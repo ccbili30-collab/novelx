@@ -9,7 +9,7 @@ describe("Player Worker controller", () => {
   it("fails closed on the unpublished GM Prompt before Provider access", async () => {
     const emit = vi.fn(); const providerRun = vi.fn();
     await handlePlayerWorkerCommand({ command: command(), signal: new AbortController().signal, audit: { record: async () => undefined }, emit }, {
-      loadGmPrompt,
+      loadGmPrompt: () => ({ ...loadGmPrompt(), status: "candidate", publicationEvidence: null }),
       loadSpecialistPrompts: () => prompts(),
       createAdapter: () => ({ run: providerRun }),
     });

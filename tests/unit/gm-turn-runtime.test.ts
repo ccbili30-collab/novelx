@@ -13,7 +13,7 @@ describe("runGmTurn", () => {
   it("blocks an unpublished GM prompt before calling the Provider", async () => {
     const createAdapter = vi.fn();
     await expect(runGmTurn({
-      turn: turn(), providerProfile: provider, prompt: loadGmPrompt(), createAdapter, signal: new AbortController().signal,
+      turn: turn(), providerProfile: provider, prompt: { ...loadGmPrompt(), status: "candidate", publicationEvidence: null }, createAdapter, signal: new AbortController().signal,
     })).rejects.toMatchObject({ code: "PLAY_PROMPT_NOT_PUBLISHED" });
     expect(createAdapter).not.toHaveBeenCalled();
   });

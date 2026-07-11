@@ -17,12 +17,14 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "prebuild": "npm run verify:prompt-publication && npm run verify:decomposer-prompt-publication",
+    "prebuild": "npm run verify:prompt-publication && npm run verify:decomposer-prompt-publication && npm run verify:gm-prompt-publication",
     "build": "electron-vite build",
     "build:prompt-evals": "vite build --config prompt-eval.vite.config.ts",
     "build:decomposer-prompt-eval": "vite build --config decomposer-prompt-eval.vite.config.ts",
+    "build:gm-prompt-eval": "vite build --config gm-prompt-eval.vite.config.ts",
     "eval:prompts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\run-prompt-evals.ps1",
     "eval:decomposer": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\run-decomposer-prompt-eval.ps1",
+    "eval:gm": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\run-gm-prompt-eval.ps1",
     "preview": "electron-vite preview",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
@@ -32,6 +34,7 @@
     "package:update": "npm run build && node ./node_modules/electron-builder/cli.js --config electron-builder.update.yml --win nsis --x64 --publish never",
     "verify:prompt-publication": "node ./scripts/verify-prompt-publication.mjs",
     "verify:decomposer-prompt-publication": "node ./scripts/verify-decomposer-prompt-publication.mjs",
+    "verify:gm-prompt-publication": "node ./scripts/verify-gm-prompt-publication.mjs",
     "verify:package": "node scripts/verify-package.mjs",
     "verify:installer": "node scripts/verify-installer.mjs"
   },

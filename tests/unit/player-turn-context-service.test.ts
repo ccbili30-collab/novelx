@@ -56,6 +56,7 @@ describe("PlayerTurnContextService", () => {
     expect(prepared.luck).toBe(0.8);
     expect(prepared.recentMemory).toContain("你抵达银湾海岸");
     expect(prepared.evidence.some((item) => item.content.includes("退潮时开放"))).toBe(true);
+    expect(prepared.evidence.filter((item) => item.content.startsWith("{")).every((item) => !item.content.includes("sources"))).toBe(true);
     expect(JSON.stringify(prepared.evidence)).not.toContain("永久封死");
     expect(prepared.styleConstraints.map((item) => item.content)).toContain("正文风格 · 语气：轻快");
     expect(JSON.stringify(prepared.styleConstraints)).not.toContain("悲伤");

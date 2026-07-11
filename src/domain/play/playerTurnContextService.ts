@@ -35,7 +35,7 @@ export class PlayerTurnContextService {
     if (packet.retrieval.completeness.incomplete) throw contextError("PLAYER_CONTEXT_INCOMPLETE");
     const evidence = [
       ...packet.assertions.map((assertion) => {
-        const content = JSON.stringify({ subject: assertion.subject, predicate: assertion.predicate, object: assertion.object, sources: assertion.sources });
+        const content = JSON.stringify({ subject: assertion.subject, predicate: assertion.predicate, object: assertion.object });
         return { id: assertion.versionId, content, sha256: createHash("sha256").update(content, "utf8").digest("hex") };
       }),
       ...packet.documents.map((document) => ({

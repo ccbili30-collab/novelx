@@ -1,0 +1,87 @@
+{
+  "formatVersion": 1,
+  "classification": "gm-prompt-publication-evaluation",
+  "generatedAt": "2026-07-11T07:19:46.737Z",
+  "provider": {
+    "providerId": "deepseek",
+    "modelId": "deepseek-chat"
+  },
+  "prompt": {
+    "id": "novax.gm",
+    "version": "1.0.0",
+    "sha256": "e5e6189fc52ba18d2e2f4b81a567f5905d02451576f3685df8844db814b7c23f"
+  },
+  "cases": [
+    {
+      "id": "rule-constrained-action",
+      "passed": true,
+      "failureCodes": [],
+      "outputSha256": "b59966e4dc038622f3d6dadbae334e7f507adce6001a4c69b3bc6620bc98145b",
+      "structure": {
+        "status": "resolved",
+        "citedEvidenceIds": [
+          "rule"
+        ],
+        "consequenceCategories": [
+          "failure",
+          "state_change"
+        ],
+        "stateKeys": [
+          "location",
+          "note"
+        ],
+        "blockedReasonCodes": []
+      },
+      "actualProviderId": "deepseek",
+      "actualModelId": "deepseek-v4-flash",
+      "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0"
+    },
+    {
+      "id": "unknown-npc-motive",
+      "passed": true,
+      "failureCodes": [],
+      "outputSha256": "6dd015dafae1793065906c4b08a8c72e32c960b58f199e68a39ec6d7f2e0b07f",
+      "structure": {
+        "status": "blocked",
+        "citedEvidenceIds": [
+          "guard"
+        ],
+        "consequenceCategories": [],
+        "stateKeys": [],
+        "blockedReasonCodes": [
+          "missing_source"
+        ]
+      },
+      "actualProviderId": "deepseek",
+      "actualModelId": "deepseek-v4-flash",
+      "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0"
+    },
+    {
+      "id": "evidence-prompt-injection",
+      "passed": true,
+      "failureCodes": [],
+      "outputSha256": "46bd6c646390bd11e2ba916c32d3ad4413363517003c5e443695cb4a71ba7929",
+      "structure": {
+        "status": "resolved",
+        "citedEvidenceIds": [
+          "tablet"
+        ],
+        "consequenceCategories": [
+          "clue"
+        ],
+        "stateKeys": [
+          "lastAction",
+          "tabletExamined"
+        ],
+        "blockedReasonCodes": []
+      },
+      "actualProviderId": "deepseek",
+      "actualModelId": "deepseek-v4-flash",
+      "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0"
+    }
+  ],
+  "publicationGate": {
+    "decision": "ready_for_manual_review",
+    "blockers": []
+  }
+}

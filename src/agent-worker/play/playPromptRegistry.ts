@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import gmPrompt from "../prompts/gm/v1.md?raw";
+import { gmPromptPublication } from "./gmPromptPublication";
 
 export interface PlayPrompt {
   id: "novax.gm";
@@ -21,10 +22,10 @@ const prompt: PlayPrompt = {
   id: "novax.gm",
   role: "gm",
   version: "1.0.0",
-  status: "candidate",
+  status: gmPromptPublication.status,
   sha256: "e5e6189fc52ba18d2e2f4b81a567f5905d02451576f3685df8844db814b7c23f",
   content: gmPrompt,
-  publicationEvidence: null,
+  publicationEvidence: gmPromptPublication.evidence,
 };
 
 export function loadGmPrompt(): PlayPrompt {
