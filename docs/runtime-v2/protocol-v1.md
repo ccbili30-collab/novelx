@@ -35,6 +35,7 @@ Rules:
 - `correlationId` links a response or terminal event to the initiating command.
 - `runId` is required for run-scoped messages.
 - Host commands use a monotonic connection sequence. Durable runtime events use a monotonic per-run sequence allocated by the journal.
+- Protocol V1 sequence values are limited to `1..=9,007,199,254,740,991` so Rust and TypeScript preserve the same integer exactly.
 - Unknown major protocol versions fail the handshake. Unknown message names are rejected with a typed protocol error.
 - Invalid UTF-8, oversized frames, missing fields and malformed JSON terminate the connection without executing the payload.
 
@@ -222,4 +223,3 @@ Player Mode receives a stricter projection that excludes tool details, hidden st
 ## 11. Limits
 
 Protocol V1 does not yet define binary asset transfer, remote multi-user collaboration, arbitrary plugin execution or Android synchronization. Assets use project-local references and content hashes until a later protocol adds a framed binary channel.
-

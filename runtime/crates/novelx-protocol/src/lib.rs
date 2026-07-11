@@ -3,6 +3,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u16 = 1;
+pub const MAX_SAFE_SEQUENCE: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,20 +50,26 @@ impl Envelope {
     }
 
     pub fn validate_version(&self) -> Result<(), ProtocolError> {
-        if self.protocol_version == PROTOCOL_VERSION {
-            Ok(())
-        } else {
-            Err(ProtocolError::UnsupportedVersion {
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedVersion {
                 received: self.protocol_version,
                 supported: PROTOCOL_VERSION,
-            })
+            });
         }
+        if self.sequence == 0 || self.sequence > MAX_SAFE_SEQUENCE {
+            return Err(ProtocolError::SequenceOutOfRange {
+                received: self.sequence,
+                maximum: MAX_SAFE_SEQUENCE,
+            });
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
     UnsupportedVersion { received: u16, supported: u16 },
+    SequenceOutOfRange { received: u64, maximum: u64 },
 }
 
 impl std::fmt::Display for ProtocolError {
@@ -74,6 +81,10 @@ impl std::fmt::Display for ProtocolError {
             } => write!(
                 formatter,
                 "unsupported protocol version {received}; supported version is {supported}"
+            ),
+            Self::SequenceOutOfRange { received, maximum } => write!(
+                formatter,
+                "protocol sequence {received} is outside the supported range 1..={maximum}"
             ),
         }
     }
@@ -146,6 +157,27 @@ mod tests {
             Err(ProtocolError::UnsupportedVersion {
                 received: PROTOCOL_VERSION + 1,
                 supported: PROTOCOL_VERSION,
+            })
+        );
+    }
+
+    #[test]
+    fn sequence_must_fit_the_cross_language_safe_integer_range() {
+        let mut envelope = Envelope::new(
+            MessageType::Event,
+            "run.created",
+            "2026-07-12T00:00:00Z",
+            1,
+            serde_json::json!({}),
+        )
+        .expect("empty payload should serialize");
+
+        envelope.sequence = MAX_SAFE_SEQUENCE + 1;
+        assert_eq!(
+            envelope.validate_version(),
+            Err(ProtocolError::SequenceOutOfRange {
+                received: MAX_SAFE_SEQUENCE + 1,
+                maximum: MAX_SAFE_SEQUENCE,
             })
         );
     }

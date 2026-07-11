@@ -9,11 +9,12 @@
 - Defined Protocol V1 envelopes, handshake, durable run events, tool ledger rules, context receipts, typed errors, cancellation, recovery and Renderer projection boundaries.
 - Created the Rust workspace with `novelx-protocol` and `novelx-runtime` crates.
 - Implemented and verified a real `runtime.hello` JSON message and protocol-version rejection tests.
+- Added a legal Run state machine, an immutable SQLite event journal, strict duplicate-message conflict detection, and a TypeScript/Zod protocol mirror.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 2 tests.
+- Rust workspace tests pass: 11 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
 - `git diff --check` passes.
@@ -28,4 +29,3 @@
 - No production workflow uses Runtime V2.
 
 This is a real compiled foundation, but it is not a usable Harness and must not be presented as one.
-
