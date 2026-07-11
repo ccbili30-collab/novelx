@@ -568,6 +568,7 @@ export class AgentProcessSupervisor {
     try {
       const operation = request.operation;
       if (operation.type === "invocation.started") {
+        if (operation.role === "gm") throw new Error("GM invocation requires the Player supervisor.");
         validateInvocationIdentity(runId, run, operation);
         run.audit.beginInvocation({
           invocationId: operation.invocationId,

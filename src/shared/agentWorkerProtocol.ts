@@ -403,7 +403,7 @@ const auditInvocationStartedOperationSchema = z.object({
   type: z.literal("invocation.started"),
   invocationId: z.string().min(1).max(160),
   parentInvocationId: z.string().min(1).max(160).nullable(),
-  role: z.enum(["steward", "writer", "checker"]),
+  role: z.enum(["steward", "gm", "writer", "checker"]),
   prompt: z.object({
     id: z.string().min(1).max(160),
     version: z.string().regex(/^\d+\.\d+\.\d+$/),

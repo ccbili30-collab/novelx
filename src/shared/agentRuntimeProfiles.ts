@@ -1,4 +1,4 @@
-export type AgentRuntimeRole = "steward" | "writer" | "checker";
+export type AgentRuntimeRole = "steward" | "gm" | "writer" | "checker";
 
 export interface AgentRuntimeProfileIdentity {
   id: string;
@@ -39,6 +39,15 @@ const profiles: Record<AgentRuntimeRole, AgentRuntimeProfileIdentity> = {
       "submit_steward_result",
       "writer",
     ],
+  },
+  gm: {
+    id: "novax.gm-runtime",
+    version: "1.0.0",
+    sha256: "066ddfdaebb38a821982f5425530f715d052203fe7cd39a1675f13f24f245e9d",
+    toolPolicyId: "novax.gm-tools",
+    toolPolicyVersion: "1.0.0",
+    toolPolicySha256: "3cb2c873aef4295ae2a18edad738ba7bd2d78d88f82fafeaef28f40e3c59361f",
+    authorizedTools: ["submit_gm_result"],
   },
   writer: {
     id: "novax.writer-runtime",

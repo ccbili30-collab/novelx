@@ -13,12 +13,24 @@ export interface GmTurnInput {
   luck: number;
 }
 
+export interface GmTurnLifecycle {
+  started(input: { handoff: string }): Promise<void>;
+  completed(input: {
+    handoff: string;
+    output: GmTurnOutput;
+    adapterResult: Awaited<ReturnType<RuntimeAdapter["run"]>>;
+    submissionCount: number;
+  }): Promise<void>;
+  failed(input: { handoff: string; cause: unknown; submissionCount: number }): Promise<void>;
+}
+
 export async function runGmTurn(input: {
   turn: GmTurnInput;
   providerProfile: ProviderRuntimeProfile;
   prompt: PlayPrompt;
   createAdapter(profile: ProviderRuntimeProfile): RuntimeAdapter;
   signal: AbortSignal;
+  lifecycle?: GmTurnLifecycle;
 }): Promise<GmTurnOutput> {
   if (input.prompt.status !== "active" || !input.prompt.publicationEvidence) throw runtimeError("PLAY_PROMPT_NOT_PUBLISHED");
   const evidenceIds = new Set(input.turn.evidenceIds);
@@ -47,18 +59,27 @@ export async function runGmTurn(input: {
     recentMemory: input.turn.recentMemory,
     luck: input.turn.luck,
   });
-  await input.createAdapter(input.providerProfile).run({
-    systemPrompt: input.prompt.content,
-    userInput: handoff,
-    tools: [tool],
-    signal: input.signal,
-    completionGuard: { toolName: "submit_gm_result", isSatisfied: () => submission !== null },
-  });
-  if (count !== 1 || !submission) throw runtimeError("GM_OUTPUT_REQUIRED");
-  const result = submission as GmTurnOutput;
-  const cited = result.status === "resolved" ? result.evidenceIds : result.reasons.flatMap((reason) => reason.evidenceIds);
-  if (cited.some((id) => !evidenceIds.has(id))) throw runtimeError("GM_EVIDENCE_MISMATCH");
-  return result;
+  await input.lifecycle?.started({ handoff });
+  let terminalAuditAttempted = false;
+  try {
+    const adapterResult = await input.createAdapter(input.providerProfile).run({
+      systemPrompt: input.prompt.content,
+      userInput: handoff,
+      tools: [tool],
+      signal: input.signal,
+      completionGuard: { toolName: "submit_gm_result", isSatisfied: () => submission !== null },
+    });
+    if (count !== 1 || !submission) throw runtimeError("GM_OUTPUT_REQUIRED");
+    const result = submission as GmTurnOutput;
+    const cited = result.status === "resolved" ? result.evidenceIds : result.reasons.flatMap((reason) => reason.evidenceIds);
+    if (cited.some((id) => !evidenceIds.has(id))) throw runtimeError("GM_EVIDENCE_MISMATCH");
+    terminalAuditAttempted = true;
+    await input.lifecycle?.completed({ handoff, output: result, adapterResult, submissionCount: count });
+    return result;
+  } catch (cause) {
+    if (!terminalAuditAttempted) await input.lifecycle?.failed({ handoff, cause, submissionCount: count });
+    throw cause;
+  }
 }
 
 function runtimeError(code: string): Error & { code: string } {

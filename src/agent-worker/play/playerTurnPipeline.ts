@@ -4,6 +4,7 @@ import type { ProviderRuntimeProfile } from "../../shared/providerContract";
 import type { RuntimeAdapter } from "../pi/runtimeAdapterContract";
 import type { PlayPrompt } from "./playPromptRegistry";
 import { runGmTurn, type GmTurnInput } from "./gmTurnRuntime";
+import type { GmTurnLifecycle } from "./gmTurnRuntime";
 import { validateTurnPipeline, type AcceptedTurnPipeline } from "./turnValidator";
 
 export interface PlayerTurnPipelineResult extends AcceptedTurnPipeline {
@@ -18,6 +19,7 @@ export async function runPlayerTurnPipeline(input: {
   createAdapter(profile: ProviderRuntimeProfile): RuntimeAdapter;
   specialistTools: AgentTool[];
   signal: AbortSignal;
+  gmLifecycle?: GmTurnLifecycle;
 }): Promise<PlayerTurnPipelineResult> {
   const gm = await runGmTurn({
     turn: input.turn,
@@ -25,6 +27,7 @@ export async function runPlayerTurnPipeline(input: {
     prompt: input.gmPrompt,
     createAdapter: input.createAdapter,
     signal: input.signal,
+    lifecycle: input.gmLifecycle,
   });
   if (gm.status === "blocked") throw pipelineError("GM_RESOLUTION_BLOCKED");
   const writerTool = requireTool(input.specialistTools, "writer");

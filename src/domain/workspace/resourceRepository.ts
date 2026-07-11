@@ -68,6 +68,29 @@ export class ResourceRepository {
     return rows.map(mapResource);
   }
 
+  listAtCheckpoint(checkpointId: string): ResourceRecord[] {
+    const rows = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+        SELECT ?, 0
+        UNION ALL
+        SELECT c.parent_checkpoint_id, ancestry.depth + 1 FROM checkpoints c
+        JOIN ancestry ON c.id = ancestry.checkpoint_id
+        WHERE c.parent_checkpoint_id IS NOT NULL
+      ), ranked AS (
+        SELECT rr.*, ancestry.depth,
+          ROW_NUMBER() OVER (PARTITION BY rr.resource_id ORDER BY ancestry.depth ASC) AS revision_rank
+        FROM resource_revisions rr JOIN ancestry ON ancestry.checkpoint_id = rr.created_checkpoint_id
+      )
+      SELECT resource_id AS id, type, object_kind, title, parent_resource_id AS parent_id
+      FROM ranked WHERE revision_rank = 1 AND state = 'active'
+      ORDER BY CASE type
+        WHEN 'world' THEN 1 WHEN 'oc' THEN 2 WHEN 'story' THEN 3
+        WHEN 'graph' THEN 4 WHEN 'timeline' THEN 5 WHEN 'asset' THEN 6 ELSE 99 END,
+        sort_order, title
+    `).all(checkpointId);
+    return rows.map(mapResource);
+  }
+
   listVisibleCurrent(branchId = this.#checkpoints.getActiveBranch().id): ResourceRecord[] {
     return this.listCurrent(branchId).filter((resource) => !this.#isPristineDomainRoot(resource, branchId));
   }

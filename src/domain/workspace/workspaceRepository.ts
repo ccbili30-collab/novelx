@@ -200,7 +200,11 @@ function migrate(db: DatabaseSync): void {
     migrateStartProfilePlaythroughSchema(db);
     schema = { version: 15 };
   }
-  if (schema.version !== 15) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 15) {
+    migratePlayerAuditSchema(db);
+    schema = { version: 16 };
+  }
+  if (schema.version !== 16) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -235,6 +239,119 @@ function migrate(db: DatabaseSync): void {
       insertResource.run(resourceId);
       insertRevision.run(randomUUID(), resourceId, type, title, checkpointId, index, now);
     }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migratePlayerAuditSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS player_agent_runs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        playthrough_id TEXT NOT NULL REFERENCES playthroughs(id),
+        player_action_sha256 TEXT NOT NULL CHECK (length(player_action_sha256) = 64),
+        provider_id TEXT NOT NULL,
+        requested_model_id TEXT NOT NULL,
+        provider_config_sha256 TEXT NOT NULL CHECK (length(provider_config_sha256) = 64),
+        runtime_contract_version TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS player_agent_invocations (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES player_agent_runs(id) ON DELETE CASCADE,
+        parent_invocation_id TEXT REFERENCES player_agent_invocations(id),
+        role TEXT NOT NULL CHECK (role IN ('gm', 'writer', 'checker')),
+        prompt_id TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        prompt_sha256 TEXT NOT NULL CHECK (length(prompt_sha256) = 64),
+        agent_profile_id TEXT NOT NULL,
+        agent_profile_version TEXT NOT NULL,
+        agent_profile_sha256 TEXT NOT NULL CHECK (length(agent_profile_sha256) = 64),
+        provider_id TEXT NOT NULL,
+        requested_model_id TEXT NOT NULL,
+        provider_config_sha256 TEXT NOT NULL CHECK (length(provider_config_sha256) = 64),
+        tool_policy_id TEXT NOT NULL,
+        tool_policy_version TEXT NOT NULL,
+        tool_policy_sha256 TEXT NOT NULL CHECK (length(tool_policy_sha256) = 64),
+        authorized_tools_json TEXT NOT NULL CHECK (json_valid(authorized_tools_json)),
+        handoff_contract_id TEXT,
+        handoff_version TEXT,
+        handoff_payload_sha256 TEXT,
+        input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (role = 'gm' AND parent_invocation_id IS NULL AND handoff_contract_id IS NULL
+            AND handoff_version IS NULL AND handoff_payload_sha256 IS NULL)
+          OR
+          (role IN ('writer', 'checker') AND parent_invocation_id IS NOT NULL
+            AND handoff_contract_id IS NOT NULL AND handoff_version IS NOT NULL
+            AND handoff_payload_sha256 IS NOT NULL)
+        )
+      );
+      CREATE TABLE IF NOT EXISTS player_agent_tool_invocations (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES player_agent_runs(id) ON DELETE CASCADE,
+        invocation_id TEXT NOT NULL REFERENCES player_agent_invocations(id),
+        tool_name TEXT NOT NULL CHECK (tool_name IN ('writer', 'checker')),
+        arguments_sha256 TEXT NOT NULL CHECK (length(arguments_sha256) = 64),
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS player_agent_audit_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL REFERENCES player_agent_runs(id) ON DELETE CASCADE,
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('run', 'invocation', 'tool')),
+        invocation_id TEXT REFERENCES player_agent_invocations(id),
+        tool_invocation_id TEXT REFERENCES player_agent_tool_invocations(id),
+        event_type TEXT NOT NULL CHECK (event_type IN ('completed', 'blocked', 'failed', 'cancelled', 'interrupted', 'succeeded')),
+        error_code TEXT,
+        actual_provider_id TEXT,
+        actual_model_id TEXT,
+        response_id_sha256 TEXT,
+        stop_reason TEXT,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        total_tokens INTEGER,
+        context_policy_version TEXT,
+        charged_input_bytes INTEGER,
+        configured_context_window INTEGER,
+        safety_reserve INTEGER,
+        output_reserve INTEGER,
+        structured_submission_count INTEGER,
+        output_sha256 TEXT,
+        result_sha256 TEXT,
+        created_at TEXT NOT NULL,
+        CHECK (
+          (entity_type = 'run' AND invocation_id IS NULL AND tool_invocation_id IS NULL)
+          OR (entity_type = 'invocation' AND invocation_id IS NOT NULL AND tool_invocation_id IS NULL)
+          OR (entity_type = 'tool' AND invocation_id IS NOT NULL AND tool_invocation_id IS NOT NULL)
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS player_agent_run_terminal_idx
+        ON player_agent_audit_events(run_id) WHERE entity_type = 'run';
+      CREATE UNIQUE INDEX IF NOT EXISTS player_agent_invocation_terminal_idx
+        ON player_agent_audit_events(invocation_id) WHERE entity_type = 'invocation';
+      CREATE UNIQUE INDEX IF NOT EXISTS player_agent_tool_terminal_idx
+        ON player_agent_audit_events(tool_invocation_id) WHERE entity_type = 'tool';
+      CREATE TABLE IF NOT EXISTS player_agent_evidence_links (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES player_agent_runs(id) ON DELETE CASCADE,
+        invocation_id TEXT NOT NULL REFERENCES player_agent_invocations(id),
+        evidence_id TEXT NOT NULL,
+        evidence_sha256 TEXT,
+        ordinal INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (run_id, invocation_id, evidence_id)
+      );
+      CREATE INDEX IF NOT EXISTS player_agent_runs_playthrough_idx
+        ON player_agent_runs(playthrough_id, created_at, id);
+      UPDATE schema_meta SET version = 16 WHERE singleton = 1;
+    `);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

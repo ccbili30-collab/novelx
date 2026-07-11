@@ -140,15 +140,18 @@ export class ContextPacketService {
     this.#resources = new ResourceRepository(workspace);
   }
 
-  build(input: { scopeResourceIds: readonly string[]; budget?: Partial<ContextPacketBudget> }): ContextPacket {
-    const branch = this.#checkpoints.getActiveBranch();
+  build(input: { scopeResourceIds: readonly string[]; budget?: Partial<ContextPacketBudget>; checkpointId?: string }): ContextPacket {
+    const branch = input.checkpointId ? this.#resolvePinnedCheckpoint(input.checkpointId) : this.#checkpoints.getActiveBranch();
+    const checkpointId = input.checkpointId ?? branch.headCheckpointId;
     const budget = normalizeBudget(input.budget);
     const requestedScopeIds = normalizeScopeIds(input.scopeResourceIds);
     if (requestedScopeIds.length === 0) {
       throw serviceError("CONTEXT_SCOPE_REQUIRED", "At least one scope resource is required.");
     }
 
-    const activeResources = new Map(this.#resources.listCurrent(branch.id).map((resource) => [resource.id, resource]));
+    const activeResources = new Map((input.checkpointId
+      ? this.#resources.listAtCheckpoint(checkpointId)
+      : this.#resources.listCurrent(branch.id)).map((resource) => [resource.id, resource]));
     const scopes = requestedScopeIds.map((resourceId) => {
       const resource = activeResources.get(resourceId);
       if (!resource) throw serviceError("CONTEXT_SCOPE_NOT_ACTIVE", "A requested scope is not active on the current branch.");
@@ -157,23 +160,31 @@ export class ContextPacketService {
     const stableDocuments = new Map<string, { resource: ContextPacketScope; document: CreativeDocumentRecord | null; version: DocumentVersionRecord }>();
     const availableDocuments: Array<{ resource: ContextPacketScope; document: CreativeDocumentRecord | null; version: DocumentVersionRecord }> = [];
     for (const scope of scopes) {
-      const creativeDocuments = this.#creativeDocuments.listCurrent(scope.resourceId, branch.id);
+      const creativeDocuments = input.checkpointId
+        ? this.#creativeDocuments.listAtCheckpoint(checkpointId, scope.resourceId)
+        : this.#creativeDocuments.listCurrent(scope.resourceId, branch.id);
       let foundCreativeStable = false;
       for (const document of creativeDocuments) {
-        const version = this.#documents.getCurrentStableForCreativeDocument(document.id, branch.id);
+        const version = input.checkpointId
+          ? this.#documents.getStableForCreativeDocumentAtCheckpoint(document.id, checkpointId)
+          : this.#documents.getCurrentStableForCreativeDocument(document.id, branch.id);
         if (!version) continue;
         foundCreativeStable = true;
         stableDocuments.set(version.id, { resource: scope, document, version });
         availableDocuments.push({ resource: scope, document, version });
       }
       if (foundCreativeStable) continue;
-      const legacyVersion = this.#documents.getCurrentStable(scope.resourceId, branch.id);
+      const legacyVersion = input.checkpointId
+        ? this.#documents.getStableAtCheckpoint(scope.resourceId, checkpointId)
+        : this.#documents.getCurrentStable(scope.resourceId, branch.id);
       if (!legacyVersion) continue;
       stableDocuments.set(legacyVersion.id, { resource: scope, document: null, version: legacyVersion });
       availableDocuments.push({ resource: scope, document: null, version: legacyVersion });
     }
 
-    const currentAssertions = this.#assertions.listCurrentInScopes(requestedScopeIds, branch.id);
+    const currentAssertions = input.checkpointId
+      ? this.#assertions.listCurrentInScopesAtCheckpoint(requestedScopeIds, checkpointId)
+      : this.#assertions.listCurrentInScopes(requestedScopeIds, branch.id);
     const activeAssertionVersions = new Map(currentAssertions.map((assertion) => [assertion.versionId, assertion]));
     const availableAssertions = currentAssertions.map((assertion) => ({
       assertionId: assertion.assertionId,
@@ -185,7 +196,7 @@ export class ContextPacketService {
       object: assertion.object,
       sources: assertion.sources.map((source) => this.#projectSource(
         source,
-        branch.id,
+        checkpointId,
         stableDocuments,
         activeAssertionVersions,
       )),
@@ -205,7 +216,7 @@ export class ContextPacketService {
     const omittedDocuments = availableDocuments.length - selectedDocuments.values.length;
 
     return {
-      branch: { id: branch.id, headCheckpointId: branch.headCheckpointId },
+      branch: { id: branch.id, headCheckpointId: checkpointId },
       scopes,
       assertions: selectedAssertions.values,
       documents: selectedDocuments.values,
@@ -236,7 +247,7 @@ export class ContextPacketService {
 
   #projectSource(
     source: StoredAssertionSource,
-    branchId: string,
+    checkpointId: string,
     stableDocuments: ReadonlyMap<string, { resource: ContextPacketScope; document: CreativeDocumentRecord | null; version: DocumentVersionRecord }>,
     activeAssertionVersions: ReadonlyMap<string, SourcedAssertionRecord>,
   ): AssertionEvidenceSource {
@@ -283,7 +294,7 @@ export class ContextPacketService {
       if (!sourceIdentity) return { type: "unresolved", reason: "unsupported_source" };
       const changeSet = this.workspace.db.prepare(`
         WITH RECURSIVE ancestry(checkpoint_id) AS (
-          SELECT head_checkpoint_id FROM branches WHERE id = ?
+          SELECT ?
           UNION ALL
           SELECT checkpoints.parent_checkpoint_id FROM checkpoints
           JOIN ancestry ON checkpoints.id = ancestry.checkpoint_id
@@ -296,7 +307,7 @@ export class ContextPacketService {
         WHERE change_sets.id = ? AND change_sets.status = 'committed'
           AND (? IS NULL OR change_set_items.decision = 'accepted')
       `).get(
-        branchId,
+        checkpointId,
         sourceIdentity.itemId,
         sourceIdentity.changeSetId,
         sourceIdentity.itemId,
@@ -310,6 +321,17 @@ export class ContextPacketService {
       };
     }
     return { type: "unresolved", reason: "unsupported_source" };
+  }
+
+  #resolvePinnedCheckpoint(checkpointId: string): { id: string; headCheckpointId: string } {
+    const row = this.workspace.db.prepare(`
+      SELECT checkpoints.branch_id, creative_commits.sealed_at
+      FROM checkpoints JOIN creative_commits ON creative_commits.id = checkpoints.id
+      WHERE checkpoints.id = ?
+    `).get(checkpointId) as { branch_id: string; sealed_at: string | null } | undefined;
+    if (!row) throw serviceError("CONTEXT_CHECKPOINT_NOT_FOUND", "Pinned context checkpoint was not found.");
+    if (!row.sealed_at) throw serviceError("CONTEXT_CHECKPOINT_UNSEALED", "Pinned context checkpoint is not sealed.");
+    return { id: row.branch_id, headCheckpointId: checkpointId };
   }
 }
 
