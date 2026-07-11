@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./build/icon.png" width="160" alt="NovelX 应用图标" />
+</p>
+
 # novelx
 
 novelx 是一个面向小说、世界观与原创角色创作的 Windows 桌面工作台。它使用 Electron（桌面运行壳）、React（界面框架）与 TypeScript（类型化 JavaScript），通过真实模型 Provider（模型服务商）运行大管家、Writer（写手）和 Checker（检查器）。
