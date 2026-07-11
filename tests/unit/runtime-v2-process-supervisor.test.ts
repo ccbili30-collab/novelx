@@ -39,6 +39,9 @@ describe("RuntimeV2ProcessSupervisor", () => {
     ["unsupported-version", "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED"],
     ["bad-ready-correlation", "RUNTIME_V2_PROTOCOL_INVALID"],
     ["ready-identity-mismatch", "RUNTIME_V2_PROTOCOL_INVALID"],
+    ["initialization-failed-bad-correlation", "RUNTIME_V2_PROTOCOL_INVALID"],
+    ["initialization-failed-malformed", "RUNTIME_V2_PROTOCOL_INVALID"],
+    ["unknown-second-message", "RUNTIME_V2_PROTOCOL_INVALID"],
     ["early-exit", "RUNTIME_V2_EXITED_BEFORE_READY"],
     ["no-output", "RUNTIME_V2_START_TIMEOUT"],
   ] as const)("rejects %s during startup", async (scenario, code) => {
@@ -57,6 +60,29 @@ describe("RuntimeV2ProcessSupervisor", () => {
     expect((error as Error).message).toContain("controlled stderr");
     expect(supervisor.stderr).toContain("controlled stderr");
     expect(diagnostics.join("")).toContain("controlled stderr");
+  });
+
+  it("preserves a strict initialization failure payload and bounded stderr separately", async () => {
+    const supervisor = createSupervisor(createFixture("initialization-failed"));
+
+    const caught = await supervisor.start().catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(RuntimeV2SupervisorError);
+    const error = caught as RuntimeV2SupervisorError;
+    expect(error.code).toBe("RUNTIME_V2_INITIALIZATION_FAILED");
+    expect(error.message).toBe("Runtime storage integrity check failed.");
+    expect(error.publicPayload).toEqual({
+      code: "RUNTIME_JOURNAL_INTEGRITY_FAILED",
+      class: "storage",
+      retryable: false,
+      publicMessage: "Runtime storage integrity check failed.",
+      stage: "runtime.initialize",
+      attempt: 1,
+      diagnosticId: "d6a03646-04ef-4b3e-9639-47b2a843f3a2",
+    });
+    expect(error.publicPayload?.publicMessage).not.toContain("internal fixture stderr");
+    expect(error.stderr).toContain("internal fixture stderr");
+    expect(error.stderr.length).toBeLessThanOrEqual(16_000);
   });
 
   it("reports an executable spawn failure without touching unrelated processes", async () => {
@@ -152,6 +178,24 @@ input.once("line", (line) => {
   const initialize = JSON.parse(line);
   fs.writeFileSync(capturePath, JSON.stringify(initialize), "utf8");
   const correlationId = scenario === "bad-ready-correlation" ? randomUUID() : initialize.messageId;
+  if (scenario.startsWith("initialization-failed")) {
+    process.stderr.write("internal fixture stderr\n");
+    const failureCorrelation = scenario === "initialization-failed-bad-correlation" ? randomUUID() : initialize.messageId;
+    const payload = {
+      code: "RUNTIME_JOURNAL_INTEGRITY_FAILED", class: "storage", retryable: false,
+      publicMessage: "Runtime storage integrity check failed.", stage: "runtime.initialize", attempt: 1,
+      diagnosticId: "d6a03646-04ef-4b3e-9639-47b2a843f3a2",
+    };
+    if (scenario === "initialization-failed-malformed") delete payload.diagnosticId;
+    setTimeout(() => process.stdout.write(JSON.stringify(envelope(
+      1, "runtime.initialization_failed", payload, failureCorrelation, 2,
+    )) + "\n"), 20);
+    return;
+  }
+  if (scenario === "unknown-second-message") {
+    process.stdout.write(JSON.stringify(envelope(1, "runtime.future", {}, initialize.messageId, 2)) + "\n");
+    return;
+  }
   const runtimeVersion = scenario === "ready-identity-mismatch" ? "0.2.0" : "0.1.0";
   process.stdout.write(JSON.stringify(envelope(1, "runtime.ready", {
     selectedProtocolVersion: 1, runtime: { version: runtimeVersion, build: { commit: "fixture", target: "win32-x64" } },

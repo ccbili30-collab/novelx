@@ -23,21 +23,23 @@
 - Added the event-backed ToolCall Aggregate with strict recovery, independent business idempotency keys and SHA-256 argument identity.
 - Added a read-only Recovery Coordinator that classifies every persisted Run and fails the entire startup report if any Run cannot be replayed.
 - Added the strict `runtime.initialization_failed` handshake contract for typed startup failures.
+- Wired Rust initialization to the real workspace event journal and Recovery Coordinator; `runtime.ready` now reports the real nonterminal Run count.
+- Added fail-closed structured initialization errors for migration, schema-integrity and replay failures, with internal diagnostics separated from public text.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 39 tests.
+- Rust workspace tests pass: 42 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass: 31 tests.
+- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass: 35 tests.
 - `git diff --check` passes.
 - Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and the `handshake` capability.
 
 ## Not Completed
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor exists only as an independently tested module.
-- The runtime still does not open the supplied workspace database during initialization or process Run commands after readiness.
+- The runtime opens and recovers the supplied workspace database during initialization, but still does not process Run commands after readiness.
 - The ToolCall state machine and event-backed aggregate exist, but the real tool executor, Provider call, context compiler, recovery execution policy and domain tools are not implemented.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.

@@ -6,9 +6,11 @@ import {
   RUNTIME_V2_PROTOCOL_VERSION,
   RuntimeV2ProtocolVersionError,
   parseRuntimeV2HelloEnvelope,
+  parseRuntimeV2InitializationFailedEnvelope,
   parseRuntimeV2ReadyEnvelope,
   runtimeV2InitializeEnvelopeSchema,
   type RuntimeV2HelloEnvelope,
+  type RuntimeV2Error,
   type RuntimeV2InitializeEnvelope,
   type RuntimeV2ReadyEnvelope,
 } from "../shared/runtimeV2Protocol";
@@ -45,17 +47,23 @@ export type RuntimeV2SupervisorErrorCode =
   | "RUNTIME_V2_INVALID_JSON"
   | "RUNTIME_V2_PROTOCOL_INVALID"
   | "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED"
+  | "RUNTIME_V2_INITIALIZATION_FAILED"
   | "RUNTIME_V2_EXITED_BEFORE_READY"
   | "RUNTIME_V2_WRITE_FAILED";
 
 export class RuntimeV2SupervisorError extends Error {
+  readonly publicPayload: RuntimeV2Error | null;
+  readonly stderr: string;
+
   constructor(
     readonly code: RuntimeV2SupervisorErrorCode,
     message: string,
-    options?: ErrorOptions,
+    options: ErrorOptions & { publicPayload?: RuntimeV2Error; stderr?: string } = {},
   ) {
     super(message, options);
     this.name = "RuntimeV2SupervisorError";
+    this.publicPayload = options.publicPayload ?? null;
+    this.stderr = options.stderr ?? "";
   }
 }
 
@@ -175,6 +183,21 @@ export class RuntimeV2ProcessSupervisor {
               });
               return;
             }
+            const secondName = readMessageName(value);
+            if (secondName === "runtime.initialization_failed") {
+              const failure = parseRuntimeV2InitializationFailedEnvelope(value);
+              if (!initialize || failure.correlationId !== initialize.messageId) {
+                throw new Error("runtime.initialization_failed correlationId does not match runtime.initialize messageId.");
+              }
+              throw new RuntimeV2SupervisorError(
+                "RUNTIME_V2_INITIALIZATION_FAILED",
+                failure.payload.publicMessage,
+                { publicPayload: failure.payload, stderr: this.#stderr },
+              );
+            }
+            if (secondName !== "runtime.ready") {
+              throw new Error(`unexpected Runtime V2 handshake message: ${String(secondName)}.`);
+            }
             const ready = parseRuntimeV2ReadyEnvelope(value);
             if (!initialize || ready.correlationId !== initialize.messageId) {
               throw new Error("runtime.ready correlationId does not match runtime.initialize messageId.");
@@ -222,6 +245,7 @@ function createInitializeEnvelope(
 }
 
 function toProtocolError(error: unknown): RuntimeV2SupervisorError {
+  if (error instanceof RuntimeV2SupervisorError) return error;
   if (error instanceof RuntimeV2ProtocolVersionError) {
     return new RuntimeV2SupervisorError("RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED", error.message, { cause: error });
   }
@@ -229,6 +253,11 @@ function toProtocolError(error: unknown): RuntimeV2SupervisorError {
     return new RuntimeV2SupervisorError("RUNTIME_V2_PROTOCOL_INVALID", `Runtime V2 handshake is invalid: ${error.message}`, { cause: error });
   }
   return new RuntimeV2SupervisorError("RUNTIME_V2_PROTOCOL_INVALID", "Runtime V2 handshake is invalid.");
+}
+
+function readMessageName(value: unknown): unknown {
+  if (!value || typeof value !== "object" || !("name" in value)) return undefined;
+  return value.name;
 }
 
 function waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {

@@ -143,6 +143,38 @@ pub struct RuntimeReady {
     pub recovered_run_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeErrorClass {
+    Protocol,
+    ProviderAuth,
+    ProviderRateLimit,
+    ProviderTimeout,
+    ProviderRejected,
+    ContextCapacity,
+    ToolArguments,
+    ToolPermission,
+    ToolExecution,
+    SourceConflict,
+    StaleVersion,
+    Storage,
+    RuntimeCrash,
+    Cancelled,
+    Validation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeError {
+    pub code: String,
+    pub class: RuntimeErrorClass,
+    pub retryable: bool,
+    pub public_message: String,
+    pub stage: String,
+    pub attempt: u64,
+    pub diagnostic_id: Uuid,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

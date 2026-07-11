@@ -1,10 +1,13 @@
 use std::io::{self, BufRead, Write};
 
 use novelx_protocol::{
-    Envelope, MessageType, PROTOCOL_VERSION, RuntimeBuild, RuntimeHello, RuntimeIdentity,
-    RuntimeInitialize, RuntimeReady,
+    Envelope, MessageType, PROTOCOL_VERSION, RuntimeBuild, RuntimeError, RuntimeErrorClass,
+    RuntimeHello, RuntimeIdentity, RuntimeInitialize, RuntimeReady,
 };
+use novelx_runtime::event_journal::{EventJournal, EventJournalError};
+use novelx_runtime::recovery::{RecoveryCoordinator, RecoveryError};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use uuid::Uuid;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
@@ -57,6 +60,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    let recovered_run_count = match initialize.workspace_database_path.as_deref() {
+        None => 0,
+        Some(path) => match initialize_runtime(path) {
+            Ok(count) => count,
+            Err(error) => {
+                let diagnostic_id = Uuid::new_v4();
+                write_initialization_failed(
+                    &mut output,
+                    initialize_envelope.message_id,
+                    diagnostic_id,
+                    &error,
+                )?;
+                return Err(
+                    format!("runtime initialization failed [{diagnostic_id}]: {error}").into(),
+                );
+            }
+        },
+    };
+
     let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let mut ready_envelope = Envelope::new(
         MessageType::Control,
@@ -76,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .to_owned(),
                 },
             },
-            recovered_run_count: 0,
+            recovered_run_count,
         },
     )?;
     ready_envelope.correlation_id = Some(initialize_envelope.message_id);
@@ -92,3 +114,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+fn initialize_runtime(path: &str) -> Result<u64, InitializationError> {
+    let journal = EventJournal::open(path).map_err(InitializationError::Storage)?;
+    let report = RecoveryCoordinator::recover(&journal).map_err(InitializationError::Recovery)?;
+    Ok(report.recovered_nonterminal_count)
+}
+
+fn write_initialization_failed(
+    output: &mut impl Write,
+    correlation_id: Uuid,
+    diagnostic_id: Uuid,
+    error: &InitializationError,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (code, class, stage) = match error {
+        InitializationError::Storage(_) => (
+            "RUNTIME_STORAGE_INITIALIZATION_FAILED",
+            RuntimeErrorClass::Storage,
+            "runtime.initialize.storage",
+        ),
+        InitializationError::Recovery(_) => (
+            "RUNTIME_RECOVERY_FAILED",
+            RuntimeErrorClass::Validation,
+            "runtime.initialize.recovery",
+        ),
+    };
+    let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    let mut envelope = Envelope::new(
+        MessageType::Control,
+        "runtime.initialization_failed",
+        sent_at,
+        2,
+        RuntimeError {
+            code: code.to_owned(),
+            class,
+            retryable: false,
+            public_message: "运行时初始化失败，项目数据未被修改。".to_owned(),
+            stage: stage.to_owned(),
+            attempt: 0,
+            diagnostic_id,
+        },
+    )?;
+    envelope.correlation_id = Some(correlation_id);
+    serde_json::to_writer(&mut *output, &envelope)?;
+    output.write_all(b"\n")?;
+    output.flush()?;
+    Ok(())
+}
+
+#[derive(Debug)]
+enum InitializationError {
+    Storage(EventJournalError),
+    Recovery(RecoveryError),
+}
+
+impl std::fmt::Display for InitializationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => write!(formatter, "storage: {error}"),
+            Self::Recovery(error) => write!(formatter, "recovery: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for InitializationError {}
