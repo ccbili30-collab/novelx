@@ -59,6 +59,9 @@ export const desktopIpcChannels = {
   decompositionCandidateList: "novax:decomposition-candidate-list",
   decompositionCandidateRevise: "novax:decomposition-candidate-revise",
   decompositionCandidateDecide: "novax:decomposition-candidate-decide",
+  decomposerStart: "novax:decomposer-start",
+  decomposerCancel: "novax:decomposer-cancel",
+  decomposerEvent: "novax:decomposer-event",
   workspaceRestore: "novax:workspace-restore",
   workspaceFlushRequest: "novax:workspace-flush-request",
   workspaceFlushComplete: "novax:workspace-flush-complete",
@@ -635,6 +638,17 @@ export const decompositionCandidateListResultSchema = z.discriminatedUnion("ok",
 ]);
 export const decompositionCandidateReviseRequestSchema = z.object({ candidateId: opaqueIdSchema, payload: z.record(z.string(), z.json()) }).strict();
 export const decompositionCandidateDecideRequestSchema = z.object({ candidateId: opaqueIdSchema, decision: z.enum(["accepted", "rejected"]) }).strict();
+export const decomposerStartRequestSchema = z.object({ sourceId: opaqueIdSchema }).strict();
+export const decomposerStartResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), runId: opaqueIdSchema }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
+export const decomposerCancelRequestSchema = z.object({ runId: opaqueIdSchema }).strict();
+export const publicDecomposerEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("started"), runId: opaqueIdSchema, sourceId: opaqueIdSchema }).strict(),
+  z.object({ type: z.literal("completed"), runId: opaqueIdSchema, sourceId: opaqueIdSchema, candidateCount: z.number().int().nonnegative().max(1000) }).strict(),
+  z.object({ type: z.literal("failed"), runId: opaqueIdSchema, sourceId: opaqueIdSchema, error: sourceOperationErrorSchema }).strict(),
+]);
 
 export const playthroughReconciliationStatusSchema = z.object({
   state: z.enum(["current", "canon_diverged"]),
@@ -1161,6 +1175,10 @@ export type DecompositionCandidateListRequest = z.infer<typeof decompositionCand
 export type DecompositionCandidateListResult = z.infer<typeof decompositionCandidateListResultSchema>;
 export type DecompositionCandidateReviseRequest = z.infer<typeof decompositionCandidateReviseRequestSchema>;
 export type DecompositionCandidateDecideRequest = z.infer<typeof decompositionCandidateDecideRequestSchema>;
+export type DecomposerStartRequest = z.infer<typeof decomposerStartRequestSchema>;
+export type DecomposerStartResult = z.infer<typeof decomposerStartResultSchema>;
+export type DecomposerCancelRequest = z.infer<typeof decomposerCancelRequestSchema>;
+export type PublicDecomposerEvent = z.infer<typeof publicDecomposerEventSchema>;
 export type PlaythroughInspectResult = z.infer<typeof playthroughInspectResultSchema>;
 export type PlayerTurnStartRequest = z.infer<typeof playerTurnStartRequestSchema>;
 export type PlayerTurnStartResponse = z.infer<typeof playerTurnStartResponseSchema>;
@@ -1269,6 +1287,9 @@ export interface DesktopApi {
     listCandidates(request: DecompositionCandidateListRequest): Promise<DecompositionCandidateListResult>;
     reviseCandidate(request: DecompositionCandidateReviseRequest): Promise<DecompositionCandidateListResult>;
     decideCandidate(request: DecompositionCandidateDecideRequest): Promise<DecompositionCandidateListResult>;
+    startDecomposer(request: DecomposerStartRequest): Promise<DecomposerStartResult>;
+    cancelDecomposer(request: DecomposerCancelRequest): Promise<void>;
+    subscribeDecomposer(listener: (event: PublicDecomposerEvent) => void): () => void;
   };
   document: {
     get(request: DocumentGetRequest): Promise<EditorDocumentSnapshot>;

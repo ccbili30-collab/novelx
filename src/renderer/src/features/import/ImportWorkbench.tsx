@@ -19,11 +19,20 @@ export function ImportWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
   const [opening, setOpening] = useState("");
   const [location, setLocation] = useState("");
   const [candidateUse, setCandidateUse] = useState<Record<string, CandidateUse>>({});
+  const [decomposerRun, setDecomposerRun] = useState<{ runId: string; sourceId: string } | null>(null);
   const selected = sources.find((item) => item.id === sourceId) ?? null;
   const accepted = useMemo(() => candidates.filter((item) => item.status === "accepted"), [candidates]);
 
   useEffect(() => { if (workspace) void Promise.all([loadSources(), loadProfiles()]); else { setSources([]); setCandidates([]); } }, [workspace?.workspaceId]);
   useEffect(() => { if (sourceId) void loadCandidates(sourceId); else setCandidates([]); }, [sourceId]);
+  useEffect(() => window.novaxDesktop.sourceLibrary.subscribeDecomposer((event) => {
+    setDecomposerRun((current) => {
+      if (!current || current.runId !== event.runId || current.sourceId !== event.sourceId) return current;
+      if (event.type === "completed") { setNotice(`拆解完成，生成 ${event.candidateCount} 个待审核候选。`); void loadCandidates(event.sourceId); return null; }
+      if (event.type === "failed") { setError(event.error.message); return null; }
+      return current;
+    });
+  }), []);
 
   async function loadSources() {
     const result = await window.novaxDesktop.sourceLibrary.list();
@@ -81,6 +90,15 @@ export function ImportWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
       setNotice(`已创建起始模板“${result.startProfile.title}”。`);
     } finally { setBusy(false); }
   }
+  async function startDecomposer() {
+    if (!selected) return; setError(null); setNotice(null);
+    const result = await window.novaxDesktop.sourceLibrary.startDecomposer({ sourceId: selected.id });
+    if (!result.ok) { setError(result.error.message); return; }
+    setDecomposerRun({ runId: result.runId, sourceId: selected.id });
+  }
+  async function cancelDecomposer() {
+    if (!decomposerRun) return; await window.novaxDesktop.sourceLibrary.cancelDecomposer({ runId: decomposerRun.runId });
+  }
 
   return <section className="import-workbench" aria-label="来源导入">
     <aside className="source-rail">
@@ -94,7 +112,7 @@ export function ImportWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
     <div className="source-canvas">
       {selected ? <>
         <header className="source-summary"><div><FileSearch size={20} /><div><h1>{selected.displayName}</h1><p>{formatLabel(selected.format)} · {formatBytes(selected.byteSize)} · {rightsLabel(selected.rightsAttestation)}</p></div></div><button type="button" onClick={parseSource} disabled={busy || selected.state === "parsed"}>{busy ? <LoaderCircle className="spin" size={16} /> : <FileSearch size={16} />}{selected.state === "parsed" ? "已解析" : "解析"}</button></header>
-        <section className="decomposer-status"><div><strong>Decomposer（拆解器）</strong><span>提示词尚未通过真实模型评测</span></div><button type="button" disabled>开始拆解</button></section>
+        <section className="decomposer-status"><div><strong>Decomposer（拆解器）</strong><span>{decomposerRun?.sourceId === selected.id ? "正在调用真实模型并生成待审核候选" : "已通过真实模型评测，结果不会自动进入正史"}</span></div>{decomposerRun?.sourceId === selected.id ? <button type="button" onClick={cancelDecomposer}>取消</button> : <button type="button" onClick={startDecomposer} disabled={busy || selected.state !== "parsed" || selected.rightsAttestation === "unknown" || decomposerRun !== null}>开始拆解</button>}</section>
         <section className="start-profile-builder">
           <h2>起始模板</h2>
           <div className="start-profile-fields"><select aria-label="目标故事配置" value={startProfileId} onChange={(event) => setStartProfileId(event.target.value)}><option value="">选择故事配置</option>{profiles.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select><input aria-label="起始模板名称" value={startTitle} onChange={(event) => setStartTitle(event.target.value)} /><input aria-label="初始位置" value={location} onChange={(event) => setLocation(event.target.value)} /><textarea aria-label="开场情境" rows={3} value={opening} onChange={(event) => setOpening(event.target.value)} /></div>

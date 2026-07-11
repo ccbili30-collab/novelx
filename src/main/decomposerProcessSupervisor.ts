@@ -18,12 +18,13 @@ export class DecomposerProcessSupervisor {
     loadPrompt?(): DecomposerPrompt; spawnWorker?(path: string): AgentWorkerProcess; cancelGraceMs?: number;
   }) {}
 
-  start(sourceId: string, emit: (event: DecomposerWorkerEvent) => void): string | null {
+  start(sourceId: string, emit: (event: DecomposerWorkerEvent) => void): string {
     const provider = this.readProvider(); const lease = this.options.acquireRuntimeLease();
-    if (!provider || !lease) { provider && (provider.apiKey = ""); lease?.release(); return null; }
+    if (!provider) throw supervisorError("REAL_DECOMPOSER_PROVIDER_REQUIRED");
+    if (!lease) { provider.apiKey = ""; throw supervisorError("WORKSPACE_NOT_OPEN"); }
     let prepared: PreparedDecomposerRun;
     try { prepared = lease.service.prepare({ sourceId, provider, prompt: (this.options.loadPrompt ?? requireActiveDecomposerPrompt)() }); }
-    catch { provider.apiKey = ""; lease.release(); return null; }
+    catch (error) { provider.apiKey = ""; lease.release(); throw error; }
     const child = (this.options.spawnWorker ?? spawnWorker)(this.workerPath);
     const run = { child, lease, prepared, provider, emit }; this.#runs.set(prepared.runId, run);
     child.on("message", (payload) => this.handle(prepared.runId, payload));
@@ -68,3 +69,4 @@ export class DecomposerProcessSupervisor {
 }
 
 function spawnWorker(workerPath: string): AgentWorkerProcess { return fork(workerPath, [], { env: createAgentWorkerEnvironment(process.env), stdio: ["ignore", "ignore", "ignore", "ipc"] }) as AgentWorkerProcess; }
+function supervisorError(code: string): Error & { code: string } { return Object.assign(new Error("Decomposer supervisor failed."), { code }); }

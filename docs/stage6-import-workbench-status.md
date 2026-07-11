@@ -12,12 +12,10 @@ Date: 2026-07-11
 - Event Candidate（事件候选）的时间点、时间范围或事件顺序可以在审核界面中校正。
 - 已接受候选可以被显式标记为起点依据、原著未来排除项或不使用。
 - 用户可以为一个现有 Story Profile（故事配置）创建 Active Start Profile（启用的起始模板），成功后有可见确认。
-- Decomposer（拆解器）入口在缺少正式 Provider eval（模型提供方评测）发布时保持禁用，没有把 fixture（测试夹具）包装成 live（实时可用）。
+- Decomposer（拆解器）已通过正式 Provider eval（模型提供方评测），入口连接真实子进程监督器，支持运行、取消、失败和候选刷新。
 
 ## Not Completed
 
-- Decomposer 尚未通过独立监督进程记录 Provider（模型提供方）、Prompt（提示词）、输入哈希、输出哈希、来源块和终态回执。
-- Decomposer Prompt（拆解器提示词）尚未完成真实 Provider eval 并发布到 live 路径。
 - 已接受候选尚不能转换为带明确目标世界或故事的 Change Set（变更集）提案，因此不会写入 Canon（正史）。
 - 原生文件选择器流程没有自动化点击覆盖；解析器、IPC 和已注入来源的可见审核流程已有覆盖。
 - 大文件解析仍没有进度、取消和后台任务恢复界面。
