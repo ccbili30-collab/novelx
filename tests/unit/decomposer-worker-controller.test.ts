@@ -12,7 +12,7 @@ const command: DecomposerWorkerStart = {
 it("fails closed before Provider access when the Decomposer Prompt is unpublished", async () => {
   const events: DecomposerWorkerEvent[] = []; const createAdapter = vi.fn();
   await handleDecomposerWorkerCommand({ command: structuredClone(command), signal: new AbortController().signal, emit: (event) => events.push(event) },
-    { loadPrompt: () => loadDecomposerPrompt(), createAdapter });
+    { loadPrompt: () => ({ ...loadDecomposerPrompt(), status: "candidate", publicationEvidence: null }), createAdapter });
   expect(createAdapter).not.toHaveBeenCalled();
   expect(events).toEqual([
     { type: "decompose.started", runId: "run-1" },

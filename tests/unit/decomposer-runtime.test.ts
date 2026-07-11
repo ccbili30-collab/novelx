@@ -19,7 +19,7 @@ const provider: ProviderRuntimeProfile = { providerId: "test", displayName: "Tes
 describe("Decomposer runtime", () => {
   it("fails closed before Provider access while the Prompt is unpublished", async () => {
     const createAdapter = vi.fn();
-    await expect(runDecomposer({ chunks: [chunk()], providerProfile: provider, prompt: loadDecomposerPrompt(), createAdapter, signal: new AbortController().signal }))
+    await expect(runDecomposer({ chunks: [chunk()], providerProfile: provider, prompt: { ...loadDecomposerPrompt(), status: "candidate", publicationEvidence: null }, createAdapter, signal: new AbortController().signal }))
       .rejects.toMatchObject({ code: "DECOMPOSER_PROMPT_NOT_PUBLISHED" });
     expect(createAdapter).not.toHaveBeenCalled();
   });

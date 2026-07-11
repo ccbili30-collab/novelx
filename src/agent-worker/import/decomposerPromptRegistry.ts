@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import decomposerPrompt from "../prompts/decomposer/v1.md?raw";
+import { decomposerPromptPublication } from "./decomposerPromptPublication";
 
 export interface DecomposerPrompt {
   id: "novax.decomposer";
@@ -20,11 +21,11 @@ export interface DecomposerPrompt {
 const prompt: DecomposerPrompt = {
   id: "novax.decomposer",
   role: "decomposer",
-  version: "1.0.0",
-  status: "candidate",
-  sha256: "e8b432eccecf934fc197c92c8a385bc3865bd0192d9819315bcc6217dcb4a7e0",
+  version: "1.1.0",
+  status: decomposerPromptPublication.status,
+  sha256: "eadcabbf9c0eab271364fbdd65b4049546d2d3cbc38d54c09f36fa917b60f548",
   content: decomposerPrompt,
-  publicationEvidence: null,
+  publicationEvidence: decomposerPromptPublication.evidence,
 };
 
 export function loadDecomposerPrompt(): DecomposerPrompt {
