@@ -817,6 +817,7 @@ function publicSourceError(error: unknown) {
     IMPORT_CANDIDATES_REQUIRED: "请至少选择一个已接受候选。",
     IMPORT_CANDIDATE_NOT_ACCEPTED: "候选未接受、来源不匹配或已失效。",
     IMPORT_AMBIGUITY_NOT_PROPOSABLE: "歧义候选需要先由用户裁定，不能直接生成变更集。",
+    IMPORT_PROVENANCE_INCOMPLETE: "导入来源关联不完整，变更集已阻止提交。",
   };
   return { code, message: messages[code] ?? "来源资料操作失败，请检查文件后重试。" };
 }

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { ChangeSetService, type ChangeSetItem } from "../changeSet/changeSetService";
 import { WorkspaceChangeSetPolicy } from "../changeSet/workspaceChangeSetPolicy";
 import { CheckpointRepository } from "../version/checkpointRepository";
+import { ChangeSetRepository } from "../changeSet/changeSetRepository";
 import { ResourceRepository } from "../workspace/resourceRepository";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 import { DecompositionCandidateRepository } from "./decompositionCandidateRepository";
@@ -25,6 +26,11 @@ export class ImportCandidateChangeSetService {
     });
     const insert = this.workspace.db.prepare(`INSERT OR IGNORE INTO import_candidate_change_set_links (candidate_id, candidate_revision, change_set_id, item_id, created_at) VALUES (?, ?, ?, ?, ?)`);
     for (const entry of entries) for (const item of entry.items) insert.run(entry.candidate.id, entry.candidate.revision, changeSet.id, item.id, new Date().toISOString());
+    const linked = this.workspace.db.prepare("SELECT COUNT(*) AS count FROM import_candidate_change_set_links WHERE change_set_id = ?").get(changeSet.id) as { count: number };
+    if (linked.count !== changeSet.items.length) {
+      new ChangeSetRepository(this.workspace).markFailed(changeSet.id, "IMPORT_PROVENANCE_INCOMPLETE");
+      throw importProposalError("IMPORT_PROVENANCE_INCOMPLETE");
+    }
     return changeSet;
   }
 }

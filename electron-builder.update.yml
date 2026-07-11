@@ -2,4 +2,4 @@ extends: ./electron-builder.yml
 
 publish:
   - provider: generic
-    url: ${env.NOVAX_UPDATE_URL}
+    url: https://github.com/ccbili30-collab/novelx/releases/latest/download
