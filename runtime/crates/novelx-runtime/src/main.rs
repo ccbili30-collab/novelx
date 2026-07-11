@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 
 use novelx_protocol::{
     Envelope, MessageType, PROTOCOL_VERSION, RuntimeBuild, RuntimeError, RuntimeErrorClass,
-    RuntimeHello, RuntimeIdentity, RuntimeInitialize, RuntimeReady,
+    RuntimeHello, RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
 };
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
 use novelx_runtime::recovery::{RecoveryCoordinator, RecoveryError};
@@ -38,26 +38,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .next()
         .ok_or("runtime.initialize was not received")??;
     let initialize_envelope: Envelope = serde_json::from_str(&initialize_line)?;
-    initialize_envelope.validate_version()?;
-    if initialize_envelope.message_type != MessageType::Command {
-        return Err("runtime.initialize must be a command message".into());
+    if let Err(error) = validate_initialize_envelope(&initialize_envelope) {
+        write_protocol_error(&mut output, initialize_envelope.message_id, 2, &error)?;
+        return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
     }
-    if initialize_envelope.name != "runtime.initialize" {
-        return Err(format!("unexpected handshake message: {}", initialize_envelope.name).into());
-    }
-    if initialize_envelope.correlation_id.is_some() {
-        return Err("runtime.initialize must not include correlationId".into());
-    }
-    if initialize_envelope.run_id.is_some() {
-        return Err("runtime.initialize must not include runId".into());
-    }
-    let initialize: RuntimeInitialize = serde_json::from_value(initialize_envelope.payload)?;
+    let initialize: RuntimeInitialize =
+        match serde_json::from_value(initialize_envelope.payload.clone()) {
+            Ok(initialize) => initialize,
+            Err(error) => {
+                let error = format!("invalid runtime.initialize payload: {error}");
+                write_protocol_error(&mut output, initialize_envelope.message_id, 2, &error)?;
+                return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
+            }
+        };
     if initialize.selected_protocol_version != PROTOCOL_VERSION {
-        return Err(format!(
+        let error = format!(
             "runtime.initialize selected unsupported protocol version {}",
             initialize.selected_protocol_version
-        )
-        .into());
+        );
+        write_protocol_error(&mut output, initialize_envelope.message_id, 2, &error)?;
+        return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
     }
 
     let recovered_run_count = match initialize.workspace_database_path.as_deref() {
@@ -106,12 +106,162 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     output.write_all(b"\n")?;
     output.flush()?;
 
-    if let Some(extra_line) = lines.next() {
-        extra_line?;
-        return Err(
-            "runtime accepts no messages after runtime.initialize in handshake-only mode".into(),
-        );
+    run_command_loop(
+        &mut lines,
+        &mut output,
+        initialize.workspace_database_path.is_some(),
+        recovered_run_count,
+    )
+}
+
+fn validate_initialize_envelope(envelope: &Envelope) -> Result<(), String> {
+    envelope
+        .validate_version()
+        .map_err(|error| error.to_string())?;
+    if envelope.message_type != MessageType::Command {
+        return Err("runtime.initialize must be a command message".to_owned());
     }
+    if envelope.name != "runtime.initialize" {
+        return Err(format!("unexpected handshake message: {}", envelope.name));
+    }
+    if envelope.correlation_id.is_some() {
+        return Err("runtime.initialize must not include correlationId".to_owned());
+    }
+    if envelope.run_id.is_some() {
+        return Err("runtime.initialize must not include runId".to_owned());
+    }
+    if envelope.sequence != 1 {
+        return Err(format!(
+            "runtime.initialize sequence must be 1, received {}",
+            envelope.sequence
+        ));
+    }
+    Ok(())
+}
+
+fn run_command_loop(
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    output: &mut impl Write,
+    workspace_database_configured: bool,
+    recovered_run_count: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for ((expected_host_sequence, runtime_sequence), line) in (2_u64..).zip(3_u64..).zip(lines) {
+        let line = line?;
+        let command: Envelope = serde_json::from_str(&line)?;
+        if let Err(error) = validate_command(&command, expected_host_sequence) {
+            write_protocol_error(output, command.message_id, runtime_sequence, &error)?;
+            return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
+        }
+
+        match command.name.as_str() {
+            "runtime.status.get" => {
+                write_response(
+                    output,
+                    &command,
+                    runtime_sequence,
+                    "runtime.status",
+                    RuntimeStatus {
+                        initialized: true,
+                        workspace_database_configured,
+                        recovered_run_count,
+                        protocol_version: PROTOCOL_VERSION,
+                        runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    },
+                )?;
+            }
+            "runtime.shutdown" => {
+                write_response(
+                    output,
+                    &command,
+                    runtime_sequence,
+                    "runtime.stopped",
+                    RuntimeStopped {
+                        reason: "requested".to_owned(),
+                    },
+                )?;
+                return Ok(());
+            }
+            _ => unreachable!("validated command name"),
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), String> {
+    command
+        .validate_version()
+        .map_err(|error| error.to_string())?;
+    if command.message_type != MessageType::Command {
+        return Err("runtime messages after initialization must be commands".to_owned());
+    }
+    if command.correlation_id.is_some() {
+        return Err("runtime commands must not include correlationId".to_owned());
+    }
+    if command.run_id.is_some() {
+        return Err("runtime commands must not include runId".to_owned());
+    }
+    if command.sequence != expected_sequence {
+        return Err(format!(
+            "host sequence must be {expected_sequence}, received {}",
+            command.sequence
+        ));
+    }
+    if !matches!(
+        command.name.as_str(),
+        "runtime.status.get" | "runtime.shutdown"
+    ) {
+        return Err(format!("unknown runtime command: {}", command.name));
+    }
+    if !matches!(command.payload.as_object(), Some(payload) if payload.is_empty()) {
+        return Err(format!("{} payload must be an empty object", command.name));
+    }
+    Ok(())
+}
+
+fn write_response(
+    output: &mut impl Write,
+    command: &Envelope,
+    sequence: u64,
+    name: &str,
+    payload: impl serde::Serialize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    let mut response = Envelope::new(MessageType::Response, name, sent_at, sequence, payload)?;
+    response.correlation_id = Some(command.message_id);
+    serde_json::to_writer(&mut *output, &response)?;
+    output.write_all(b"\n")?;
+    output.flush()?;
+    Ok(())
+}
+
+fn write_protocol_error(
+    output: &mut impl Write,
+    correlation_id: Uuid,
+    sequence: u64,
+    error: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    let mut envelope = Envelope::new(
+        MessageType::Event,
+        "runtime.error",
+        sent_at,
+        sequence,
+        RuntimeError {
+            code: "RUNTIME_PROTOCOL_ERROR".to_owned(),
+            class: RuntimeErrorClass::Protocol,
+            retryable: false,
+            public_message: "运行时收到不符合协议的消息，已停止处理。".to_owned(),
+            stage: "runtime.command.validate".to_owned(),
+            attempt: 0,
+            diagnostic_id: Uuid::new_v4(),
+        },
+    )?;
+    envelope.correlation_id = Some(correlation_id);
+    serde_json::to_writer(&mut *output, &envelope)?;
+    output.write_all(b"\n")?;
+    output.flush()?;
+    eprintln!("runtime protocol error: {error}");
     Ok(())
 }
 

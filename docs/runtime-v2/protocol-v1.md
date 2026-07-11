@@ -34,7 +34,7 @@ Rules:
 - `messageId` is globally unique and supports idempotent receipt.
 - `correlationId` links a response or terminal event to the initiating command.
 - `runId` is required for run-scoped messages.
-- Host commands use a monotonic connection sequence. Durable runtime events use a monotonic per-run sequence allocated by the journal.
+- Host and runtime each allocate their own monotonic connection sequence for handshake, control, command and response messages. Durable runtime events use a separate monotonic per-run sequence allocated by the journal.
 - Protocol V1 sequence values are limited to `1..=9,007,199,254,740,991` so Rust and TypeScript preserve the same integer exactly.
 - Unknown major protocol versions fail the handshake. Unknown message names are rejected with a typed protocol error.
 - Invalid UTF-8, oversized frames, missing fields and malformed JSON terminate the connection without executing the payload.
@@ -126,6 +126,35 @@ Initialization failure uses a strict `runtime.initialization_failed` `control` e
 ```
 
 The failure envelope requires a non-null UUID `correlationId` and `runId: null`. Unknown envelope fields, unknown error fields, credentials and raw stack traces are rejected.
+
+After `runtime.ready`, the host may use a continuous control loop:
+
+- `runtime.status.get` is a `command` with `{}` payload, `correlationId: null` and `runId: null`.
+- `runtime.status` is a `response` correlated to the status command and has `runId: null`.
+- `runtime.shutdown` is a `command` with `{}` payload, `correlationId: null` and `runId: null`.
+- `runtime.stopped` is a `response` correlated to the shutdown command and has `runId: null`.
+
+The strict status response payload is:
+
+```json
+{
+  "initialized": true,
+  "workspaceDatabaseConfigured": true,
+  "recoveredRunCount": 0,
+  "protocolVersion": 1,
+  "runtimeVersion": "0.1.0"
+}
+```
+
+The strict stopped response payload is:
+
+```json
+{
+  "reason": "requested"
+}
+```
+
+Command and response payloads reject unknown fields. Host command sequence and runtime response sequence are independently monotonic for the lifetime of the connection; matching numeric values across directions do not imply shared ownership.
 
 ## 4. Run Commands
 

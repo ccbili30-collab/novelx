@@ -143,6 +143,22 @@ pub struct RuntimeReady {
     pub recovered_run_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeStatus {
+    pub initialized: bool,
+    pub workspace_database_configured: bool,
+    pub recovered_run_count: u64,
+    pub protocol_version: u16,
+    pub runtime_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeStopped {
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeErrorClass {

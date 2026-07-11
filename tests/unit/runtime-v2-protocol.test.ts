@@ -8,6 +8,10 @@ import {
   parseRuntimeV2ReadyEnvelope,
   parseRuntimeV2ErrorEnvelope,
   parseRuntimeV2InitializationFailedEnvelope,
+  parseRuntimeV2ShutdownEnvelope,
+  parseRuntimeV2StatusEnvelope,
+  parseRuntimeV2StatusGetEnvelope,
+  parseRuntimeV2StoppedEnvelope,
   runtimeV2EnvelopeSchema,
 } from "../../src/shared/runtimeV2Protocol";
 
@@ -135,6 +139,72 @@ function initializationFailedEnvelope(overrides: Record<string, unknown> = {}) {
       attempt: 1,
       diagnosticId: "d6a03646-04ef-4b3e-9639-47b2a843f3a2",
     },
+    ...overrides,
+  };
+}
+
+function statusGetEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1,
+    messageId: "90b45f0d-3df9-45d6-a578-521358bb8fb3",
+    messageType: "command",
+    name: "runtime.status.get",
+    sentAt: "2026-07-12T00:00:04Z",
+    correlationId: null,
+    runId: null,
+    sequence: 3,
+    payload: {},
+    ...overrides,
+  };
+}
+
+function statusEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1,
+    messageId: "622457d6-b458-418a-8a89-f51cf1e699da",
+    messageType: "response",
+    name: "runtime.status",
+    sentAt: "2026-07-12T00:00:05Z",
+    correlationId: statusGetEnvelope().messageId,
+    runId: null,
+    sequence: 3,
+    payload: {
+      initialized: true,
+      workspaceDatabaseConfigured: true,
+      recoveredRunCount: 2,
+      protocolVersion: 1,
+      runtimeVersion: "0.1.0",
+    },
+    ...overrides,
+  };
+}
+
+function shutdownEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1,
+    messageId: "05781875-af7d-49ca-af8e-cec1c9e48dcf",
+    messageType: "command",
+    name: "runtime.shutdown",
+    sentAt: "2026-07-12T00:00:06Z",
+    correlationId: null,
+    runId: null,
+    sequence: 4,
+    payload: {},
+    ...overrides,
+  };
+}
+
+function stoppedEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1,
+    messageId: "682a6389-1cdb-43b2-8f93-f4df8def3783",
+    messageType: "response",
+    name: "runtime.stopped",
+    sentAt: "2026-07-12T00:00:07Z",
+    correlationId: shutdownEnvelope().messageId,
+    runId: null,
+    sequence: 4,
+    payload: { reason: "requested" },
     ...overrides,
   };
 }
@@ -333,5 +403,43 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(() => parseRuntimeV2InitializationFailedEnvelope(initializationFailedEnvelope({
       payload: { ...initializationFailedEnvelope().payload, internalError: "must-not-cross-protocol" },
     }))).toThrow();
+  });
+
+  it("accepts runtime.status.get and its correlated runtime.status response", () => {
+    expect(parseRuntimeV2StatusGetEnvelope(statusGetEnvelope())).toEqual(statusGetEnvelope());
+    expect(parseRuntimeV2StatusEnvelope(statusEnvelope())).toEqual(statusEnvelope());
+  });
+
+  it("strictly rejects malformed status commands and responses", () => {
+    expect(() => parseRuntimeV2StatusGetEnvelope(statusGetEnvelope({ payload: { extra: true } }))).toThrow();
+    expect(() => parseRuntimeV2StatusGetEnvelope(statusGetEnvelope({ messageType: "control" }))).toThrow();
+    expect(() => parseRuntimeV2StatusGetEnvelope(statusGetEnvelope({ correlationId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2StatusGetEnvelope(statusGetEnvelope({ runId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2StatusEnvelope(statusEnvelope({ name: "runtime.ready" }))).toThrow();
+    expect(() => parseRuntimeV2StatusEnvelope(statusEnvelope({ correlationId: null }))).toThrow();
+    expect(() => parseRuntimeV2StatusEnvelope(statusEnvelope({ runId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2StatusEnvelope(statusEnvelope({
+      payload: { ...statusEnvelope().payload, initialized: false },
+    }))).toThrow();
+    expect(() => parseRuntimeV2StatusEnvelope(statusEnvelope({
+      payload: { ...statusEnvelope().payload, extra: true },
+    }))).toThrow();
+  });
+
+  it("accepts runtime.shutdown and its correlated runtime.stopped response", () => {
+    expect(parseRuntimeV2ShutdownEnvelope(shutdownEnvelope())).toEqual(shutdownEnvelope());
+    expect(parseRuntimeV2StoppedEnvelope(stoppedEnvelope())).toEqual(stoppedEnvelope());
+  });
+
+  it("strictly rejects malformed shutdown commands and stopped responses", () => {
+    expect(() => parseRuntimeV2ShutdownEnvelope(shutdownEnvelope({ payload: { force: true } }))).toThrow();
+    expect(() => parseRuntimeV2ShutdownEnvelope(shutdownEnvelope({ name: "runtime.stop" }))).toThrow();
+    expect(() => parseRuntimeV2ShutdownEnvelope(shutdownEnvelope({ correlationId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2ShutdownEnvelope(shutdownEnvelope({ runId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ messageType: "control" }))).toThrow();
+    expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ correlationId: null }))).toThrow();
+    expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ runId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ payload: { reason: "crashed" } }))).toThrow();
+    expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ payload: { reason: "requested", extra: true } }))).toThrow();
   });
 });

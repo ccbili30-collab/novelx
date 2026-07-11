@@ -8,6 +8,7 @@ const runtimeV2BuildSchema = z.object({
   commit: z.string().trim().min(1).max(160),
   target: z.string().trim().min(1).max(240),
 }).strict();
+const emptyRuntimeV2PayloadSchema = z.object({}).strict();
 
 export const runtimeV2MessageTypeSchema = z.enum([
   "command",
@@ -146,6 +147,50 @@ export const runtimeV2InitializationFailedEnvelopeSchema = runtimeV2EnvelopeSche
   payload: runtimeV2ErrorSchema,
 }).strict();
 
+export const runtimeV2StatusGetEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("runtime.status.get"),
+  correlationId: z.null(),
+  runId: z.null(),
+  payload: emptyRuntimeV2PayloadSchema,
+}).strict();
+
+export const runtimeV2StatusPayloadSchema = z.object({
+  initialized: z.literal(true),
+  workspaceDatabaseConfigured: z.boolean(),
+  recoveredRunCount: z.number().int().min(0).safe(),
+  protocolVersion: z.literal(RUNTIME_V2_PROTOCOL_VERSION),
+  runtimeVersion: semanticVersionSchema,
+}).strict();
+
+export const runtimeV2StatusEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("runtime.status"),
+  correlationId: z.uuid(),
+  runId: z.null(),
+  payload: runtimeV2StatusPayloadSchema,
+}).strict();
+
+export const runtimeV2ShutdownEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("runtime.shutdown"),
+  correlationId: z.null(),
+  runId: z.null(),
+  payload: emptyRuntimeV2PayloadSchema,
+}).strict();
+
+export const runtimeV2StoppedPayloadSchema = z.object({
+  reason: z.literal("requested"),
+}).strict();
+
+export const runtimeV2StoppedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("runtime.stopped"),
+  correlationId: z.uuid(),
+  runId: z.null(),
+  payload: runtimeV2StoppedPayloadSchema,
+}).strict();
+
 export type RuntimeV2MessageType = z.infer<typeof runtimeV2MessageTypeSchema>;
 export type RuntimeV2Envelope = z.infer<typeof runtimeV2EnvelopeSchema>;
 export type RuntimeV2HelloPayload = z.infer<typeof runtimeV2HelloPayloadSchema>;
@@ -158,6 +203,12 @@ export type RuntimeV2ErrorClass = z.infer<typeof runtimeV2ErrorClassSchema>;
 export type RuntimeV2Error = z.infer<typeof runtimeV2ErrorSchema>;
 export type RuntimeV2ErrorEnvelope = z.infer<typeof runtimeV2ErrorEnvelopeSchema>;
 export type RuntimeV2InitializationFailedEnvelope = z.infer<typeof runtimeV2InitializationFailedEnvelopeSchema>;
+export type RuntimeV2StatusGetEnvelope = z.infer<typeof runtimeV2StatusGetEnvelopeSchema>;
+export type RuntimeV2StatusPayload = z.infer<typeof runtimeV2StatusPayloadSchema>;
+export type RuntimeV2StatusEnvelope = z.infer<typeof runtimeV2StatusEnvelopeSchema>;
+export type RuntimeV2ShutdownEnvelope = z.infer<typeof runtimeV2ShutdownEnvelopeSchema>;
+export type RuntimeV2StoppedPayload = z.infer<typeof runtimeV2StoppedPayloadSchema>;
+export type RuntimeV2StoppedEnvelope = z.infer<typeof runtimeV2StoppedEnvelopeSchema>;
 
 export class RuntimeV2ProtocolVersionError extends Error {
   readonly code = "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED";
@@ -205,6 +256,28 @@ export function parseRuntimeV2InitializationFailedEnvelope(value: unknown): Runt
   const version = readProtocolVersion(value);
   if (version !== RUNTIME_V2_PROTOCOL_VERSION) throw new RuntimeV2ProtocolVersionError(version);
   return runtimeV2InitializationFailedEnvelopeSchema.parse(value);
+}
+
+export function parseRuntimeV2StatusGetEnvelope(value: unknown): RuntimeV2StatusGetEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2StatusGetEnvelopeSchema);
+}
+
+export function parseRuntimeV2StatusEnvelope(value: unknown): RuntimeV2StatusEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2StatusEnvelopeSchema);
+}
+
+export function parseRuntimeV2ShutdownEnvelope(value: unknown): RuntimeV2ShutdownEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ShutdownEnvelopeSchema);
+}
+
+export function parseRuntimeV2StoppedEnvelope(value: unknown): RuntimeV2StoppedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2StoppedEnvelopeSchema);
+}
+
+function parseVersionedEnvelope<T>(value: unknown, schema: z.ZodType<T>): T {
+  const version = readProtocolVersion(value);
+  if (version !== RUNTIME_V2_PROTOCOL_VERSION) throw new RuntimeV2ProtocolVersionError(version);
+  return schema.parse(value);
 }
 
 function readProtocolVersion(value: unknown): unknown {

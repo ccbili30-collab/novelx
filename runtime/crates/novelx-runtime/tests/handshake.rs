@@ -4,7 +4,8 @@ use std::process::{Child, Command, Stdio};
 
 use novelx_protocol::{
     Envelope, MessageType, PROTOCOL_VERSION, RuntimeApplicationIdentity, RuntimeError,
-    RuntimeErrorClass, RuntimeHello, RuntimeInitialize, RuntimeReady,
+    RuntimeErrorClass, RuntimeHello, RuntimeInitialize, RuntimeReady, RuntimeStatus,
+    RuntimeStopped,
 };
 use novelx_runtime::event_journal::EventJournal;
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
@@ -73,22 +74,40 @@ fn rejects_invalid_handshake_input_without_emitting_ready() {
         "unsupported_version",
         "wrong_name",
         "wrong_correlation",
+        "wrong_sequence",
+        "extra_payload",
     ];
     for case in cases {
         let (mut child, hello) = spawn_and_read_hello();
+        let mut correlated_message_id = None;
         match case {
             "invalid_json" => write_line(&mut child, "not-json"),
             "unsupported_version" => {
                 let envelope = initialize_envelope(PROTOCOL_VERSION + 1, "runtime.initialize");
+                correlated_message_id = Some(envelope.message_id);
                 write_envelope(&mut child, &envelope);
             }
             "wrong_name" => {
                 let envelope = initialize_envelope(PROTOCOL_VERSION, "run.start");
+                correlated_message_id = Some(envelope.message_id);
                 write_envelope(&mut child, &envelope);
             }
             "wrong_correlation" => {
                 let mut envelope = initialize_envelope(PROTOCOL_VERSION, "runtime.initialize");
                 envelope.correlation_id = Some(hello.message_id);
+                correlated_message_id = Some(envelope.message_id);
+                write_envelope(&mut child, &envelope);
+            }
+            "wrong_sequence" => {
+                let mut envelope = initialize_envelope(PROTOCOL_VERSION, "runtime.initialize");
+                envelope.sequence = 2;
+                correlated_message_id = Some(envelope.message_id);
+                write_envelope(&mut child, &envelope);
+            }
+            "extra_payload" => {
+                let mut envelope = initialize_envelope(PROTOCOL_VERSION, "runtime.initialize");
+                envelope.payload["unexpected"] = serde_json::json!(true);
+                correlated_message_id = Some(envelope.message_id);
                 write_envelope(&mut child, &envelope);
             }
             _ => unreachable!(),
@@ -96,10 +115,19 @@ fn rejects_invalid_handshake_input_without_emitting_ready() {
         drop(child.stdin.take());
         let output = child.wait_with_output().expect("runtime output");
         assert!(!output.status.success(), "{case} must fail");
-        assert!(
-            output.stdout.is_empty(),
-            "{case} must not emit runtime.ready"
-        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        if let Some(message_id) = correlated_message_id {
+            let envelopes = stdout
+                .lines()
+                .map(|line| serde_json::from_str::<Envelope>(line).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(envelopes.len(), 1, "{case}");
+            assert_eq!(envelopes[0].name, "runtime.error", "{case}");
+            assert_eq!(envelopes[0].sequence, 2, "{case}");
+            assert_eq!(envelopes[0].correlation_id, Some(message_id), "{case}");
+        } else {
+            assert!(stdout.is_empty(), "{case} cannot be correlated");
+        }
         assert!(
             !output.stderr.is_empty(),
             "{case} must explain failure on stderr"
@@ -108,22 +136,100 @@ fn rejects_invalid_handshake_input_without_emitting_ready() {
 }
 
 #[test]
-fn rejects_a_second_message_after_ready() {
+fn serves_multiple_status_requests_and_shutdown_with_continuous_sequences() {
     let (mut child, _hello) = spawn_and_read_hello();
     let initialize = initialize_envelope(PROTOCOL_VERSION, "runtime.initialize");
     write_envelope(&mut child, &initialize);
-    write_line(&mut child, "{}");
-    drop(child.stdin.take());
+    let ready = read_next_envelope(&mut child);
+    assert_eq!(ready.sequence, 2);
 
-    let output = child.wait_with_output().expect("runtime output");
-    assert!(!output.status.success());
-    let lines: Vec<_> = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    assert_eq!(lines.len(), 1, "only runtime.ready may follow hello");
-    assert!(!output.stderr.is_empty());
+    let first_status = command_envelope("runtime.status.get", 2, serde_json::json!({}));
+    write_envelope(&mut child, &first_status);
+    let first_response = read_next_envelope(&mut child);
+    assert_response(&first_response, &first_status, "runtime.status", 3);
+    let first_payload: RuntimeStatus = serde_json::from_value(first_response.payload).unwrap();
+    assert!(first_payload.initialized);
+    assert!(!first_payload.workspace_database_configured);
+    assert_eq!(first_payload.recovered_run_count, 0);
+    assert_eq!(first_payload.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(first_payload.runtime_version, env!("CARGO_PKG_VERSION"));
+
+    let second_status = command_envelope("runtime.status.get", 3, serde_json::json!({}));
+    write_envelope(&mut child, &second_status);
+    let second_response = read_next_envelope(&mut child);
+    assert_response(&second_response, &second_status, "runtime.status", 4);
+
+    let shutdown = command_envelope("runtime.shutdown", 4, serde_json::json!({}));
+    write_envelope(&mut child, &shutdown);
+    let stopped = read_next_envelope(&mut child);
+    assert_response(&stopped, &shutdown, "runtime.stopped", 5);
+    let stopped_payload: RuntimeStopped = serde_json::from_value(stopped.payload).unwrap();
+    assert_eq!(stopped_payload.reason, "requested");
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn protocol_violations_emit_correlated_runtime_error_and_fail_closed() {
+    let cases = [
+        "duplicate_sequence",
+        "skipped_sequence",
+        "unknown_command",
+        "extra_payload",
+        "wrong_type",
+        "wrong_version",
+        "unexpected_correlation",
+        "unexpected_run_id",
+    ];
+
+    for case in cases {
+        let (mut child, _hello) = spawn_and_read_hello();
+        let initialize = initialize_envelope(PROTOCOL_VERSION, "runtime.initialize");
+        write_envelope(&mut child, &initialize);
+        let ready = read_next_envelope(&mut child);
+        assert_eq!(ready.name, "runtime.ready");
+
+        let mut command = command_envelope("runtime.status.get", 2, serde_json::json!({}));
+        match case {
+            "duplicate_sequence" => command.sequence = 1,
+            "skipped_sequence" => command.sequence = 3,
+            "unknown_command" => command.name = "runtime.unknown".to_owned(),
+            "extra_payload" => command.payload = serde_json::json!({ "unexpected": true }),
+            "wrong_type" => command.message_type = MessageType::Event,
+            "wrong_version" => command.protocol_version = PROTOCOL_VERSION + 1,
+            "unexpected_correlation" => command.correlation_id = Some(ready.message_id),
+            "unexpected_run_id" => command.run_id = Some(uuid::Uuid::new_v4()),
+            _ => unreachable!(),
+        }
+        write_envelope(&mut child, &command);
+        let error_envelope = read_next_envelope(&mut child);
+        assert_eq!(error_envelope.message_type, MessageType::Event, "{case}");
+        assert_eq!(error_envelope.name, "runtime.error", "{case}");
+        assert_eq!(
+            error_envelope.correlation_id,
+            Some(command.message_id),
+            "{case}"
+        );
+        assert_eq!(error_envelope.run_id, None, "{case}");
+        assert_eq!(error_envelope.sequence, 3, "{case}");
+        let error: RuntimeError = serde_json::from_value(error_envelope.payload).unwrap();
+        assert_eq!(error.code, "RUNTIME_PROTOCOL_ERROR", "{case}");
+        assert_eq!(
+            error.public_message, "运行时收到不符合协议的消息，已停止处理。",
+            "{case}"
+        );
+        assert_eq!(error.class, RuntimeErrorClass::Protocol, "{case}");
+        assert!(!error.retryable, "{case}");
+
+        drop(child.stdin.take());
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success(), "{case}");
+        assert!(
+            output.stdout.is_empty(),
+            "{case} must stop after runtime.error"
+        );
+        assert!(!output.stderr.is_empty(), "{case}");
+    }
 }
 
 #[test]
@@ -163,6 +269,19 @@ fn reports_the_real_nonterminal_recovery_count() {
     let ready = read_next_envelope(&mut child);
     let payload: RuntimeReady = serde_json::from_value(ready.payload).unwrap();
     assert_eq!(payload.recovered_run_count, 3);
+
+    let status_command = command_envelope("runtime.status.get", 2, serde_json::json!({}));
+    write_envelope(&mut child, &status_command);
+    let status_response = read_next_envelope(&mut child);
+    assert_response(&status_response, &status_command, "runtime.status", 3);
+    let status: RuntimeStatus = serde_json::from_value(status_response.payload).unwrap();
+    assert!(status.workspace_database_configured);
+    assert_eq!(status.recovered_run_count, 3);
+
+    let shutdown = command_envelope("runtime.shutdown", 3, serde_json::json!({}));
+    write_envelope(&mut child, &shutdown);
+    let stopped = read_next_envelope(&mut child);
+    assert_response(&stopped, &shutdown, "runtime.stopped", 4);
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
 }
@@ -242,7 +361,7 @@ fn initialize_envelope_with_path(
         MessageType::Command,
         name,
         "2026-07-12T00:00:00Z",
-        2,
+        1,
         RuntimeInitialize {
             selected_protocol_version: version,
             application: RuntimeApplicationIdentity {
@@ -265,6 +384,30 @@ fn initialize_envelope_with_path(
     envelope.protocol_version = version;
     envelope.correlation_id = None;
     envelope
+}
+
+fn command_envelope(name: &str, sequence: u64, payload: serde_json::Value) -> Envelope {
+    Envelope::new(
+        MessageType::Command,
+        name,
+        "2026-07-12T00:00:01Z",
+        sequence,
+        payload,
+    )
+    .unwrap()
+}
+
+fn assert_response(
+    response: &Envelope,
+    command: &Envelope,
+    expected_name: &str,
+    expected_sequence: u64,
+) {
+    assert_eq!(response.message_type, MessageType::Response);
+    assert_eq!(response.name, expected_name);
+    assert_eq!(response.correlation_id, Some(command.message_id));
+    assert_eq!(response.run_id, None);
+    assert_eq!(response.sequence, expected_sequence);
 }
 
 fn read_next_envelope(child: &mut Child) -> Envelope {

@@ -25,21 +25,23 @@
 - Added the strict `runtime.initialization_failed` handshake contract for typed startup failures.
 - Wired Rust initialization to the real workspace event journal and Recovery Coordinator; `runtime.ready` now reports the real nonterminal Run count.
 - Added fail-closed structured initialization errors for migration, schema-integrity and replay failures, with internal diagnostics separated from public text.
+- Added the post-ready continuous control loop for `runtime.status.get` and `runtime.shutdown`, with independently monotonic Host/Runtime connection sequences, correlated responses and fail-closed protocol errors.
+- Added graceful `runtime.stopped` shutdown and strict Rust/TypeScript schemas for status and shutdown messages.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 42 tests.
+- Rust workspace tests pass: 43 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass: 35 tests.
+- Runtime V2 protocol tests pass: 23 tests. The previously verified process-supervisor and real cross-language tests remain outside this batch and will be rerun after the supervisor adopts the continuous loop.
 - `git diff --check` passes.
 - Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and the `handshake` capability.
 
 ## Not Completed
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor exists only as an independently tested module.
-- The runtime opens and recovers the supplied workspace database during initialization, but still does not process Run commands after readiness.
+- The runtime opens and recovers the supplied workspace database and processes status/shutdown control commands after readiness, but it still does not process durable Run commands.
 - The ToolCall state machine and event-backed aggregate exist, but the real tool executor, Provider call, context compiler, recovery execution policy and domain tools are not implemented.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
