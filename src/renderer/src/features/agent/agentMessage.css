@@ -27,3 +27,16 @@
 .agent-artifact--generating svg { animation: novax-agent-spin 1s linear infinite; }
 @keyframes novax-agent-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .agent-artifact--generating svg { animation: none; } }
+.agent-artifacts { display: block; }
+.agent-artifacts > summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+.agent-artifacts__body { display: grid; gap: 6px; margin-top: 6px; }
+.steward-message { position: relative; }
+.steward-message--user { padding-right: 13px; }
+.steward-message--assistant, .steward-message--error { padding-right: 38px; }
+.steward-message-actions { position: absolute; top: 2px; right: 2px; display: flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); box-shadow: 0 2px 8px color-mix(in srgb, black 10%, transparent); opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
+.steward-message--user .steward-message-actions { top: 50%; right: calc(100% + 6px); transform: translateY(-50%); }
+.steward-message:hover .steward-message-actions, .steward-message:focus-within .steward-message-actions { opacity: 1; pointer-events: auto; }
+.steward-message-actions button { display: grid; width: 26px; height: 26px; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.steward-message-actions button:hover { background: var(--hover); color: var(--novax-color-text-strong); }
+.steward-action-notice { align-self: center; padding: 5px 8px; color: var(--muted); font-size: 11px; }
+@media (hover: none) { .steward-message-actions { position: static; justify-self: end; opacity: 1; pointer-events: auto; box-shadow: none; } }

@@ -11,12 +11,15 @@ import {
   agentWorkerToolRequestSchema,
   agentWorkerToolResponseSchema,
   proposeChangeSetResultSchema,
+  inspectProjectFilesResultSchema,
   retrieveGraphEvidenceResultSchema,
   type AgentWorkerToolRequest,
   type AgentCollaborationContext,
   type AgentSessionHistory,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
+  type InspectProjectFilesArgs,
+  type InspectProjectFilesResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
 } from "../shared/agentWorkerProtocol";
@@ -43,6 +46,10 @@ export interface AgentToolGateway {
     args: RetrieveGraphEvidenceArgs,
     context: AgentToolInvocationContext,
   ): Promise<RetrieveGraphEvidenceResult>;
+  inspectProjectFiles(
+    args: InspectProjectFilesArgs,
+    context: AgentToolInvocationContext,
+  ): Promise<InspectProjectFilesResult>;
   proposeChangeSet(
     args: ProposeChangeSetArgs,
     context: AgentToolInvocationContext,
@@ -87,6 +94,8 @@ interface AgentProcessSupervisorOptions {
 export interface AgentRuntimeLease {
   gateway: AgentToolGateway;
   audit: AgentAuditStore;
+  authorizedScopeResourceIds?: string[];
+  defaultScopeResourceIds?: string[];
   release(): void;
 }
 
@@ -121,7 +130,13 @@ export class AgentProcessSupervisor {
     const providerProfile = this.#readProviderProfile();
     const lease = this.#acquireRuntimeLease();
     if (!lease) {
-      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_TOOLS_REQUIRED" }) }));
+      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_TOOLS_REQUIRED" }), artifacts: [] }));
+      return runId;
+    }
+    const scopeResourceIds = resolveRunScopes(request.scopeResourceIds, lease);
+    if (!scopeResourceIds) {
+      lease.release();
+      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_RUN_FAILED" }), artifacts: [] }));
       return runId;
     }
     const providerConfigSha256 = providerProfile ? hashProviderConfig(providerProfile) : null;
@@ -136,7 +151,7 @@ export class AgentProcessSupervisor {
       });
     } catch {
       lease.release();
-      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }) }));
+      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }), artifacts: [] }));
       return runId;
     }
     const child = this.#spawnWorker(this.#workerPath);
@@ -157,11 +172,12 @@ export class AgentProcessSupervisor {
     child.once("error", () => this.#interrupt(runId));
     child.once("exit", () => this.#interrupt(runId));
     child.once("spawn", () => {
-      const { projectId: _projectId, sessionId: _sessionId, ...workerRequest } = request;
+      const { projectId: _projectId, sessionId: _sessionId, scopeResourceIds: _requestedScopes, ...workerRequest } = request;
       const command = agentWorkerRunStartCommandSchema.parse({
         type: "run.start",
         runId,
         ...workerRequest,
+        scopeResourceIds,
         sessionHistory,
         collaborationContext,
         toolsAvailable: true,
@@ -193,7 +209,7 @@ export class AgentProcessSupervisor {
       return;
     }
     const error = toPublicError({ code: "AGENT_RUN_CANCELLED" });
-    run.emit({ type: "run.failed", runId, ...error });
+    run.emit({ type: "run.failed", runId, ...error, artifacts: [] });
     this.#abortPendingTools(run);
     const cancelCommand = agentWorkerRunCancelCommandSchema.parse({ type: "run.cancel", runId });
     try {
@@ -284,12 +300,13 @@ export class AgentProcessSupervisor {
   }
 
   #invokeTool(runId: string, run: ActiveRun, request: AgentWorkerToolRequest): void {
+    const presentation = toolPresentation(request);
     run.emit({
       type: "run.activity",
       runId,
-      label: request.tool === "retrieve_graph_evidence" ? "检索项目事实" : "生成候选变更",
+      label: presentation.label,
       phase: "started",
-      domains: request.tool === "retrieve_graph_evidence" ? ["graph"] : proposalDomains(request.args),
+      domains: presentation.domains,
     });
     try {
       run.audit.beginTool({
@@ -332,9 +349,11 @@ export class AgentProcessSupervisor {
       mode: run.mode,
       signal: controller.signal,
     };
-    const operation: Promise<RetrieveGraphEvidenceResult | ProposeChangeSetResult> = request.tool === "retrieve_graph_evidence"
+    const operation: Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ProposeChangeSetResult> = request.tool === "retrieve_graph_evidence"
       ? Promise.resolve().then(() => run.gateway!.retrieveGraphEvidence(request.args, context))
-      : Promise.resolve().then(() => run.gateway!.proposeChangeSet(request.args, context));
+      : request.tool === "inspect_project_files"
+        ? Promise.resolve().then(() => run.gateway!.inspectProjectFiles(request.args, context))
+        : Promise.resolve().then(() => run.gateway!.proposeChangeSet(request.args, context));
 
     void operation.then((result) => {
       if (!this.#takePending(run, request.requestId)) return;
@@ -387,6 +406,42 @@ export class AgentProcessSupervisor {
           label: "检索项目事实",
           phase: "completed",
           domains: uniqueDomains(["graph", ...parsed.data.scopes.map((scope) => scope.type)]),
+        });
+        return;
+      }
+      if (request.tool === "inspect_project_files") {
+        const parsed = inspectProjectFilesResultSchema.safeParse(result);
+        if (!parsed.success) {
+          if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+          this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
+          return;
+        }
+        try {
+          run.audit.appendToolTerminal({
+            runId,
+            invocationId: stewardInvocationId(runId),
+            toolInvocationId: request.requestId,
+            eventType: "succeeded",
+            errorCode: null,
+            resultSha256: canonicalAuditHash(parsed.data),
+          });
+        } catch {
+          this.#failAudit(runId);
+          return;
+        }
+        this.#sendToolSuccess(run, {
+          type: "tool.response",
+          runId,
+          requestId: request.requestId,
+          ok: true,
+          tool: request.tool,
+          result: parsed.data,
+        });
+        run.emit({
+          type: "run.activity",
+          runId,
+          label: presentation.label,
+          phase: "completed",
         });
         return;
       }
@@ -446,9 +501,9 @@ export class AgentProcessSupervisor {
       run.emit({
         type: "run.activity",
         runId,
-        label: request.tool === "retrieve_graph_evidence" ? "检索项目事实" : "生成候选变更",
+        label: presentation.label,
         phase: "failed",
-        domains: request.tool === "retrieve_graph_evidence" ? ["graph"] : proposalDomains(request.args),
+        domains: presentation.domains,
       });
     });
   }
@@ -535,7 +590,7 @@ export class AgentProcessSupervisor {
       return;
     }
     const error = toPublicError({ code: "AGENT_WORKER_INTERRUPTED" });
-    run.emit({ type: "run.failed", runId, ...error });
+    run.emit({ type: "run.failed", runId, ...error, artifacts: [] });
     this.#finish(runId);
   }
 
@@ -568,6 +623,7 @@ export class AgentProcessSupervisor {
     try {
       const operation = request.operation;
       if (operation.type === "invocation.started") {
+        if (operation.role === "gm") throw new Error("GM invocation requires the Player supervisor.");
         validateInvocationIdentity(runId, run, operation);
         run.audit.beginInvocation({
           invocationId: operation.invocationId,
@@ -666,12 +722,29 @@ export class AgentProcessSupervisor {
   #failAudit(runId: string): void {
     const run = this.#runs.get(runId);
     if (!run) return;
-    run.emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }) });
+    run.emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }), artifacts: [] });
     this.#finish(runId);
   }
 }
 
+function resolveRunScopes(requested: string[] | undefined, lease: AgentRuntimeLease): string[] | null {
+  const authorized = lease.authorizedScopeResourceIds;
+  if (!authorized && !lease.defaultScopeResourceIds) return [...new Set(requested ?? [])];
+  const defaults = lease.defaultScopeResourceIds ?? [];
+  const selected = requested && requested.length > 0 ? [...new Set(requested)] : defaults;
+  if (selected.length === 0 || selected.length > 100) return null;
+  if (!authorized) return selected;
+  const allowed = new Set(authorized);
+  return selected.every((scopeId) => allowed.has(scopeId)) ? selected : null;
+}
+
 type ActivityDomain = "world" | "oc" | "story" | "graph" | "timeline" | "asset";
+
+function toolPresentation(request: AgentWorkerToolRequest): { label: string; domains?: ActivityDomain[] } {
+  if (request.tool === "retrieve_graph_evidence") return { label: "检索项目事实", domains: ["graph"] };
+  if (request.tool === "inspect_project_files") return { label: "检查项目文件" };
+  return { label: "生成候选变更", domains: proposalDomains(request.args) };
+}
 
 function proposalDomains(args: ProposeChangeSetArgs): ActivityDomain[] {
   const domains: ActivityDomain[] = [];

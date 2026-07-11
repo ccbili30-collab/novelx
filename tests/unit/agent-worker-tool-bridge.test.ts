@@ -4,12 +4,18 @@ import { createAgentTools } from "../../src/agent-worker/tools/createAgentTools"
 import type { AgentWorkerToolRequest } from "../../src/shared/agentWorkerProtocol";
 
 describe("Agent Worker tool bridge", () => {
-  it("exposes two and only two Pi tools", () => {
+  it("exposes the three audited project tools", () => {
     const bridge = new AgentWorkerToolBridge(() => true);
     const tools = createAgentTools({
       retrieveGraphEvidence: (args, signal) => bridge.invoke(
         "run-1",
         "retrieve_graph_evidence",
+        args,
+        signal,
+      ),
+      inspectProjectFiles: (args, signal) => bridge.invoke(
+        "run-1",
+        "inspect_project_files",
         args,
         signal,
       ),
@@ -23,8 +29,13 @@ describe("Agent Worker tool bridge", () => {
 
     expect(tools.map((tool) => tool.name)).toEqual([
       "retrieve_graph_evidence",
+      "inspect_project_files",
       "propose_change_set",
     ]);
+    expect(tools.find((tool) => tool.name === "inspect_project_files")?.parameters).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+    });
   });
 
   it("correlates responses by runId and requestId", async () => {

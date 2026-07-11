@@ -76,6 +76,28 @@ export class CreativeDocumentRepository {
     return rows.map(mapCreativeDocument);
   }
 
+  listAtCheckpoint(checkpointId: string, resourceId?: string): CreativeDocumentRecord[] {
+    const rows = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+        SELECT ?, 0
+        UNION ALL
+        SELECT c.parent_checkpoint_id, ancestry.depth + 1 FROM checkpoints c
+        JOIN ancestry ON c.id = ancestry.checkpoint_id WHERE c.parent_checkpoint_id IS NOT NULL
+      ), ranked AS (
+        SELECT cdr.*, ancestry.depth,
+          ROW_NUMBER() OVER (PARTITION BY cdr.document_id ORDER BY ancestry.depth ASC) AS revision_rank
+        FROM creative_document_revisions cdr JOIN ancestry ON ancestry.checkpoint_id = cdr.created_checkpoint_id
+      )
+      SELECT document_id AS id, resource_id, kind, title, sort_order FROM ranked
+      WHERE revision_rank = 1 AND state = 'active' AND (? IS NULL OR resource_id = ?)
+      ORDER BY sort_order,
+        CASE kind WHEN 'prose' THEN 1 WHEN 'setting' THEN 2 WHEN 'character_profile' THEN 3
+          WHEN 'location_profile' THEN 4 WHEN 'faction_profile' THEN 5 WHEN 'knowledge_note' THEN 6
+          WHEN 'style_guide' THEN 7 ELSE 8 END, title
+    `).all(checkpointId, resourceId ?? null, resourceId ?? null);
+    return rows.map(mapCreativeDocument);
+  }
+
   getCurrent(documentId: string, branchId = this.#checkpoints.getActiveBranch().id): CreativeDocumentRecord | null {
     return this.listCurrent(undefined, branchId).find((document) => document.id === documentId) ?? null;
   }

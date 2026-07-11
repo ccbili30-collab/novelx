@@ -3,10 +3,11 @@ import { Type, type TSchema } from "typebox";
 import { z } from "zod";
 import type { RoleOutputToolCapture } from "./contracts/roleOutputTool";
 import { stewardOutputSchema, type StewardOutput } from "./contracts/roleOutputs";
-import { proposeChangeSetResultSchema, retrieveGraphEvidenceResultSchema } from "../shared/agentWorkerProtocol";
+import { inspectProjectFilesResultSchema, proposeChangeSetResultSchema, retrieveGraphEvidenceResultSchema } from "../shared/agentWorkerProtocol";
 
 const operationalToolNames = [
   "retrieve_graph_evidence",
+  "inspect_project_files",
   "checker",
   "writer",
   "propose_change_set",
@@ -16,9 +17,9 @@ type OperationalToolName = (typeof operationalToolNames)[number];
 type BlockReason = "missing_source" | "major_conflict" | "tool_failed";
 
 const planSchema = z.object({
-  objective: z.enum(["discussion", "research", "change_set", "draft", "check", "orchestrate"]),
+  objective: z.enum(["discussion", "research", "inspect_files", "change_set", "draft", "check", "orchestrate"]),
   scopeResourceIds: z.array(z.string().trim().min(1).max(240)).max(100),
-  steps: z.array(z.enum(operationalToolNames)).max(4),
+  steps: z.array(z.enum(operationalToolNames)).max(5),
 }).strict().superRefine((plan, context) => {
   if (new Set(plan.scopeResourceIds).size !== plan.scopeResourceIds.length) {
     context.addIssue({ code: "custom", message: "Plan scopes must be unique." });
@@ -26,14 +27,15 @@ const planSchema = z.object({
   if (new Set(plan.steps).size !== plan.steps.length) {
     context.addIssue({ code: "custom", message: "Plan steps must be unique." });
   }
-  if (plan.steps.length > 0 && plan.steps[0] !== "retrieve_graph_evidence") {
-    context.addIssue({ code: "custom", message: "Operational plans must retrieve sources first." });
+  if (plan.steps.length > 0 && plan.steps[0] !== "retrieve_graph_evidence" && plan.steps[0] !== "inspect_project_files") {
+    context.addIssue({ code: "custom", message: "Operational plans must retrieve project sources first." });
   }
   if (plan.steps.length > 0 && plan.scopeResourceIds.length === 0) {
     context.addIssue({ code: "custom", message: "Operational plans require project scopes." });
   }
   const requiredByObjective: Partial<Record<typeof plan.objective, OperationalToolName>> = {
     research: "retrieve_graph_evidence",
+    inspect_files: "inspect_project_files",
     change_set: "propose_change_set",
     draft: "writer",
     check: "checker",
@@ -64,6 +66,7 @@ export interface StewardExecutionSnapshot {
   executions: Array<{ tool: OperationalToolName; status: "succeeded" | "failed" }>;
   blockReason: BlockReason | null;
   retrievedDocuments: RetrievedDocumentReference[];
+  inspectedFiles: InspectedProjectFileReference[];
 }
 
 export interface RetrievedDocumentReference {
@@ -71,6 +74,13 @@ export interface RetrievedDocumentReference {
   title: string;
   versionId: string;
   content: string;
+}
+
+export interface InspectedProjectFileReference {
+  path: string;
+  sha256: string;
+  kind: "text" | "binary";
+  complete: boolean;
 }
 
 export function createStewardExecutionStateMachine(input: {
@@ -93,6 +103,7 @@ export function createStewardExecutionStateMachine(input: {
   let blockReason: BlockReason | null = null;
   const executions: ExecutionRecord[] = [];
   let retrievedDocuments: RetrievedDocumentReference[] = [];
+  let inspectedFiles: InspectedProjectFileReference[] = [];
   const allowedEvidenceIds = new Set<string>();
   let proposedChangeSet: z.infer<typeof proposeChangeSetResultSchema> | null = null;
   const forbiddenExternalEchoTokens = extractExternalEchoTokens(input.userInput);
@@ -174,6 +185,7 @@ export function createStewardExecutionStateMachine(input: {
       executions: executions.map(({ tool, status }) => ({ tool, status })),
       blockReason,
       retrievedDocuments: retrievedDocuments.map((document) => ({ ...document })),
+      inspectedFiles: inspectedFiles.map((file) => ({ ...file })),
     }),
     requiredNextTool: () => {
       return requiredNextTool();
@@ -259,6 +271,21 @@ export function createStewardExecutionStateMachine(input: {
         return;
       }
       if (containsStructuralConflict(retrieval.data.assertions)) insertRequiredChecker();
+      return;
+    }
+    if (name === "inspect_project_files") {
+      const inspection = inspectProjectFilesResultSchema.safeParse(details);
+      if (!inspection.success) throw stateError("STEWARD_TOOL_RESULT_INVALID");
+      const reads = inspection.data.mode === "overview"
+        ? inspection.data.files
+        : inspection.data.mode === "read" ? [inspection.data.file] : [];
+      for (const file of reads) allowedEvidenceIds.add(file.sha256);
+      inspectedFiles = reads.map((file) => ({
+        path: file.path,
+        sha256: file.sha256,
+        kind: file.kind,
+        complete: file.complete,
+      }));
       return;
     }
     if (name === "propose_change_set") {
@@ -363,13 +390,14 @@ function createPlanParameters(authorizedScopeResourceIds: string[]): TSchema {
     objective: Type.Union([
       Type.Literal("discussion"),
       Type.Literal("research"),
+      Type.Literal("inspect_files"),
       Type.Literal("change_set"),
       Type.Literal("draft"),
       Type.Literal("check"),
       Type.Literal("orchestrate"),
     ]),
     scopeResourceIds: Type.Array(scopeItem, { maxItems: authorizedScopeResourceIds.length }),
-    steps: Type.Array(Type.Union(operationalToolNames.map((name) => Type.Literal(name))), { maxItems: 4 }),
+    steps: Type.Array(Type.Union(operationalToolNames.map((name) => Type.Literal(name))), { maxItems: 5 }),
   }, { additionalProperties: false });
 }
 

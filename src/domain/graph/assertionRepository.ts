@@ -119,6 +119,32 @@ export class AssertionRepository {
     return mapSourcedAssertions(rows);
   }
 
+  listCurrentInScopesAtCheckpoint(scopeResourceIds: readonly string[], checkpointId: string): SourcedAssertionRecord[] {
+    const scopeIds = [...new Set(scopeResourceIds.map((scopeId) => scopeId.trim()).filter(Boolean))];
+    if (scopeIds.length === 0) return [];
+    const placeholders = scopeIds.map(() => "?").join(", ");
+    const rows = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+        SELECT ?, 0
+        UNION ALL
+        SELECT c.parent_checkpoint_id, ancestry.depth + 1 FROM checkpoints c
+        JOIN ancestry ON c.id = ancestry.checkpoint_id WHERE c.parent_checkpoint_id IS NOT NULL
+      ), ranked AS (
+        SELECT av.*, ancestry.depth,
+          ROW_NUMBER() OVER (PARTITION BY av.assertion_id ORDER BY ancestry.depth ASC) AS version_rank
+        FROM assertion_versions av JOIN ancestry ON ancestry.checkpoint_id = av.created_checkpoint_id
+      ), current_assertions AS (
+        SELECT * FROM ranked WHERE version_rank = 1 AND status = 'current' AND scope_id IN (${placeholders})
+      )
+      SELECT current_assertions.*, sr.kind AS source_kind, sr.ref AS source_ref
+      FROM current_assertions
+      LEFT JOIN assertion_sources linked ON linked.assertion_version_id = current_assertions.id
+      LEFT JOIN source_records sr ON sr.id = linked.source_id
+      ORDER BY current_assertions.subject, current_assertions.predicate, current_assertions.assertion_id, sr.id
+    `).all(checkpointId, ...scopeIds);
+    return mapSourcedAssertions(rows);
+  }
+
   listLatestForGraph(branchId = this.#checkpoints.getActiveBranch().id): SourcedAssertionRecord[] {
     const rows = this.workspace.db.prepare(`
       WITH RECURSIVE ancestry(checkpoint_id, depth) AS (

@@ -8,8 +8,12 @@ import { ResourceRepository } from "../workspace/resourceRepository";
 import { CreativeDocumentRepository } from "../workspace/creativeDocumentRepository";
 import { CreativeRelationRepository } from "../workspace/creativeRelationRepository";
 import { ConstraintProfileRepository } from "../workspace/constraintProfileRepository";
+import { ProjectFileVersionService } from "../workspace/projectFileVersionService";
 import { AgentAuditRepository } from "../audit/agentAuditRepository";
 import { canonicalAuditHash } from "../audit/canonicalAuditHash";
+import { CreativeCommitService } from "../commit/creativeCommitService";
+import { ProjectionCoordinator } from "../projection/projectionCoordinator";
+import { createDefaultProjectors } from "../projection/defaultProjectors";
 import {
   ChangeSetRepository,
   type ChangeSetConflictRecord,
@@ -138,6 +142,25 @@ const constraintProfileItemSchema = z.object({
   }).strict(),
 }).strict();
 
+const projectFilePutItemSchema = z.object({
+  ...commonItemShape,
+  kind: z.literal("project_file.put"),
+  payload: z.object({
+    path: z.string().trim().min(1).max(1_000),
+    content: z.string().max(8_000_000),
+    expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  }).strict(),
+}).strict();
+
+const projectFileDeleteItemSchema = z.object({
+  ...commonItemShape,
+  kind: z.literal("project_file.delete"),
+  payload: z.object({
+    path: z.string().trim().min(1).max(1_000),
+    expectedSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict(),
+}).strict();
+
 const changeSetItemSchema = z.discriminatedUnion("kind", [
   assertionItemSchema,
   resourceItemSchema,
@@ -145,6 +168,8 @@ const changeSetItemSchema = z.discriminatedUnion("kind", [
   creativeDocumentItemSchema,
   creativeRelationItemSchema,
   constraintProfileItemSchema,
+  projectFilePutItemSchema,
+  projectFileDeleteItemSchema,
 ]);
 
 const proposalSchema = z.object({
@@ -173,7 +198,7 @@ export interface ChangeSetPolicyEvaluator {
   assess(candidate: ChangeSetCandidate): ChangeSetPolicyAssessment[];
 }
 
-export type PublicChangeSetItemKind = "fact" | "resource" | "document" | "relation" | "constraint";
+export type PublicChangeSetItemKind = "fact" | "resource" | "document" | "relation" | "constraint" | "project_file";
 export type PublicChangeSetBlockedReason =
   | "MAJOR_CONFLICT"
   | "FREE_REVIEW_REQUIRED"
@@ -219,7 +244,8 @@ export interface ChangeSetApplyReceipt {
     | "assertion_version"
     | "creative_document_revision"
     | "creative_relation_revision"
-    | "constraint_profile_version";
+    | "constraint_profile_version"
+    | "project_file_version";
   outputId: string;
   outputSha256: string;
 }
@@ -231,6 +257,8 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
   readonly #creativeDocuments: CreativeDocumentRepository;
   readonly #creativeRelations: CreativeRelationRepository;
   readonly #constraintProfiles: ConstraintProfileRepository;
+  readonly #projectFiles: ProjectFileVersionService;
+  readonly #fileRollbacks: Array<() => void> = [];
 
   constructor(readonly workspace: WorkspaceDatabase) {
     this.#assertions = new AssertionRepository(workspace);
@@ -239,6 +267,7 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
     this.#creativeDocuments = new CreativeDocumentRepository(workspace);
     this.#creativeRelations = new CreativeRelationRepository(workspace);
     this.#constraintProfiles = new ConstraintProfileRepository(workspace);
+    this.#projectFiles = new ProjectFileVersionService(workspace);
   }
 
   apply(item: ChangeSetItem, context: { changeSetId: string; checkpointId: string }): ChangeSetApplyReceipt {
@@ -247,7 +276,7 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
         const { evidenceIds, source: _proposalSource, ...assertion } = item.payload;
         const sources = [
           { kind: "confirmed_change_set", ref: `${context.changeSetId}:${item.id}` },
-          ...evidenceIds.map((ref) => ({ kind: "evidence_version", ref })),
+          ...evidenceIds.map((ref) => ({ kind: this.#isAcceptedImportCandidate(ref) ? "import_candidate" : "evidence_version", ref })),
         ];
         const outputId = this.#assertions.putVersion({
           ...assertion,
@@ -323,7 +352,38 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
           outputSha256: version.payloadHash,
         };
       }
+      case "project_file.put": {
+        const receipt = this.#projectFiles.put({
+          checkpointId: context.checkpointId,
+          relativePath: item.payload.path,
+          content: item.payload.content,
+          expectedSha256: item.payload.expectedSha256,
+        });
+        this.#fileRollbacks.push(receipt.rollback);
+        return { kind: "project_file_version", outputId: receipt.versionId, outputSha256: receipt.sha256 };
+      }
+      case "project_file.delete": {
+        const receipt = this.#projectFiles.delete({
+          checkpointId: context.checkpointId,
+          relativePath: item.payload.path,
+          expectedSha256: item.payload.expectedSha256,
+        });
+        this.#fileRollbacks.push(receipt.rollback);
+        return { kind: "project_file_version", outputId: receipt.versionId, outputSha256: receipt.sha256 };
+      }
     }
+  }
+
+  rollbackFileMutations(): void {
+    for (const rollback of this.#fileRollbacks.splice(0).reverse()) rollback();
+  }
+
+  finalizeFileMutations(): void {
+    this.#fileRollbacks.length = 0;
+  }
+
+  #isAcceptedImportCandidate(id: string): boolean {
+    return Boolean(this.workspace.db.prepare("SELECT 1 FROM decomposition_candidates WHERE id = ? AND status = 'accepted'").get(id));
   }
 }
 
@@ -545,10 +605,14 @@ export class ChangeSetService {
       }
       this.#repository.markCommitted(changeSetId, checkpointId);
       new AgentAuditRepository(this.workspace).linkChangeSetOutputs(changeSetId);
+      new CreativeCommitService(this.workspace).sealCheckpoint(checkpointId);
       this.workspace.db.exec("COMMIT");
+      if (this.applier instanceof WorkspaceChangeSetApplier) this.applier.finalizeFileMutations();
+      new ProjectionCoordinator(this.workspace, createDefaultProjectors(this.workspace)).runAll(checkpointId);
       return this.#repository.getRequired(changeSetId);
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
+      if (this.applier instanceof WorkspaceChangeSetApplier) this.applier.rollbackFileMutations();
       if (applyStarted) this.#recordApplyFailure(changeSetId);
       throw error;
     }
@@ -806,6 +870,22 @@ function projectReviewItem(
         kindLabel: "写作约束",
         semanticSummary: `${item.payload.create ? "创建" : "更新"}约束：${item.payload.title}`,
         contentPreview: previewText(item.payload.profile.notes),
+      };
+    case "project_file.put":
+      return {
+        ...common,
+        kind: "project_file",
+        kindLabel: "项目文件",
+        semanticSummary: `${item.payload.expectedSha256 ? "更新" : "创建"}文件：${item.payload.path}`,
+        contentPreview: previewText(item.payload.content),
+      };
+    case "project_file.delete":
+      return {
+        ...common,
+        kind: "project_file",
+        kindLabel: "项目文件",
+        semanticSummary: `删除文件：${item.payload.path}`,
+        contentPreview: null,
       };
   }
 }

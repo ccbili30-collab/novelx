@@ -23,6 +23,7 @@ export function openWorkspace(rootPathInput: string): WorkspaceDatabase {
     PRAGMA busy_timeout = 5000;
   `);
   migrate(db);
+  ensureOptionalRetrievalIndex(db);
   const state = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get() as { workspace_id: string };
 
   return {
@@ -175,7 +176,47 @@ function migrate(db: DatabaseSync): void {
     migrateCheckpointAttributionSchema(db);
     schema = { version: 9 };
   }
-  if (schema.version !== 9) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 9) {
+    migrateCreativeCommitProjectionSchema(db);
+    schema = { version: 10 };
+  }
+  if (schema.version === 10) {
+    migrateProjectionArtifactSchema(db);
+    schema = { version: 11 };
+  }
+  if (schema.version === 11) {
+    migrateStoryPlaythroughSchema(db);
+    schema = { version: 12 };
+  }
+  if (schema.version === 12) {
+    migrateSourceImportSchema(db);
+    schema = { version: 13 };
+  }
+  if (schema.version === 13) {
+    migrateImportReviewSchema(db);
+    schema = { version: 14 };
+  }
+  if (schema.version === 14) {
+    migrateStartProfilePlaythroughSchema(db);
+    schema = { version: 15 };
+  }
+  if (schema.version === 15) {
+    migratePlayerAuditSchema(db);
+    schema = { version: 16 };
+  }
+  if (schema.version === 16) {
+    migrateDecomposerAuditSchema(db);
+    schema = { version: 17 };
+  }
+  if (schema.version === 17) {
+    migrateImportChangeSetLinks(db);
+    schema = { version: 18 };
+  }
+  if (schema.version === 18) {
+    migrateProjectFileVersionSchema(db);
+    schema = { version: 19 };
+  }
+  if (schema.version !== 19) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -190,6 +231,12 @@ function migrate(db: DatabaseSync): void {
       .run(branchId, "main", now);
     db.prepare("INSERT INTO checkpoints (id, branch_id, parent_checkpoint_id, sequence, label, actor_kind, source_change_set_id, created_at) VALUES (?, ?, NULL, 0, ?, 'import', NULL, ?)")
       .run(checkpointId, branchId, "工作区初始化", now);
+    db.prepare(`
+      INSERT INTO creative_commits (
+        id, branch_id, parent_commit_id, kind, actor_kind, source_change_set_id,
+        label, manifest_sha256, sealed_at, created_at
+      ) VALUES (?, ?, NULL, 'initialization', 'import', NULL, ?, NULL, NULL, ?)
+    `).run(checkpointId, branchId, "工作区初始化", now);
     db.prepare("UPDATE branches SET head_checkpoint_id = ? WHERE id = ?").run(checkpointId, branchId);
     db.prepare("INSERT INTO workspace_state (singleton, workspace_id, active_branch_id) VALUES (1, ?, ?)")
       .run(workspaceId, branchId);
@@ -204,6 +251,632 @@ function migrate(db: DatabaseSync): void {
       insertResource.run(resourceId);
       insertRevision.run(randomUUID(), resourceId, type, title, checkpointId, index, now);
     }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateProjectFileVersionSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS project_file_versions (
+        id TEXT PRIMARY KEY,
+        checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id) ON DELETE CASCADE,
+        relative_path TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('active', 'deleted')),
+        content_sha256 TEXT CHECK (content_sha256 IS NULL OR length(content_sha256) = 64),
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        created_at TEXT NOT NULL,
+        UNIQUE (checkpoint_id, relative_path),
+        CHECK ((state = 'active' AND content_sha256 IS NOT NULL) OR (state = 'deleted' AND content_sha256 IS NULL))
+      );
+      CREATE INDEX IF NOT EXISTS project_file_versions_path_idx ON project_file_versions(relative_path, checkpoint_id);
+
+      ALTER TABLE change_set_outputs RENAME TO change_set_outputs_v18;
+      CREATE TABLE change_set_outputs (
+        change_set_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        output_kind TEXT NOT NULL CHECK (output_kind IN (
+          'resource_revision', 'document_version', 'assertion_version',
+          'creative_document_revision', 'creative_relation_revision', 'constraint_profile_version',
+          'project_file_version'
+        )),
+        output_id TEXT NOT NULL,
+        output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (output_kind, output_id),
+        UNIQUE (change_set_id, item_id),
+        FOREIGN KEY (change_set_id, item_id)
+          REFERENCES change_set_items(change_set_id, id) ON DELETE CASCADE
+      );
+      INSERT INTO change_set_outputs SELECT * FROM change_set_outputs_v18;
+      DROP TABLE change_set_outputs_v18;
+      CREATE INDEX change_set_outputs_change_idx ON change_set_outputs(change_set_id, item_id);
+
+      ALTER TABLE agent_audit_links RENAME TO agent_audit_links_v18;
+      CREATE TABLE agent_audit_links (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        invocation_id TEXT REFERENCES agent_invocations(id),
+        tool_invocation_id TEXT REFERENCES agent_tool_invocations(id),
+        link_kind TEXT NOT NULL CHECK (link_kind IN (
+          'document_evidence', 'assertion_evidence', 'change_set_input', 'change_set_output',
+          'document_version_output', 'assertion_version_output', 'resource_revision_output',
+          'creative_document_revision_output', 'creative_relation_revision_output',
+          'constraint_profile_version_output', 'project_file_version_output', 'gm_resolution', 'style_profile'
+        )),
+        target_id TEXT NOT NULL,
+        target_sha256 TEXT,
+        ordinal INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO agent_audit_links SELECT * FROM agent_audit_links_v18;
+      DROP TABLE agent_audit_links_v18;
+      CREATE UNIQUE INDEX agent_audit_links_identity_idx
+        ON agent_audit_links(run_id, COALESCE(invocation_id, ''), COALESCE(tool_invocation_id, ''), link_kind, target_id);
+      UPDATE schema_meta SET version = 19 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateImportChangeSetLinks(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS import_candidate_change_set_links (
+        candidate_id TEXT NOT NULL REFERENCES decomposition_candidates(id),
+        candidate_revision INTEGER NOT NULL CHECK (candidate_revision > 0),
+        change_set_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (candidate_id, candidate_revision, change_set_id, item_id),
+        FOREIGN KEY (change_set_id, item_id) REFERENCES change_set_items(change_set_id, id) ON DELETE CASCADE
+      );
+      CREATE TRIGGER IF NOT EXISTS import_candidate_change_set_links_update_guard
+      BEFORE UPDATE ON import_candidate_change_set_links BEGIN SELECT RAISE(ABORT, 'IMPORT_CHANGE_SET_LINK_IMMUTABLE'); END;
+      UPDATE schema_meta SET version = 18 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+}
+
+function migrateDecomposerAuditSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS decomposer_run_audits (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL UNIQUE REFERENCES import_jobs(id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL REFERENCES source_library_entries(id) ON DELETE CASCADE,
+        provider_id TEXT NOT NULL,
+        requested_model_id TEXT NOT NULL,
+        provider_config_sha256 TEXT NOT NULL CHECK (length(provider_config_sha256) = 64),
+        prompt_id TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        prompt_sha256 TEXT NOT NULL CHECK (length(prompt_sha256) = 64),
+        input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+        error_code TEXT,
+        output_sha256 TEXT CHECK (output_sha256 IS NULL OR length(output_sha256) = 64),
+        receipt_json TEXT CHECK (receipt_json IS NULL OR json_valid(receipt_json)),
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS decomposer_run_sources (
+        audit_id TEXT NOT NULL REFERENCES decomposer_run_audits(id) ON DELETE CASCADE,
+        chunk_id TEXT NOT NULL REFERENCES source_chunks(id),
+        content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (audit_id, chunk_id),
+        UNIQUE (audit_id, ordinal)
+      );
+      CREATE TRIGGER IF NOT EXISTS decomposer_audit_identity_guard
+      BEFORE UPDATE OF job_id, source_id, provider_id, requested_model_id, provider_config_sha256,
+        prompt_id, prompt_version, prompt_sha256, input_sha256, started_at ON decomposer_run_audits
+      BEGIN SELECT RAISE(ABORT, 'DECOMPOSER_AUDIT_IDENTITY_IMMUTABLE'); END;
+      CREATE TRIGGER IF NOT EXISTS decomposer_audit_terminal_guard
+      BEFORE UPDATE ON decomposer_run_audits
+      WHEN OLD.status <> 'running'
+      BEGIN SELECT RAISE(ABORT, 'DECOMPOSER_AUDIT_TERMINAL'); END;
+      UPDATE schema_meta SET version = 17 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migratePlayerAuditSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS player_agent_runs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        playthrough_id TEXT NOT NULL REFERENCES playthroughs(id),
+        player_action_sha256 TEXT NOT NULL CHECK (length(player_action_sha256) = 64),
+        provider_id TEXT NOT NULL,
+        requested_model_id TEXT NOT NULL,
+        provider_config_sha256 TEXT NOT NULL CHECK (length(provider_config_sha256) = 64),
+        runtime_contract_version TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS player_agent_invocations (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES player_agent_runs(id) ON DELETE CASCADE,
+        parent_invocation_id TEXT REFERENCES player_agent_invocations(id),
+        role TEXT NOT NULL CHECK (role IN ('gm', 'writer', 'checker')),
+        prompt_id TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        prompt_sha256 TEXT NOT NULL CHECK (length(prompt_sha256) = 64),
+        agent_profile_id TEXT NOT NULL,
+        agent_profile_version TEXT NOT NULL,
+        agent_profile_sha256 TEXT NOT NULL CHECK (length(agent_profile_sha256) = 64),
+        provider_id TEXT NOT NULL,
+        requested_model_id TEXT NOT NULL,
+        provider_config_sha256 TEXT NOT NULL CHECK (length(provider_config_sha256) = 64),
+        tool_policy_id TEXT NOT NULL,
+        tool_policy_version TEXT NOT NULL,
+        tool_policy_sha256 TEXT NOT NULL CHECK (length(tool_policy_sha256) = 64),
+        authorized_tools_json TEXT NOT NULL CHECK (json_valid(authorized_tools_json)),
+        handoff_contract_id TEXT,
+        handoff_version TEXT,
+        handoff_payload_sha256 TEXT,
+        input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (role = 'gm' AND parent_invocation_id IS NULL AND handoff_contract_id IS NULL
+            AND handoff_version IS NULL AND handoff_payload_sha256 IS NULL)
+          OR
+          (role IN ('writer', 'checker') AND parent_invocation_id IS NOT NULL
+            AND handoff_contract_id IS NOT NULL AND handoff_version IS NOT NULL
+            AND handoff_payload_sha256 IS NOT NULL)
+        )
+      );
+      CREATE TABLE IF NOT EXISTS player_agent_tool_invocations (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES player_agent_runs(id) ON DELETE CASCADE,
+        invocation_id TEXT NOT NULL REFERENCES player_agent_invocations(id),
+        tool_name TEXT NOT NULL CHECK (tool_name IN ('writer', 'checker')),
+        arguments_sha256 TEXT NOT NULL CHECK (length(arguments_sha256) = 64),
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS player_agent_audit_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL REFERENCES player_agent_runs(id) ON DELETE CASCADE,
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('run', 'invocation', 'tool')),
+        invocation_id TEXT REFERENCES player_agent_invocations(id),
+        tool_invocation_id TEXT REFERENCES player_agent_tool_invocations(id),
+        event_type TEXT NOT NULL CHECK (event_type IN ('completed', 'blocked', 'failed', 'cancelled', 'interrupted', 'succeeded')),
+        error_code TEXT,
+        actual_provider_id TEXT,
+        actual_model_id TEXT,
+        response_id_sha256 TEXT,
+        stop_reason TEXT,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        total_tokens INTEGER,
+        context_policy_version TEXT,
+        charged_input_bytes INTEGER,
+        configured_context_window INTEGER,
+        safety_reserve INTEGER,
+        output_reserve INTEGER,
+        structured_submission_count INTEGER,
+        output_sha256 TEXT,
+        result_sha256 TEXT,
+        created_at TEXT NOT NULL,
+        CHECK (
+          (entity_type = 'run' AND invocation_id IS NULL AND tool_invocation_id IS NULL)
+          OR (entity_type = 'invocation' AND invocation_id IS NOT NULL AND tool_invocation_id IS NULL)
+          OR (entity_type = 'tool' AND invocation_id IS NOT NULL AND tool_invocation_id IS NOT NULL)
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS player_agent_run_terminal_idx
+        ON player_agent_audit_events(run_id) WHERE entity_type = 'run';
+      CREATE UNIQUE INDEX IF NOT EXISTS player_agent_invocation_terminal_idx
+        ON player_agent_audit_events(invocation_id) WHERE entity_type = 'invocation';
+      CREATE UNIQUE INDEX IF NOT EXISTS player_agent_tool_terminal_idx
+        ON player_agent_audit_events(tool_invocation_id) WHERE entity_type = 'tool';
+      CREATE TABLE IF NOT EXISTS player_agent_evidence_links (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES player_agent_runs(id) ON DELETE CASCADE,
+        invocation_id TEXT NOT NULL REFERENCES player_agent_invocations(id),
+        evidence_id TEXT NOT NULL,
+        evidence_sha256 TEXT,
+        ordinal INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (run_id, invocation_id, evidence_id)
+      );
+      CREATE INDEX IF NOT EXISTS player_agent_runs_playthrough_idx
+        ON player_agent_runs(playthrough_id, created_at, id);
+      UPDATE schema_meta SET version = 16 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateStartProfilePlaythroughSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (!hasColumn(db, "playthroughs", "start_profile_id")) {
+      db.exec("ALTER TABLE playthroughs ADD COLUMN start_profile_id TEXT REFERENCES start_profiles(id)");
+    }
+    if (!hasColumn(db, "playthroughs", "initial_state_snapshot_json")) {
+      db.exec("ALTER TABLE playthroughs ADD COLUMN initial_state_snapshot_json TEXT CHECK (initial_state_snapshot_json IS NULL OR json_valid(initial_state_snapshot_json))");
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS start_profiles_story_idx
+        ON start_profiles(story_profile_id, status, created_at, id);
+      CREATE TRIGGER IF NOT EXISTS start_profiles_identity_immutable
+      BEFORE UPDATE OF story_profile_id, source_id, title, start_state_json, created_at ON start_profiles BEGIN
+        SELECT RAISE(ABORT, 'START_PROFILE_IDENTITY_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS playthrough_baseline_immutable
+      BEFORE UPDATE OF story_profile_id, baseline_commit_id, parent_playthrough_id, start_profile_id, initial_state_snapshot_json, created_at ON playthroughs BEGIN
+        SELECT RAISE(ABORT, 'PLAYTHROUGH_BASELINE_IMMUTABLE');
+      END;
+      UPDATE schema_meta SET version = 15 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateImportReviewSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS decomposition_candidate_revisions (
+        id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL REFERENCES decomposition_candidates(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        editor_kind TEXT NOT NULL CHECK (editor_kind IN ('user', 'agent')),
+        created_at TEXT NOT NULL,
+        UNIQUE (candidate_id, revision)
+      );
+      CREATE TABLE IF NOT EXISTS import_review_decisions (
+        id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL REFERENCES decomposition_candidates(id),
+        decision TEXT NOT NULL CHECK (decision IN ('accepted', 'rejected')),
+        candidate_revision INTEGER NOT NULL CHECK (candidate_revision > 0),
+        decided_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS start_profiles (
+        id TEXT PRIMARY KEY,
+        story_profile_id TEXT NOT NULL REFERENCES story_profiles(id),
+        source_id TEXT REFERENCES source_library_entries(id),
+        title TEXT NOT NULL,
+        start_state_json TEXT NOT NULL CHECK (json_valid(start_state_json)),
+        status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'archived')),
+        created_at TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS decomposition_candidate_revisions_update_guard
+      BEFORE UPDATE ON decomposition_candidate_revisions BEGIN
+        SELECT RAISE(ABORT, 'DECOMPOSITION_CANDIDATE_REVISION_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS import_review_decisions_update_guard
+      BEFORE UPDATE ON import_review_decisions BEGIN
+        SELECT RAISE(ABORT, 'IMPORT_REVIEW_DECISION_IMMUTABLE');
+      END;
+      INSERT INTO decomposition_candidate_revisions (
+        id, candidate_id, revision, payload_json, editor_kind, created_at
+      )
+      SELECT lower(hex(randomblob(16))), dc.id, 1, dc.payload_json, 'agent', dc.created_at
+      FROM decomposition_candidates dc
+      WHERE NOT EXISTS (
+        SELECT 1 FROM decomposition_candidate_revisions dcr WHERE dcr.candidate_id = dc.id
+      );
+      UPDATE schema_meta SET version = 14 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateSourceImportSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS source_library_entries (
+        id TEXT PRIMARY KEY,
+        original_path TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        format TEXT NOT NULL CHECK (format IN ('txt', 'markdown', 'docx', 'epub', 'image')),
+        content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+        byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+        rights_attestation TEXT NOT NULL CHECK (rights_attestation IN ('user_owned', 'licensed', 'public_domain', 'unknown')),
+        state TEXT NOT NULL CHECK (state IN ('registered', 'parsed', 'failed', 'missing')),
+        created_at TEXT NOT NULL,
+        UNIQUE (original_path, content_sha256)
+      );
+      CREATE INDEX IF NOT EXISTS source_library_hash_idx
+        ON source_library_entries(content_sha256, format);
+      CREATE TABLE IF NOT EXISTS source_chunks (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES source_library_entries(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        locator_json TEXT NOT NULL CHECK (json_valid(locator_json)),
+        content TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+        created_at TEXT NOT NULL,
+        UNIQUE (source_id, ordinal)
+      );
+      CREATE TABLE IF NOT EXISTS import_jobs (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES source_library_entries(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('parse', 'decompose')),
+        attempt INTEGER NOT NULL CHECK (attempt > 0),
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+        error_code TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        UNIQUE (source_id, kind, attempt)
+      );
+      CREATE TABLE IF NOT EXISTS decomposition_candidates (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES source_library_entries(id) ON DELETE CASCADE,
+        job_id TEXT NOT NULL REFERENCES import_jobs(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('character', 'world_rule', 'location', 'faction', 'event', 'style', 'ambiguity')),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        confidence_milli INTEGER NOT NULL CHECK (confidence_milli BETWEEN 0 AND 1000),
+        source_locator_json TEXT NOT NULL CHECK (json_valid(source_locator_json)),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected')),
+        created_at TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS source_chunks_update_guard
+      BEFORE UPDATE ON source_chunks BEGIN
+        SELECT RAISE(ABORT, 'SOURCE_CHUNK_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS source_chunks_delete_guard
+      BEFORE DELETE ON source_chunks BEGIN
+        SELECT RAISE(ABORT, 'SOURCE_CHUNK_IMMUTABLE');
+      END;
+      UPDATE schema_meta SET version = 13 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateStoryPlaythroughSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS story_profiles (
+        id TEXT PRIMARY KEY,
+        story_resource_id TEXT NOT NULL REFERENCES resources(id),
+        world_resource_id TEXT NOT NULL REFERENCES resources(id),
+        canon_commit_id TEXT NOT NULL REFERENCES creative_commits(id),
+        title TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'archived')),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS story_profiles_story_idx
+        ON story_profiles(story_resource_id, status, created_at);
+      CREATE TABLE IF NOT EXISTS story_profile_oc_bindings (
+        story_profile_id TEXT NOT NULL REFERENCES story_profiles(id) ON DELETE CASCADE,
+        oc_resource_id TEXT NOT NULL REFERENCES resources(id),
+        variant_resource_id TEXT REFERENCES resources(id),
+        PRIMARY KEY (story_profile_id, oc_resource_id)
+      );
+      CREATE TABLE IF NOT EXISTS playthroughs (
+        id TEXT PRIMARY KEY,
+        story_profile_id TEXT NOT NULL REFERENCES story_profiles(id),
+        baseline_commit_id TEXT NOT NULL REFERENCES creative_commits(id),
+        parent_playthrough_id TEXT REFERENCES playthroughs(id),
+        current_turn_id TEXT,
+        status TEXT NOT NULL CHECK (status IN ('active', 'archived')),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS playthroughs_profile_idx
+        ON playthroughs(story_profile_id, status, created_at);
+      CREATE TABLE IF NOT EXISTS play_turns (
+        id TEXT PRIMARY KEY,
+        playthrough_id TEXT NOT NULL REFERENCES playthroughs(id) ON DELETE CASCADE,
+        parent_turn_id TEXT REFERENCES play_turns(id),
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        player_action TEXT NOT NULL,
+        gm_resolution_json TEXT NOT NULL CHECK (json_valid(gm_resolution_json)),
+        gm_resolution_sha256 TEXT NOT NULL CHECK (length(gm_resolution_sha256) = 64),
+        writer_text TEXT NOT NULL,
+        writer_sha256 TEXT NOT NULL CHECK (length(writer_sha256) = 64),
+        state_snapshot_json TEXT NOT NULL CHECK (json_valid(state_snapshot_json)),
+        created_at TEXT NOT NULL,
+        UNIQUE (playthrough_id, sequence)
+      );
+      CREATE TABLE IF NOT EXISTS canon_reconciliation_decisions (
+        id TEXT PRIMARY KEY,
+        playthrough_id TEXT NOT NULL REFERENCES playthroughs(id),
+        current_commit_id TEXT NOT NULL REFERENCES creative_commits(id),
+        decision TEXT NOT NULL CHECK (decision IN ('continue_pinned', 'fork_from_current')),
+        forked_playthrough_id TEXT REFERENCES playthroughs(id),
+        created_at TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS play_turns_update_guard
+      BEFORE UPDATE ON play_turns BEGIN
+        SELECT RAISE(ABORT, 'PLAY_TURN_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS play_turns_delete_guard
+      BEFORE DELETE ON play_turns BEGIN
+        SELECT RAISE(ABORT, 'PLAY_TURN_IMMUTABLE');
+      END;
+      UPDATE schema_meta SET version = 12 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateProjectionArtifactSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS projection_artifacts (
+        run_id TEXT NOT NULL REFERENCES projection_runs(id) ON DELETE CASCADE,
+        artifact_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        source_refs_json TEXT NOT NULL CHECK (json_valid(source_refs_json)),
+        artifact_sha256 TEXT NOT NULL CHECK (length(artifact_sha256) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, artifact_key)
+      );
+      CREATE INDEX IF NOT EXISTS projection_artifacts_run_idx
+        ON projection_artifacts(run_id, artifact_key);
+      CREATE TABLE IF NOT EXISTS retrieval_index_capability (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        available INTEGER NOT NULL CHECK (available IN (0, 1)),
+        checked_at TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS projection_artifacts_insert_guard
+      BEFORE INSERT ON projection_artifacts
+      WHEN (SELECT status FROM projection_runs WHERE id = NEW.run_id) <> 'running'
+      BEGIN
+        SELECT RAISE(ABORT, 'PROJECTION_RUN_NOT_WRITABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS projection_artifacts_update_guard
+      BEFORE UPDATE ON projection_artifacts
+      BEGIN
+        SELECT RAISE(ABORT, 'PROJECTION_ARTIFACT_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS projection_artifacts_delete_guard
+      BEFORE DELETE ON projection_artifacts
+      BEGIN
+        SELECT RAISE(ABORT, 'PROJECTION_ARTIFACT_IMMUTABLE');
+      END;
+      UPDATE schema_meta SET version = 11 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function ensureOptionalRetrievalIndex(db: DatabaseSync): void {
+  let available = 1;
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_fts USING fts5(
+        run_id UNINDEXED,
+        commit_id UNINDEXED,
+        artifact_key UNINDEXED,
+        title,
+        content,
+        tokenize = 'trigram'
+      );
+    `);
+  } catch {
+    available = 0;
+  }
+  db.prepare(`
+    INSERT INTO retrieval_index_capability (singleton, available, checked_at)
+    VALUES (1, ?, ?)
+    ON CONFLICT(singleton) DO UPDATE SET available = excluded.available, checked_at = excluded.checked_at
+  `).run(available, new Date().toISOString());
+}
+
+function migrateCreativeCommitProjectionSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS creative_commits (
+        id TEXT PRIMARY KEY REFERENCES checkpoints(id) ON DELETE CASCADE,
+        branch_id TEXT NOT NULL REFERENCES branches(id),
+        parent_commit_id TEXT REFERENCES creative_commits(id),
+        kind TEXT NOT NULL CHECK (kind IN ('initialization', 'manual', 'change_set', 'import', 'retcon')),
+        actor_kind TEXT NOT NULL CHECK (actor_kind IN ('user', 'agent', 'import')),
+        source_change_set_id TEXT,
+        label TEXT NOT NULL,
+        manifest_sha256 TEXT CHECK (manifest_sha256 IS NULL OR length(manifest_sha256) = 64),
+        sealed_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS creative_commits_branch_idx ON creative_commits(branch_id, created_at, id);
+      CREATE TABLE IF NOT EXISTS creative_commit_entries (
+        commit_id TEXT NOT NULL REFERENCES creative_commits(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        artifact_kind TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        artifact_sha256 TEXT NOT NULL CHECK (length(artifact_sha256) = 64),
+        source_item_id TEXT,
+        PRIMARY KEY (commit_id, artifact_kind, artifact_id),
+        UNIQUE (commit_id, ordinal)
+      );
+      CREATE TABLE IF NOT EXISTS projection_runs (
+        id TEXT PRIMARY KEY,
+        commit_id TEXT NOT NULL REFERENCES creative_commits(id) ON DELETE CASCADE,
+        projection_kind TEXT NOT NULL,
+        attempt INTEGER NOT NULL CHECK (attempt > 0),
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+        input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+        output_sha256 TEXT CHECK (output_sha256 IS NULL OR length(output_sha256) = 64),
+        error_code TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        UNIQUE (commit_id, projection_kind, attempt)
+      );
+      CREATE INDEX IF NOT EXISTS projection_runs_commit_idx
+        ON projection_runs(commit_id, projection_kind, attempt DESC);
+      CREATE TRIGGER IF NOT EXISTS creative_commits_sealed_immutable
+      BEFORE UPDATE OF manifest_sha256, sealed_at ON creative_commits
+      WHEN OLD.sealed_at IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'CREATIVE_COMMIT_ALREADY_SEALED');
+      END;
+      CREATE TRIGGER IF NOT EXISTS creative_commit_entries_insert_guard
+      BEFORE INSERT ON creative_commit_entries
+      WHEN (SELECT sealed_at FROM creative_commits WHERE id = NEW.commit_id) IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'CREATIVE_COMMIT_ALREADY_SEALED');
+      END;
+      CREATE TRIGGER IF NOT EXISTS creative_commit_entries_update_guard
+      BEFORE UPDATE ON creative_commit_entries
+      WHEN (SELECT sealed_at FROM creative_commits WHERE id = OLD.commit_id) IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'CREATIVE_COMMIT_ALREADY_SEALED');
+      END;
+      CREATE TRIGGER IF NOT EXISTS creative_commit_entries_delete_guard
+      BEFORE DELETE ON creative_commit_entries
+      WHEN (SELECT sealed_at FROM creative_commits WHERE id = OLD.commit_id) IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'CREATIVE_COMMIT_ALREADY_SEALED');
+      END;
+      INSERT OR IGNORE INTO creative_commits (
+        id, branch_id, parent_commit_id, kind, actor_kind, source_change_set_id,
+        label, manifest_sha256, sealed_at, created_at
+      )
+      SELECT id, branch_id, parent_checkpoint_id,
+        CASE
+          WHEN sequence = 0 THEN 'initialization'
+          WHEN source_change_set_id IS NOT NULL THEN 'change_set'
+          WHEN actor_kind = 'import' THEN 'import'
+          ELSE 'manual'
+        END,
+        actor_kind, source_change_set_id, label, NULL, NULL, created_at
+      FROM checkpoints;
+      UPDATE schema_meta SET version = 10 WHERE singleton = 1;
+    `);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

@@ -9,7 +9,7 @@ import { stewardOutputSchema, type StewardOutput } from "./contracts/roleOutputs
 import type { SafePiEvent } from "./pi/eventProjection";
 import type { RuntimeAdapter } from "./pi/runtimeAdapterContract";
 import type { PublishedPrompt } from "./promptRegistry";
-import { createStewardExecutionStateMachine, type RetrievedDocumentReference } from "./stewardExecutionStateMachine";
+import { createStewardExecutionStateMachine, type InspectedProjectFileReference, type RetrievedDocumentReference } from "./stewardExecutionStateMachine";
 
 export interface StewardRuntimeAudit {
   record(runId: string, operation: AgentWorkerAuditOperation, signal?: AbortSignal): Promise<void>;
@@ -21,6 +21,7 @@ export interface StewardRuntimeResult {
   output: StewardOutput;
   submissionCount: number;
   retrievedDocuments: RetrievedDocumentReference[];
+  inspectedFiles: InspectedProjectFileReference[];
 }
 
 export async function runStewardRuntime(input: {
@@ -107,7 +108,14 @@ export async function runStewardRuntime(input: {
       outputSha256: canonicalAuditHash(output),
     });
     invocationStarted = false;
-    return { adapterResult, invocationId, output, submissionCount, retrievedDocuments: machine.snapshot().retrievedDocuments };
+    return {
+      adapterResult,
+      invocationId,
+      output,
+      submissionCount,
+      retrievedDocuments: machine.snapshot().retrievedDocuments,
+      inspectedFiles: machine.snapshot().inspectedFiles,
+    };
   } catch (cause) {
     const effectiveCause = stateMachine?.lastFinalRejectionCode()
       ? stewardRuntimeError(stateMachine.lastFinalRejectionCode()!)
@@ -126,8 +134,16 @@ export async function runStewardRuntime(input: {
     } catch {
       throw stewardRuntimeError("AGENT_AUDIT_REQUIRED");
     }
-    throw effectiveCause;
+    throw attachPublicTrace(effectiveCause, stateMachine?.snapshot().executions ?? []);
   }
+}
+
+function attachPublicTrace(
+  cause: unknown,
+  executions: Array<{ tool: "retrieve_graph_evidence" | "inspect_project_files" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
+): unknown {
+  if (!cause || typeof cause !== "object") return cause;
+  return Object.assign(cause, { publicToolOutcomes: executions.map((execution) => ({ ...execution })) });
 }
 
 function providerConfigSha256(profile: ProviderRuntimeProfile): string {

@@ -18,26 +18,57 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates the schema 6 creative object storage", () => {
+  it("creates schema 19 project-file, projection, playthrough, import, player, and Decomposer audit storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 9 });
+      .toEqual({ version: 19 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
       "constraint_profile_versions",
       "working_constraint_profiles",
+      "creative_commits",
+      "creative_commit_entries",
+      "projection_runs",
+      "projection_artifacts",
+      "story_profiles",
+      "story_profile_oc_bindings",
+      "playthroughs",
+      "play_turns",
+      "canon_reconciliation_decisions",
+      "source_library_entries",
+      "source_chunks",
+      "import_jobs",
+      "decomposition_candidates",
+      "decomposition_candidate_revisions",
+      "import_review_decisions",
+      "start_profiles",
+      "player_agent_runs",
+      "player_agent_invocations",
+      "player_agent_tool_invocations",
+      "player_agent_audit_events",
+      "player_agent_evidence_links",
+      "decomposer_run_audits",
+      "decomposer_run_sources",
+      "import_candidate_change_set_links",
+      "project_file_versions",
     ]));
     expect(listIndexes(workspace)).toEqual(expect.arrayContaining([
       "creative_documents_resource_idx",
       "creative_relation_versions_identity_idx",
       "creative_relation_versions_target_idx",
       "constraint_profile_versions_scope_idx",
+      "creative_commits_branch_idx",
+      "projection_runs_commit_idx",
+      "projection_artifacts_run_idx",
     ]));
+    expect(workspace.db.prepare("SELECT id, kind, sealed_at FROM creative_commits").all()).toMatchObject([
+      { kind: "initialization", sealed_at: null },
+    ]);
   });
 
   it("keeps logical domain roots internal until they contain user content or are renamed", () => {

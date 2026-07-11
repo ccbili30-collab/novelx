@@ -2,6 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { SQLOutputValue } from "node:sqlite";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 import { CheckpointRepository } from "../version/checkpointRepository";
+import { CreativeCommitService } from "../commit/creativeCommitService";
+import { ProjectionCoordinator } from "../projection/projectionCoordinator";
+import { createDefaultProjectors } from "../projection/defaultProjectors";
 
 export type ChangeSetMode = "free" | "assist";
 export type ChangeSetStatus = "pending" | "committed" | "rejected" | "failed";
@@ -51,7 +54,8 @@ export interface ChangeSetOutputRecord {
     | "assertion_version"
     | "creative_document_revision"
     | "creative_relation_revision"
-    | "constraint_profile_version";
+    | "constraint_profile_version"
+    | "project_file_version";
   outputId: string;
   outputSha256: string;
 }
@@ -131,7 +135,9 @@ export class ChangeSetRepository {
       const checkpointId = this.#checkpoints.appendCheckpoint(changeSet.branchId, label);
       apply(checkpointId);
       this.markCommitted(id, checkpointId);
+      new CreativeCommitService(this.workspace).sealCheckpoint(checkpointId);
       this.workspace.db.exec("COMMIT");
+      new ProjectionCoordinator(this.workspace, createDefaultProjectors(this.workspace)).runAll(checkpointId);
       return checkpointId;
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
@@ -287,6 +293,7 @@ export class ChangeSetRepository {
       kind: readEnum(row, "output_kind", [
         "resource_revision", "document_version", "assertion_version",
         "creative_document_revision", "creative_relation_revision", "constraint_profile_version",
+        "project_file_version",
       ] as const),
       outputId: readString(row, "output_id"),
       outputSha256: readString(row, "output_sha256"),

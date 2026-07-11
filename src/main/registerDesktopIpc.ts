@@ -2,10 +2,19 @@ import { ipcMain } from "electron";
 import {
   agentRunCancelRequestSchema,
   agentRunStartRequestSchema,
+  playerTurnStartRequestSchema,
+  playerTurnStartResponseSchema,
+  playerTurnCancelRequestSchema,
+  decomposerStartRequestSchema,
+  decomposerStartResultSchema,
+  decomposerCancelRequestSchema,
+  publicDecomposerEventSchema,
   desktopIpcChannels,
   systemStatusSchema,
 } from "../shared/ipcContract";
 import { AgentProcessSupervisor, type AgentRuntimeLease } from "./agentProcessSupervisor";
+import { PlayerProcessSupervisor, type PlayerRuntimeLease } from "./playerProcessSupervisor";
+import { DecomposerProcessSupervisor, type DecomposerRuntimeLease } from "./decomposerProcessSupervisor";
 import type { ProviderRuntimeProfile } from "../shared/providerContract";
 import { ApplicationRegistryRepository } from "../domain/application/applicationRegistryRepository";
 
@@ -14,8 +23,12 @@ export function registerDesktopIpc(
   applicationRegistry: ApplicationRegistryRepository,
   acquireRuntimeLease: () => AgentRuntimeLease | null = () => null,
   getProviderProfile: () => ProviderRuntimeProfile | null = () => null,
-): AgentProcessSupervisor {
+  acquirePlayerRuntimeLease: () => PlayerRuntimeLease | null = () => null,
+  acquireDecomposerRuntimeLease: () => DecomposerRuntimeLease | null = () => null,
+): { dispose(): void } {
   const supervisor = new AgentProcessSupervisor(workerPath, { acquireRuntimeLease, getProviderProfile });
+  const playerSupervisor = new PlayerProcessSupervisor(workerPath, { acquireRuntimeLease: acquirePlayerRuntimeLease, getProviderProfile });
+  const decomposerSupervisor = new DecomposerProcessSupervisor(workerPath, { acquireRuntimeLease: acquireDecomposerRuntimeLease, getProviderProfile });
 
   ipcMain.handle(desktopIpcChannels.systemStatus, () => systemStatusSchema.parse({
     platform: process.platform,
@@ -58,6 +71,7 @@ export function registerDesktopIpc(
           sessionId: request.sessionId,
           role: "error",
           text: agentEvent.message,
+          artifacts: agentEvent.artifacts,
           outcome: "blocked",
         });
         applicationRegistry.setSessionState(request.sessionId, "blocked");
@@ -70,5 +84,43 @@ export function registerDesktopIpc(
     const request = agentRunCancelRequestSchema.parse(payload);
     supervisor.cancel(request.runId);
   });
-  return supervisor;
+  ipcMain.handle(desktopIpcChannels.playerTurnStart, (event, payload: unknown) => {
+    const request = playerTurnStartRequestSchema.parse(payload);
+    const runId = playerSupervisor.start(request, (playerEvent) => {
+      if (!event.sender.isDestroyed()) event.sender.send(desktopIpcChannels.playerTurnEvent, playerEvent);
+    });
+    return playerTurnStartResponseSchema.parse({ runId });
+  });
+  ipcMain.handle(desktopIpcChannels.playerTurnCancel, (_event, payload: unknown) => {
+    playerSupervisor.cancel(playerTurnCancelRequestSchema.parse(payload).runId);
+  });
+  ipcMain.handle(desktopIpcChannels.decomposerStart, (event, payload: unknown) => {
+    const request = decomposerStartRequestSchema.parse(payload);
+    try {
+      const runId = decomposerSupervisor.start(request.sourceId, (workerEvent) => {
+        const projected = workerEvent.type === "decompose.started"
+          ? { type: "started" as const, runId: workerEvent.runId, sourceId: request.sourceId }
+          : workerEvent.type === "decompose.completed"
+            ? { type: "completed" as const, runId: workerEvent.runId, sourceId: request.sourceId, candidateCount: workerEvent.output.candidates.length }
+            : { type: "failed" as const, runId: workerEvent.runId, sourceId: request.sourceId, error: publicDecomposerError(workerEvent.error.code) };
+        if (!event.sender.isDestroyed()) event.sender.send(desktopIpcChannels.decomposerEvent, publicDecomposerEventSchema.parse(projected));
+      });
+      return decomposerStartResultSchema.parse({ ok: true, runId });
+    } catch (error) { return decomposerStartResultSchema.parse({ ok: false, error: publicDecomposerError(readCode(error)) }); }
+  });
+  ipcMain.handle(desktopIpcChannels.decomposerCancel, (_event, payload: unknown) => {
+    decomposerSupervisor.cancel(decomposerCancelRequestSchema.parse(payload).runId);
+  });
+  return { dispose: () => { decomposerSupervisor.dispose(); playerSupervisor.dispose(); supervisor.dispose(); } };
+}
+
+function readCode(error: unknown): string { return error && typeof error === "object" && "code" in error ? String(error.code).slice(0, 120) : "DECOMPOSITION_FAILED"; }
+function publicDecomposerError(code: string) {
+  const messages: Record<string, string> = {
+    REAL_DECOMPOSER_PROVIDER_REQUIRED: "需要先配置可用的模型服务。", WORKSPACE_NOT_OPEN: "需要先打开小说工作区。",
+    DECOMPOSER_PROMPT_NOT_PUBLISHED: "拆解器提示词尚未通过发布验证。", DECOMPOSER_SOURCE_NOT_PARSED: "需要先解析来源资料。",
+    SOURCE_RIGHTS_ATTESTATION_REQUIRED: "需要先确认资料的使用权。", SOURCE_FILE_CHANGED: "来源文件已经变化，请重新添加。",
+    AGENT_RUN_CANCELLED: "拆解任务已取消。", AGENT_WORKER_INTERRUPTED: "拆解工作进程中断，未写入候选。",
+  };
+  return { code, message: messages[code] ?? "拆解任务失败，未写入候选。" };
 }

@@ -1,4 +1,4 @@
-export type AgentRuntimeRole = "steward" | "writer" | "checker";
+export type AgentRuntimeRole = "steward" | "gm" | "writer" | "checker";
 
 export interface AgentRuntimeProfileIdentity {
   id: string;
@@ -26,19 +26,29 @@ export const STEWARD_STATE_CORRECTION = {
 const profiles: Record<AgentRuntimeRole, AgentRuntimeProfileIdentity> = {
   steward: {
     id: "novax.steward-runtime",
-    version: "1.14.0",
-    sha256: "29af57fd84113a54a3ba19a6d87069fb12fe7952b3bba99785efed3d29d4c10b",
+    version: "1.15.0",
+    sha256: "dc213a3af97094664c5add01baa884dc373852543fd52feaf2cfc2e5bb3862e2",
     toolPolicyId: "novax.steward-tools",
-    toolPolicyVersion: "2.6.0",
-    toolPolicySha256: "697c7057c667312dd64e062ae9ee7df016aa6659073ce0fe5bf6f2e098cc3cac",
+    toolPolicyVersion: "2.7.0",
+    toolPolicySha256: "628bdb347146274f86cedd932bf680bc3498dae003534a92bc5510a3a5c04d17",
     authorizedTools: [
       "checker",
+      "inspect_project_files",
       "propose_change_set",
       "retrieve_graph_evidence",
       "submit_steward_plan",
       "submit_steward_result",
       "writer",
     ],
+  },
+  gm: {
+    id: "novax.gm-runtime",
+    version: "1.0.0",
+    sha256: "066ddfdaebb38a821982f5425530f715d052203fe7cd39a1675f13f24f245e9d",
+    toolPolicyId: "novax.gm-tools",
+    toolPolicyVersion: "1.0.0",
+    toolPolicySha256: "3cb2c873aef4295ae2a18edad738ba7bd2d78d88f82fafeaef28f40e3c59361f",
+    authorizedTools: ["submit_gm_result"],
   },
   writer: {
     id: "novax.writer-runtime",

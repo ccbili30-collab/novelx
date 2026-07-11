@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Check,
   CircleStop,
+  Copy,
   GitFork,
   LoaderCircle,
+  Pencil,
   Send,
 } from "lucide-react";
-import type { AgentArtifact, SessionSummary, WorkspaceSnapshot } from "../../../../shared/ipcContract";
+import type { AgentArtifact, SessionMessage, SessionSummary, WorkspaceSnapshot } from "../../../../shared/ipcContract";
 import { PendingChangeSets } from "../change-set/PendingChangeSets";
 import { AgentArtifactList } from "./AgentArtifactList";
 import { AgentMessageContent } from "./AgentMessageContent";
@@ -50,6 +53,8 @@ export function StewardRuntimePanel({
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [activity, setActivity] = useState<string | null>(null);
+  const [copiedEntryId, setCopiedEntryId] = useState<FeedEntry["id"] | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const nextEntryId = useRef(1);
   const terminalRunIds = useRef(new Set<string>());
 
@@ -82,7 +87,7 @@ export function StewardRuntimePanel({
       if (event.type === "run.completed") {
         appendEntry({ kind: "assistant", text: event.message, outcome: event.outcome, artifacts: event.artifacts });
       } else {
-        appendEntry({ kind: "error", text: event.message, artifacts: [] });
+        appendEntry({ kind: "error", text: event.message, artifacts: event.artifacts });
       }
     });
   }, [session?.id, onActivityChange]);
@@ -94,20 +99,14 @@ export function StewardRuntimePanel({
     setActiveRunId(null);
     setStarting(false);
     setActivity(null);
+    setCopiedEntryId(null);
+    setActionNotice(null);
     onActivityChange(null);
     terminalRunIds.current.clear();
     if (session) {
       void window.novaxDesktop.session.messages({ sessionId: session.id }).then((result) => {
         if (cancelled) return;
-        setEntries(result.messages.map((message) => ({
-          id: message.id,
-          kind: message.role,
-          text: message.text,
-          artifacts: message.artifacts,
-          outcome: message.outcome === "review"
-            ? "awaiting_confirmation"
-            : message.outcome === "blocked" ? "blocked" : message.outcome === "completed" ? "completed" : undefined,
-        })));
+        setEntries(toFeedEntries(result.messages));
       });
     }
     return () => { cancelled = true; };
@@ -122,6 +121,7 @@ export function StewardRuntimePanel({
     if (!workspace || !projectId || !session || !userInput || starting || activeRunId) return;
     setStarting(true);
     setDraft("");
+    setActionNotice(null);
     appendEntry({ kind: "user", text: userInput, artifacts: [] });
     try {
       const response = await window.novaxDesktop.agent.start({
@@ -143,7 +143,40 @@ export function StewardRuntimePanel({
     await window.novaxDesktop.agent.cancel({ runId: activeRunId });
   }
 
+  async function copyMessage(entry: FeedEntry) {
+    try {
+      await navigator.clipboard.writeText(entry.text);
+      setCopiedEntryId(entry.id);
+      setActionNotice("已复制");
+      window.setTimeout(() => {
+        setCopiedEntryId((current) => current === entry.id ? null : current);
+        setActionNotice(null);
+      }, 1_500);
+    } catch {
+      setActionNotice("复制失败");
+    }
+  }
+
+  async function editLastUserMessage() {
+    if (!session || running) return;
+    let result;
+    try {
+      result = await window.novaxDesktop.session.retractLast({ sessionId: session.id });
+    } catch {
+      setActionNotice("上一条消息撤回失败。");
+      return;
+    }
+    if (!result.ok) {
+      setActionNotice(result.message);
+      return;
+    }
+    setEntries(toFeedEntries(result.messages));
+    setDraft(result.text);
+    setActionNotice("上一条消息已撤回，可以修改后重新发送。");
+  }
+
   const running = starting || activeRunId !== null;
+  const lastUserEntryIndex = findLastUserEntryIndex(entries);
 
   return (
     <>
@@ -153,9 +186,21 @@ export function StewardRuntimePanel({
           <span>{session ? session.title : workspace ? "选择一个 Agent 会话" : "等待工作区"}</span>
         </div>
         <div className="steward-conversation" aria-live="polite">
-          {entries.map((entry) => (
+          {entries.map((entry, index) => (
             <article className={`steward-message steward-message--${entry.kind}`} key={entry.id}>
               <span>{entry.kind === "user" ? "你" : entry.kind === "error" ? "运行阻塞" : "大管家"}</span>
+              <div className="steward-message-actions" aria-label="消息操作">
+                {entry.kind === "user" && index === lastUserEntryIndex && !running ? (
+                  <button type="button" onClick={() => void editLastUserMessage()} title="修改上一句">
+                    <Pencil size={14} aria-hidden="true" />
+                    <span className="sr-only">修改上一句</span>
+                  </button>
+                ) : null}
+                <button type="button" onClick={() => void copyMessage(entry)} title="复制">
+                  {copiedEntryId === entry.id ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+                  <span className="sr-only">复制</span>
+                </button>
+              </div>
               {entry.kind === "assistant"
                 ? <AgentMessageContent text={entry.text} />
                 : <p>{entry.text}</p>}
@@ -169,6 +214,7 @@ export function StewardRuntimePanel({
               <span>{activity || "大管家正在处理"}</span>
             </div>
           ) : null}
+          {actionNotice ? <div className="steward-action-notice" role="status">{actionNotice}</div> : null}
         </div>
         {workspace ? (
           <PendingChangeSets
@@ -216,4 +262,23 @@ export function StewardRuntimePanel({
       </div>
     </>
   );
+}
+
+function toFeedEntries(messages: SessionMessage[]): FeedEntry[] {
+  return messages.map((message) => ({
+    id: message.id,
+    kind: message.role,
+    text: message.text,
+    artifacts: message.artifacts,
+    outcome: message.outcome === "review"
+      ? "awaiting_confirmation"
+      : message.outcome === "blocked" ? "blocked" : message.outcome === "completed" ? "completed" : undefined,
+  }));
+}
+
+function findLastUserEntryIndex(entries: FeedEntry[]): number {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index]?.kind === "user") return index;
+  }
+  return -1;
 }

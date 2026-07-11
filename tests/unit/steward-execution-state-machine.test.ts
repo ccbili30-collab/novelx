@@ -206,6 +206,7 @@ describe("Steward tool handoff state machine", () => {
       escalations: [],
     });
   });
+
 });
 
 function createMachine(mode: "free" | "assist", operationalTools: AgentTool[]) {

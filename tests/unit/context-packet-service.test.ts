@@ -310,6 +310,38 @@ describe("ContextPacketService", () => {
       .toThrow(expect.objectContaining({ code: "CONTEXT_SCOPE_NOT_ACTIVE" }));
   });
 
+  it("retrieves the sealed Playthrough baseline instead of the newer branch head", () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-context-pinned-playthrough-"));
+    workspace = openWorkspace(root);
+    const assertions = new AssertionRepository(workspace);
+    const documents = new DocumentRepository(workspace);
+    const resources = new ResourceRepository(workspace);
+    const worldRootId = resources.listCurrent().find((resource) => resource.type === "world")!.id;
+    let resourceId = "";
+    const baseline = commitFixtureCheckpoint(workspace, {
+      idempotencyKey: "pinned-baseline", summary: "旧存档正史", label: "旧存档正史",
+    }, (checkpointId, changeSetId) => {
+      resourceId = resources.putRevision({ checkpointId, type: "world", title: "潮汐洞穴", parentId: worldRootId, state: "active" });
+      const versionId = documents.putVersion({ resourceId, checkpointId, content: "旧正史：洞穴只在退潮时开放。", authorKind: "user" });
+      assertions.putVersion({ assertionId: "assertion.cave.rule", checkpointId, scopeType: "world", scopeId: resourceId, subject: "潮汐洞穴", predicate: "开放条件", object: { tide: "low" }, status: "current", sources: [{ kind: "document_version", ref: versionId }, { kind: "confirmed_change_set", ref: changeSetId }] });
+    });
+    commitFixtureCheckpoint(workspace, {
+      idempotencyKey: "new-canon", summary: "新正史改写", label: "新正史改写",
+    }, (checkpointId, changeSetId) => {
+      const versionId = documents.putVersion({ resourceId, checkpointId, content: "新正史：洞穴已被永久封死。", authorKind: "user" });
+      assertions.putVersion({ assertionId: "assertion.cave.rule", checkpointId, scopeType: "world", scopeId: resourceId, subject: "潮汐洞穴", predicate: "开放条件", object: { state: "sealed" }, status: "current", sources: [{ kind: "document_version", ref: versionId }, { kind: "confirmed_change_set", ref: changeSetId }] });
+    });
+
+    const current = new ContextPacketService(workspace).build({ scopeResourceIds: [resourceId] });
+    const pinned = new ContextPacketService(workspace).build({ scopeResourceIds: [resourceId], checkpointId: baseline.checkpointId });
+
+    expect(current.documents[0]?.content).toContain("永久封死");
+    expect(pinned.branch.headCheckpointId).toBe(baseline.checkpointId);
+    expect(pinned.documents[0]?.content).toBe("旧正史：洞穴只在退潮时开放。");
+    expect(pinned.assertions[0]?.object).toEqual({ tide: "low" });
+    expect(JSON.stringify(pinned)).not.toContain("永久封死");
+  });
+
   it("projects the committed Change Set item used by the production write path", () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-context-change-set-source-"));
     workspace = openWorkspace(root);

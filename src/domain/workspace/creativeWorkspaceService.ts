@@ -6,6 +6,7 @@ import { CreativeRelationRepository, type CreativeRelationKind } from "./creativ
 import { ResourceRepository } from "./resourceRepository";
 import type { CreativeObjectKind, ResourceDomain } from "./creativeObjectPolicy";
 import type { WorkspaceDatabase } from "./workspaceRepository";
+import { CreativeCommitService } from "../commit/creativeCommitService";
 
 export type CreativeWorkspaceMutation =
   | { action: "create_resource"; domain: ResourceDomain; objectKind: CreativeObjectKind; title: string; parentId: string | null }
@@ -41,6 +42,7 @@ export class CreativeWorkspaceService {
       const branch = this.#checkpoints.getActiveBranch();
       const checkpointId = this.#checkpoints.appendCheckpoint(branch.id, mutationLabel(input));
       this.apply(input, checkpointId);
+      new CreativeCommitService(this.workspace).sealCheckpoint(checkpointId);
       this.workspace.db.exec("COMMIT");
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");

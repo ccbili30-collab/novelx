@@ -2,10 +2,13 @@ import { randomUUID } from "node:crypto";
 import {
   agentWorkerToolRequestSchema,
   agentWorkerToolResponseSchema,
+  inspectProjectFilesResultSchema,
   proposeChangeSetResultSchema,
   retrieveGraphEvidenceResultSchema,
   type AgentToolName,
   type AgentWorkerToolRequest,
+  type InspectProjectFilesArgs,
+  type InspectProjectFilesResult,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
   type RetrieveGraphEvidenceArgs,
@@ -41,6 +44,12 @@ export class AgentWorkerToolBridge {
   ): Promise<RetrieveGraphEvidenceResult>;
   invoke(
     runId: string,
+    tool: "inspect_project_files",
+    args: InspectProjectFilesArgs,
+    signal?: AbortSignal,
+  ): Promise<InspectProjectFilesResult>;
+  invoke(
+    runId: string,
     tool: "propose_change_set",
     args: ProposeChangeSetArgs,
     signal?: AbortSignal,
@@ -48,9 +57,9 @@ export class AgentWorkerToolBridge {
   invoke(
     runId: string,
     tool: AgentToolName,
-    args: RetrieveGraphEvidenceArgs | ProposeChangeSetArgs,
+    args: RetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ProposeChangeSetArgs,
     signal?: AbortSignal,
-  ): Promise<RetrieveGraphEvidenceResult | ProposeChangeSetResult> {
+  ): Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ProposeChangeSetResult> {
     if (signal?.aborted) return Promise.reject(toolBridgeError("AGENT_RUN_CANCELLED", "Agent run was cancelled."));
     const request = agentWorkerToolRequestSchema.parse({
       type: "tool.request",
@@ -107,7 +116,9 @@ export class AgentWorkerToolBridge {
     }
     const result = response.tool === "retrieve_graph_evidence"
       ? retrieveGraphEvidenceResultSchema.safeParse(response.result)
-      : proposeChangeSetResultSchema.safeParse(response.result);
+      : response.tool === "inspect_project_files"
+        ? inspectProjectFilesResultSchema.safeParse(response.result)
+        : proposeChangeSetResultSchema.safeParse(response.result);
     if (!result.success) {
       this.#settle(response.requestId, undefined, toolBridgeError("AGENT_TOOL_PROTOCOL_FAILED", "Agent tool response is invalid."));
       return true;

@@ -52,6 +52,7 @@ test("persists the supported themes and keeps long rich content usable at the mi
     const diagramBox = await diagram.boundingBox();
     expect(diagramBox?.width ?? 0).toBeGreaterThan(100);
     expect(diagramBox?.height ?? 0).toBeGreaterThan(40);
+    await page.getByText("已处理 1 项", { exact: true }).click();
     await expect(page.getByText("世界一致性检查", { exact: true })).toBeVisible();
 
     const settingsButton = page.getByTestId("open-settings");

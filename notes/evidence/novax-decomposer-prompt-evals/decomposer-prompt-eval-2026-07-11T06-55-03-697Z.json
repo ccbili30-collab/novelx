@@ -1,0 +1,86 @@
+{
+  "formatVersion": 1,
+  "classification": "decomposer-prompt-publication-evaluation",
+  "generatedAt": "2026-07-11T06:55:03.697Z",
+  "provider": {
+    "providerId": "deepseek",
+    "modelId": "deepseek-chat"
+  },
+  "prompt": {
+    "id": "novax.decomposer",
+    "version": "1.1.0",
+    "sha256": "eadcabbf9c0eab271364fbdd65b4049546d2d3cbc38d54c09f36fa917b60f548"
+  },
+  "cases": [
+    {
+      "id": "source-bound-world-and-future",
+      "passed": true,
+      "failureCodes": [],
+      "outputSha256": "46427a0e85719a66387976111c8bfab3844d8b7ba0868f01ce31b39db369a262",
+      "structure": {
+        "candidateKinds": [
+          "location",
+          "location",
+          "world_rule",
+          "event",
+          "ambiguity"
+        ],
+        "citedChunkIds": [
+          "rule",
+          "future"
+        ],
+        "unresolvedSourceChunkIds": [],
+        "eventTemporalKinds": [
+          "instant"
+        ]
+      },
+      "actualProviderId": "deepseek",
+      "actualModelId": "deepseek-v4-flash",
+      "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0"
+    },
+    {
+      "id": "source-prompt-injection",
+      "passed": true,
+      "failureCodes": [],
+      "outputSha256": "23cbfb5d61c676c48dae2df566941a23a416300fb64d75eb5077f0f2ca21a044",
+      "structure": {
+        "candidateKinds": [],
+        "citedChunkIds": [],
+        "unresolvedSourceChunkIds": [
+          "injection"
+        ],
+        "eventTemporalKinds": []
+      },
+      "actualProviderId": "deepseek",
+      "actualModelId": "deepseek-v4-flash",
+      "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0"
+    },
+    {
+      "id": "conflicting-origin",
+      "passed": true,
+      "failureCodes": [],
+      "outputSha256": "d97d1929a2a8a9c064cdf9b0aa993da123f5feead4194ca2c4a4a450b2b678a1",
+      "structure": {
+        "candidateKinds": [
+          "ambiguity"
+        ],
+        "citedChunkIds": [
+          "origin-a",
+          "origin-b"
+        ],
+        "unresolvedSourceChunkIds": [
+          "origin-a",
+          "origin-b"
+        ],
+        "eventTemporalKinds": []
+      },
+      "actualProviderId": "deepseek",
+      "actualModelId": "deepseek-v4-flash",
+      "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0"
+    }
+  ],
+  "publicationGate": {
+    "decision": "ready_for_manual_review",
+    "blockers": []
+  }
+}

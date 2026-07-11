@@ -3,12 +3,18 @@ import {
   agentWorkerRunStartCommandSchema,
 } from "../shared/agentWorkerProtocol";
 import { verifyPromptRegistry } from "./promptRegistry";
+import { playerWorkerTurnStartCommandSchema } from "../shared/playerWorkerProtocol";
 import { AgentWorkerAuditBridge } from "./audit/agentWorkerAuditBridge";
 import { AgentWorkerToolBridge } from "./tools/agentWorkerToolBridge";
 import { createAgentTools } from "./tools/createAgentTools";
 import { handleAgentWorkerCommand } from "./workerController";
+import { handlePlayerWorkerCommand } from "./play/playerWorkerController";
+import { loadGmPrompt } from "./play/playPromptRegistry";
+import { decomposerWorkerStartSchema } from "../shared/decomposerWorkerProtocol";
+import { handleDecomposerWorkerCommand } from "./import/decomposerWorkerController";
 
 verifyPromptRegistry();
+loadGmPrompt();
 
 const toolBridge = new AgentWorkerToolBridge((message) => process.send?.(message) ?? false);
 const auditBridge = new AgentWorkerAuditBridge((message) => process.send?.(message) ?? false);
@@ -31,7 +37,34 @@ process.on("message", (payload: unknown) => {
   }
 
   const start = agentWorkerRunStartCommandSchema.safeParse(payload);
-  if (!start.success) return;
+  if (!start.success) {
+    const decomposerStart = decomposerWorkerStartSchema.safeParse(payload);
+    if (decomposerStart.success) {
+      const command = decomposerStart.data;
+      if (activeRuns.has(command.runId)) return;
+      const controller = new AbortController(); activeRuns.set(command.runId, controller);
+      void handleDecomposerWorkerCommand({ command, signal: controller.signal, emit: (event) => process.send?.(event) }).finally(() => {
+        activeRuns.delete(command.runId); clearProviderProfile(command.providerProfile);
+      });
+      return;
+    }
+    const playerStart = playerWorkerTurnStartCommandSchema.safeParse(payload);
+    if (!playerStart.success) return;
+    const command = playerStart.data;
+    if (activeRuns.has(command.runId)) return;
+    const controller = new AbortController();
+    activeRuns.set(command.runId, controller);
+    void handlePlayerWorkerCommand({
+      command,
+      signal: controller.signal,
+      audit: auditBridge,
+      emit: (event) => process.send?.(event),
+    }).finally(() => {
+      activeRuns.delete(command.runId);
+      clearProviderProfile(command.providerProfile);
+    });
+    return;
+  }
   const command = start.data;
   if (activeRuns.has(command.runId)) return;
   const controller = new AbortController();
@@ -41,6 +74,12 @@ process.on("message", (payload: unknown) => {
         retrieveGraphEvidence: (args, signal) => toolBridge.invoke(
           command.runId,
           "retrieve_graph_evidence",
+          args,
+          signal,
+        ),
+        inspectProjectFiles: (args, signal) => toolBridge.invoke(
+          command.runId,
+          "inspect_project_files",
           args,
           signal,
         ),

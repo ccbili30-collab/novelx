@@ -29,6 +29,7 @@ interface PromptEvalRunnerOptions {
   now?: () => Date;
   createAdapter?(profile: ModelProfile): EvalAdapter;
   loadPrompts?(): PublishedPrompt[];
+  onCaseProgress?(event: { caseId: string; phase: "started" | "completed"; passed?: boolean; errorCode?: string | null }): void;
 }
 
 type ProviderConfiguration =
@@ -76,15 +77,23 @@ export async function runCandidatePromptEvaluation(options: PromptEvalRunnerOpti
   const promptByRole = new Map(prompts.map((prompt) => [prompt.role, prompt]));
   const caseReports: PromptEvalReport["realProvider"]["cases"] = [];
   for (const testCase of promptAdversarialCases) {
+    options.onCaseProgress?.({ caseId: testCase.id, phase: "started" });
     const prompt = promptByRole.get(testCase.role);
     if (!prompt) throw evalRunnerError("PROMPT_SET_INCOMPLETE", `Missing candidate Prompt for role: ${testCase.role}`);
-    caseReports.push(await runCase(
+    const caseReport = await runCase(
       createAdapter(configuration.profile),
       prompts,
       testCase,
       configuration.profile,
       configuration.timeoutMs,
-    ));
+    );
+    caseReports.push(caseReport);
+    options.onCaseProgress?.({
+      caseId: testCase.id,
+      phase: "completed",
+      passed: caseReport.passed,
+      errorCode: caseReport.errorCode,
+    });
   }
 
   const blockers: string[] = [];
@@ -137,7 +146,7 @@ async function runCase(
   let submissions = 0;
   let directResult: Awaited<ReturnType<EvalAdapter["run"]>> | null = null;
   const productionToolExecutions: Array<{
-    tool: "retrieve_graph_evidence" | "propose_change_set" | "writer" | "checker";
+    tool: "retrieve_graph_evidence" | "inspect_project_files" | "propose_change_set" | "writer" | "checker";
     status: "succeeded" | "failed";
   }> = [];
   try {
@@ -254,11 +263,39 @@ async function runCase(
 function createEvaluationToolExecutor(
   scenario: (typeof promptAdversarialCases)[number]["stewardToolScenario"],
   executions: Array<{
-    tool: "retrieve_graph_evidence" | "propose_change_set" | "writer" | "checker";
+    tool: "retrieve_graph_evidence" | "inspect_project_files" | "propose_change_set" | "writer" | "checker";
     status: "succeeded" | "failed";
   }>,
 ): AgentToolExecutor {
   return {
+    inspectProjectFiles: async () => {
+      if (scenario !== "project_overview") {
+        executions.push({ tool: "inspect_project_files", status: "failed" });
+        throw evalRunnerError("AGENT_TOOL_FAILED", "Project files are not configured for this evaluation case.");
+      }
+      executions.push({ tool: "inspect_project_files", status: "succeeded" });
+      const readme = "# NovelX\n小说创作工作台。";
+      const world = "银湾海岸由古代沉降与海水倒灌形成。";
+      return {
+        mode: "overview" as const,
+        listing: {
+          root: ".",
+          entries: [
+            { path: "README.md", kind: "file" as const, size: Buffer.byteLength(readme), modifiedAt: "2026-07-11T00:00:00.000Z" },
+            { path: "world.md", kind: "file" as const, size: Buffer.byteLength(world), modifiedAt: "2026-07-11T00:00:00.000Z" },
+          ],
+          ignoredDirectories: [".git", ".novax", "node_modules"],
+          incomplete: false,
+          omittedEntries: 0,
+        },
+        files: [
+          evaluationFile("README.md", readme),
+          evaluationFile("world.md", world),
+        ],
+        omittedReadableFiles: 0,
+        totalReturnedChars: readme.length + world.length,
+      };
+    },
     retrieveGraphEvidence: async (args: RetrieveGraphEvidenceArgs) => {
       if (scenario === "graph_timeout") {
         executions.push({ tool: "retrieve_graph_evidence", status: "failed" });
@@ -358,8 +395,22 @@ function evaluationScopeResourceIds(testCase: (typeof promptAdversarialCases)[nu
     case "assist_pending_change_set": return ["world-coast-eval"];
     case "major_conflict": return ["world-conflict-eval"];
     case "graph_timeout": return ["world-timeout-eval"];
+    case "project_overview": return ["world-files-eval"];
     default: return [];
   }
+}
+
+function evaluationFile(path: string, content: string) {
+  return {
+    path,
+    kind: "text" as const,
+    size: Buffer.byteLength(content),
+    sha256: sha256(content),
+    content,
+    complete: true,
+    originalChars: content.length,
+    returnedChars: content.length,
+  };
 }
 
 function readSpecialistSubmissionCount(operations: AgentWorkerAuditOperation[]): number {

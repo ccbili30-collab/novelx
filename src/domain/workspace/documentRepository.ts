@@ -100,6 +100,10 @@ export class DocumentRepository {
     return row ? mapVersion(row) : null;
   }
 
+  getStableAtCheckpoint(resourceId: string, checkpointId: string): DocumentVersionRecord | null {
+    return this.getStableByAnchor("resource_id", resourceId, checkpointId);
+  }
+
   getCurrentStableForCreativeDocument(
     documentId: string,
     branchId = this.#checkpoints.getActiveBranch().id,
@@ -118,6 +122,24 @@ export class DocumentRepository {
       ORDER BY ancestry.depth ASC, dv.created_at DESC, dv.rowid DESC
       LIMIT 1
     `).get(branchId, documentId);
+    return row ? mapVersion(row) : null;
+  }
+
+  getStableForCreativeDocumentAtCheckpoint(documentId: string, checkpointId: string): DocumentVersionRecord | null {
+    return this.getStableByAnchor("creative_document_id", documentId, checkpointId);
+  }
+
+  private getStableByAnchor(column: "resource_id" | "creative_document_id", id: string, checkpointId: string): DocumentVersionRecord | null {
+    const row = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+        SELECT ?, 0
+        UNION ALL
+        SELECT c.parent_checkpoint_id, ancestry.depth + 1 FROM checkpoints c
+        JOIN ancestry ON c.id = ancestry.checkpoint_id WHERE c.parent_checkpoint_id IS NOT NULL
+      )
+      SELECT dv.* FROM document_versions dv JOIN ancestry ON ancestry.checkpoint_id = dv.created_checkpoint_id
+      WHERE dv.${column} = ? ORDER BY ancestry.depth ASC, dv.created_at DESC, dv.rowid DESC LIMIT 1
+    `).get(checkpointId, id);
     return row ? mapVersion(row) : null;
   }
 

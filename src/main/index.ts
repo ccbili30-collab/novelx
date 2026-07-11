@@ -58,6 +58,8 @@ app.whenReady().then(() => {
     applicationRegistry,
     () => workspaceSession.acquireAgentRuntimeLease(),
     () => providerStore.loadRuntimeProfile(),
+    () => workspaceSession.acquirePlayerRuntimeLease(),
+    () => workspaceSession.acquireDecomposerRuntimeLease(),
   );
   app.once("before-quit", () => {
     disposeUpdateEvents();

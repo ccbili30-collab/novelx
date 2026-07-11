@@ -33,6 +33,34 @@ import {
   workspaceSnapshotSchema,
   workspaceHistoryResultSchema,
   nullableContextBudgetAuditSchema,
+  projectDoctorResultSchema,
+  storyProfileCreateRequestSchema,
+  storyProfileCreateResultSchema,
+  storyProfileListResultSchema,
+  startProfileCreateRequestSchema,
+  startProfileListRequestSchema,
+  startProfileResultSchema,
+  startProfileListResultSchema,
+  playthroughCreateRequestSchema,
+  playthroughListRequestSchema,
+  playTurnListRequestSchema,
+  playthroughInspectRequestSchema,
+  playthroughResolveRequestSchema,
+  playthroughResultSchema,
+  playthroughInspectResultSchema,
+  playthroughListResultSchema,
+  playTurnListResultSchema,
+  sourceListResultSchema,
+  sourceAddRequestSchema,
+  sourceAddResultSchema,
+  sourceParseRequestSchema,
+  sourceParseResultSchema,
+  decompositionCandidateListRequestSchema,
+  decompositionCandidateListResultSchema,
+  decompositionCandidateReviseRequestSchema,
+  decompositionCandidateDecideRequestSchema,
+  importCandidateProposeRequestSchema,
+  importCandidateProposeResultSchema,
   workspaceRestoreRequestSchema,
   workspaceRestoreResultSchema,
   safeChangeSetDetailSchema,
@@ -58,6 +86,19 @@ import {
   type CheckpointHistoryEntry,
   type WorkspaceHistoryResult,
   type WorkspaceRestoreResult,
+  type ProjectDoctorResult,
+  type StoryProfileCreateResult,
+  type StoryProfileListResult,
+  type StartProfileResult,
+  type StartProfileListResult,
+  type PlaythroughResult,
+  type PlaythroughInspectResult,
+  type PlaythroughListResult,
+  type PlayTurnListResult,
+  type SourceListResult,
+  type SourceAddResult,
+  type SourceParseResult,
+  type DecompositionCandidateListResult,
 } from "../shared/ipcContract";
 import { openWorkspace, type WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
@@ -65,6 +106,7 @@ import { CreativeDocumentRepository } from "../domain/workspace/creativeDocument
 import { CreativeRelationRepository } from "../domain/workspace/creativeRelationRepository";
 import { ConstraintProfileRepository } from "../domain/workspace/constraintProfileRepository";
 import { ConstraintProfileService } from "../domain/workspace/constraintProfileService";
+import { ProjectFileVersionService } from "../domain/workspace/projectFileVersionService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import { DocumentEditorService } from "../domain/workspace/documentEditorService";
 import { CreativeDocumentEditorService } from "../domain/workspace/creativeDocumentEditorService";
@@ -75,7 +117,22 @@ import { SemanticGraphService } from "../domain/graph/semanticGraphService";
 import type { AgentToolGateway } from "./agentProcessSupervisor";
 import { createWorkspaceAgentToolGateway } from "./workspaceAgentToolGateway";
 import { AgentAuditRepository } from "../domain/audit/agentAuditRepository";
+import { ProjectDoctorService } from "../domain/doctor/projectDoctorService";
+import { StoryProfileRepository } from "../domain/story/storyProfileRepository";
+import { PlaythroughRepository } from "../domain/play/playthroughRepository";
+import { StartProfileRepository } from "../domain/play/startProfileRepository";
+import { PlaythroughReconciliationService } from "../domain/play/playthroughReconciliationService";
 import type { AgentRuntimeLease } from "./agentProcessSupervisor";
+import type { PlayerRuntimeLease } from "./playerProcessSupervisor";
+import { PlayerAuditRepository } from "../domain/audit/playerAuditRepository";
+import { PlayerRunCommitService } from "../domain/play/playerRunCommitService";
+import { PlayerTurnContextService } from "../domain/play/playerTurnContextService";
+import { SourceImportService } from "../domain/import/sourceImportService";
+import { DecomposerRunService } from "../domain/import/decomposerRunService";
+import { ImportCandidateChangeSetService } from "../domain/import/importCandidateChangeSetService";
+import type { DecomposerRuntimeLease } from "./decomposerProcessSupervisor";
+import { SourceLibraryRepository, type SourceLibraryEntry } from "../domain/import/sourceLibraryRepository";
+import type { DecompositionCandidateRecord } from "../domain/import/decompositionCandidateRepository";
 
 export class WorkspaceSession {
   #workspace: WorkspaceDatabase | null = null;
@@ -109,6 +166,44 @@ export class WorkspaceSession {
     return new AgentAuditRepository(this.requireWorkspace()).getLatestContextBudget();
   }
 
+  inspectProject() {
+    return new ProjectDoctorService(this.requireWorkspace()).inspect();
+  }
+
+  createStoryProfile(input: { storyResourceId: string; worldResourceId: string; title: string; ocBindings: Array<{ ocResourceId: string; variantResourceId?: string | null }> }) {
+    const workspace = this.requireWorkspace();
+    const canonCommitId = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+    return new StoryProfileRepository(workspace).create({ ...input, canonCommitId });
+  }
+
+  listStoryProfiles() { return new StoryProfileRepository(this.requireWorkspace()).list(); }
+
+  createStartProfile(input: Parameters<StartProfileRepository["create"]>[0]) {
+    return new StartProfileRepository(this.requireWorkspace()).create(input);
+  }
+
+  listStartProfiles(storyProfileId: string) {
+    return new StartProfileRepository(this.requireWorkspace()).listForStory(storyProfileId);
+  }
+
+  createPlaythroughFromStart(storyProfileId: string, startProfileId?: string | null) {
+    return new PlaythroughRepository(this.requireWorkspace()).create({ storyProfileId, startProfileId });
+  }
+
+  listPlaythroughs(storyProfileId: string) { return new PlaythroughRepository(this.requireWorkspace()).listForStoryProfile(storyProfileId); }
+  listPlayTurns(playthroughId: string) { return new PlaythroughRepository(this.requireWorkspace()).listTurns(playthroughId); }
+  listSources() { return new SourceLibraryRepository(this.requireWorkspace()).list(); }
+  getSourceImportService() { return new SourceImportService(this.requireWorkspace()); }
+  proposeImportCandidates(input: { sourceId: string; targetResourceId: string; candidateIds: string[] }) { return new ImportCandidateChangeSetService(this.requireWorkspace()).propose(input); }
+
+  inspectPlaythrough(playthroughId: string) {
+    return new PlaythroughReconciliationService(this.requireWorkspace()).inspect(playthroughId);
+  }
+
+  resolvePlaythrough(input: { playthroughId: string; decision: "continue_pinned" | "fork_from_current" }) {
+    return new PlaythroughReconciliationService(this.requireWorkspace()).resolve(input);
+  }
+
   getActiveCheckpointId(): string {
     return new CheckpointRepository(this.requireWorkspace()).getActiveBranch().headCheckpointId;
   }
@@ -117,11 +212,18 @@ export class WorkspaceSession {
     if (this.#activeAgentLeases > 0) {
       throw Object.assign(new Error("An Agent run is using the current workspace."), { code: "WORKSPACE_AGENT_RUN_ACTIVE" });
     }
-    const checkpoints = new CheckpointRepository(this.requireWorkspace());
+    const workspace = this.requireWorkspace();
+    const checkpoints = new CheckpointRepository(workspace);
     const target = checkpoints.listActiveHistory().find((checkpoint) => checkpoint.id === checkpointId && !checkpoint.isHead);
     if (!target) throw Object.assign(new Error("Checkpoint is not restorable."), { code: "CHECKPOINT_NOT_FOUND" });
     const label = new Date().toISOString().replace(/[:.]/g, "-");
-    checkpoints.restoreFromCheckpoint(checkpointId, `回溯-${label}`);
+    const rollbackFiles = new ProjectFileVersionService(workspace).restoreToCheckpoint(checkpointId);
+    try {
+      checkpoints.restoreFromCheckpoint(checkpointId, `回溯-${label}`);
+    } catch (error) {
+      rollbackFiles();
+      throw error;
+    }
     return this.snapshot();
   }
 
@@ -141,16 +243,47 @@ export class WorkspaceSession {
     const policy = this.#changeSetPolicy;
     if (!workspace || !policy) return null;
     this.#activeAgentLeases += 1;
+    const scopes = resolveWorkspaceAgentScopes(workspace);
     let released = false;
     return {
       gateway: this.#serializeWrites(createWorkspaceAgentToolGateway(workspace, policy, () => this.#workspace === workspace)),
       audit: new AgentAuditRepository(workspace),
+      authorizedScopeResourceIds: scopes.authorized,
+      defaultScopeResourceIds: scopes.defaults,
       release: () => {
         if (released) return;
         released = true;
         this.#activeAgentLeases -= 1;
       },
     };
+  }
+
+  acquirePlayerRuntimeLease(): PlayerRuntimeLease | null {
+    const workspace = this.#workspace;
+    if (!workspace) return null;
+    this.#activeAgentLeases += 1;
+    let released = false;
+    return {
+      audit: new PlayerAuditRepository(workspace),
+      commit: new PlayerRunCommitService(workspace),
+      prepare: (input) => {
+        if (this.#workspace !== workspace) throw Object.assign(new Error("Workspace changed."), { code: "PLAYER_WORKSPACE_REQUIRED" });
+        return new PlayerTurnContextService(workspace).prepare(input);
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        this.#activeAgentLeases -= 1;
+      },
+    };
+  }
+
+  acquireDecomposerRuntimeLease(): DecomposerRuntimeLease | null {
+    const workspace = this.#workspace; if (!workspace) return null;
+    this.#activeAgentLeases += 1; let released = false;
+    return { service: new DecomposerRunService(workspace), release: () => {
+      if (released) return; released = true; this.#activeAgentLeases -= 1;
+    } };
   }
 
   getDocument(resourceId: string): EditorDocumentSnapshot {
@@ -301,12 +434,22 @@ export class WorkspaceSession {
   #serializeWrites(gateway: AgentToolGateway): AgentToolGateway {
     return {
       retrieveGraphEvidence: (args, context) => gateway.retrieveGraphEvidence(args, context),
+      inspectProjectFiles: (args, context) => gateway.inspectProjectFiles(args, context),
       proposeChangeSet: (args, context) => this.#writeQueue.run(
         context.signal,
         () => gateway.proposeChangeSet(args, context),
       ),
     };
   }
+}
+
+function resolveWorkspaceAgentScopes(workspace: WorkspaceDatabase): { authorized: string[]; defaults: string[] } {
+  const resources = new ResourceRepository(workspace).listCurrent();
+  const authorized = resources.map((resource) => resource.id);
+  const projectObjects = resources.filter((resource) => resource.objectKind !== "domain_root");
+  const roots = resources.filter((resource) => resource.objectKind === "domain_root");
+  const defaults = (projectObjects.length > 0 ? projectObjects : roots).slice(0, 100).map((resource) => resource.id);
+  return { authorized, defaults };
 }
 
 export class ProjectWriteQueue {
@@ -332,6 +475,78 @@ export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolic
   ipcMain.handle(desktopIpcChannels.workspaceContextBudget, () => (
     nullableContextBudgetAuditSchema.parse(session.getCurrent() ? session.getLatestContextBudget() : null)
   ));
+  ipcMain.handle(desktopIpcChannels.workspaceDoctor, () => projectDoctorResult(() => session.inspectProject()));
+  ipcMain.handle(desktopIpcChannels.storyProfileCreate, (_event, payload: unknown) => storyProfileResult(() => {
+    const request = storyProfileCreateRequestSchema.parse(payload);
+    return session.createStoryProfile(request);
+  }));
+  ipcMain.handle(desktopIpcChannels.storyProfileList, () => storyProfileListResult(() => session.listStoryProfiles()));
+  ipcMain.handle(desktopIpcChannels.startProfileCreate, (_event, payload: unknown) => startProfileResult(() => {
+    const request = startProfileCreateRequestSchema.parse(payload);
+    return session.createStartProfile(request);
+  }));
+  ipcMain.handle(desktopIpcChannels.startProfileList, (_event, payload: unknown) => startProfileListResult(() => {
+    const request = startProfileListRequestSchema.parse(payload);
+    return session.listStartProfiles(request.storyProfileId);
+  }));
+  ipcMain.handle(desktopIpcChannels.playthroughCreate, (_event, payload: unknown) => playthroughResult(() => {
+    const request = playthroughCreateRequestSchema.parse(payload);
+    return session.createPlaythroughFromStart(request.storyProfileId, request.startProfileId);
+  }));
+  ipcMain.handle(desktopIpcChannels.playthroughList, (_event, payload: unknown) => playthroughListResult(() => {
+    const request = playthroughListRequestSchema.parse(payload);
+    return session.listPlaythroughs(request.storyProfileId);
+  }));
+  ipcMain.handle(desktopIpcChannels.playTurnList, (_event, payload: unknown) => playTurnListResult(() => {
+    const request = playTurnListRequestSchema.parse(payload);
+    return session.listPlayTurns(request.playthroughId);
+  }));
+  ipcMain.handle(desktopIpcChannels.sourceList, () => sourceListResult(() => session.listSources()));
+  ipcMain.handle(desktopIpcChannels.sourceAdd, async (event, payload: unknown) => {
+    const request = sourceAddRequestSchema.parse(payload);
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const options = {
+      title: "添加小说或世界资料",
+      properties: ["openFile"] as Electron.OpenDialogOptions["properties"],
+      filters: [{ name: "支持的资料", extensions: ["txt", "md", "markdown", "docx", "epub", "png", "jpg", "jpeg", "webp", "gif"] }],
+    };
+    const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+    if (result.canceled || !result.filePaths[0]) return sourceAddResultSchema.parse({ status: "cancelled" });
+    try {
+      const source = session.getSourceImportService().register(result.filePaths[0], request.rightsAttestation);
+      return sourceAddResultSchema.parse({ status: "added", source: publicSource(source) });
+    } catch (error) { return sourceAddResultSchema.parse({ status: "failed", error: publicSourceError(error) }); }
+  });
+  ipcMain.handle(desktopIpcChannels.sourceParse, (_event, payload: unknown) => sourceParseResult(() => {
+    const request = sourceParseRequestSchema.parse(payload);
+    return session.getSourceImportService().parse(request.sourceId);
+  }));
+  ipcMain.handle(desktopIpcChannels.decompositionCandidateList, (_event, payload: unknown) => decompositionCandidateListResult(() => {
+    const request = decompositionCandidateListRequestSchema.parse(payload);
+    return session.getSourceImportService().listCandidateReviews(request.sourceId);
+  }));
+  ipcMain.handle(desktopIpcChannels.decompositionCandidateRevise, (_event, payload: unknown) => decompositionCandidateListResult(() => {
+    const request = decompositionCandidateReviseRequestSchema.parse(payload);
+    const candidate = session.getSourceImportService().revise(request.candidateId, request.payload);
+    return session.getSourceImportService().listCandidateReviews(candidate.sourceId);
+  }));
+  ipcMain.handle(desktopIpcChannels.decompositionCandidateDecide, (_event, payload: unknown) => decompositionCandidateListResult(() => {
+    const request = decompositionCandidateDecideRequestSchema.parse(payload);
+    const candidate = session.getSourceImportService().decide(request.candidateId, request.decision);
+    return session.getSourceImportService().listCandidateReviews(candidate.sourceId);
+  }));
+  ipcMain.handle(desktopIpcChannels.importCandidatePropose, (_event, payload: unknown) => {
+    try { const request = importCandidateProposeRequestSchema.parse(payload); const changeSet = session.proposeImportCandidates(request); return importCandidateProposeResultSchema.parse({ ok: true, changeSetId: changeSet.id, itemCount: changeSet.items.length }); }
+    catch (error) { return importCandidateProposeResultSchema.parse({ ok: false, error: publicSourceError(error) }); }
+  });
+  ipcMain.handle(desktopIpcChannels.playthroughInspect, (_event, payload: unknown) => playthroughInspectResult(() => {
+    const request = playthroughInspectRequestSchema.parse(payload);
+    return session.inspectPlaythrough(request.playthroughId);
+  }));
+  ipcMain.handle(desktopIpcChannels.playthroughResolve, (_event, payload: unknown) => playthroughResult(() => {
+    const request = playthroughResolveRequestSchema.parse(payload);
+    return session.resolvePlaythrough(request);
+  }));
   ipcMain.handle(desktopIpcChannels.workspaceRestore, (_event, payload: unknown) => {
     const request = workspaceRestoreRequestSchema.parse(payload);
     return workspaceRestoreResult(() => session.restoreCheckpoint(request.checkpointId));
@@ -517,6 +732,134 @@ function workspaceRestoreResult(operation: () => WorkspaceSnapshot): WorkspaceRe
   } catch (error) {
     return workspaceRestoreResultSchema.parse({ ok: false, error: publicWorkspaceHistoryError(error) });
   }
+}
+
+function projectDoctorResult(operation: () => unknown): ProjectDoctorResult {
+  try {
+    return projectDoctorResultSchema.parse({ ok: true, report: operation() });
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      && String((error as { code: unknown }).code) === "WORKSPACE_NOT_OPEN"
+      ? "WORKSPACE_NOT_OPEN"
+      : "PROJECT_DOCTOR_FAILED";
+    const message = code === "WORKSPACE_NOT_OPEN"
+      ? "尚未打开工作区。"
+      : "项目体检失败，请重试。";
+    return projectDoctorResultSchema.parse({ ok: false, error: { code, message } });
+  }
+}
+
+function storyProfileResult(operation: () => unknown): StoryProfileCreateResult {
+  try {
+    return storyProfileCreateResultSchema.parse({ ok: true, profile: operation() });
+  } catch (error) {
+    return storyProfileCreateResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
+function storyProfileListResult(operation: () => unknown): StoryProfileListResult {
+  try { return storyProfileListResultSchema.parse({ ok: true, profiles: operation() }); }
+  catch (error) { return storyProfileListResultSchema.parse({ ok: false, error: publicPlayError(error) }); }
+}
+
+function startProfileResult(operation: () => unknown): StartProfileResult {
+  try {
+    return startProfileResultSchema.parse({ ok: true, startProfile: operation() });
+  } catch (error) {
+    return startProfileResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
+function startProfileListResult(operation: () => unknown): StartProfileListResult {
+  try {
+    return startProfileListResultSchema.parse({ ok: true, startProfiles: operation() });
+  } catch (error) {
+    return startProfileListResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
+function playthroughResult(operation: () => unknown): PlaythroughResult {
+  try {
+    return playthroughResultSchema.parse({ ok: true, playthrough: operation() });
+  } catch (error) {
+    return playthroughResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
+function playthroughListResult(operation: () => unknown): PlaythroughListResult {
+  try { return playthroughListResultSchema.parse({ ok: true, playthroughs: operation() }); }
+  catch (error) { return playthroughListResultSchema.parse({ ok: false, error: publicPlayError(error) }); }
+}
+
+function playTurnListResult(operation: () => unknown): PlayTurnListResult {
+  try {
+    const turns = operation() as Array<{ id: string; playthroughId: string; sequence: number; playerAction: string; writerText: string; stateSnapshot: unknown; createdAt: string }>;
+    return playTurnListResultSchema.parse({ ok: true, turns: turns.map((turn) => ({ id: turn.id, playthroughId: turn.playthroughId,
+      sequence: turn.sequence, playerAction: turn.playerAction, writerText: turn.writerText, stateSnapshot: turn.stateSnapshot, createdAt: turn.createdAt })) });
+  } catch (error) { return playTurnListResultSchema.parse({ ok: false, error: publicPlayError(error) }); }
+}
+
+function sourceListResult(operation: () => unknown): SourceListResult {
+  try { return sourceListResultSchema.parse({ ok: true, sources: (operation() as SourceLibraryEntry[]).map(publicSource) }); }
+  catch (error) { return sourceListResultSchema.parse({ ok: false, error: publicSourceError(error) }); }
+}
+
+function sourceParseResult(operation: () => unknown): SourceParseResult {
+  try { const result = operation() as ReturnType<SourceImportService["parse"]>; return sourceParseResultSchema.parse({ ok: true, source: publicSource(result.source), chunkCount: result.chunkCount }); }
+  catch (error) { return sourceParseResultSchema.parse({ ok: false, error: publicSourceError(error) }); }
+}
+
+function decompositionCandidateListResult(operation: () => unknown): DecompositionCandidateListResult {
+  try { return decompositionCandidateListResultSchema.parse({ ok: true, candidates: (operation() as ReturnType<SourceImportService["listCandidateReviews"]>).map(publicCandidate) }); }
+  catch (error) { return decompositionCandidateListResultSchema.parse({ ok: false, error: publicSourceError(error) }); }
+}
+
+function publicSource(source: SourceLibraryEntry) {
+  return { id: source.id, displayName: source.displayName, format: source.format, byteSize: source.byteSize,
+    rightsAttestation: source.rightsAttestation, state: source.state, createdAt: source.createdAt };
+}
+
+function publicCandidate(candidate: DecompositionCandidateRecord & { sources: Array<{ chunkId: string; locator: Record<string, unknown>; excerpt: string; contentSha256: string }> }) {
+  return { id: candidate.id, sourceId: candidate.sourceId, jobId: candidate.jobId, kind: candidate.kind, payload: candidate.payload,
+    confidence: candidate.confidence, status: candidate.status, revision: candidate.revision, createdAt: candidate.createdAt, sources: candidate.sources };
+}
+
+function publicSourceError(error: unknown) {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code).slice(0, 120) : "SOURCE_OPERATION_FAILED";
+  const messages: Record<string, string> = {
+    SOURCE_RIGHTS_ATTESTATION_REQUIRED: "需要先确认资料的使用权。",
+    SOURCE_FILE_CHANGED: "来源文件已经变化，请重新添加。",
+    SOURCE_FILE_MISSING: "来源文件已被移动或删除。",
+    SOURCE_FORMAT_UNSUPPORTED: "暂不支持这种文件格式。",
+    SOURCE_TEXT_ENCODING_UNSUPPORTED: "无法识别文本编码。",
+    SOURCE_ARCHIVE_LIMIT_EXCEEDED: "压缩文档超过安全解析限制。",
+    DECOMPOSITION_CANDIDATE_ALREADY_DECIDED: "这个候选已经完成审核。",
+    IMPORT_TARGET_INVALID: "请选择有效的世界、故事或 OC 作为导入目标。",
+    IMPORT_CANDIDATES_REQUIRED: "请至少选择一个已接受候选。",
+    IMPORT_CANDIDATE_NOT_ACCEPTED: "候选未接受、来源不匹配或已失效。",
+    IMPORT_AMBIGUITY_NOT_PROPOSABLE: "歧义候选需要先由用户裁定，不能直接生成变更集。",
+    IMPORT_PROVENANCE_INCOMPLETE: "导入来源关联不完整，变更集已阻止提交。",
+  };
+  return { code, message: messages[code] ?? "来源资料操作失败，请检查文件后重试。" };
+}
+
+function playthroughInspectResult(operation: () => unknown): PlaythroughInspectResult {
+  try {
+    return playthroughInspectResultSchema.parse({ ok: true, reconciliation: operation() });
+  } catch (error) {
+    return playthroughInspectResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
+function publicPlayError(error: unknown) {
+  const internal = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  if (internal === "WORKSPACE_NOT_OPEN") return { code: "WORKSPACE_NOT_OPEN" as const, message: "尚未打开工作区。" };
+  if (internal === "PLAYTHROUGH_NOT_FOUND") return { code: "PLAYTHROUGH_NOT_FOUND" as const, message: "找不到这个游玩存档。" };
+  if (internal.startsWith("STORY_PROFILE_")) return { code: "STORY_PROFILE_INVALID" as const, message: "故事配置不完整或正史版本尚未就绪。" };
+  if (internal.startsWith("START_PROFILE_")) return { code: "START_PROFILE_INVALID" as const, message: "起始模板无效、未启用或来源审核尚未完成。" };
+  if (internal.startsWith("PLAYTHROUGH_RECONCILIATION_")) return { code: "PLAYTHROUGH_RECONCILIATION_REQUIRED" as const, message: "需要先选择继续旧存档或创建新分支。" };
+  if (internal.startsWith("PLAYTHROUGH_") || internal.startsWith("PLAY_")) return { code: "PLAY_OPERATION_INVALID" as const, message: "当前游玩操作不符合存档状态。" };
+  return { code: "PLAY_OPERATION_FAILED" as const, message: "游玩存档操作失败，请重试。" };
 }
 
 function publicWorkspaceHistoryError(error: unknown) {

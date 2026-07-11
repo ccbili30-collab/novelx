@@ -10,7 +10,9 @@ interface AgentArtifactListProps {
 export function AgentArtifactList({ artifacts, onOpenChangeSet, onOpenDocumentReference }: AgentArtifactListProps) {
   if (artifacts.length === 0) return null;
   return (
-    <div className="agent-artifacts" aria-label="Agent 产物">
+    <details className="agent-artifacts" aria-label="Agent 已处理内容">
+      <summary>已处理 {artifacts.length} 项</summary>
+      <div className="agent-artifacts__body">
       {artifacts.map((artifact, index) => {
         const key = `${artifact.kind}-${index}`;
         if (artifact.kind === "tool_call") {
@@ -18,6 +20,14 @@ export function AgentArtifactList({ artifacts, onOpenChangeSet, onOpenDocumentRe
             <section className="agent-artifact agent-artifact--tool" key={key}>
               <Wrench size={15} aria-hidden="true" />
               <div><strong>{artifact.label}</strong><small>{toolStatusLabel(artifact.status)}</small></div>
+            </section>
+          );
+        }
+        if (artifact.kind === "activity") {
+          return (
+            <section className={`agent-artifact agent-artifact--activity agent-artifact--${artifact.status}`} key={key}>
+              {artifact.status === "succeeded" ? <CheckCircle2 size={15} aria-hidden="true" /> : <AlertTriangle size={15} aria-hidden="true" />}
+              <div><strong>{artifact.label}</strong><small>{artifact.status === "succeeded" ? "已完成" : "未完成"}</small>{artifact.detail ? <p>{artifact.detail}</p> : null}</div>
             </section>
           );
         }
@@ -64,7 +74,8 @@ export function AgentArtifactList({ artifacts, onOpenChangeSet, onOpenDocumentRe
           </section>
         );
       })}
-    </div>
+      </div>
+    </details>
   );
 }
 

@@ -87,7 +87,7 @@ export async function handleAgentWorkerCommand(
       signal,
       onEvent: (projected) => {
         if (projected.type === "text.delta") return;
-        if (projected.tool === "retrieve_graph_evidence" || projected.tool === "propose_change_set") return;
+        if (["retrieve_graph_evidence", "inspect_project_files", "propose_change_set"].includes(projected.tool)) return;
         emit({
           type: "run.activity",
           runId: command.runId,
@@ -107,7 +107,11 @@ export async function handleAgentWorkerCommand(
       outcome: runtimeResult.output.status,
       message: projectPublicMessage(runtimeResult.output),
       changeSetState: runtimeResult.output.changeSet.state,
-      artifacts: projectPublicArtifacts(runtimeResult.output, runtimeResult.retrievedDocuments),
+      artifacts: projectPublicArtifacts(
+        runtimeResult.output,
+        runtimeResult.retrievedDocuments,
+        runtimeResult.inspectedFiles,
+      ),
     });
   } catch (cause) {
     emitFailure(command.runId, cause, emit);
@@ -117,9 +121,11 @@ export async function handleAgentWorkerCommand(
 export function projectPublicArtifacts(
   output: StewardOutput,
   retrievedDocuments: Array<{ documentId: string; title: string; versionId: string; content: string }> = [],
+  inspectedFiles: Array<{ path: string; sha256: string; kind: "text" | "binary"; complete: boolean }> = [],
 ): AgentArtifact[] {
   const toolLabels: Record<StewardOutput["toolOutcomes"][number]["tool"], string> = {
     retrieve_graph_evidence: "检索图谱与稳定资料",
+    inspect_project_files: "检查项目文件",
     propose_change_set: "生成变更集",
     writer: "写手处理",
     checker: "一致性检查",
@@ -160,6 +166,14 @@ export function projectPublicArtifacts(
     },
     excerpt: document.content.slice(0, 500) || null,
   })));
+  artifacts.push(...inspectedFiles.map((file): AgentArtifact => ({
+    kind: "activity",
+    label: file.path,
+    status: "succeeded",
+    detail: file.kind === "binary"
+      ? "已读取文件元数据。"
+      : file.complete ? "已读取完整文本。" : "已读取文本片段。",
+  })));
   return artifacts;
 }
 
@@ -185,7 +199,29 @@ function projectPublicMessage(output: Awaited<ReturnType<typeof runStewardRuntim
 
 function emitFailure(runId: string, cause: unknown, emit: (event: AgentRunEvent) => void): void {
   const error = toPublicError(cause);
-  emit({ type: "run.failed", runId, ...error });
+  emit({ type: "run.failed", runId, ...error, artifacts: projectFailureArtifacts(cause, error.message) });
+}
+
+function projectFailureArtifacts(cause: unknown, message: string): AgentArtifact[] {
+  const outcomes = cause && typeof cause === "object" && "publicToolOutcomes" in cause
+    ? cause.publicToolOutcomes
+    : [];
+  const tools = Array.isArray(outcomes) ? outcomes.flatMap((value): AgentArtifact[] => {
+    if (!value || typeof value !== "object" || !("tool" in value) || !("status" in value)) return [];
+    const tool = value.tool;
+    const status = value.status;
+    if (!(["retrieve_graph_evidence", "inspect_project_files", "propose_change_set", "writer", "checker"] as const).includes(tool as never)) return [];
+    if (status !== "succeeded" && status !== "failed") return [];
+    const labels = {
+      retrieve_graph_evidence: "检索项目资料",
+      inspect_project_files: "检查项目文件",
+      propose_change_set: "生成候选变更",
+      writer: "写手处理",
+      checker: "一致性检查",
+    } as const;
+    return [{ kind: "tool_call", tool: tool as keyof typeof labels, label: labels[tool as keyof typeof labels], status }];
+  }) : [];
+  return [...tools, { kind: "activity", label: "生成回复", status: "failed", detail: message }];
 }
 
 function workerError(code: string): Error & { code: string } {

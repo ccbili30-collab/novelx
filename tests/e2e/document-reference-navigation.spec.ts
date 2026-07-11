@@ -48,6 +48,7 @@ test("opens a persisted stable document reference at its structured line locator
     });
     const page = await app.firstWindow();
     await expect(page.getByText("已根据稳定资料完成核验。", { exact: true })).toBeVisible();
+    await page.getByText("已处理 1 项", { exact: true }).click();
     const artifact = page.getByRole("button", { name: /潮汐纪年法.*第 2 行.*稳定版本/ });
     await expect(artifact).toBeVisible();
     await artifact.click();

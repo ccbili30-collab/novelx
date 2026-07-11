@@ -9,6 +9,7 @@ export type SafePiEvent =
 const safeToolLabels: Record<string, string> = {
   submit_steward_plan: "规划执行步骤",
   retrieve_graph_evidence: "检索项目事实",
+  inspect_project_files: "检查项目文件",
   propose_change_set: "生成候选变更",
   writer: "调用写手",
   checker: "调用校验器",

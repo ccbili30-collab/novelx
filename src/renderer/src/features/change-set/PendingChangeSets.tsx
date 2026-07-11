@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckSquare2, ChevronRight } from "lucide-react";
+import { AlertTriangle, ChevronRight } from "lucide-react";
 import type { SafeChangeSetSummary } from "../../../../shared/ipcContract";
 
 export function PendingChangeSets(props: {
@@ -14,6 +14,7 @@ export function PendingChangeSets(props: {
   useEffect(() => {
     let active = true;
     setFailed(false);
+    setItems([]);
     void window.novaxDesktop.changeSet.listPending().then((result) => {
       if (!active) return;
       if (result.ok) setItems(result.changeSets);
@@ -24,6 +25,8 @@ export function PendingChangeSets(props: {
     return () => { active = false; };
   }, [props.workspaceId, props.refreshKey]);
 
+  if (!failed && items.length === 0) return null;
+
   return (
     <section className="pending-changes" aria-label="待审查变更">
       <div className="pending-changes-heading">
@@ -32,8 +35,6 @@ export function PendingChangeSets(props: {
       </div>
       {failed ? (
         <div className="pending-changes-empty"><AlertTriangle size={14} aria-hidden="true" />载入失败</div>
-      ) : items.length === 0 ? (
-        <div className="pending-changes-empty"><CheckSquare2 size={14} aria-hidden="true" />暂无待审查变更</div>
       ) : (
         <div className="pending-change-list">
           {items.map((item) => (

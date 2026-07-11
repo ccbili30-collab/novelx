@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Boxes, Download, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings } from "lucide-react";
+import { BookOpen, Boxes, Download, FileInput, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings } from "lucide-react";
 import type { AgentArtifact, CollaborationListResult, CreativeWorkspaceMutation, HandoffSummary, ProjectAddResult, ProjectSummary, SessionSummary, WorkspaceSnapshot } from "../../shared/ipcContract";
 import type { DesktopUpdateState } from "../../shared/desktopUpdateContract";
 import { StewardRuntimePanel } from "./features/agent/StewardRuntimePanel";
+import { resolveAgentScopeResourceIds } from "../../shared/agentScope";
 import { ProjectActivityPanel } from "./features/activity/ProjectActivityPanel";
 import { ChangeSetWorkbench } from "./features/change-set/ChangeSetWorkbench";
 import { EditorHost, type EditorHostHandle } from "./features/editor/EditorHost";
@@ -10,6 +11,7 @@ import { CreativeDocumentEditorHost } from "./features/editor/CreativeDocumentEd
 import { DocumentTabs } from "./features/editor/DocumentTabs";
 import { CreateDocumentDialog } from "./features/editor/CreateDocumentDialog";
 import { CheckpointHistoryDialog } from "./features/history/CheckpointHistoryDialog";
+import { ProjectDoctorDialog } from "./features/doctor/ProjectDoctorDialog";
 import { ProjectOnboardingDialog } from "./features/projects/ProjectOnboardingDialog";
 import { ProjectSessionRail } from "./features/projects/ProjectSessionRail";
 import { HandoffDialog } from "./features/projects/HandoffDialog";
@@ -19,6 +21,8 @@ import { ObjectMetadataPanel } from "./features/resources/ObjectMetadataPanel";
 import { MoveCreativeObjectDialog } from "./features/resources/MoveCreativeObjectDialog";
 import { DeleteCreativeObjectDialog, RenameCreativeObjectDialog } from "./features/resources/CreativeObjectCommandDialogs";
 import { applyThemePreference, readThemePreference, type NovaxTheme } from "../../shared/themePreference";
+import { PlayerWorkbench } from "./features/player/PlayerWorkbench";
+import { ImportWorkbench } from "./features/import/ImportWorkbench";
 
 const SemanticGraphView = lazy(async () => {
   const module = await import("./features/graph/SemanticGraphView");
@@ -30,7 +34,7 @@ const ProviderSettingsDialog = lazy(async () => {
   return { default: module.ProviderSettingsDialog };
 });
 
-type WorkbenchMode = "agent" | "ide";
+type WorkbenchMode = "player" | "agent" | "ide" | "import";
 type OnboardingState = Pick<ProjectAddResult, "project" | "detection">;
 
 export function App() {
@@ -51,6 +55,7 @@ export function App() {
   const [sessionMessageRefreshKey, setSessionMessageRefreshKey] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [doctorOpen, setDoctorOpen] = useState(false);
   const [updateState, setUpdateState] = useState<DesktopUpdateState | null>(null);
   const [addingProject, setAddingProject] = useState(false);
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
@@ -462,6 +467,7 @@ export function App() {
     await window.novaxDesktop.session.export({ sessionId });
   }
 
+  const agentScopeResourceIds = resolveAgentScopeResourceIds(workspace, selectedResourceId);
   const agentPanel = (
     <section className="agent-conversation-panel" aria-label="大管家">
       <div className="panel-heading">
@@ -472,7 +478,7 @@ export function App() {
         workspace={workspace}
         projectId={activeProjectId}
         session={activeSession}
-        scopeResourceIds={selectedResourceId ? [selectedResourceId] : []}
+        scopeResourceIds={agentScopeResourceIds}
         changeSetRefreshKey={changeSetRefreshKey}
         messageRefreshKey={sessionMessageRefreshKey}
         selectedChangeSetId={selectedChangeSetId}
@@ -489,6 +495,12 @@ export function App() {
     setHistoryOpen(true);
   }
 
+  async function openProjectDoctor(projectId = activeProjectId) {
+    if (!projectId) return;
+    if (projectId !== activeProjectId) await selectProject(projectId);
+    setDoctorOpen(true);
+  }
+
   const showUpdateCommand = updateState
     ? ["available", "downloading", "downloaded", "error"].includes(updateState.kind)
     : false;
@@ -499,11 +511,17 @@ export function App() {
         <strong className="brand">novelx</strong>
         <span className="workspace-state">{activeProject?.name ?? "未选择项目"}</span>
         <div className="mode-switch" role="radiogroup" aria-label="工作台模式">
+          <button type="button" role="radio" aria-checked={mode === "player"} onClick={() => setMode("player")}>
+            <BookOpen size={14} aria-hidden="true" />玩家模式
+          </button>
           <button type="button" role="radio" aria-checked={mode === "agent"} onClick={() => setMode("agent")}>
             <MessageSquareText size={14} aria-hidden="true" />Agent 模式
           </button>
           <button type="button" role="radio" aria-checked={mode === "ide"} onClick={() => setMode("ide")}>
             <PanelLeft size={14} aria-hidden="true" />IDE 模式
+          </button>
+          <button type="button" role="radio" aria-checked={mode === "import"} onClick={() => setMode("import")}>
+            <FileInput size={14} aria-hidden="true" />导入
           </button>
         </div>
         <button className="titlebar-command" data-testid="open-settings" type="button" onClick={() => setSettingsOpen(true)} title="设置">
@@ -515,7 +533,7 @@ export function App() {
         </button> : null}
       </header>
 
-      {mode === "agent" ? (
+      {mode === "player" ? <PlayerWorkbench workspace={workspace} /> : mode === "import" ? <ImportWorkbench workspace={workspace} /> : mode === "agent" ? (
         <div className="workbench-grid workbench-grid--agent">
           <ProjectSessionRail
             projects={projects}
@@ -537,6 +555,7 @@ export function App() {
             onDeleteSession={deleteSession}
             onExportSession={exportSession}
             onOpenProjectHistory={openProjectVersions}
+            onOpenProjectDoctor={openProjectDoctor}
           />
           {agentPanel}
           {selectedChangeSetId ? (
@@ -569,6 +588,7 @@ export function App() {
             onMove={setMoveResource}
             onDelete={setDeleteResourceTarget}
             onOpenHistory={() => void openProjectVersions()}
+            onOpenDoctor={() => void openProjectDoctor()}
           />
           <section className="canvas" aria-label="创作内容">
             {selectedChangeSetId ? (
@@ -603,7 +623,7 @@ export function App() {
 
       <footer className="statusbar">
         <span>{activeProject ? projectStateLabel(activeProject.state) : "本地"}</span>
-        <span>{activeSession ? `Agent：${activeSession.title}` : "尚未选择 Agent 会话"}</span>
+        <span>{mode === "player" ? "玩家模式" : mode === "import" ? "来源导入" : activeSession ? `Agent：${activeSession.title}` : "尚未选择 Agent 会话"}</span>
       </footer>
 
       {creativeError ? <div className="creative-operation-error" role="alert"><span>{creativeError}</span><button type="button" onClick={() => setCreativeError(null)}>关闭</button></div> : null}
@@ -617,6 +637,7 @@ export function App() {
         setSelectedChangeSetId(null);
         setChangeSetRefreshKey((value) => value + 1);
       }} /> : null}
+      {doctorOpen && workspace ? <ProjectDoctorDialog workspaceId={workspace.workspaceId} onClose={() => setDoctorOpen(false)} /> : null}
       {createObjectTarget ? <CreateCreativeObjectDialog
         domain={createObjectTarget.domain}
         parent={createObjectTarget.parent}

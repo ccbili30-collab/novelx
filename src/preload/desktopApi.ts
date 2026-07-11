@@ -35,6 +35,42 @@ import {
   graphSnapshotResultSchema,
   nullableWorkspaceSnapshotSchema,
   nullableContextBudgetAuditSchema,
+  projectDoctorResultSchema,
+  storyProfileCreateRequestSchema,
+  storyProfileCreateResultSchema,
+  storyProfileListResultSchema,
+  startProfileCreateRequestSchema,
+  startProfileListRequestSchema,
+  startProfileResultSchema,
+  startProfileListResultSchema,
+  playthroughCreateRequestSchema,
+  playthroughListRequestSchema,
+  playTurnListRequestSchema,
+  playthroughInspectRequestSchema,
+  playthroughResolveRequestSchema,
+  playthroughResultSchema,
+  playthroughInspectResultSchema,
+  playthroughListResultSchema,
+  playTurnListResultSchema,
+  playerTurnStartRequestSchema,
+  playerTurnStartResponseSchema,
+  playerTurnCancelRequestSchema,
+  playerTurnEventSchema,
+  sourceListResultSchema,
+  sourceAddRequestSchema,
+  sourceAddResultSchema,
+  sourceParseRequestSchema,
+  sourceParseResultSchema,
+  decompositionCandidateListRequestSchema,
+  decompositionCandidateListResultSchema,
+  decompositionCandidateReviseRequestSchema,
+  decompositionCandidateDecideRequestSchema,
+  decomposerStartRequestSchema,
+  decomposerStartResultSchema,
+  decomposerCancelRequestSchema,
+  publicDecomposerEventSchema,
+  importCandidateProposeRequestSchema,
+  importCandidateProposeResultSchema,
   nullableProjectAddResultSchema,
   projectInitializeRequestSchema,
   projectListResultSchema,
@@ -53,6 +89,8 @@ import {
   sessionListResultSchema,
   sessionMessageListRequestSchema,
   sessionMessageListResultSchema,
+  sessionRetractLastRequestSchema,
+  sessionRetractLastResultSchema,
   sessionRenameRequestSchema,
   sessionSummarySchema,
   sharedMemoryPublishRequestSchema,
@@ -179,6 +217,10 @@ export function exposeDesktopApi(): void {
         const safeRequest = sessionMessageListRequestSchema.parse(request);
         return sessionMessageListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sessionMessages, safeRequest));
       },
+      async retractLast(request) {
+        const safeRequest = sessionRetractLastRequestSchema.parse(request);
+        return sessionRetractLastResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sessionRetractLast, safeRequest));
+      },
     },
     collaboration: {
       async list(request) {
@@ -215,6 +257,9 @@ export function exposeDesktopApi(): void {
       async getLatestContextBudget() {
         return nullableContextBudgetAuditSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.workspaceContextBudget));
       },
+      async inspectProject() {
+        return projectDoctorResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.workspaceDoctor));
+      },
       async restore(request) {
         const safeRequest = workspaceRestoreRequestSchema.parse(request);
         return workspaceRestoreResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.workspaceRestore, safeRequest));
@@ -234,6 +279,92 @@ export function exposeDesktopApi(): void {
         );
         if (result.ok) return result.workspace;
         throw new Error(result.error.message);
+      },
+    },
+    play: {
+      async createStoryProfile(request) {
+        const safeRequest = storyProfileCreateRequestSchema.parse(request);
+        return storyProfileCreateResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.storyProfileCreate, safeRequest));
+      },
+      async listStoryProfiles() {
+        return storyProfileListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.storyProfileList));
+      },
+      async createStartProfile(request) {
+        const safeRequest = startProfileCreateRequestSchema.parse(request);
+        return startProfileResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.startProfileCreate, safeRequest));
+      },
+      async listStartProfiles(request) {
+        const safeRequest = startProfileListRequestSchema.parse(request);
+        return startProfileListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.startProfileList, safeRequest));
+      },
+      async createPlaythrough(request) {
+        const safeRequest = playthroughCreateRequestSchema.parse(request);
+        return playthroughResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughCreate, safeRequest));
+      },
+      async listPlaythroughs(request) {
+        const safeRequest = playthroughListRequestSchema.parse(request);
+        return playthroughListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughList, safeRequest));
+      },
+      async listTurns(request) {
+        const safeRequest = playTurnListRequestSchema.parse(request);
+        return playTurnListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playTurnList, safeRequest));
+      },
+      async inspect(request) {
+        const safeRequest = playthroughInspectRequestSchema.parse(request);
+        return playthroughInspectResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughInspect, safeRequest));
+      },
+      async resolve(request) {
+        const safeRequest = playthroughResolveRequestSchema.parse(request);
+        return playthroughResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughResolve, safeRequest));
+      },
+      async runTurn(request) {
+        const safeRequest = playerTurnStartRequestSchema.parse(request);
+        return playerTurnStartResponseSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playerTurnStart, safeRequest));
+      },
+      async cancelTurn(request) {
+        await ipcRenderer.invoke(desktopIpcChannels.playerTurnCancel, playerTurnCancelRequestSchema.parse(request));
+      },
+      subscribeTurns(listener) {
+        const handler = (_event: IpcRendererEvent, payload: unknown) => {
+          const parsed = playerTurnEventSchema.safeParse(payload);
+          if (parsed.success) listener(parsed.data);
+        };
+        ipcRenderer.on(desktopIpcChannels.playerTurnEvent, handler);
+        return () => ipcRenderer.removeListener(desktopIpcChannels.playerTurnEvent, handler);
+      },
+    },
+    sourceLibrary: {
+      async list() {
+        return sourceListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sourceList));
+      },
+      async add(request) {
+        return sourceAddResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sourceAdd, sourceAddRequestSchema.parse(request)));
+      },
+      async parse(request) {
+        return sourceParseResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sourceParse, sourceParseRequestSchema.parse(request)));
+      },
+      async listCandidates(request) {
+        return decompositionCandidateListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.decompositionCandidateList, decompositionCandidateListRequestSchema.parse(request)));
+      },
+      async reviseCandidate(request) {
+        return decompositionCandidateListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.decompositionCandidateRevise, decompositionCandidateReviseRequestSchema.parse(request)));
+      },
+      async decideCandidate(request) {
+        return decompositionCandidateListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.decompositionCandidateDecide, decompositionCandidateDecideRequestSchema.parse(request)));
+      },
+      async startDecomposer(request) {
+        return decomposerStartResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.decomposerStart, decomposerStartRequestSchema.parse(request)));
+      },
+      async cancelDecomposer(request) {
+        await ipcRenderer.invoke(desktopIpcChannels.decomposerCancel, decomposerCancelRequestSchema.parse(request));
+      },
+      subscribeDecomposer(listener) {
+        const handler = (_event: IpcRendererEvent, payload: unknown) => { const parsed = publicDecomposerEventSchema.safeParse(payload); if (parsed.success) listener(parsed.data); };
+        ipcRenderer.on(desktopIpcChannels.decomposerEvent, handler);
+        return () => ipcRenderer.removeListener(desktopIpcChannels.decomposerEvent, handler);
+      },
+      async proposeCandidates(request) {
+        return importCandidateProposeResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.importCandidatePropose, importCandidateProposeRequestSchema.parse(request)));
       },
     },
     document: {

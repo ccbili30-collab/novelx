@@ -32,6 +32,7 @@ export const desktopIpcChannels = {
   sessionDelete: "novax:session-delete",
   sessionExport: "novax:session-export",
   sessionMessages: "novax:session-messages",
+  sessionRetractLast: "novax:session-retract-last",
   collaborationList: "novax:collaboration-list",
   sharedMemoryPublish: "novax:shared-memory-publish",
   handoffCreate: "novax:handoff-create",
@@ -40,6 +41,29 @@ export const desktopIpcChannels = {
   workspaceCurrent: "novax:workspace-current",
   workspaceHistory: "novax:workspace-history",
   workspaceContextBudget: "novax:workspace-context-budget",
+  workspaceDoctor: "novax:workspace-doctor",
+  storyProfileCreate: "novax:story-profile-create",
+  storyProfileList: "novax:story-profile-list",
+  startProfileCreate: "novax:start-profile-create",
+  startProfileList: "novax:start-profile-list",
+  playthroughCreate: "novax:playthrough-create",
+  playthroughList: "novax:playthrough-list",
+  playTurnList: "novax:play-turn-list",
+  playthroughInspect: "novax:playthrough-inspect",
+  playthroughResolve: "novax:playthrough-resolve",
+  playerTurnStart: "novax:player-turn-start",
+  playerTurnCancel: "novax:player-turn-cancel",
+  playerTurnEvent: "novax:player-turn-event",
+  sourceList: "novax:source-list",
+  sourceAdd: "novax:source-add",
+  sourceParse: "novax:source-parse",
+  decompositionCandidateList: "novax:decomposition-candidate-list",
+  decompositionCandidateRevise: "novax:decomposition-candidate-revise",
+  decompositionCandidateDecide: "novax:decomposition-candidate-decide",
+  importCandidatePropose: "novax:import-candidate-propose",
+  decomposerStart: "novax:decomposer-start",
+  decomposerCancel: "novax:decomposer-cancel",
+  decomposerEvent: "novax:decomposer-event",
   workspaceRestore: "novax:workspace-restore",
   workspaceFlushRequest: "novax:workspace-flush-request",
   workspaceFlushComplete: "novax:workspace-flush-complete",
@@ -164,9 +188,15 @@ const artifactLocatorSchema = z.discriminatedUnion("kind", [
 export const agentArtifactSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("tool_call"),
-    tool: z.enum(["retrieve_graph_evidence", "propose_change_set", "writer", "checker"]),
+    tool: z.enum(["retrieve_graph_evidence", "inspect_project_files", "propose_change_set", "writer", "checker"]),
     label: z.string().trim().min(1).max(120),
     status: z.enum(["succeeded", "failed", "not_run"]),
+  }).strict(),
+  z.object({
+    kind: z.literal("activity"),
+    label: z.string().trim().min(1).max(120),
+    status: z.enum(["succeeded", "failed"]),
+    detail: z.string().trim().min(1).max(500).nullable(),
   }).strict(),
   z.object({
     kind: z.literal("change_set"),
@@ -218,6 +248,25 @@ export const sessionMessageListRequestSchema = z.object({ sessionId: opaqueIdSch
 export const sessionMessageListResultSchema = z.object({
   messages: z.array(sessionMessageSchema).max(100_000),
 }).strict();
+export const sessionRetractLastRequestSchema = z.object({ sessionId: opaqueIdSchema }).strict();
+export const sessionRetractLastResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    text: z.string().min(1).max(12_000),
+    session: sessionSummarySchema,
+    messages: z.array(sessionMessageSchema).max(100_000),
+  }).strict(),
+  z.object({
+    ok: z.literal(false),
+    code: z.enum([
+      "SESSION_RUN_ACTIVE",
+      "SESSION_LAST_USER_MESSAGE_NOT_FOUND",
+      "SESSION_LAST_EXCHANGE_HAS_PROJECT_EFFECTS",
+      "SESSION_RETRACT_FAILED",
+    ]),
+    message: z.string().min(1).max(500),
+  }).strict(),
+]);
 
 const collaborationScopeIdsSchema = z.array(z.string().trim().min(1).max(120)).max(100);
 
@@ -416,6 +465,272 @@ export const contextBudgetAuditSchema = z.object({
 
 export const nullableContextBudgetAuditSchema = contextBudgetAuditSchema.nullable();
 
+export const projectDoctorIssueSchema = z.object({
+  code: z.enum([
+    "COMMIT_UNSEALED",
+    "COMMIT_MANIFEST_MISMATCH",
+    "PROJECTION_MISSING",
+    "PROJECTION_FAILED",
+    "PROJECTION_STALE",
+  ]),
+  severity: z.enum(["warning", "blocked"]),
+  commitId: opaqueIdSchema,
+  projectionKind: z.string().min(1).max(120).nullable(),
+  repairAvailable: z.boolean(),
+}).strict();
+
+export const projectDoctorReportSchema = z.object({
+  status: z.enum(["healthy", "warning", "blocked"]),
+  checkedAt: z.iso.datetime(),
+  counts: z.object({
+    commits: z.number().int().min(0),
+    sealedCommits: z.number().int().min(0),
+    openBranchHeads: z.number().int().min(0),
+    successfulHeadProjections: z.number().int().min(0),
+  }).strict(),
+  issues: z.array(projectDoctorIssueSchema).max(100_000),
+  deferredCapabilities: z.array(z.enum(["timeline", "retrieval", "summary", "character_knowledge"])).max(4),
+}).strict();
+
+export const projectDoctorResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), report: projectDoctorReportSchema }).strict(),
+  z.object({
+    ok: z.literal(false),
+    error: z.object({
+      code: z.enum(["WORKSPACE_NOT_OPEN", "PROJECT_DOCTOR_FAILED"]),
+      message: z.string().min(1).max(240),
+    }).strict(),
+  }).strict(),
+]);
+
+export const storyProfileSchema = z.object({
+  id: opaqueIdSchema,
+  storyResourceId: opaqueIdSchema,
+  worldResourceId: opaqueIdSchema,
+  canonCommitId: opaqueIdSchema,
+  title: z.string().min(1).max(500),
+  status: z.enum(["draft", "active", "archived"]),
+  ocBindings: z.array(z.object({
+    ocResourceId: opaqueIdSchema,
+    variantResourceId: opaqueIdSchema.nullable(),
+  }).strict()).max(10_000),
+  createdAt: z.iso.datetime(),
+}).strict();
+
+export const storyProfileCreateRequestSchema = z.object({
+  storyResourceId: opaqueIdSchema,
+  worldResourceId: opaqueIdSchema,
+  title: z.string().trim().min(1).max(500),
+  ocBindings: z.array(z.object({
+    ocResourceId: opaqueIdSchema,
+    variantResourceId: opaqueIdSchema.nullable().optional(),
+  }).strict()).max(10_000).default([]),
+}).strict();
+
+const startProfileStateSchema = z.object({
+  openingSituation: z.string().trim().min(1).max(20_000),
+  initialState: z.record(z.string().trim().min(1).max(240), z.json()),
+  sourceCandidateIds: z.array(opaqueIdSchema).max(10_000),
+  excludedFutureEventCandidateIds: z.array(opaqueIdSchema).max(10_000),
+}).strict();
+
+export const startProfileSchema = z.object({
+  id: opaqueIdSchema,
+  storyProfileId: opaqueIdSchema,
+  sourceId: opaqueIdSchema.nullable(),
+  title: z.string().min(1).max(500),
+  startState: startProfileStateSchema,
+  status: z.enum(["draft", "active", "archived"]),
+  createdAt: z.iso.datetime(),
+}).strict();
+
+export const startProfileCreateRequestSchema = z.object({
+  storyProfileId: opaqueIdSchema,
+  sourceId: opaqueIdSchema.nullable().optional(),
+  title: z.string().trim().min(1).max(500),
+  startState: startProfileStateSchema,
+  status: z.enum(["draft", "active"]).default("draft"),
+}).strict();
+export const startProfileListRequestSchema = z.object({ storyProfileId: opaqueIdSchema }).strict();
+
+export const playthroughSchema = z.object({
+  id: opaqueIdSchema,
+  storyProfileId: opaqueIdSchema,
+  baselineCommitId: opaqueIdSchema,
+  parentPlaythroughId: opaqueIdSchema.nullable(),
+  startProfileId: opaqueIdSchema.nullable(),
+  initialStateSnapshot: z.record(z.string().min(1).max(240), z.json()).nullable(),
+  currentTurnId: opaqueIdSchema.nullable(),
+  status: z.enum(["active", "archived"]),
+  createdAt: z.iso.datetime(),
+}).strict();
+
+export const playthroughCreateRequestSchema = z.object({
+  storyProfileId: opaqueIdSchema,
+  startProfileId: opaqueIdSchema.nullable().optional(),
+}).strict();
+export const playthroughListRequestSchema = z.object({ storyProfileId: opaqueIdSchema }).strict();
+export const playTurnListRequestSchema = z.object({ playthroughId: opaqueIdSchema }).strict();
+export const playthroughInspectRequestSchema = z.object({ playthroughId: opaqueIdSchema }).strict();
+export const playthroughResolveRequestSchema = z.object({
+  playthroughId: opaqueIdSchema,
+  decision: z.enum(["continue_pinned", "fork_from_current"]),
+}).strict();
+
+export const playerTurnStartRequestSchema = z.object({
+  playthroughId: opaqueIdSchema,
+  playerAction: z.string().trim().min(1).max(12_000),
+}).strict();
+export const playerTurnStartResponseSchema = z.object({ runId: opaqueIdSchema }).strict();
+export const playerTurnCancelRequestSchema = z.object({ runId: opaqueIdSchema }).strict();
+export const playerTurnEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("started"), runId: opaqueIdSchema }).strict(),
+  z.object({
+    type: z.literal("completed"),
+    runId: opaqueIdSchema,
+    turn: z.object({
+      id: opaqueIdSchema,
+      playthroughId: opaqueIdSchema,
+      sequence: z.number().int().positive(),
+      writerText: z.string().min(1).max(100_000),
+      stateSnapshot: z.record(z.string().min(1).max(240), z.json()),
+      createdAt: z.iso.datetime(),
+    }).strict(),
+  }).strict(),
+  z.object({
+    type: z.literal("failed"),
+    runId: opaqueIdSchema,
+    error: z.object({ code: z.string().min(1).max(120), message: z.string().min(1).max(240) }).strict(),
+  }).strict(),
+]);
+
+export const publicPlayTurnSchema = z.object({
+  id: opaqueIdSchema,
+  playthroughId: opaqueIdSchema,
+  sequence: z.number().int().positive(),
+  playerAction: z.string().min(1).max(12_000),
+  writerText: z.string().min(1).max(100_000),
+  stateSnapshot: z.record(z.string().min(1).max(240), z.json()),
+  createdAt: z.iso.datetime(),
+}).strict();
+
+export const sourceLibraryEntrySchema = z.object({
+  id: opaqueIdSchema,
+  displayName: z.string().min(1).max(500),
+  format: z.enum(["txt", "markdown", "docx", "epub", "image"]),
+  byteSize: z.number().int().min(0),
+  rightsAttestation: z.enum(["user_owned", "licensed", "public_domain", "unknown"]),
+  state: z.enum(["registered", "parsed", "failed", "missing"]),
+  createdAt: z.iso.datetime(),
+}).strict();
+const sourceOperationErrorSchema = z.object({
+  code: z.string().min(1).max(120), message: z.string().min(1).max(240),
+}).strict();
+export const sourceListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), sources: z.array(sourceLibraryEntrySchema).max(100_000) }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
+export const sourceAddRequestSchema = z.object({ rightsAttestation: z.enum(["user_owned", "licensed", "public_domain", "unknown"]) }).strict();
+export const sourceAddResultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("added"), source: sourceLibraryEntrySchema }).strict(),
+  z.object({ status: z.literal("cancelled") }).strict(),
+  z.object({ status: z.literal("failed"), error: sourceOperationErrorSchema }).strict(),
+]);
+export const sourceParseRequestSchema = z.object({ sourceId: opaqueIdSchema }).strict();
+export const sourceParseResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), source: sourceLibraryEntrySchema, chunkCount: z.number().int().positive() }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
+export const decompositionCandidateReviewSchema = z.object({
+  id: opaqueIdSchema,
+  sourceId: opaqueIdSchema,
+  jobId: opaqueIdSchema,
+  kind: z.enum(["character", "world_rule", "location", "faction", "event", "style", "ambiguity"]),
+  payload: z.record(z.string(), z.json()),
+  confidence: z.number().min(0).max(1),
+  status: z.enum(["pending", "accepted", "rejected"]),
+  revision: z.number().int().positive(),
+  createdAt: z.iso.datetime(),
+  sources: z.array(z.object({
+    chunkId: opaqueIdSchema,
+    locator: z.record(z.string(), z.json()),
+    excerpt: z.string().max(2_000),
+    contentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict()).min(1).max(100),
+}).strict();
+export const decompositionCandidateListRequestSchema = z.object({ sourceId: opaqueIdSchema }).strict();
+export const decompositionCandidateListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), candidates: z.array(decompositionCandidateReviewSchema).max(100_000) }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
+export const decompositionCandidateReviseRequestSchema = z.object({ candidateId: opaqueIdSchema, payload: z.record(z.string(), z.json()) }).strict();
+export const decompositionCandidateDecideRequestSchema = z.object({ candidateId: opaqueIdSchema, decision: z.enum(["accepted", "rejected"]) }).strict();
+export const decomposerStartRequestSchema = z.object({ sourceId: opaqueIdSchema }).strict();
+export const decomposerStartResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), runId: opaqueIdSchema }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
+export const decomposerCancelRequestSchema = z.object({ runId: opaqueIdSchema }).strict();
+export const publicDecomposerEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("started"), runId: opaqueIdSchema, sourceId: opaqueIdSchema }).strict(),
+  z.object({ type: z.literal("completed"), runId: opaqueIdSchema, sourceId: opaqueIdSchema, candidateCount: z.number().int().nonnegative().max(1000) }).strict(),
+  z.object({ type: z.literal("failed"), runId: opaqueIdSchema, sourceId: opaqueIdSchema, error: sourceOperationErrorSchema }).strict(),
+]);
+export const importCandidateProposeRequestSchema = z.object({ sourceId: opaqueIdSchema, targetResourceId: opaqueIdSchema, candidateIds: z.array(opaqueIdSchema).min(1).max(100) }).strict();
+export const importCandidateProposeResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), changeSetId: opaqueIdSchema, itemCount: z.number().int().positive().max(500) }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
+
+export const playthroughReconciliationStatusSchema = z.object({
+  state: z.enum(["current", "canon_diverged"]),
+  playthroughId: opaqueIdSchema,
+  pinnedCommitId: opaqueIdSchema,
+  currentCommitId: opaqueIdSchema,
+  allowedDecisions: z.array(z.enum(["continue_pinned", "fork_from_current"])).min(1).max(2),
+}).strict();
+
+const playOperationErrorSchema = z.object({
+  code: z.enum([
+    "WORKSPACE_NOT_OPEN", "PLAY_OPERATION_INVALID", "STORY_PROFILE_INVALID",
+    "PLAYTHROUGH_NOT_FOUND", "PLAYTHROUGH_RECONCILIATION_REQUIRED", "START_PROFILE_INVALID", "PLAY_OPERATION_FAILED",
+  ]),
+  message: z.string().min(1).max(240),
+}).strict();
+
+export const storyProfileCreateResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), profile: storyProfileSchema }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const storyProfileListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), profiles: z.array(storyProfileSchema).max(10_000) }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const startProfileResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), startProfile: startProfileSchema }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const startProfileListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), startProfiles: z.array(startProfileSchema).max(10_000) }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const playthroughResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), playthrough: playthroughSchema }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const playthroughListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), playthroughs: z.array(playthroughSchema).max(10_000) }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const playTurnListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), turns: z.array(publicPlayTurnSchema).max(100_000) }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const playthroughInspectResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), reconciliation: playthroughReconciliationStatusSchema }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+
 export const workspaceRestoreRequestSchema = z.object({
   checkpointId: z.string().min(1).max(120),
 }).strict();
@@ -576,7 +891,7 @@ export const safeChangeSetSummarySchema = z.object({
 
 export const safeChangeSetItemSchema = z.object({
   id: z.string().min(1).max(160),
-  kind: z.enum(["fact", "resource", "document", "relation", "constraint"]),
+  kind: z.enum(["fact", "resource", "document", "relation", "constraint", "project_file"]),
   kindLabel: z.string().min(1).max(80),
   decision: z.enum(["pending", "accepted", "rejected", "draft"]),
   risk: z.enum(["low", "elevated"]),
@@ -784,6 +1099,7 @@ const runFailedEventSchema = z.object({
   sessionId: opaqueIdSchema.optional(),
   code: publicErrorCodeSchema,
   message: z.string().min(1).max(240),
+  artifacts: z.array(agentArtifactSchema).max(100).default([]),
 }).strict();
 
 const runActivityEventSchema = z.object({
@@ -847,6 +1163,8 @@ export type SessionMessage = z.infer<typeof sessionMessageSchema>;
 export type AgentArtifact = z.infer<typeof agentArtifactSchema>;
 export type SessionMessageListRequest = z.infer<typeof sessionMessageListRequestSchema>;
 export type SessionMessageListResult = z.infer<typeof sessionMessageListResultSchema>;
+export type SessionRetractLastRequest = z.infer<typeof sessionRetractLastRequestSchema>;
+export type SessionRetractLastResult = z.infer<typeof sessionRetractLastResultSchema>;
 export type SharedMemorySummary = z.infer<typeof sharedMemorySummarySchema>;
 export type HandoffSummary = z.infer<typeof handoffSummarySchema>;
 export type CollaborationListRequest = z.infer<typeof collaborationListRequestSchema>;
@@ -860,6 +1178,49 @@ export type CreativeMutationResult = z.infer<typeof creativeMutationResultSchema
 export type CheckpointHistoryEntry = z.infer<typeof checkpointHistoryEntrySchema>;
 export type WorkspaceHistoryResult = z.infer<typeof workspaceHistoryResultSchema>;
 export type ContextBudgetAudit = z.infer<typeof contextBudgetAuditSchema>;
+export type ProjectDoctorReport = z.infer<typeof projectDoctorReportSchema>;
+export type ProjectDoctorResult = z.infer<typeof projectDoctorResultSchema>;
+export type StoryProfile = z.infer<typeof storyProfileSchema>;
+export type StoryProfileCreateRequest = z.input<typeof storyProfileCreateRequestSchema>;
+export type StoryProfileCreateResult = z.infer<typeof storyProfileCreateResultSchema>;
+export type StoryProfileListResult = z.infer<typeof storyProfileListResultSchema>;
+export type StartProfile = z.infer<typeof startProfileSchema>;
+export type StartProfileCreateRequest = z.input<typeof startProfileCreateRequestSchema>;
+export type StartProfileListRequest = z.infer<typeof startProfileListRequestSchema>;
+export type StartProfileResult = z.infer<typeof startProfileResultSchema>;
+export type StartProfileListResult = z.infer<typeof startProfileListResultSchema>;
+export type Playthrough = z.infer<typeof playthroughSchema>;
+export type PlaythroughCreateRequest = z.infer<typeof playthroughCreateRequestSchema>;
+export type PlaythroughListRequest = z.infer<typeof playthroughListRequestSchema>;
+export type PlayTurnListRequest = z.infer<typeof playTurnListRequestSchema>;
+export type PlaythroughResolveRequest = z.infer<typeof playthroughResolveRequestSchema>;
+export type PlaythroughInspectRequest = z.infer<typeof playthroughInspectRequestSchema>;
+export type PlaythroughResult = z.infer<typeof playthroughResultSchema>;
+export type PlaythroughListResult = z.infer<typeof playthroughListResultSchema>;
+export type PlayTurnListResult = z.infer<typeof playTurnListResultSchema>;
+export type PublicPlayTurn = z.infer<typeof publicPlayTurnSchema>;
+export type SourceLibraryEntry = z.infer<typeof sourceLibraryEntrySchema>;
+export type SourceListResult = z.infer<typeof sourceListResultSchema>;
+export type SourceAddRequest = z.infer<typeof sourceAddRequestSchema>;
+export type SourceAddResult = z.infer<typeof sourceAddResultSchema>;
+export type SourceParseRequest = z.infer<typeof sourceParseRequestSchema>;
+export type SourceParseResult = z.infer<typeof sourceParseResultSchema>;
+export type DecompositionCandidateReview = z.infer<typeof decompositionCandidateReviewSchema>;
+export type DecompositionCandidateListRequest = z.infer<typeof decompositionCandidateListRequestSchema>;
+export type DecompositionCandidateListResult = z.infer<typeof decompositionCandidateListResultSchema>;
+export type DecompositionCandidateReviseRequest = z.infer<typeof decompositionCandidateReviseRequestSchema>;
+export type DecompositionCandidateDecideRequest = z.infer<typeof decompositionCandidateDecideRequestSchema>;
+export type DecomposerStartRequest = z.infer<typeof decomposerStartRequestSchema>;
+export type DecomposerStartResult = z.infer<typeof decomposerStartResultSchema>;
+export type DecomposerCancelRequest = z.infer<typeof decomposerCancelRequestSchema>;
+export type PublicDecomposerEvent = z.infer<typeof publicDecomposerEventSchema>;
+export type ImportCandidateProposeRequest = z.infer<typeof importCandidateProposeRequestSchema>;
+export type ImportCandidateProposeResult = z.infer<typeof importCandidateProposeResultSchema>;
+export type PlaythroughInspectResult = z.infer<typeof playthroughInspectResultSchema>;
+export type PlayerTurnStartRequest = z.infer<typeof playerTurnStartRequestSchema>;
+export type PlayerTurnStartResponse = z.infer<typeof playerTurnStartResponseSchema>;
+export type PlayerTurnCancelRequest = z.infer<typeof playerTurnCancelRequestSchema>;
+export type PlayerTurnEvent = z.infer<typeof playerTurnEventSchema>;
 export type WorkspaceRestoreRequest = z.infer<typeof workspaceRestoreRequestSchema>;
 export type WorkspaceRestoreResult = z.infer<typeof workspaceRestoreResultSchema>;
 export type WorkspaceFlushRequest = z.infer<typeof workspaceFlushRequestSchema>;
@@ -924,6 +1285,7 @@ export interface DesktopApi {
     delete(request: SessionDeleteRequest): Promise<SessionListResult>;
     export(request: SessionExportRequest): Promise<SessionExportResult>;
     messages(request: SessionMessageListRequest): Promise<SessionMessageListResult>;
+    retractLast(request: SessionRetractLastRequest): Promise<SessionRetractLastResult>;
   };
   collaboration: {
     list(request: CollaborationListRequest): Promise<CollaborationListResult>;
@@ -936,10 +1298,37 @@ export interface DesktopApi {
     getCurrent(): Promise<WorkspaceSnapshot | null>;
     listHistory(): Promise<WorkspaceHistoryResult>;
     getLatestContextBudget(): Promise<ContextBudgetAudit | null>;
+    inspectProject(): Promise<ProjectDoctorResult>;
     restore(request: WorkspaceRestoreRequest): Promise<WorkspaceRestoreResult>;
     subscribeFlushRequest(listener: (request: WorkspaceFlushRequest) => void): () => void;
     completeFlush(request: WorkspaceFlushComplete): void;
     mutate(request: CreativeWorkspaceMutation): Promise<WorkspaceSnapshot>;
+  };
+  play: {
+    createStoryProfile(request: StoryProfileCreateRequest): Promise<StoryProfileCreateResult>;
+    listStoryProfiles(): Promise<StoryProfileListResult>;
+    createStartProfile(request: StartProfileCreateRequest): Promise<StartProfileResult>;
+    listStartProfiles(request: StartProfileListRequest): Promise<StartProfileListResult>;
+    createPlaythrough(request: PlaythroughCreateRequest): Promise<PlaythroughResult>;
+    listPlaythroughs(request: PlaythroughListRequest): Promise<PlaythroughListResult>;
+    listTurns(request: PlayTurnListRequest): Promise<PlayTurnListResult>;
+    inspect(request: PlaythroughInspectRequest): Promise<PlaythroughInspectResult>;
+    resolve(request: PlaythroughResolveRequest): Promise<PlaythroughResult>;
+    runTurn(request: PlayerTurnStartRequest): Promise<PlayerTurnStartResponse>;
+    cancelTurn(request: PlayerTurnCancelRequest): Promise<void>;
+    subscribeTurns(listener: (event: PlayerTurnEvent) => void): () => void;
+  };
+  sourceLibrary: {
+    list(): Promise<SourceListResult>;
+    add(request: SourceAddRequest): Promise<SourceAddResult>;
+    parse(request: SourceParseRequest): Promise<SourceParseResult>;
+    listCandidates(request: DecompositionCandidateListRequest): Promise<DecompositionCandidateListResult>;
+    reviseCandidate(request: DecompositionCandidateReviseRequest): Promise<DecompositionCandidateListResult>;
+    decideCandidate(request: DecompositionCandidateDecideRequest): Promise<DecompositionCandidateListResult>;
+    startDecomposer(request: DecomposerStartRequest): Promise<DecomposerStartResult>;
+    cancelDecomposer(request: DecomposerCancelRequest): Promise<void>;
+    subscribeDecomposer(listener: (event: PublicDecomposerEvent) => void): () => void;
+    proposeCandidates(request: ImportCandidateProposeRequest): Promise<ImportCandidateProposeResult>;
   };
   document: {
     get(request: DocumentGetRequest): Promise<EditorDocumentSnapshot>;
