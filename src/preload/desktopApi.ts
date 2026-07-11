@@ -38,6 +38,10 @@ import {
   projectDoctorResultSchema,
   storyProfileCreateRequestSchema,
   storyProfileCreateResultSchema,
+  startProfileCreateRequestSchema,
+  startProfileListRequestSchema,
+  startProfileResultSchema,
+  startProfileListResultSchema,
   playthroughCreateRequestSchema,
   playthroughInspectRequestSchema,
   playthroughResolveRequestSchema,
@@ -251,6 +255,14 @@ export function exposeDesktopApi(): void {
       async createStoryProfile(request) {
         const safeRequest = storyProfileCreateRequestSchema.parse(request);
         return storyProfileCreateResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.storyProfileCreate, safeRequest));
+      },
+      async createStartProfile(request) {
+        const safeRequest = startProfileCreateRequestSchema.parse(request);
+        return startProfileResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.startProfileCreate, safeRequest));
+      },
+      async listStartProfiles(request) {
+        const safeRequest = startProfileListRequestSchema.parse(request);
+        return startProfileListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.startProfileList, safeRequest));
       },
       async createPlaythrough(request) {
         const safeRequest = playthroughCreateRequestSchema.parse(request);

@@ -3,6 +3,7 @@ import type { SQLOutputValue } from "node:sqlite";
 import { canonicalAuditHash } from "../audit/canonicalAuditHash";
 import { CreativeCommitRepository } from "../commit/creativeCommitRepository";
 import { StoryProfileRepository } from "../story/storyProfileRepository";
+import { StartProfileRepository } from "./startProfileRepository";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 
 export interface PlaythroughRecord {
@@ -10,6 +11,8 @@ export interface PlaythroughRecord {
   storyProfileId: string;
   baselineCommitId: string;
   parentPlaythroughId: string | null;
+  startProfileId: string | null;
+  initialStateSnapshot: Record<string, unknown> | null;
   currentTurnId: string | null;
   status: "active" | "archived";
   createdAt: string;
@@ -32,18 +35,25 @@ export interface PlayTurnRecord {
 export class PlaythroughRepository {
   constructor(readonly workspace: WorkspaceDatabase) {}
 
-  create(input: { storyProfileId: string; parentPlaythroughId?: string | null }): PlaythroughRecord {
+  create(input: { storyProfileId: string; parentPlaythroughId?: string | null; startProfileId?: string | null }): PlaythroughRecord {
     const profile = new StoryProfileRepository(this.workspace).getRequired(input.storyProfileId);
     if (profile.status !== "active") throw playError("STORY_PROFILE_NOT_ACTIVE");
     const commit = new CreativeCommitRepository(this.workspace).getRequired(profile.canonCommitId);
     if (!commit.sealedAt) throw playError("PLAYTHROUGH_BASELINE_UNSEALED");
     if (input.parentPlaythroughId) this.getRequired(input.parentPlaythroughId);
+    const startProfile = input.startProfileId ? new StartProfileRepository(this.workspace).getRequired(input.startProfileId) : null;
+    if (startProfile && (startProfile.status !== "active" || startProfile.storyProfileId !== profile.id)) {
+      throw playError("START_PROFILE_INVALID");
+    }
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     this.workspace.db.prepare(`
-      INSERT INTO playthroughs (id, story_profile_id, baseline_commit_id, parent_playthrough_id, current_turn_id, status, created_at)
-      VALUES (?, ?, ?, ?, NULL, 'active', ?)
-    `).run(id, profile.id, profile.canonCommitId, input.parentPlaythroughId ?? null, createdAt);
+      INSERT INTO playthroughs (
+        id, story_profile_id, baseline_commit_id, parent_playthrough_id, current_turn_id,
+        status, created_at, start_profile_id, initial_state_snapshot_json
+      ) VALUES (?, ?, ?, ?, NULL, 'active', ?, ?, ?)
+    `).run(id, profile.id, profile.canonCommitId, input.parentPlaythroughId ?? null, createdAt,
+      startProfile?.id ?? null, startProfile ? JSON.stringify(startProfile.startState.initialState) : null);
     return this.getRequired(id);
   }
 
@@ -94,7 +104,9 @@ function mapPlaythrough(row: Record<string, SQLOutputValue>): PlaythroughRecord 
   const status = String(row.status);
   if (status !== "active" && status !== "archived") throw playError("PLAYTHROUGH_DATA_INVALID");
   return { id: String(row.id), storyProfileId: String(row.story_profile_id), baselineCommitId: String(row.baseline_commit_id),
-    parentPlaythroughId: nullable(row.parent_playthrough_id), currentTurnId: nullable(row.current_turn_id), status, createdAt: String(row.created_at) };
+    parentPlaythroughId: nullable(row.parent_playthrough_id), startProfileId: nullable(row.start_profile_id),
+    initialStateSnapshot: row.initial_state_snapshot_json === null ? null : JSON.parse(String(row.initial_state_snapshot_json)) as Record<string, unknown>,
+    currentTurnId: nullable(row.current_turn_id), status, createdAt: String(row.created_at) };
 }
 
 function mapTurn(row: Record<string, SQLOutputValue>): PlayTurnRecord {

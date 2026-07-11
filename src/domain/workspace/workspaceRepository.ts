@@ -196,7 +196,11 @@ function migrate(db: DatabaseSync): void {
     migrateImportReviewSchema(db);
     schema = { version: 14 };
   }
-  if (schema.version !== 14) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 14) {
+    migrateStartProfilePlaythroughSchema(db);
+    schema = { version: 15 };
+  }
+  if (schema.version !== 15) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -231,6 +235,35 @@ function migrate(db: DatabaseSync): void {
       insertResource.run(resourceId);
       insertRevision.run(randomUUID(), resourceId, type, title, checkpointId, index, now);
     }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateStartProfilePlaythroughSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (!hasColumn(db, "playthroughs", "start_profile_id")) {
+      db.exec("ALTER TABLE playthroughs ADD COLUMN start_profile_id TEXT REFERENCES start_profiles(id)");
+    }
+    if (!hasColumn(db, "playthroughs", "initial_state_snapshot_json")) {
+      db.exec("ALTER TABLE playthroughs ADD COLUMN initial_state_snapshot_json TEXT CHECK (initial_state_snapshot_json IS NULL OR json_valid(initial_state_snapshot_json))");
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS start_profiles_story_idx
+        ON start_profiles(story_profile_id, status, created_at, id);
+      CREATE TRIGGER IF NOT EXISTS start_profiles_identity_immutable
+      BEFORE UPDATE OF story_profile_id, source_id, title, start_state_json, created_at ON start_profiles BEGIN
+        SELECT RAISE(ABORT, 'START_PROFILE_IDENTITY_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS playthrough_baseline_immutable
+      BEFORE UPDATE OF story_profile_id, baseline_commit_id, parent_playthrough_id, start_profile_id, initial_state_snapshot_json, created_at ON playthroughs BEGIN
+        SELECT RAISE(ABORT, 'PLAYTHROUGH_BASELINE_IMMUTABLE');
+      END;
+      UPDATE schema_meta SET version = 15 WHERE singleton = 1;
+    `);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

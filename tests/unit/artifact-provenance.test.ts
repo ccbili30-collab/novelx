@@ -204,7 +204,7 @@ describe("Artifact provenance", () => {
     expect(countRows(workspace, "change_set_outputs")).toBe(0);
   });
 
-  it("migrates a schema v3 workspace through v14 without inventing provenance", () => {
+  it("migrates a schema v3 workspace through v15 without inventing provenance", () => {
     const { root, workspace } = createWorkspace();
     closeWorkspace(workspace);
     const databasePath = path.join(root, ".novax", "workspace.db");
@@ -217,7 +217,7 @@ describe("Artifact provenance", () => {
 
     const migrated = openTrackedWorkspace(root);
     expect(migrated.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toMatchObject({ version: 14 });
+      .toMatchObject({ version: 15 });
     const columns = migrated.db.prepare("PRAGMA table_info(change_sets)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toContain("producer_tool_invocation_id");
     expect(migrated.db.prepare(`

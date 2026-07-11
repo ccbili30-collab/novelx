@@ -111,6 +111,8 @@ describe("desktop IPC contract", () => {
       workspaceHistory: "novax:workspace-history",
       workspaceDoctor: "novax:workspace-doctor",
       storyProfileCreate: "novax:story-profile-create",
+      startProfileCreate: "novax:start-profile-create",
+      startProfileList: "novax:start-profile-list",
       playthroughCreate: "novax:playthrough-create",
       playthroughInspect: "novax:playthrough-inspect",
       playthroughResolve: "novax:playthrough-resolve",

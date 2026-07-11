@@ -36,6 +36,10 @@ import {
   projectDoctorResultSchema,
   storyProfileCreateRequestSchema,
   storyProfileCreateResultSchema,
+  startProfileCreateRequestSchema,
+  startProfileListRequestSchema,
+  startProfileResultSchema,
+  startProfileListResultSchema,
   playthroughCreateRequestSchema,
   playthroughInspectRequestSchema,
   playthroughResolveRequestSchema,
@@ -68,6 +72,8 @@ import {
   type WorkspaceRestoreResult,
   type ProjectDoctorResult,
   type StoryProfileCreateResult,
+  type StartProfileResult,
+  type StartProfileListResult,
   type PlaythroughResult,
   type PlaythroughInspectResult,
 } from "../shared/ipcContract";
@@ -90,6 +96,7 @@ import { AgentAuditRepository } from "../domain/audit/agentAuditRepository";
 import { ProjectDoctorService } from "../domain/doctor/projectDoctorService";
 import { StoryProfileRepository } from "../domain/story/storyProfileRepository";
 import { PlaythroughRepository } from "../domain/play/playthroughRepository";
+import { StartProfileRepository } from "../domain/play/startProfileRepository";
 import { PlaythroughReconciliationService } from "../domain/play/playthroughReconciliationService";
 import type { AgentRuntimeLease } from "./agentProcessSupervisor";
 
@@ -135,8 +142,16 @@ export class WorkspaceSession {
     return new StoryProfileRepository(workspace).create({ ...input, canonCommitId });
   }
 
-  createPlaythrough(storyProfileId: string) {
-    return new PlaythroughRepository(this.requireWorkspace()).create({ storyProfileId });
+  createStartProfile(input: Parameters<StartProfileRepository["create"]>[0]) {
+    return new StartProfileRepository(this.requireWorkspace()).create(input);
+  }
+
+  listStartProfiles(storyProfileId: string) {
+    return new StartProfileRepository(this.requireWorkspace()).listForStory(storyProfileId);
+  }
+
+  createPlaythroughFromStart(storyProfileId: string, startProfileId?: string | null) {
+    return new PlaythroughRepository(this.requireWorkspace()).create({ storyProfileId, startProfileId });
   }
 
   inspectPlaythrough(playthroughId: string) {
@@ -375,9 +390,17 @@ export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolic
     const request = storyProfileCreateRequestSchema.parse(payload);
     return session.createStoryProfile(request);
   }));
+  ipcMain.handle(desktopIpcChannels.startProfileCreate, (_event, payload: unknown) => startProfileResult(() => {
+    const request = startProfileCreateRequestSchema.parse(payload);
+    return session.createStartProfile(request);
+  }));
+  ipcMain.handle(desktopIpcChannels.startProfileList, (_event, payload: unknown) => startProfileListResult(() => {
+    const request = startProfileListRequestSchema.parse(payload);
+    return session.listStartProfiles(request.storyProfileId);
+  }));
   ipcMain.handle(desktopIpcChannels.playthroughCreate, (_event, payload: unknown) => playthroughResult(() => {
     const request = playthroughCreateRequestSchema.parse(payload);
-    return session.createPlaythrough(request.storyProfileId);
+    return session.createPlaythroughFromStart(request.storyProfileId, request.startProfileId);
   }));
   ipcMain.handle(desktopIpcChannels.playthroughInspect, (_event, payload: unknown) => playthroughInspectResult(() => {
     const request = playthroughInspectRequestSchema.parse(payload);
@@ -597,6 +620,22 @@ function storyProfileResult(operation: () => unknown): StoryProfileCreateResult 
   }
 }
 
+function startProfileResult(operation: () => unknown): StartProfileResult {
+  try {
+    return startProfileResultSchema.parse({ ok: true, startProfile: operation() });
+  } catch (error) {
+    return startProfileResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
+function startProfileListResult(operation: () => unknown): StartProfileListResult {
+  try {
+    return startProfileListResultSchema.parse({ ok: true, startProfiles: operation() });
+  } catch (error) {
+    return startProfileListResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
 function playthroughResult(operation: () => unknown): PlaythroughResult {
   try {
     return playthroughResultSchema.parse({ ok: true, playthrough: operation() });
@@ -618,6 +657,7 @@ function publicPlayError(error: unknown) {
   if (internal === "WORKSPACE_NOT_OPEN") return { code: "WORKSPACE_NOT_OPEN" as const, message: "尚未打开工作区。" };
   if (internal === "PLAYTHROUGH_NOT_FOUND") return { code: "PLAYTHROUGH_NOT_FOUND" as const, message: "找不到这个游玩存档。" };
   if (internal.startsWith("STORY_PROFILE_")) return { code: "STORY_PROFILE_INVALID" as const, message: "故事配置不完整或正史版本尚未就绪。" };
+  if (internal.startsWith("START_PROFILE_")) return { code: "START_PROFILE_INVALID" as const, message: "起始模板无效、未启用或来源审核尚未完成。" };
   if (internal.startsWith("PLAYTHROUGH_RECONCILIATION_")) return { code: "PLAYTHROUGH_RECONCILIATION_REQUIRED" as const, message: "需要先选择继续旧存档或创建新分支。" };
   if (internal.startsWith("PLAYTHROUGH_") || internal.startsWith("PLAY_")) return { code: "PLAY_OPERATION_INVALID" as const, message: "当前游玩操作不符合存档状态。" };
   return { code: "PLAY_OPERATION_FAILED" as const, message: "游玩存档操作失败，请重试。" };
