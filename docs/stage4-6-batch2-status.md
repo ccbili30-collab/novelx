@@ -17,9 +17,10 @@ Date: 2026-07-11
 ## Not Completed
 
 - Memory-aware relevance and token admission is not yet wired into every Agent request.
-- The real player GM/Writer/Validator runtime and player UI are not implemented in this batch.
-- DOCX, EPUB, and image parsers are not implemented.
-- Decomposer（拆解器）Provider runtime, candidate review UI, and Start Profile（起始模板）generation are not implemented.
+- Player runtime currently stops at an internal `GM -> Writer -> Checker -> TurnValidator` boundary. Audited worker subprocess execution, validated turn persistence, and player UI are not implemented.
+- Decomposer（拆解器）已具备真实 Provider（模型服务提供方）运行边界、候选 Prompt v1 完整性门、来源分块约束、失败任务落库和不可直接写入正史的候选仓库；Prompt 仍是 candidate（候选），尚未经过真实 Provider eval（评测），因此 live（正式运行）路径继续 fail-closed（失败关闭）。
+- Decomposer candidate review UI（拆解候选审核界面）、接受候选到 Change Set（变更集）的转换、Start Profile（起始模板）生成仍未实现。
+- TXT / Markdown / DOCX / EPUB / image metadata（文本 / Markdown / Word / 电子书 / 图片元数据）均已有本地解析器和稳定来源定位器。图片尚无 OCR（光学字符识别）或视觉理解，不会虚构图片内容。
 - Stage 5 and Stage 6 are therefore not complete product loops.
 
 ## Functional Reduction Risks
@@ -32,7 +33,7 @@ Date: 2026-07-11
 ## Verification
 
 - TypeScript typecheck: passed
-- Vitest: 57 files, 244 tests passed
+- Vitest: 63 files, 258 tests passed
 - Production Electron build: passed
 - Electron Playwright: 30 passed, 1 real-Provider test skipped because no external test credential was supplied
 - The Provider-missing fail-closed E2E had one Windows child-process crash during the first full run; it then passed three isolated repetitions and the complete rerun.
@@ -42,6 +43,8 @@ Date: 2026-07-11
 - Added typed Electron IPC for Story Profile creation, Playthrough creation, canon divergence inspection, and explicit resolution.
 - Added candidate GM Prompt v1 with a fixed SHA-256 identity and a separate publication gate.
 - Added a real RuntimeAdapter boundary for structured GM resolution. Candidate prompts are rejected before any Provider call.
+- Added the governed `GM -> Writer -> Checker -> TurnValidator` player pipeline as an internal boundary. It is not yet wired through the audited worker subprocess, main-process persistence, or player UI, so it is not a playable closed loop.
+- Added schema v14 immutable Decomposer candidate revisions, human review decisions, and Start Profile storage foundation. Accepted candidates remain non-canonical until a later Change Set applies them.
 - Added Turn Validator binding GM resolution, Writer output, evidence IDs, and Checker outcome.
 - GM Prompt has not yet passed real Provider evaluation and is not active; player live mode therefore remains blocked rather than simulated.
-- Latest verification: 59 Vitest files, 248 tests passed; production build passed.
+- Latest verification: TypeScript passed; 63 Vitest files / 258 tests passed; production build passed; Electron Playwright 30 passed / 1 real-Provider test skipped.

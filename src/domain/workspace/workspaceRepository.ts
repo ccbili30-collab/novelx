@@ -192,7 +192,11 @@ function migrate(db: DatabaseSync): void {
     migrateSourceImportSchema(db);
     schema = { version: 13 };
   }
-  if (schema.version !== 13) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 13) {
+    migrateImportReviewSchema(db);
+    schema = { version: 14 };
+  }
+  if (schema.version !== 14) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -227,6 +231,60 @@ function migrate(db: DatabaseSync): void {
       insertResource.run(resourceId);
       insertRevision.run(randomUUID(), resourceId, type, title, checkpointId, index, now);
     }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateImportReviewSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS decomposition_candidate_revisions (
+        id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL REFERENCES decomposition_candidates(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        editor_kind TEXT NOT NULL CHECK (editor_kind IN ('user', 'agent')),
+        created_at TEXT NOT NULL,
+        UNIQUE (candidate_id, revision)
+      );
+      CREATE TABLE IF NOT EXISTS import_review_decisions (
+        id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL REFERENCES decomposition_candidates(id),
+        decision TEXT NOT NULL CHECK (decision IN ('accepted', 'rejected')),
+        candidate_revision INTEGER NOT NULL CHECK (candidate_revision > 0),
+        decided_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS start_profiles (
+        id TEXT PRIMARY KEY,
+        story_profile_id TEXT NOT NULL REFERENCES story_profiles(id),
+        source_id TEXT REFERENCES source_library_entries(id),
+        title TEXT NOT NULL,
+        start_state_json TEXT NOT NULL CHECK (json_valid(start_state_json)),
+        status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'archived')),
+        created_at TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS decomposition_candidate_revisions_update_guard
+      BEFORE UPDATE ON decomposition_candidate_revisions BEGIN
+        SELECT RAISE(ABORT, 'DECOMPOSITION_CANDIDATE_REVISION_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS import_review_decisions_update_guard
+      BEFORE UPDATE ON import_review_decisions BEGIN
+        SELECT RAISE(ABORT, 'IMPORT_REVIEW_DECISION_IMMUTABLE');
+      END;
+      INSERT INTO decomposition_candidate_revisions (
+        id, candidate_id, revision, payload_json, editor_kind, created_at
+      )
+      SELECT lower(hex(randomblob(16))), dc.id, 1, dc.payload_json, 'agent', dc.created_at
+      FROM decomposition_candidates dc
+      WHERE NOT EXISTS (
+        SELECT 1 FROM decomposition_candidate_revisions dcr WHERE dcr.candidate_id = dc.id
+      );
+      UPDATE schema_meta SET version = 14 WHERE singleton = 1;
+    `);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

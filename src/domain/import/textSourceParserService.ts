@@ -8,10 +8,16 @@ export interface SourceChunkRecord {
   id: string;
   sourceId: string;
   ordinal: number;
-  locator: { kind: "lines"; start: number; end: number; section: string | null };
+  locator: SourceChunkLocator;
   content: string;
   contentSha256: string;
 }
+
+export type SourceChunkLocator =
+  | { kind: "lines"; start: number; end: number; section: string | null }
+  | { kind: "docx_paragraphs"; start: number; end: number }
+  | { kind: "epub_spine"; spineIndex: number; chapterPath: string; part: number }
+  | { kind: "image"; fileName: string; width: number; height: number; format: string };
 
 export class TextSourceParserService {
   constructor(readonly workspace: WorkspaceDatabase) {}
@@ -68,7 +74,7 @@ function decodeText(buffer: Buffer): string {
 
 function chunkLines(text: string, markdown: boolean) {
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  const chunks: Array<{ locator: SourceChunkRecord["locator"]; content: string }> = [];
+  const chunks: Array<{ locator: Extract<SourceChunkLocator, { kind: "lines" }>; content: string }> = [];
   let start = 0;
   let section: string | null = null;
   let content: string[] = [];

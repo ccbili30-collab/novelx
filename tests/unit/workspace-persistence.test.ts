@@ -18,14 +18,14 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates schema 13 projection, playthrough, and source import storage", () => {
+  it("creates schema 14 projection, playthrough, source import, and review storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 13 });
+      .toEqual({ version: 14 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
@@ -44,6 +44,9 @@ describe("local workspace persistence", () => {
       "source_chunks",
       "import_jobs",
       "decomposition_candidates",
+      "decomposition_candidate_revisions",
+      "import_review_decisions",
+      "start_profiles",
     ]));
     expect(listIndexes(workspace)).toEqual(expect.arrayContaining([
       "creative_documents_resource_idx",
