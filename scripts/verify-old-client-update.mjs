@@ -6,8 +6,9 @@ import process from "node:process";
 import { _electron as electron } from "@playwright/test";
 
 const appRoot = path.resolve(import.meta.dirname, "..");
+const packageVersion = JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8")).version;
 const oldVersion = process.env.NOVAX_UPDATE_FROM_VERSION ?? "0.1.0";
-const expectedVersion = process.env.NOVAX_UPDATE_EXPECTED_VERSION ?? "0.2.0";
+const expectedVersion = process.env.NOVAX_UPDATE_EXPECTED_VERSION ?? packageVersion;
 const installerPath = path.join(appRoot, "release", `novelx-Setup-${oldVersion}-x64.exe`);
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "novax-old-client-update-"));
 const installRoot = path.join(testRoot, "novelx");
@@ -22,7 +23,6 @@ const evidencePath = path.join(appRoot, "test-results", `novax-update-${oldVersi
 assertFile(installerPath, "OLD_INSTALLER_MISSING");
 fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
 
-let completed = false;
 try {
   await run(installerPath, ["/S", `/D=${installRoot}`], environment, 180_000);
   const executablePath = path.join(installRoot, "novelx.exe");
@@ -82,18 +82,13 @@ try {
   };
   fs.writeFileSync(evidencePath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  completed = true;
 } finally {
-  if (completed) {
-    await removeWithRetry(testRoot);
-  } else {
-    process.stderr.write(`OLD_CLIENT_UPDATE_TEST_ROOT_PRESERVED:${testRoot}\n`);
-  }
+  await removeWithRetry(testRoot);
 }
 
 async function removeWithRetry(target) {
   let lastError;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
     try {
       fs.rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 });
       return;
