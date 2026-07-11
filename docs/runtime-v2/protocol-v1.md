@@ -101,6 +101,32 @@ The current handshake-only binary emits this strict `runtime.ready` payload afte
 
 The `runtime.ready` envelope uses sequence `2` and correlates to the `messageId` of `runtime.initialize`. After readiness, the handshake-only binary performs no run action and waits for stdin EOF. Any additional line is a protocol error and terminates the process with a non-zero exit code.
 
+Initialization failure uses a strict `runtime.initialization_failed` `control` envelope. It must correlate to the initiating `runtime.initialize` message, cannot be run-scoped, and reuses the structured Runtime Error payload:
+
+```json
+{
+  "protocolVersion": 1,
+  "messageId": "uuid",
+  "messageType": "control",
+  "name": "runtime.initialization_failed",
+  "sentAt": "2026-07-12T00:00:02.000Z",
+  "correlationId": "runtime-initialize-message-uuid",
+  "runId": null,
+  "sequence": 3,
+  "payload": {
+    "code": "RUNTIME_JOURNAL_INTEGRITY_FAILED",
+    "class": "storage",
+    "retryable": false,
+    "publicMessage": "运行记录完整性检查失败，Runtime V2 未启动。",
+    "stage": "runtime.initialize",
+    "attempt": 1,
+    "diagnosticId": "uuid"
+  }
+}
+```
+
+The failure envelope requires a non-null UUID `correlationId` and `runId: null`. Unknown envelope fields, unknown error fields, credentials and raw stack traces are rejected.
+
 ## 4. Run Commands
 
 Baseline commands:

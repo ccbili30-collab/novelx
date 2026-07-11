@@ -37,6 +37,13 @@ pub struct RuntimeEvent {
     pub created_at: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AggregateAddress {
+    pub run_id: String,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+}
+
 #[derive(Debug, Error)]
 pub enum EventJournalError {
     #[error("runtime event field `{0}` must not be empty")]
@@ -212,6 +219,25 @@ impl EventJournal {
             params![run_id, aggregate_type, aggregate_id, to_sql_integer(after)?],
             map_event_row,
         )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_aggregates(
+        &self,
+        aggregate_type: &str,
+    ) -> Result<Vec<AggregateAddress>, EventJournalError> {
+        require_non_empty("aggregate_type", aggregate_type)?;
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT run_id, aggregate_type, aggregate_id FROM runtime_events \
+             WHERE aggregate_type = ?1 ORDER BY run_id, aggregate_id",
+        )?;
+        let rows = statement.query_map([aggregate_type], |row| {
+            Ok(AggregateAddress {
+                run_id: row.get(0)?,
+                aggregate_type: row.get(1)?,
+                aggregate_id: row.get(2)?,
+            })
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

@@ -138,6 +138,14 @@ export const runtimeV2ErrorEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   payload: runtimeV2ErrorSchema,
 }).strict();
 
+export const runtimeV2InitializationFailedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("control"),
+  name: z.literal("runtime.initialization_failed"),
+  correlationId: z.uuid(),
+  runId: z.null(),
+  payload: runtimeV2ErrorSchema,
+}).strict();
+
 export type RuntimeV2MessageType = z.infer<typeof runtimeV2MessageTypeSchema>;
 export type RuntimeV2Envelope = z.infer<typeof runtimeV2EnvelopeSchema>;
 export type RuntimeV2HelloPayload = z.infer<typeof runtimeV2HelloPayloadSchema>;
@@ -149,6 +157,7 @@ export type RuntimeV2ReadyEnvelope = z.infer<typeof runtimeV2ReadyEnvelopeSchema
 export type RuntimeV2ErrorClass = z.infer<typeof runtimeV2ErrorClassSchema>;
 export type RuntimeV2Error = z.infer<typeof runtimeV2ErrorSchema>;
 export type RuntimeV2ErrorEnvelope = z.infer<typeof runtimeV2ErrorEnvelopeSchema>;
+export type RuntimeV2InitializationFailedEnvelope = z.infer<typeof runtimeV2InitializationFailedEnvelopeSchema>;
 
 export class RuntimeV2ProtocolVersionError extends Error {
   readonly code = "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED";
@@ -190,6 +199,12 @@ export function parseRuntimeV2ErrorEnvelope(value: unknown): RuntimeV2ErrorEnvel
   const version = readProtocolVersion(value);
   if (version !== RUNTIME_V2_PROTOCOL_VERSION) throw new RuntimeV2ProtocolVersionError(version);
   return runtimeV2ErrorEnvelopeSchema.parse(value);
+}
+
+export function parseRuntimeV2InitializationFailedEnvelope(value: unknown): RuntimeV2InitializationFailedEnvelope {
+  const version = readProtocolVersion(value);
+  if (version !== RUNTIME_V2_PROTOCOL_VERSION) throw new RuntimeV2ProtocolVersionError(version);
+  return runtimeV2InitializationFailedEnvelopeSchema.parse(value);
 }
 
 function readProtocolVersion(value: unknown): unknown {

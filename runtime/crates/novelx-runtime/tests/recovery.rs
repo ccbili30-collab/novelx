@@ -1,0 +1,230 @@
+use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
+use novelx_runtime::recovery::{RecoveryClassification, RecoveryCoordinator, RecoveryError};
+use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
+use novelx_runtime::run_state::RunState;
+use serde_json::json;
+use tempfile::TempDir;
+
+#[test]
+fn reopens_the_database_and_returns_stably_sorted_mixed_classifications() {
+    let fixture = Fixture::new();
+    {
+        let mut journal = fixture.open();
+        create_run(&mut journal, "01-created", &[]);
+        create_run(&mut journal, "02-preparing", &[Step::Prepare]);
+        create_run(&mut journal, "03-running", &[Step::Prepare, Step::Start]);
+        create_run(
+            &mut journal,
+            "04-retrying",
+            &[Step::Prepare, Step::Start, Step::Retry],
+        );
+        create_run(
+            &mut journal,
+            "05-waiting",
+            &[Step::Prepare, Step::Start, Step::Wait],
+        );
+        create_run(
+            &mut journal,
+            "06-committing",
+            &[Step::Prepare, Step::Start, Step::Commit],
+        );
+        create_run(&mut journal, "07-blocked", &[Step::Prepare, Step::Block]);
+        create_run(&mut journal, "08-cancelled", &[Step::Cancel]);
+        create_run(&mut journal, "09-failed", &[Step::Fail]);
+        create_run(
+            &mut journal,
+            "10-completed",
+            &[Step::Prepare, Step::Start, Step::Complete],
+        );
+    }
+
+    let journal = fixture.open();
+    let report = RecoveryCoordinator::recover(&journal).unwrap();
+    assert_eq!(
+        report
+            .runs
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "01-created",
+            "02-preparing",
+            "03-running",
+            "04-retrying",
+            "05-waiting",
+            "06-committing",
+            "07-blocked",
+            "08-cancelled",
+            "09-failed",
+            "10-completed",
+        ]
+    );
+    assert_eq!(report.recovered_nonterminal_count, 6);
+    assert_eq!(
+        report.runs[0].classification,
+        RecoveryClassification::Resumable(RunState::Created)
+    );
+    assert_eq!(
+        report.runs[3].classification,
+        RecoveryClassification::Resumable(RunState::Retrying)
+    );
+    assert_eq!(
+        report.runs[4].classification,
+        RecoveryClassification::WaitingForApproval
+    );
+    assert_eq!(
+        report.runs[5].classification,
+        RecoveryClassification::CommitUncertain
+    );
+    assert_eq!(
+        report.runs[6].classification,
+        RecoveryClassification::Terminal(RunState::Blocked)
+    );
+    assert_eq!(
+        report.runs[7].classification,
+        RecoveryClassification::Terminal(RunState::Cancelled)
+    );
+    assert_eq!(
+        report.runs[8].classification,
+        RecoveryClassification::Terminal(RunState::Failed)
+    );
+    assert_eq!(
+        report.runs[9].classification,
+        RecoveryClassification::Terminal(RunState::Completed)
+    );
+}
+
+#[test]
+fn one_damaged_run_blocks_the_entire_report_without_writing() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    create_run(&mut journal, "healthy", &[Step::Prepare]);
+    create_run(&mut journal, "damaged", &[]);
+    journal
+        .append(
+            NewRuntimeEvent {
+                run_id: "damaged".to_owned(),
+                aggregate_type: "run".to_owned(),
+                aggregate_id: "damaged".to_owned(),
+                message_id: "damaged-unknown".to_owned(),
+                idempotency_key: "damaged-unknown".to_owned(),
+                event_type: "run.future".to_owned(),
+                event_version: 1,
+                payload: json!({
+                    "previousState": "created",
+                    "currentState": "running",
+                    "reason": null,
+                }),
+                created_at: "2026-07-12T00:00:02Z".to_owned(),
+            },
+            1,
+            1,
+        )
+        .unwrap();
+    let event_count_before = journal.read_run("damaged", 0).unwrap().len();
+
+    assert!(matches!(
+        RecoveryCoordinator::recover(&journal),
+        Err(RecoveryError::RunRecoveryFailed { run_id, .. }) if run_id == "damaged"
+    ));
+    assert_eq!(
+        journal.read_run("damaged", 0).unwrap().len(),
+        event_count_before
+    );
+}
+
+#[test]
+fn tool_only_aggregates_are_not_reported_as_runs() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    journal
+        .append(
+            NewRuntimeEvent {
+                run_id: "tool-only-run".to_owned(),
+                aggregate_type: "tool".to_owned(),
+                aggregate_id: "tool-1".to_owned(),
+                message_id: "tool-message".to_owned(),
+                idempotency_key: "tool-key".to_owned(),
+                event_type: "tool.requested".to_owned(),
+                event_version: 1,
+                payload: json!({ "tool": "read_project_file" }),
+                created_at: "2026-07-12T00:00:00Z".to_owned(),
+            },
+            0,
+            0,
+        )
+        .unwrap();
+    create_run(&mut journal, "real-run", &[]);
+
+    let report = RecoveryCoordinator::recover(&journal).unwrap();
+    assert_eq!(report.runs.len(), 1);
+    assert_eq!(report.runs[0].run_id, "real-run");
+    assert_eq!(report.recovered_nonterminal_count, 1);
+}
+
+#[derive(Clone, Copy)]
+enum Step {
+    Prepare,
+    Start,
+    Wait,
+    Commit,
+    Retry,
+    Block,
+    Cancel,
+    Fail,
+    Complete,
+}
+
+fn create_run(journal: &mut EventJournal, run_id: &str, steps: &[Step]) {
+    let created_message = format!("{run_id}-message-0");
+    let mut run = RunAggregate::create(
+        journal,
+        run_id,
+        EventMetadata {
+            message_id: &created_message,
+            created_at: "2026-07-12T00:00:00Z",
+            reason: None,
+        },
+    )
+    .unwrap();
+    for (index, step) in steps.iter().enumerate() {
+        let message_id = format!("{run_id}-message-{}", index + 1);
+        let metadata = EventMetadata {
+            message_id: &message_id,
+            created_at: "2026-07-12T00:00:00Z",
+            reason: None,
+        };
+        match step {
+            Step::Prepare => run.prepare(journal, metadata),
+            Step::Start => run.start(journal, metadata),
+            Step::Wait => run.wait_for_approval(journal, metadata),
+            Step::Commit => run.begin_commit(journal, metadata),
+            Step::Retry => run.retry(journal, metadata),
+            Step::Block => run.block(journal, metadata),
+            Step::Cancel => run.cancel(journal, metadata),
+            Step::Fail => run.fail(journal, metadata),
+            Step::Complete => run.complete(journal, metadata),
+        }
+        .unwrap();
+    }
+}
+
+struct Fixture {
+    _temp: TempDir,
+    database_path: std::path::PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("runtime.db");
+        Self {
+            _temp: temp,
+            database_path,
+        }
+    }
+
+    fn open(&self) -> EventJournal {
+        EventJournal::open(&self.database_path).unwrap()
+    }
+}

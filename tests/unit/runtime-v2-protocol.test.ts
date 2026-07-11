@@ -7,6 +7,7 @@ import {
   parseRuntimeV2InitializeEnvelope,
   parseRuntimeV2ReadyEnvelope,
   parseRuntimeV2ErrorEnvelope,
+  parseRuntimeV2InitializationFailedEnvelope,
   runtimeV2EnvelopeSchema,
 } from "../../src/shared/runtimeV2Protocol";
 
@@ -110,6 +111,29 @@ function errorEnvelope(overrides: Record<string, unknown> = {}) {
       stage: "context.compile",
       attempt: 1,
       diagnosticId: "1ad046e3-e048-4f33-aa77-85ae75b28fb7",
+    },
+    ...overrides,
+  };
+}
+
+function initializationFailedEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1,
+    messageId: "3780030f-921e-4510-82c1-500b0af8ee03",
+    messageType: "control",
+    name: "runtime.initialization_failed",
+    sentAt: "2026-07-12T00:00:03Z",
+    correlationId: INITIALIZE_MESSAGE_ID,
+    runId: null,
+    sequence: 3,
+    payload: {
+      code: "RUNTIME_JOURNAL_INTEGRITY_FAILED",
+      class: "storage",
+      retryable: false,
+      publicMessage: "运行记录完整性检查失败，Runtime V2 未启动。",
+      stage: "runtime.initialize",
+      attempt: 1,
+      diagnosticId: "d6a03646-04ef-4b3e-9639-47b2a843f3a2",
     },
     ...overrides,
   };
@@ -277,5 +301,37 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     }))).toThrow();
     expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({ messageType: "control" }))).toThrow();
     expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({ name: "run.failed" }))).toThrow();
+  });
+
+  it("accepts runtime.initialization_failed correlated to initialize", () => {
+    expect(parseRuntimeV2InitializationFailedEnvelope(initializationFailedEnvelope()))
+      .toEqual(initializationFailedEnvelope());
+  });
+
+  it("rejects invalid runtime.initialization_failed envelope identities and fields", () => {
+    expect(() => parseRuntimeV2InitializationFailedEnvelope(initializationFailedEnvelope({
+      messageType: "event",
+    }))).toThrow();
+    expect(() => parseRuntimeV2InitializationFailedEnvelope(initializationFailedEnvelope({
+      correlationId: null,
+    }))).toThrow();
+    expect(() => parseRuntimeV2InitializationFailedEnvelope(initializationFailedEnvelope({
+      runId: MESSAGE_ID,
+    }))).toThrow();
+    expect(() => parseRuntimeV2InitializationFailedEnvelope(initializationFailedEnvelope({
+      unexpected: true,
+    }))).toThrow();
+  });
+
+  it("rejects invalid runtime.initialization_failed error payloads", () => {
+    expect(() => parseRuntimeV2InitializationFailedEnvelope(initializationFailedEnvelope({
+      payload: { ...initializationFailedEnvelope().payload, class: "database" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2InitializationFailedEnvelope(initializationFailedEnvelope({
+      payload: { ...initializationFailedEnvelope().payload, diagnosticId: "diagnostic-1" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2InitializationFailedEnvelope(initializationFailedEnvelope({
+      payload: { ...initializationFailedEnvelope().payload, internalError: "must-not-cross-protocol" },
+    }))).toThrow();
   });
 });
