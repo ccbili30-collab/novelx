@@ -12,22 +12,24 @@
 - Added a legal Run state machine, an immutable SQLite event journal, strict duplicate-message conflict detection, and a TypeScript/Zod protocol mirror.
 - Added a real Rust handshake loop and matched Rust/TypeScript schemas for `runtime.hello`, `runtime.initialize` and `runtime.ready`.
 - Added an isolated Electron Main process supervisor with strict handshake identity checks, bounded stderr, startup/stop timeouts and owned-PID-tree cleanup.
+- Bound the Run state machine to the immutable journal through a recoverable Run Aggregate with optimistic sequence checks.
+- Added a real TypeScript-to-Rust integration test that builds, launches, handshakes with and stops the exact Runtime V2 binary.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 14 tests.
+- Rust workspace tests pass: 18 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol and process-supervisor tests pass: 23 tests.
+- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass: 24 tests.
 - `git diff --check` passes.
 - Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and the `handshake` capability.
 
 ## Not Completed
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor exists only as an independently tested module.
-- The runtime does not read commands after the hello event.
-- No event journal, SQLite schema, Run state machine, tool ledger, Provider call, context compiler, recovery controller or domain tool is implemented.
+- The runtime still accepts only the initialization handshake and does not process Run commands after readiness.
+- No tool ledger, Provider call, context compiler, full recovery controller or domain tool is implemented.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.
 

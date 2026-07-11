@@ -33,6 +33,10 @@ pub enum EventJournalError {
     SequenceOutOfRange,
     #[error("runtime event message_id `{message_id}` already belongs to a different event")]
     MessageIdConflict { message_id: String },
+    #[error("runtime event message_id `{message_id}` is duplicated")]
+    DuplicateMessageId { message_id: String },
+    #[error("runtime run sequence conflict: expected {expected}, actual {actual}")]
+    RunSequenceConflict { expected: u64, actual: u64 },
     #[error("runtime event payload is not valid JSON: {0}")]
     InvalidPayload(#[from] serde_json::Error),
     #[error("runtime event journal storage failed: {0}")]
@@ -76,6 +80,57 @@ impl EventJournal {
         if next_sequence <= 0 {
             return Err(EventJournalError::SequenceOutOfRange);
         }
+        let payload_json = serde_json::to_string(&event.payload)?;
+        transaction.execute(
+            "INSERT INTO runtime_events \
+             (run_id, sequence, message_id, event_type, payload_json, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event.run_id,
+                next_sequence,
+                event.message_id,
+                event.event_type,
+                payload_json,
+                event.created_at,
+            ],
+        )?;
+        let inserted = find_by_message_id(&transaction, &event.message_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        transaction.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn append_after(
+        &mut self,
+        event: NewRuntimeEvent,
+        expected_previous_sequence: u64,
+    ) -> Result<RuntimeEvent, EventJournalError> {
+        validate(&event)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if find_by_message_id(&transaction, &event.message_id)?.is_some() {
+            return Err(EventJournalError::DuplicateMessageId {
+                message_id: event.message_id,
+            });
+        }
+        let actual: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM runtime_events WHERE run_id = ?1",
+            [&event.run_id],
+            |row| row.get(0),
+        )?;
+        let actual = u64::try_from(actual).map_err(|_| EventJournalError::SequenceOutOfRange)?;
+        if actual != expected_previous_sequence {
+            return Err(EventJournalError::RunSequenceConflict {
+                expected: expected_previous_sequence,
+                actual,
+            });
+        }
+        let next_sequence = actual
+            .checked_add(1)
+            .ok_or(EventJournalError::SequenceOutOfRange)?;
+        let next_sequence =
+            i64::try_from(next_sequence).map_err(|_| EventJournalError::SequenceOutOfRange)?;
         let payload_json = serde_json::to_string(&event.payload)?;
         transaction.execute(
             "INSERT INTO runtime_events \
