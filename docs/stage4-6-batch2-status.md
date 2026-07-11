@@ -36,3 +36,12 @@ Date: 2026-07-11
 - Production Electron build: passed
 - Electron Playwright: 30 passed, 1 real-Provider test skipped because no external test credential was supplied
 - The Provider-missing fail-closed E2E had one Windows child-process crash during the first full run; it then passed three isolated repetitions and the complete rerun.
+
+## Goal Continuation: Player Runtime Boundary
+
+- Added typed Electron IPC for Story Profile creation, Playthrough creation, canon divergence inspection, and explicit resolution.
+- Added candidate GM Prompt v1 with a fixed SHA-256 identity and a separate publication gate.
+- Added a real RuntimeAdapter boundary for structured GM resolution. Candidate prompts are rejected before any Provider call.
+- Added Turn Validator binding GM resolution, Writer output, evidence IDs, and Checker outcome.
+- GM Prompt has not yet passed real Provider evaluation and is not active; player live mode therefore remains blocked rather than simulated.
+- Latest verification: 59 Vitest files, 248 tests passed; production build passed.

@@ -36,6 +36,13 @@ import {
   nullableWorkspaceSnapshotSchema,
   nullableContextBudgetAuditSchema,
   projectDoctorResultSchema,
+  storyProfileCreateRequestSchema,
+  storyProfileCreateResultSchema,
+  playthroughCreateRequestSchema,
+  playthroughInspectRequestSchema,
+  playthroughResolveRequestSchema,
+  playthroughResultSchema,
+  playthroughInspectResultSchema,
   nullableProjectAddResultSchema,
   projectInitializeRequestSchema,
   projectListResultSchema,
@@ -238,6 +245,24 @@ export function exposeDesktopApi(): void {
         );
         if (result.ok) return result.workspace;
         throw new Error(result.error.message);
+      },
+    },
+    play: {
+      async createStoryProfile(request) {
+        const safeRequest = storyProfileCreateRequestSchema.parse(request);
+        return storyProfileCreateResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.storyProfileCreate, safeRequest));
+      },
+      async createPlaythrough(request) {
+        const safeRequest = playthroughCreateRequestSchema.parse(request);
+        return playthroughResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughCreate, safeRequest));
+      },
+      async inspect(request) {
+        const safeRequest = playthroughInspectRequestSchema.parse(request);
+        return playthroughInspectResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughInspect, safeRequest));
+      },
+      async resolve(request) {
+        const safeRequest = playthroughResolveRequestSchema.parse(request);
+        return playthroughResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughResolve, safeRequest));
       },
     },
     document: {

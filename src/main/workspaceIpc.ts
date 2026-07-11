@@ -34,6 +34,13 @@ import {
   workspaceHistoryResultSchema,
   nullableContextBudgetAuditSchema,
   projectDoctorResultSchema,
+  storyProfileCreateRequestSchema,
+  storyProfileCreateResultSchema,
+  playthroughCreateRequestSchema,
+  playthroughInspectRequestSchema,
+  playthroughResolveRequestSchema,
+  playthroughResultSchema,
+  playthroughInspectResultSchema,
   workspaceRestoreRequestSchema,
   workspaceRestoreResultSchema,
   safeChangeSetDetailSchema,
@@ -60,6 +67,9 @@ import {
   type WorkspaceHistoryResult,
   type WorkspaceRestoreResult,
   type ProjectDoctorResult,
+  type StoryProfileCreateResult,
+  type PlaythroughResult,
+  type PlaythroughInspectResult,
 } from "../shared/ipcContract";
 import { openWorkspace, type WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
@@ -78,6 +88,9 @@ import type { AgentToolGateway } from "./agentProcessSupervisor";
 import { createWorkspaceAgentToolGateway } from "./workspaceAgentToolGateway";
 import { AgentAuditRepository } from "../domain/audit/agentAuditRepository";
 import { ProjectDoctorService } from "../domain/doctor/projectDoctorService";
+import { StoryProfileRepository } from "../domain/story/storyProfileRepository";
+import { PlaythroughRepository } from "../domain/play/playthroughRepository";
+import { PlaythroughReconciliationService } from "../domain/play/playthroughReconciliationService";
 import type { AgentRuntimeLease } from "./agentProcessSupervisor";
 
 export class WorkspaceSession {
@@ -114,6 +127,24 @@ export class WorkspaceSession {
 
   inspectProject() {
     return new ProjectDoctorService(this.requireWorkspace()).inspect();
+  }
+
+  createStoryProfile(input: { storyResourceId: string; worldResourceId: string; title: string; ocBindings: Array<{ ocResourceId: string; variantResourceId?: string | null }> }) {
+    const workspace = this.requireWorkspace();
+    const canonCommitId = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+    return new StoryProfileRepository(workspace).create({ ...input, canonCommitId });
+  }
+
+  createPlaythrough(storyProfileId: string) {
+    return new PlaythroughRepository(this.requireWorkspace()).create({ storyProfileId });
+  }
+
+  inspectPlaythrough(playthroughId: string) {
+    return new PlaythroughReconciliationService(this.requireWorkspace()).inspect(playthroughId);
+  }
+
+  resolvePlaythrough(input: { playthroughId: string; decision: "continue_pinned" | "fork_from_current" }) {
+    return new PlaythroughReconciliationService(this.requireWorkspace()).resolve(input);
   }
 
   getActiveCheckpointId(): string {
@@ -340,6 +371,22 @@ export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolic
     nullableContextBudgetAuditSchema.parse(session.getCurrent() ? session.getLatestContextBudget() : null)
   ));
   ipcMain.handle(desktopIpcChannels.workspaceDoctor, () => projectDoctorResult(() => session.inspectProject()));
+  ipcMain.handle(desktopIpcChannels.storyProfileCreate, (_event, payload: unknown) => storyProfileResult(() => {
+    const request = storyProfileCreateRequestSchema.parse(payload);
+    return session.createStoryProfile(request);
+  }));
+  ipcMain.handle(desktopIpcChannels.playthroughCreate, (_event, payload: unknown) => playthroughResult(() => {
+    const request = playthroughCreateRequestSchema.parse(payload);
+    return session.createPlaythrough(request.storyProfileId);
+  }));
+  ipcMain.handle(desktopIpcChannels.playthroughInspect, (_event, payload: unknown) => playthroughInspectResult(() => {
+    const request = playthroughInspectRequestSchema.parse(payload);
+    return session.inspectPlaythrough(request.playthroughId);
+  }));
+  ipcMain.handle(desktopIpcChannels.playthroughResolve, (_event, payload: unknown) => playthroughResult(() => {
+    const request = playthroughResolveRequestSchema.parse(payload);
+    return session.resolvePlaythrough(request);
+  }));
   ipcMain.handle(desktopIpcChannels.workspaceRestore, (_event, payload: unknown) => {
     const request = workspaceRestoreRequestSchema.parse(payload);
     return workspaceRestoreResult(() => session.restoreCheckpoint(request.checkpointId));
@@ -540,6 +587,40 @@ function projectDoctorResult(operation: () => unknown): ProjectDoctorResult {
       : "项目体检失败，请重试。";
     return projectDoctorResultSchema.parse({ ok: false, error: { code, message } });
   }
+}
+
+function storyProfileResult(operation: () => unknown): StoryProfileCreateResult {
+  try {
+    return storyProfileCreateResultSchema.parse({ ok: true, profile: operation() });
+  } catch (error) {
+    return storyProfileCreateResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
+function playthroughResult(operation: () => unknown): PlaythroughResult {
+  try {
+    return playthroughResultSchema.parse({ ok: true, playthrough: operation() });
+  } catch (error) {
+    return playthroughResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
+function playthroughInspectResult(operation: () => unknown): PlaythroughInspectResult {
+  try {
+    return playthroughInspectResultSchema.parse({ ok: true, reconciliation: operation() });
+  } catch (error) {
+    return playthroughInspectResultSchema.parse({ ok: false, error: publicPlayError(error) });
+  }
+}
+
+function publicPlayError(error: unknown) {
+  const internal = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  if (internal === "WORKSPACE_NOT_OPEN") return { code: "WORKSPACE_NOT_OPEN" as const, message: "尚未打开工作区。" };
+  if (internal === "PLAYTHROUGH_NOT_FOUND") return { code: "PLAYTHROUGH_NOT_FOUND" as const, message: "找不到这个游玩存档。" };
+  if (internal.startsWith("STORY_PROFILE_")) return { code: "STORY_PROFILE_INVALID" as const, message: "故事配置不完整或正史版本尚未就绪。" };
+  if (internal.startsWith("PLAYTHROUGH_RECONCILIATION_")) return { code: "PLAYTHROUGH_RECONCILIATION_REQUIRED" as const, message: "需要先选择继续旧存档或创建新分支。" };
+  if (internal.startsWith("PLAYTHROUGH_") || internal.startsWith("PLAY_")) return { code: "PLAY_OPERATION_INVALID" as const, message: "当前游玩操作不符合存档状态。" };
+  return { code: "PLAY_OPERATION_FAILED" as const, message: "游玩存档操作失败，请重试。" };
 }
 
 function publicWorkspaceHistoryError(error: unknown) {

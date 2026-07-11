@@ -41,6 +41,10 @@ export const desktopIpcChannels = {
   workspaceHistory: "novax:workspace-history",
   workspaceContextBudget: "novax:workspace-context-budget",
   workspaceDoctor: "novax:workspace-doctor",
+  storyProfileCreate: "novax:story-profile-create",
+  playthroughCreate: "novax:playthrough-create",
+  playthroughInspect: "novax:playthrough-inspect",
+  playthroughResolve: "novax:playthrough-resolve",
   workspaceRestore: "novax:workspace-restore",
   workspaceFlushRequest: "novax:workspace-flush-request",
   workspaceFlushComplete: "novax:workspace-flush-complete",
@@ -453,6 +457,76 @@ export const projectDoctorResultSchema = z.discriminatedUnion("ok", [
       message: z.string().min(1).max(240),
     }).strict(),
   }).strict(),
+]);
+
+export const storyProfileSchema = z.object({
+  id: opaqueIdSchema,
+  storyResourceId: opaqueIdSchema,
+  worldResourceId: opaqueIdSchema,
+  canonCommitId: opaqueIdSchema,
+  title: z.string().min(1).max(500),
+  status: z.enum(["draft", "active", "archived"]),
+  ocBindings: z.array(z.object({
+    ocResourceId: opaqueIdSchema,
+    variantResourceId: opaqueIdSchema.nullable(),
+  }).strict()).max(10_000),
+  createdAt: z.iso.datetime(),
+}).strict();
+
+export const storyProfileCreateRequestSchema = z.object({
+  storyResourceId: opaqueIdSchema,
+  worldResourceId: opaqueIdSchema,
+  title: z.string().trim().min(1).max(500),
+  ocBindings: z.array(z.object({
+    ocResourceId: opaqueIdSchema,
+    variantResourceId: opaqueIdSchema.nullable().optional(),
+  }).strict()).max(10_000).default([]),
+}).strict();
+
+export const playthroughSchema = z.object({
+  id: opaqueIdSchema,
+  storyProfileId: opaqueIdSchema,
+  baselineCommitId: opaqueIdSchema,
+  parentPlaythroughId: opaqueIdSchema.nullable(),
+  currentTurnId: opaqueIdSchema.nullable(),
+  status: z.enum(["active", "archived"]),
+  createdAt: z.iso.datetime(),
+}).strict();
+
+export const playthroughCreateRequestSchema = z.object({ storyProfileId: opaqueIdSchema }).strict();
+export const playthroughInspectRequestSchema = z.object({ playthroughId: opaqueIdSchema }).strict();
+export const playthroughResolveRequestSchema = z.object({
+  playthroughId: opaqueIdSchema,
+  decision: z.enum(["continue_pinned", "fork_from_current"]),
+}).strict();
+
+export const playthroughReconciliationStatusSchema = z.object({
+  state: z.enum(["current", "canon_diverged"]),
+  playthroughId: opaqueIdSchema,
+  pinnedCommitId: opaqueIdSchema,
+  currentCommitId: opaqueIdSchema,
+  allowedDecisions: z.array(z.enum(["continue_pinned", "fork_from_current"])).min(1).max(2),
+}).strict();
+
+const playOperationErrorSchema = z.object({
+  code: z.enum([
+    "WORKSPACE_NOT_OPEN", "PLAY_OPERATION_INVALID", "STORY_PROFILE_INVALID",
+    "PLAYTHROUGH_NOT_FOUND", "PLAYTHROUGH_RECONCILIATION_REQUIRED", "PLAY_OPERATION_FAILED",
+  ]),
+  message: z.string().min(1).max(240),
+}).strict();
+
+export const storyProfileCreateResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), profile: storyProfileSchema }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const playthroughResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), playthrough: playthroughSchema }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const playthroughInspectResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), reconciliation: playthroughReconciliationStatusSchema }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
 ]);
 
 export const workspaceRestoreRequestSchema = z.object({
@@ -901,6 +975,15 @@ export type WorkspaceHistoryResult = z.infer<typeof workspaceHistoryResultSchema
 export type ContextBudgetAudit = z.infer<typeof contextBudgetAuditSchema>;
 export type ProjectDoctorReport = z.infer<typeof projectDoctorReportSchema>;
 export type ProjectDoctorResult = z.infer<typeof projectDoctorResultSchema>;
+export type StoryProfile = z.infer<typeof storyProfileSchema>;
+export type StoryProfileCreateRequest = z.input<typeof storyProfileCreateRequestSchema>;
+export type StoryProfileCreateResult = z.infer<typeof storyProfileCreateResultSchema>;
+export type Playthrough = z.infer<typeof playthroughSchema>;
+export type PlaythroughCreateRequest = z.infer<typeof playthroughCreateRequestSchema>;
+export type PlaythroughResolveRequest = z.infer<typeof playthroughResolveRequestSchema>;
+export type PlaythroughInspectRequest = z.infer<typeof playthroughInspectRequestSchema>;
+export type PlaythroughResult = z.infer<typeof playthroughResultSchema>;
+export type PlaythroughInspectResult = z.infer<typeof playthroughInspectResultSchema>;
 export type WorkspaceRestoreRequest = z.infer<typeof workspaceRestoreRequestSchema>;
 export type WorkspaceRestoreResult = z.infer<typeof workspaceRestoreResultSchema>;
 export type WorkspaceFlushRequest = z.infer<typeof workspaceFlushRequestSchema>;
@@ -982,6 +1065,12 @@ export interface DesktopApi {
     subscribeFlushRequest(listener: (request: WorkspaceFlushRequest) => void): () => void;
     completeFlush(request: WorkspaceFlushComplete): void;
     mutate(request: CreativeWorkspaceMutation): Promise<WorkspaceSnapshot>;
+  };
+  play: {
+    createStoryProfile(request: StoryProfileCreateRequest): Promise<StoryProfileCreateResult>;
+    createPlaythrough(request: PlaythroughCreateRequest): Promise<PlaythroughResult>;
+    inspect(request: PlaythroughInspectRequest): Promise<PlaythroughInspectResult>;
+    resolve(request: PlaythroughResolveRequest): Promise<PlaythroughResult>;
   };
   document: {
     get(request: DocumentGetRequest): Promise<EditorDocumentSnapshot>;
