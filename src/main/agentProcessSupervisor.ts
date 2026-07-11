@@ -121,7 +121,7 @@ export class AgentProcessSupervisor {
     const providerProfile = this.#readProviderProfile();
     const lease = this.#acquireRuntimeLease();
     if (!lease) {
-      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_TOOLS_REQUIRED" }) }));
+      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_TOOLS_REQUIRED" }), artifacts: [] }));
       return runId;
     }
     const providerConfigSha256 = providerProfile ? hashProviderConfig(providerProfile) : null;
@@ -136,7 +136,7 @@ export class AgentProcessSupervisor {
       });
     } catch {
       lease.release();
-      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }) }));
+      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }), artifacts: [] }));
       return runId;
     }
     const child = this.#spawnWorker(this.#workerPath);
@@ -193,7 +193,7 @@ export class AgentProcessSupervisor {
       return;
     }
     const error = toPublicError({ code: "AGENT_RUN_CANCELLED" });
-    run.emit({ type: "run.failed", runId, ...error });
+    run.emit({ type: "run.failed", runId, ...error, artifacts: [] });
     this.#abortPendingTools(run);
     const cancelCommand = agentWorkerRunCancelCommandSchema.parse({ type: "run.cancel", runId });
     try {
@@ -535,7 +535,7 @@ export class AgentProcessSupervisor {
       return;
     }
     const error = toPublicError({ code: "AGENT_WORKER_INTERRUPTED" });
-    run.emit({ type: "run.failed", runId, ...error });
+    run.emit({ type: "run.failed", runId, ...error, artifacts: [] });
     this.#finish(runId);
   }
 
@@ -667,7 +667,7 @@ export class AgentProcessSupervisor {
   #failAudit(runId: string): void {
     const run = this.#runs.get(runId);
     if (!run) return;
-    run.emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }) });
+    run.emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }), artifacts: [] });
     this.#finish(runId);
   }
 }

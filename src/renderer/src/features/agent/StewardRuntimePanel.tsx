@@ -82,7 +82,7 @@ export function StewardRuntimePanel({
       if (event.type === "run.completed") {
         appendEntry({ kind: "assistant", text: event.message, outcome: event.outcome, artifacts: event.artifacts });
       } else {
-        appendEntry({ kind: "error", text: event.message, artifacts: [] });
+        appendEntry({ kind: "error", text: event.message, artifacts: event.artifacts });
       }
     });
   }, [session?.id, onActivityChange]);

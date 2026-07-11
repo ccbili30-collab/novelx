@@ -126,8 +126,16 @@ export async function runStewardRuntime(input: {
     } catch {
       throw stewardRuntimeError("AGENT_AUDIT_REQUIRED");
     }
-    throw effectiveCause;
+    throw attachPublicTrace(effectiveCause, stateMachine?.snapshot().executions ?? []);
   }
+}
+
+function attachPublicTrace(
+  cause: unknown,
+  executions: Array<{ tool: "retrieve_graph_evidence" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
+): unknown {
+  if (!cause || typeof cause !== "object") return cause;
+  return Object.assign(cause, { publicToolOutcomes: executions.map((execution) => ({ ...execution })) });
 }
 
 function providerConfigSha256(profile: ProviderRuntimeProfile): string {

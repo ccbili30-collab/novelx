@@ -51,9 +51,9 @@ describe("candidate Prompt evaluation framework", () => {
   it("marks all offline adversarial outputs as fixture-only and rejects every violating pair", () => {
     expect(verifyOfflineAdversarialFixtures()).toEqual({
       classification: "fixture-only-not-live-evidence",
-      cases: 8,
-      compliantAccepted: 8,
-      violationsRejected: 8,
+      cases: 9,
+      compliantAccepted: 9,
+      violationsRejected: 9,
     });
     expect(new Set(promptAdversarialCases.map((testCase) => testCase.category))).toEqual(new Set([
       "prompt_injection",
@@ -64,6 +64,7 @@ describe("candidate Prompt evaluation framework", () => {
       "major_conflict",
       "hidden_fact_leak",
       "tool_failure",
+      "natural_conversation",
     ]));
   });
 
@@ -221,7 +222,7 @@ describe("candidate Prompt evaluation framework", () => {
     expect(callIndex).toBe(offlineAdversarialFixtures.length);
     expect(report.realProvider.cases.filter((item) => !item.passed)).toEqual([]);
     const stewards = report.realProvider.cases.filter((item) => item.role === "steward");
-    expect(stewards).toHaveLength(5);
+    expect(stewards).toHaveLength(6);
     expect(stewards.every((item) =>
       item.executionPath === "production-steward-runtime"
       && item.handoffVersion === null

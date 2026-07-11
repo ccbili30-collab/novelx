@@ -8,6 +8,7 @@ import stewardPromptV1_2 from "./prompts/steward/v1.2.md?raw";
 import stewardPromptV1_3 from "./prompts/steward/v1.3.md?raw";
 import stewardPromptV1_4 from "./prompts/steward/v1.4.md?raw";
 import stewardPromptV1_5 from "./prompts/steward/v1.5.md?raw";
+import stewardPromptV1_6 from "./prompts/steward/v1.6.md?raw";
 import writerPrompt from "./prompts/writer/v1.md?raw";
 
 const promptContent: Record<string, string> = {
@@ -19,13 +20,16 @@ const promptContent: Record<string, string> = {
   "novax.steward@1.5.0": stewardPromptV1_5,
   "novax.steward@1.6.0": stewardPromptV1_5,
   "novax.steward@1.7.0": stewardPromptV1_5,
+  "novax.steward@1.8.0": stewardPromptV1_6,
   "novax.writer@1.0.0": writerPrompt,
   "novax.writer@1.1.0": writerPrompt,
   "novax.writer@1.2.0": writerPrompt,
+  "novax.writer@1.3.0": writerPrompt,
   "novax.checker@1.0.0": checkerPrompt,
   "novax.checker@1.1.0": checkerPromptV1_1,
   "novax.checker@1.2.0": checkerPromptV1_1,
   "novax.checker@1.3.0": checkerPromptV1_1,
+  "novax.checker@1.4.0": checkerPromptV1_1,
 };
 
 export interface PublishedPrompt {

@@ -151,10 +151,6 @@ export function createStewardExecutionStateMachine(input: {
         lastFinalRejectionCode = "STEWARD_FINAL_SCHEMA_INVALID";
         throw stateError(lastFinalRejectionCode);
       }
-      if (containsInternalProcessLanguage(output.data.message)) {
-        lastFinalRejectionCode = "STEWARD_FINAL_MESSAGE_INTERNAL_LANGUAGE";
-        throw stateError(lastFinalRejectionCode);
-      }
       const rejectionCode = validateTrace(output.data);
       if (rejectionCode) {
         lastFinalRejectionCode = rejectionCode;
@@ -481,10 +477,6 @@ function containsForbiddenExternalEcho(value: unknown, tokens: string[]): boolea
   if (tokens.length === 0) return false;
   const serialized = JSON.stringify(value);
   return tokens.some((token) => serialized.includes(token));
-}
-
-function containsInternalProcessLanguage(message: string): boolean {
-  return /(?:\b(?:Steward|Harness|scopeResourceIds|Plan\s*(?:→|->)\s*Execute|Finalize)\b|状态已重置|正确收口|已正确收口|已说明当前状态|项目范围信息|资源\s*ID|名称线索|结构化提交|工具调用|拒绝码)/i.test(message);
 }
 
 function stateError(code: string): Error & { code: string } {

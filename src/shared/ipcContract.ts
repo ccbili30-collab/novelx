@@ -192,6 +192,12 @@ export const agentArtifactSchema = z.discriminatedUnion("kind", [
     status: z.enum(["succeeded", "failed", "not_run"]),
   }).strict(),
   z.object({
+    kind: z.literal("activity"),
+    label: z.string().trim().min(1).max(120),
+    status: z.enum(["succeeded", "failed"]),
+    detail: z.string().trim().min(1).max(500).nullable(),
+  }).strict(),
+  z.object({
     kind: z.literal("change_set"),
     changeSetId: opaqueIdSchema,
     state: z.enum(["pending_review", "committed"]),
@@ -1073,6 +1079,7 @@ const runFailedEventSchema = z.object({
   sessionId: opaqueIdSchema.optional(),
   code: publicErrorCodeSchema,
   message: z.string().min(1).max(240),
+  artifacts: z.array(agentArtifactSchema).max(100).default([]),
 }).strict();
 
 const runActivityEventSchema = z.object({

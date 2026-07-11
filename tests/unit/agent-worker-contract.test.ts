@@ -51,6 +51,7 @@ describe("agent worker fail-closed contract", () => {
         runId: "run-1",
         code: "REAL_GM_PROVIDER_REQUIRED",
         message: "需要先配置可用的模型服务。",
+        artifacts: [expect.objectContaining({ kind: "activity", label: "生成回复", status: "failed" })],
       },
     ]);
   });
@@ -97,6 +98,7 @@ describe("agent worker fail-closed contract", () => {
         runId: "run-2",
         code: "PROMPT_SET_NOT_PUBLISHED",
         message: "Agent 提示词尚未通过发布验证。",
+        artifacts: [expect.objectContaining({ kind: "activity", label: "生成回复", status: "failed" })],
       },
     ]);
   });
@@ -135,6 +137,7 @@ describe("agent worker fail-closed contract", () => {
         runId: "run-3",
         code: "AGENT_TOOLS_REQUIRED",
         message: "Agent 领域工具尚未就绪。",
+        artifacts: [expect.objectContaining({ kind: "activity", label: "生成回复", status: "failed" })],
       },
     ]);
   });
@@ -234,6 +237,7 @@ describe("agent worker fail-closed contract", () => {
       runId: "run-5",
       code: "PROVIDER_PROTOCOL_FAILED",
       message: "模型服务返回了无效结果。",
+      artifacts: [expect.objectContaining({ kind: "activity", label: "生成回复", status: "failed" })],
     });
 
     const unsafeEmit = vi.fn();
@@ -284,6 +288,7 @@ describe("agent worker fail-closed contract", () => {
       runId: "run-7",
       code: "PROMPT_SET_NOT_PUBLISHED",
       message: "Agent 提示词尚未通过发布验证。",
+      artifacts: [expect.objectContaining({ kind: "activity", label: "生成回复", status: "failed" })],
     });
   });
 
@@ -311,6 +316,7 @@ describe("agent worker fail-closed contract", () => {
       runId: "run-8",
       code: "AGENT_AUDIT_REQUIRED",
       message: "Agent 运行审计不可用，任务已阻止。",
+      artifacts: [expect.objectContaining({ kind: "activity", label: "生成回复", status: "failed" })],
     });
   });
 

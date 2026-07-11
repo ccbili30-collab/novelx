@@ -71,6 +71,7 @@ export function registerDesktopIpc(
           sessionId: request.sessionId,
           role: "error",
           text: agentEvent.message,
+          artifacts: agentEvent.artifacts,
           outcome: "blocked",
         });
         applicationRegistry.setSessionState(request.sessionId, "blocked");

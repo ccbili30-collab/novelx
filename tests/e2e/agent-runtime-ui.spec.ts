@@ -34,7 +34,11 @@ test("runs the visible Steward through real IPC and preserves fail-closed gates"
     await composer.fill("请先检查银湾海岸的现有资料");
     await page.getByTitle("发送").click();
     await expect(page.getByText("请先检查银湾海岸的现有资料")).toBeVisible();
-    await expect(page.getByText("需要先配置可用的模型服务。")).toBeVisible();
+    await expect(page.locator(".steward-message--error > p", { hasText: "需要先配置可用的模型服务。" })).toBeVisible();
+    const blockedTrace = page.getByText("已处理 1 项", { exact: true }).first();
+    await expect(blockedTrace).toBeVisible();
+    await blockedTrace.click();
+    await expect(page.getByText("生成回复", { exact: true }).first()).toBeVisible();
     await page.screenshot({ path: "test-results/novax-agent-provider-blocked-1440x900.png", fullPage: true });
 
     const saved = await page.evaluate(async ({ apiKey }) => {
@@ -59,7 +63,7 @@ test("runs the visible Steward through real IPC and preserves fail-closed gates"
     await expect(page.getByRole("radio", { name: "自由" })).toHaveAttribute("aria-checked", "true");
     await composer.fill("把刚才的讨论直接写入正式世界事实");
     await composer.press("Enter");
-    await expect(page.getByText("模型服务运行失败。")).toBeVisible();
+    await expect(page.locator(".steward-message--error > p", { hasText: "模型服务运行失败。" }).last()).toBeVisible();
     await expect(page.locator("body")).not.toContainText(secret);
 
     await page.setViewportSize({ width: 1100, height: 700 });

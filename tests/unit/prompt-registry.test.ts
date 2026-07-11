@@ -14,11 +14,11 @@ describe("versioned Prompt registry", () => {
       rollbackTo,
       hashLength: sha256.length,
     }))).toEqual([
-      { id: "novax.steward", role: "steward", version: "1.7.0", status: "active", rollbackTo: "1.6.0", hashLength: 64 },
-      { id: "novax.writer", role: "writer", version: "1.2.0", status: "active", rollbackTo: "1.1.0", hashLength: 64 },
-      { id: "novax.checker", role: "checker", version: "1.3.0", status: "active", rollbackTo: "1.2.0", hashLength: 64 },
+      { id: "novax.steward", role: "steward", version: "1.8.0", status: "active", rollbackTo: "1.7.0", hashLength: 64 },
+      { id: "novax.writer", role: "writer", version: "1.3.0", status: "active", rollbackTo: "1.2.0", hashLength: 64 },
+      { id: "novax.checker", role: "checker", version: "1.4.0", status: "active", rollbackTo: "1.3.0", hashLength: 64 },
     ]);
-    expect(verifyPromptRegistry()).toEqual({ ok: true, verified: 15 });
+    expect(verifyPromptRegistry()).toEqual({ ok: true, verified: 18 });
     expect(promptManifest.filter((prompt) => prompt.id === "novax.steward").map(({ version, status }) => ({
       version,
       status,
@@ -30,7 +30,8 @@ describe("versioned Prompt registry", () => {
       { version: "1.4.0", status: "deprecated" },
       { version: "1.5.0", status: "deprecated" },
       { version: "1.6.0", status: "deprecated" },
-      { version: "1.7.0", status: "active" },
+      { version: "1.7.0", status: "deprecated" },
+      { version: "1.8.0", status: "active" },
     ]);
     expect(loadCandidatePromptSet()).toEqual([]);
   });
@@ -40,7 +41,7 @@ describe("versioned Prompt registry", () => {
     expect(active).toHaveLength(3);
     expect(new Set(active.map((prompt) => JSON.stringify(prompt.publicationEvidence))).size).toBe(1);
     expect(active[0]?.publicationEvidence).toMatchObject({
-      providerId: "deepseek",
+      providerId: "openai-compatible",
       modelId: "deepseek-chat",
       actualModelIds: ["deepseek-v4-flash"],
     });
@@ -49,10 +50,10 @@ describe("versioned Prompt registry", () => {
   it("keeps Steward authority behind sources, Change Set, Free/Assist, and real tool evidence", () => {
     const steward = loadActivePromptSet().find((prompt) => prompt.role === "steward")?.content || "";
 
-    expect(steward).toContain("Project Truth + Task Handoff");
-    expect(steward).toContain("所有正式修改必须形成 Change Set");
+    expect(steward).toContain("对世界事实、角色状态、历史、规则、正文和用户过去决定没有把握时，检索正式资料");
+    expect(steward).toContain("正式修改必须形成 Change Set");
     expect(steward).toContain("Free / Assist");
-    expect(steward).toContain("不得用自然语言假装已经完成工具工作");
+    expect(steward).toContain("没有执行工具时，不得声称已经读取、检索、修改、保存或检查项目");
     expect(steward).toContain("未解决冲突");
     expect(steward).toContain("submit_steward_result");
   });

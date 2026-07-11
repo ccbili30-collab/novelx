@@ -27,3 +27,6 @@
 .agent-artifact--generating svg { animation: novax-agent-spin 1s linear infinite; }
 @keyframes novax-agent-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .agent-artifact--generating svg { animation: none; } }
+.agent-artifacts { display: block; }
+.agent-artifacts > summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+.agent-artifacts__body { display: grid; gap: 6px; margin-top: 6px; }

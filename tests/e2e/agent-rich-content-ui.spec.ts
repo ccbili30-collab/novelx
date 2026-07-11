@@ -35,6 +35,7 @@ test("renders GFM, Mermaid, blocked Markdown media, and structured Artifacts", a
       "![不可信远程图](https://tracker.invalid/pixel.png)",
     ].join("\n"),
     artifacts: [
+      { kind: "activity", label: "整理项目资料", status: "succeeded", detail: "已完成公开资料整理。" },
       { kind: "tool_call", tool: "checker", label: "一致性检查", status: "succeeded" },
       { kind: "conflict", code: "conflicting_sources", message: "两个稳定来源存在冲突。", evidenceIds: ["version-1", "version-2"] },
       {
@@ -60,6 +61,10 @@ test("renders GFM, Mermaid, blocked Markdown media, and structured Artifacts", a
     await expect(diagram).toBeVisible();
     await expect(diagram.locator("svg")).toHaveCount(1);
     await expect(page.getByText("Markdown 图片已阻止：不可信远程图。请使用带来源的图片产物。", { exact: true })).toBeVisible();
+    const processed = page.getByText("已处理 4 项", { exact: true });
+    await expect(processed).toBeVisible();
+    await processed.click();
+    await expect(page.getByText("整理项目资料", { exact: true })).toBeVisible();
     await expect(page.getByText("一致性检查", { exact: true })).toBeVisible();
     await expect(page.getByText("两个稳定来源存在冲突。", { exact: true })).toBeVisible();
     await expect(page.getByText("角色立绘", { exact: true })).toBeVisible();

@@ -185,7 +185,28 @@ function projectPublicMessage(output: Awaited<ReturnType<typeof runStewardRuntim
 
 function emitFailure(runId: string, cause: unknown, emit: (event: AgentRunEvent) => void): void {
   const error = toPublicError(cause);
-  emit({ type: "run.failed", runId, ...error });
+  emit({ type: "run.failed", runId, ...error, artifacts: projectFailureArtifacts(cause, error.message) });
+}
+
+function projectFailureArtifacts(cause: unknown, message: string): AgentArtifact[] {
+  const outcomes = cause && typeof cause === "object" && "publicToolOutcomes" in cause
+    ? cause.publicToolOutcomes
+    : [];
+  const tools = Array.isArray(outcomes) ? outcomes.flatMap((value): AgentArtifact[] => {
+    if (!value || typeof value !== "object" || !("tool" in value) || !("status" in value)) return [];
+    const tool = value.tool;
+    const status = value.status;
+    if (!(["retrieve_graph_evidence", "propose_change_set", "writer", "checker"] as const).includes(tool as never)) return [];
+    if (status !== "succeeded" && status !== "failed") return [];
+    const labels = {
+      retrieve_graph_evidence: "检索项目资料",
+      propose_change_set: "生成候选变更",
+      writer: "写手处理",
+      checker: "一致性检查",
+    } as const;
+    return [{ kind: "tool_call", tool: tool as keyof typeof labels, label: labels[tool as keyof typeof labels], status }];
+  }) : [];
+  return [...tools, { kind: "activity", label: "生成回复", status: "failed", detail: message }];
 }
 
 function workerError(code: string): Error & { code: string } {

@@ -113,6 +113,7 @@ describe("ApplicationRegistryRepository", () => {
       text: "候选变更已生成。",
       outcome: "review",
       artifacts: [
+        { kind: "activity", label: "整理项目资料", status: "succeeded", detail: "已完成。" },
         { kind: "tool_call", tool: "checker", label: "一致性检查", status: "succeeded" },
         { kind: "change_set", changeSetId: "change-1", state: "pending_review" },
       ],
@@ -121,6 +122,7 @@ describe("ApplicationRegistryRepository", () => {
 
     repository = new ApplicationRegistryRepository(databasePath);
     expect(repository.listMessages(session.id)[0]?.artifacts).toEqual([
+      { kind: "activity", label: "整理项目资料", status: "succeeded", detail: "已完成。" },
       { kind: "tool_call", tool: "checker", label: "一致性检查", status: "succeeded" },
       { kind: "change_set", changeSetId: "change-1", state: "pending_review" },
     ]);
