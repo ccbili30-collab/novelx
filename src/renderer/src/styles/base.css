@@ -316,6 +316,13 @@ button { letter-spacing: 0; }
 .candidate-use-list select { min-height: 30px; border: 1px solid var(--novax-color-border-control); background: var(--novax-color-surface-control); color: var(--novax-color-text); }
 .start-profile-create { margin-top: 12px; background: var(--novax-color-accent); border-color: var(--novax-color-accent); color: var(--novax-color-on-accent); }
 .start-profile-create:disabled { background: var(--novax-color-disabled-surface); border-color: transparent; color: var(--novax-color-disabled); }
+.import-proposal-builder { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--novax-color-border-subtle); }
+.import-proposal-builder h2 { margin: 0 0 10px; font-size: 15px; }
+.import-proposal-builder > select { width: 100%; min-height: 34px; padding: 7px 8px; border: 1px solid var(--novax-color-border-control); border-radius: 4px; background: var(--novax-color-surface-control); color: var(--novax-color-text); }
+.proposal-candidate-list { display: grid; gap: 6px; max-height: 160px; margin-top: 8px; overflow: auto; }
+.proposal-candidate-list label { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.import-proposal-builder > button { min-height: 34px; display: inline-flex; align-items: center; gap: 7px; margin-top: 10px; padding: 7px 11px; border: 1px solid var(--novax-color-accent); border-radius: 5px; background: var(--novax-color-accent); color: var(--novax-color-on-accent); }
+.import-proposal-builder > button:disabled { border-color: transparent; background: var(--novax-color-disabled-surface); color: var(--novax-color-disabled); }
 .import-empty { height: 100%; display: grid; place-content: center; justify-items: center; gap: 10px; color: var(--novax-color-text-faint); }
 .import-empty h1 { margin: 0; font-size: 15px; font-weight: 500; }
 .import-error { position: sticky; bottom: 0; display: flex; justify-content: space-between; gap: 10px; margin-top: 16px; padding: 9px 10px; border: 1px solid var(--novax-color-danger-border); border-radius: 5px; background: var(--novax-color-danger-surface); color: var(--novax-color-danger-strong); font-size: 13px; }

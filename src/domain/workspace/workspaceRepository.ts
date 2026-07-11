@@ -208,7 +208,11 @@ function migrate(db: DatabaseSync): void {
     migrateDecomposerAuditSchema(db);
     schema = { version: 17 };
   }
-  if (schema.version !== 17) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 17) {
+    migrateImportChangeSetLinks(db);
+    schema = { version: 18 };
+  }
+  if (schema.version !== 18) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -248,6 +252,27 @@ function migrate(db: DatabaseSync): void {
     db.exec("ROLLBACK");
     throw error;
   }
+}
+
+function migrateImportChangeSetLinks(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS import_candidate_change_set_links (
+        candidate_id TEXT NOT NULL REFERENCES decomposition_candidates(id),
+        candidate_revision INTEGER NOT NULL CHECK (candidate_revision > 0),
+        change_set_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (candidate_id, candidate_revision, change_set_id, item_id),
+        FOREIGN KEY (change_set_id, item_id) REFERENCES change_set_items(change_set_id, id) ON DELETE CASCADE
+      );
+      CREATE TRIGGER IF NOT EXISTS import_candidate_change_set_links_update_guard
+      BEFORE UPDATE ON import_candidate_change_set_links BEGIN SELECT RAISE(ABORT, 'IMPORT_CHANGE_SET_LINK_IMMUTABLE'); END;
+      UPDATE schema_meta SET version = 18 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
 }
 
 function migrateDecomposerAuditSchema(db: DatabaseSync): void {

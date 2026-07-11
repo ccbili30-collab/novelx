@@ -20,11 +20,15 @@ export function ImportWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
   const [location, setLocation] = useState("");
   const [candidateUse, setCandidateUse] = useState<Record<string, CandidateUse>>({});
   const [decomposerRun, setDecomposerRun] = useState<{ runId: string; sourceId: string } | null>(null);
+  const [proposalTargetId, setProposalTargetId] = useState("");
+  const [proposalCandidateIds, setProposalCandidateIds] = useState<string[]>([]);
   const selected = sources.find((item) => item.id === sourceId) ?? null;
   const accepted = useMemo(() => candidates.filter((item) => item.status === "accepted"), [candidates]);
+  const proposalTargets = useMemo(() => workspace?.resources.filter((item) => ["world", "story", "oc"].includes(item.type) && item.objectKind !== "domain_root") ?? [], [workspace]);
 
   useEffect(() => { if (workspace) void Promise.all([loadSources(), loadProfiles()]); else { setSources([]); setCandidates([]); } }, [workspace?.workspaceId]);
   useEffect(() => { if (sourceId) void loadCandidates(sourceId); else setCandidates([]); }, [sourceId]);
+  useEffect(() => setProposalTargetId((current) => proposalTargets.some((item) => item.id === current) ? current : proposalTargets[0]?.id ?? ""), [workspace?.workspaceId, proposalTargets.length]);
   useEffect(() => window.novaxDesktop.sourceLibrary.subscribeDecomposer((event) => {
     setDecomposerRun((current) => {
       if (!current || current.runId !== event.runId || current.sourceId !== event.sourceId) return current;
@@ -48,6 +52,7 @@ export function ImportWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
     const result = await window.novaxDesktop.sourceLibrary.listCandidates({ sourceId: nextSourceId });
     if (!result.ok) { setError(result.error.message); return; }
     setCandidates(result.candidates);
+    setProposalCandidateIds((current) => current.filter((id) => result.candidates.some((item) => item.id === id && item.status === "accepted" && item.kind !== "ambiguity")));
     setCandidateUse((current) => Object.fromEntries(result.candidates.filter((item) => item.status === "accepted").map((item) => [item.id, current[item.id] ?? "omit"])));
   }
   async function addSource() {
@@ -99,6 +104,14 @@ export function ImportWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
   async function cancelDecomposer() {
     if (!decomposerRun) return; await window.novaxDesktop.sourceLibrary.cancelDecomposer({ runId: decomposerRun.runId });
   }
+  async function proposeCandidates() {
+    if (!selected || !proposalTargetId || !proposalCandidateIds.length) return; setBusy(true); setError(null); setNotice(null);
+    try {
+      const result = await window.novaxDesktop.sourceLibrary.proposeCandidates({ sourceId: selected.id, targetResourceId: proposalTargetId, candidateIds: proposalCandidateIds });
+      if (!result.ok) { setError(result.error.message); return; }
+      setProposalCandidateIds([]); setNotice(`已生成包含 ${result.itemCount} 项的待审核变更集。`);
+    } finally { setBusy(false); }
+  }
 
   return <section className="import-workbench" aria-label="来源导入">
     <aside className="source-rail">
@@ -119,6 +132,7 @@ export function ImportWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
           {accepted.length ? <div className="candidate-use-list">{accepted.map((item) => <label key={item.id}><span>{candidateTitle(item)}</span><select value={candidateUse[item.id] ?? "omit"} onChange={(event) => setCandidateUse((current) => ({ ...current, [item.id]: event.target.value as CandidateUse }))}><option value="omit">不使用</option><option value="seed">作为起点依据</option>{item.kind === "event" ? <option value="future">排除为原著未来</option> : null}</select></label>)}</div> : null}
           <button className="start-profile-create" type="button" onClick={createStartProfile} disabled={busy || !startProfileId || !startTitle.trim() || !opening.trim()}><Save size={16} />创建起始模板</button>
         </section>
+        <section className="import-proposal-builder"><h2>生成待审核变更</h2><select aria-label="导入目标" value={proposalTargetId} onChange={(event) => setProposalTargetId(event.target.value)}><option value="">选择世界、故事或 OC</option>{proposalTargets.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select><div className="proposal-candidate-list">{accepted.filter((item) => item.kind !== "ambiguity").map((item) => <label key={item.id}><input type="checkbox" checked={proposalCandidateIds.includes(item.id)} onChange={(event) => setProposalCandidateIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /><span>{candidateTitle(item)}</span></label>)}</div><button type="button" onClick={proposeCandidates} disabled={busy || !proposalTargetId || proposalCandidateIds.length === 0}><Save size={16} />生成变更集</button></section>
       </> : <div className="import-empty"><FilePlus2 size={28} /><h1>来源库为空</h1></div>}
       {error ? <div className="import-error" role="alert">{error}<button type="button" onClick={() => setError(null)}>×</button></div> : null}
       {notice ? <div className="import-notice" role="status">{notice}<button type="button" onClick={() => setNotice(null)}>×</button></div> : null}

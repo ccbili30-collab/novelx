@@ -59,6 +59,7 @@ export const desktopIpcChannels = {
   decompositionCandidateList: "novax:decomposition-candidate-list",
   decompositionCandidateRevise: "novax:decomposition-candidate-revise",
   decompositionCandidateDecide: "novax:decomposition-candidate-decide",
+  importCandidatePropose: "novax:import-candidate-propose",
   decomposerStart: "novax:decomposer-start",
   decomposerCancel: "novax:decomposer-cancel",
   decomposerEvent: "novax:decomposer-event",
@@ -649,6 +650,11 @@ export const publicDecomposerEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("completed"), runId: opaqueIdSchema, sourceId: opaqueIdSchema, candidateCount: z.number().int().nonnegative().max(1000) }).strict(),
   z.object({ type: z.literal("failed"), runId: opaqueIdSchema, sourceId: opaqueIdSchema, error: sourceOperationErrorSchema }).strict(),
 ]);
+export const importCandidateProposeRequestSchema = z.object({ sourceId: opaqueIdSchema, targetResourceId: opaqueIdSchema, candidateIds: z.array(opaqueIdSchema).min(1).max(100) }).strict();
+export const importCandidateProposeResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), changeSetId: opaqueIdSchema, itemCount: z.number().int().positive().max(500) }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
 
 export const playthroughReconciliationStatusSchema = z.object({
   state: z.enum(["current", "canon_diverged"]),
@@ -1179,6 +1185,8 @@ export type DecomposerStartRequest = z.infer<typeof decomposerStartRequestSchema
 export type DecomposerStartResult = z.infer<typeof decomposerStartResultSchema>;
 export type DecomposerCancelRequest = z.infer<typeof decomposerCancelRequestSchema>;
 export type PublicDecomposerEvent = z.infer<typeof publicDecomposerEventSchema>;
+export type ImportCandidateProposeRequest = z.infer<typeof importCandidateProposeRequestSchema>;
+export type ImportCandidateProposeResult = z.infer<typeof importCandidateProposeResultSchema>;
 export type PlaythroughInspectResult = z.infer<typeof playthroughInspectResultSchema>;
 export type PlayerTurnStartRequest = z.infer<typeof playerTurnStartRequestSchema>;
 export type PlayerTurnStartResponse = z.infer<typeof playerTurnStartResponseSchema>;
@@ -1290,6 +1298,7 @@ export interface DesktopApi {
     startDecomposer(request: DecomposerStartRequest): Promise<DecomposerStartResult>;
     cancelDecomposer(request: DecomposerCancelRequest): Promise<void>;
     subscribeDecomposer(listener: (event: PublicDecomposerEvent) => void): () => void;
+    proposeCandidates(request: ImportCandidateProposeRequest): Promise<ImportCandidateProposeResult>;
   };
   document: {
     get(request: DocumentGetRequest): Promise<EditorDocumentSnapshot>;

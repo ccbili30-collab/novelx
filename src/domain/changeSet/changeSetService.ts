@@ -250,7 +250,7 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
         const { evidenceIds, source: _proposalSource, ...assertion } = item.payload;
         const sources = [
           { kind: "confirmed_change_set", ref: `${context.changeSetId}:${item.id}` },
-          ...evidenceIds.map((ref) => ({ kind: "evidence_version", ref })),
+          ...evidenceIds.map((ref) => ({ kind: this.#isAcceptedImportCandidate(ref) ? "import_candidate" : "evidence_version", ref })),
         ];
         const outputId = this.#assertions.putVersion({
           ...assertion,
@@ -327,6 +327,10 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
         };
       }
     }
+  }
+
+  #isAcceptedImportCandidate(id: string): boolean {
+    return Boolean(this.workspace.db.prepare("SELECT 1 FROM decomposition_candidates WHERE id = ? AND status = 'accepted'").get(id));
   }
 }
 

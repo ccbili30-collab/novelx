@@ -69,6 +69,8 @@ import {
   decomposerStartResultSchema,
   decomposerCancelRequestSchema,
   publicDecomposerEventSchema,
+  importCandidateProposeRequestSchema,
+  importCandidateProposeResultSchema,
   nullableProjectAddResultSchema,
   projectInitializeRequestSchema,
   projectListResultSchema,
@@ -354,6 +356,9 @@ export function exposeDesktopApi(): void {
         const handler = (_event: IpcRendererEvent, payload: unknown) => { const parsed = publicDecomposerEventSchema.safeParse(payload); if (parsed.success) listener(parsed.data); };
         ipcRenderer.on(desktopIpcChannels.decomposerEvent, handler);
         return () => ipcRenderer.removeListener(desktopIpcChannels.decomposerEvent, handler);
+      },
+      async proposeCandidates(request) {
+        return importCandidateProposeResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.importCandidatePropose, importCandidateProposeRequestSchema.parse(request)));
       },
     },
     document: {

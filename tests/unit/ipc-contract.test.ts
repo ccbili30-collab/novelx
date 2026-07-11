@@ -110,6 +110,7 @@ describe("desktop IPC contract", () => {
       decompositionCandidateList: "novax:decomposition-candidate-list",
       decompositionCandidateRevise: "novax:decomposition-candidate-revise",
       decompositionCandidateDecide: "novax:decomposition-candidate-decide",
+      importCandidatePropose: "novax:import-candidate-propose",
       decomposerStart: "novax:decomposer-start",
       decomposerCancel: "novax:decomposer-cancel",
       decomposerEvent: "novax:decomposer-event",

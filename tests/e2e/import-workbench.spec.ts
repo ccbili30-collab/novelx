@@ -31,6 +31,11 @@ test("reviews source-bound candidates and creates a Start Profile through the vi
     await future.getByLabel("结束").fill("第三年冬");
     await future.getByTitle("保存修改").click();
     await rule.getByTitle("接受").click(); await future.getByTitle("接受").click();
+    await page.getByLabel("导入目标").selectOption({ label: "银湾" });
+    await page.locator(".proposal-candidate-list label").filter({ hasText: "银湾洞穴" }).getByRole("checkbox").check();
+    await page.locator(".proposal-candidate-list label").filter({ hasText: "银湾沉没" }).getByRole("checkbox").check();
+    await page.getByRole("button", { name: "生成变更集" }).click();
+    await expect(page.getByRole("status")).toContainText("待审核变更集");
     await page.locator(".candidate-use-list label").filter({ hasText: "银湾洞穴" }).getByRole("combobox").selectOption("seed");
     await page.locator(".candidate-use-list label").filter({ hasText: "银湾沉没" }).getByRole("combobox").selectOption("future");
     await page.getByLabel("起始模板名称").fill("退潮入口");
@@ -54,6 +59,8 @@ test("reviews source-bound candidates and creates a Start Profile through the vi
       id: fixture.futureId,
       payload: expect.objectContaining({ temporal: { kind: "range", start: "第三年春", end: "第三年冬" } }),
     })]) });
+    const pending = await page.evaluate(async () => (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop.changeSet.listPending());
+    expect(pending).toMatchObject({ ok: true, changeSets: [{ mode: "assist", status: "pending", itemCount: 2 }] });
     await expect(page.getByRole("main")).not.toContainText(/sourceChunkIds|payload_json|workspace\.db/);
     await page.screenshot({ path: "test-results/novax-import-workbench-1440x900.png", fullPage: true });
   } finally { await app.close(); fs.rmSync(userDataPath, { recursive: true, force: true }); fs.rmSync(workspaceRoot, { recursive: true, force: true }); }

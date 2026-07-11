@@ -53,6 +53,8 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
       const document = this.#documents.getCurrentStable(resource.id);
       if (document) evidenceIds.add(document.id);
     }
+    const acceptedImportCandidates = this.workspace.db.prepare("SELECT id FROM decomposition_candidates WHERE status = 'accepted'").all() as Array<{ id: string }>;
+    for (const candidate of acceptedImportCandidates) evidenceIds.add(candidate.id);
 
     return candidate.items.map((item) => this.#assessItem(item, {
       assertions,

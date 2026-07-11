@@ -59,6 +59,8 @@ import {
   decompositionCandidateListResultSchema,
   decompositionCandidateReviseRequestSchema,
   decompositionCandidateDecideRequestSchema,
+  importCandidateProposeRequestSchema,
+  importCandidateProposeResultSchema,
   workspaceRestoreRequestSchema,
   workspaceRestoreResultSchema,
   safeChangeSetDetailSchema,
@@ -126,6 +128,7 @@ import { PlayerRunCommitService } from "../domain/play/playerRunCommitService";
 import { PlayerTurnContextService } from "../domain/play/playerTurnContextService";
 import { SourceImportService } from "../domain/import/sourceImportService";
 import { DecomposerRunService } from "../domain/import/decomposerRunService";
+import { ImportCandidateChangeSetService } from "../domain/import/importCandidateChangeSetService";
 import type { DecomposerRuntimeLease } from "./decomposerProcessSupervisor";
 import { SourceLibraryRepository, type SourceLibraryEntry } from "../domain/import/sourceLibraryRepository";
 import type { DecompositionCandidateRecord } from "../domain/import/decompositionCandidateRepository";
@@ -190,6 +193,7 @@ export class WorkspaceSession {
   listPlayTurns(playthroughId: string) { return new PlaythroughRepository(this.requireWorkspace()).listTurns(playthroughId); }
   listSources() { return new SourceLibraryRepository(this.requireWorkspace()).list(); }
   getSourceImportService() { return new SourceImportService(this.requireWorkspace()); }
+  proposeImportCandidates(input: { sourceId: string; targetResourceId: string; candidateIds: string[] }) { return new ImportCandidateChangeSetService(this.requireWorkspace()).propose(input); }
 
   inspectPlaythrough(playthroughId: string) {
     return new PlaythroughReconciliationService(this.requireWorkspace()).inspect(playthroughId);
@@ -510,6 +514,10 @@ export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolic
     const candidate = session.getSourceImportService().decide(request.candidateId, request.decision);
     return session.getSourceImportService().listCandidateReviews(candidate.sourceId);
   }));
+  ipcMain.handle(desktopIpcChannels.importCandidatePropose, (_event, payload: unknown) => {
+    try { const request = importCandidateProposeRequestSchema.parse(payload); const changeSet = session.proposeImportCandidates(request); return importCandidateProposeResultSchema.parse({ ok: true, changeSetId: changeSet.id, itemCount: changeSet.items.length }); }
+    catch (error) { return importCandidateProposeResultSchema.parse({ ok: false, error: publicSourceError(error) }); }
+  });
   ipcMain.handle(desktopIpcChannels.playthroughInspect, (_event, payload: unknown) => playthroughInspectResult(() => {
     const request = playthroughInspectRequestSchema.parse(payload);
     return session.inspectPlaythrough(request.playthroughId);
@@ -805,6 +813,10 @@ function publicSourceError(error: unknown) {
     SOURCE_TEXT_ENCODING_UNSUPPORTED: "无法识别文本编码。",
     SOURCE_ARCHIVE_LIMIT_EXCEEDED: "压缩文档超过安全解析限制。",
     DECOMPOSITION_CANDIDATE_ALREADY_DECIDED: "这个候选已经完成审核。",
+    IMPORT_TARGET_INVALID: "请选择有效的世界、故事或 OC 作为导入目标。",
+    IMPORT_CANDIDATES_REQUIRED: "请至少选择一个已接受候选。",
+    IMPORT_CANDIDATE_NOT_ACCEPTED: "候选未接受、来源不匹配或已失效。",
+    IMPORT_AMBIGUITY_NOT_PROPOSABLE: "歧义候选需要先由用户裁定，不能直接生成变更集。",
   };
   return { code, message: messages[code] ?? "来源资料操作失败，请检查文件后重试。" };
 }
