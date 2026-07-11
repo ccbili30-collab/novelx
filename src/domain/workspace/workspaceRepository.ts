@@ -204,7 +204,11 @@ function migrate(db: DatabaseSync): void {
     migratePlayerAuditSchema(db);
     schema = { version: 16 };
   }
-  if (schema.version !== 16) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 16) {
+    migrateDecomposerAuditSchema(db);
+    schema = { version: 17 };
+  }
+  if (schema.version !== 17) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -239,6 +243,53 @@ function migrate(db: DatabaseSync): void {
       insertResource.run(resourceId);
       insertRevision.run(randomUUID(), resourceId, type, title, checkpointId, index, now);
     }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateDecomposerAuditSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE decomposer_run_audits (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL UNIQUE REFERENCES import_jobs(id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL REFERENCES source_library_entries(id) ON DELETE CASCADE,
+        provider_id TEXT NOT NULL,
+        requested_model_id TEXT NOT NULL,
+        provider_config_sha256 TEXT NOT NULL CHECK (length(provider_config_sha256) = 64),
+        prompt_id TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        prompt_sha256 TEXT NOT NULL CHECK (length(prompt_sha256) = 64),
+        input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+        error_code TEXT,
+        output_sha256 TEXT CHECK (output_sha256 IS NULL OR length(output_sha256) = 64),
+        receipt_json TEXT CHECK (receipt_json IS NULL OR json_valid(receipt_json)),
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+      CREATE TABLE decomposer_run_sources (
+        audit_id TEXT NOT NULL REFERENCES decomposer_run_audits(id) ON DELETE CASCADE,
+        chunk_id TEXT NOT NULL REFERENCES source_chunks(id),
+        content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (audit_id, chunk_id),
+        UNIQUE (audit_id, ordinal)
+      );
+      CREATE TRIGGER decomposer_audit_identity_guard
+      BEFORE UPDATE OF job_id, source_id, provider_id, requested_model_id, provider_config_sha256,
+        prompt_id, prompt_version, prompt_sha256, input_sha256, started_at ON decomposer_run_audits
+      BEGIN SELECT RAISE(ABORT, 'DECOMPOSER_AUDIT_IDENTITY_IMMUTABLE'); END;
+      CREATE TRIGGER decomposer_audit_terminal_guard
+      BEFORE UPDATE ON decomposer_run_audits
+      WHEN OLD.status <> 'running'
+      BEGIN SELECT RAISE(ABORT, 'DECOMPOSER_AUDIT_TERMINAL'); END;
+      UPDATE schema_meta SET version = 17 WHERE singleton = 1;
+    `);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
