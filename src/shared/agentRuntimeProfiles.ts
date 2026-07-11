@@ -26,13 +26,14 @@ export const STEWARD_STATE_CORRECTION = {
 const profiles: Record<AgentRuntimeRole, AgentRuntimeProfileIdentity> = {
   steward: {
     id: "novax.steward-runtime",
-    version: "1.14.0",
-    sha256: "29af57fd84113a54a3ba19a6d87069fb12fe7952b3bba99785efed3d29d4c10b",
+    version: "1.15.0",
+    sha256: "dc213a3af97094664c5add01baa884dc373852543fd52feaf2cfc2e5bb3862e2",
     toolPolicyId: "novax.steward-tools",
-    toolPolicyVersion: "2.6.0",
-    toolPolicySha256: "697c7057c667312dd64e062ae9ee7df016aa6659073ce0fe5bf6f2e098cc3cac",
+    toolPolicyVersion: "2.7.0",
+    toolPolicySha256: "628bdb347146274f86cedd932bf680bc3498dae003534a92bc5510a3a5c04d17",
     authorizedTools: [
       "checker",
+      "inspect_project_files",
       "propose_change_set",
       "retrieve_graph_evidence",
       "submit_steward_plan",

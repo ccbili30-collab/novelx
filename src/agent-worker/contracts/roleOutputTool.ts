@@ -27,6 +27,7 @@ const stewardParameters = Type.Object({
   toolOutcomes: Type.Array(Type.Object({
     tool: Type.Union([
       Type.Literal("retrieve_graph_evidence"),
+      Type.Literal("inspect_project_files"),
       Type.Literal("propose_change_set"),
       Type.Literal("writer"),
       Type.Literal("checker"),
@@ -102,9 +103,9 @@ export function createRoleOutputTool(
     description: options.description ?? resultToolDescription(role),
     parameters: parametersByRole[role],
     execute: async (_toolCallId, params) => {
-      submissionCount += 1;
       const parsed = roleOutputSchemas[role].safeParse(params);
       if (!parsed.success) throw outputToolError("AGENT_OUTPUT_SCHEMA_INVALID", "Structured Agent result is invalid.");
+      submissionCount += 1;
       submission = parsed.data as RoleOutput;
       return {
         content: [{ type: "text", text: "Structured result accepted." }],

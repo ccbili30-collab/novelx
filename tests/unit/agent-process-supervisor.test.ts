@@ -67,6 +67,19 @@ function createGateway(overrides: Partial<AgentToolGateway> = {}): AgentToolGate
         },
       },
     }),
+    inspectProjectFiles: async () => ({
+      mode: "overview",
+      listing: {
+        root: ".",
+        entries: [],
+        ignoredDirectories: [".git", ".novax", "node_modules"],
+        incomplete: false,
+        omittedEntries: 0,
+      },
+      files: [],
+      omittedReadableFiles: 0,
+      totalReturnedChars: 0,
+    }),
     proposeChangeSet: async (_args, context) => ({
       changeSetId: `change-${context.requestId}`,
       mode: context.mode,

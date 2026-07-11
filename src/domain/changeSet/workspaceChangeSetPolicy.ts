@@ -106,8 +106,20 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
         return assessCreativeRelation(item, current.resourceIds, current.resourceCreateItems, current.relationIds);
       case "constraint_profile.put":
         return assessConstraintProfile(item, current.resourceIds, current.resourceCreateItems, current.profileIds);
+      case "project_file.put":
+        return assessProjectFilePut(item);
+      case "project_file.delete":
+        return { itemId: item.id, risk: "elevated", conflicts: [] };
     }
   }
+}
+
+function assessProjectFilePut(item: Extract<ChangeSetItem, { kind: "project_file.put" }>): ChangeSetPolicyAssessment {
+  return {
+    itemId: item.id,
+    risk: item.payload.expectedSha256 === null ? "low" : "elevated",
+    conflicts: [],
+  };
 }
 
 function assessDocumentContent(

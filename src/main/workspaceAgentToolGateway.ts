@@ -1,5 +1,6 @@
 import {
   proposeChangeSetResultSchema,
+  inspectProjectFilesResultSchema,
   retrieveGraphEvidenceResultSchema,
   type ProposeChangeSetArgs,
 } from "../shared/agentWorkerProtocol";
@@ -9,6 +10,7 @@ import { ContextPacketService } from "../domain/retrieval/contextPacketService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import type { WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import type { AgentToolGateway } from "./agentProcessSupervisor";
+import { ProjectFileService } from "../domain/workspace/projectFileService";
 
 export function createWorkspaceAgentToolGateway(
   workspace: WorkspaceDatabase,
@@ -26,6 +28,17 @@ export function createWorkspaceAgentToolGateway(
       const packet = new ContextPacketService(workspace).build(args);
       assertAvailable(context.signal);
       return retrieveGraphEvidenceResultSchema.parse(packet);
+    },
+    inspectProjectFiles: async (args, context) => {
+      assertAvailable(context.signal);
+      const files = new ProjectFileService(workspace.rootPath);
+      const result = args.mode === "overview"
+        ? { mode: "overview" as const, ...files.overview(args.path) }
+        : args.mode === "read"
+          ? { mode: "read" as const, file: files.read(args.path) }
+          : { mode: "search" as const, ...files.search(args.query, args.path) };
+      assertAvailable(context.signal);
+      return inspectProjectFilesResultSchema.parse(result);
     },
     proposeChangeSet: async (args, context) => {
       assertAvailable(context.signal);
@@ -83,6 +96,9 @@ function mapProposedItems(
           ...item,
           payload: { ...item.payload, authorKind: "agent" },
         };
+      case "project_file.put":
+      case "project_file.delete":
+        return item;
     }
   });
 }

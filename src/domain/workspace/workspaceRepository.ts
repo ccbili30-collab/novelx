@@ -212,7 +212,11 @@ function migrate(db: DatabaseSync): void {
     migrateImportChangeSetLinks(db);
     schema = { version: 18 };
   }
-  if (schema.version !== 18) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 18) {
+    migrateProjectFileVersionSchema(db);
+    schema = { version: 19 };
+  }
+  if (schema.version !== 19) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -247,6 +251,74 @@ function migrate(db: DatabaseSync): void {
       insertResource.run(resourceId);
       insertRevision.run(randomUUID(), resourceId, type, title, checkpointId, index, now);
     }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateProjectFileVersionSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS project_file_versions (
+        id TEXT PRIMARY KEY,
+        checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id) ON DELETE CASCADE,
+        relative_path TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('active', 'deleted')),
+        content_sha256 TEXT CHECK (content_sha256 IS NULL OR length(content_sha256) = 64),
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        created_at TEXT NOT NULL,
+        UNIQUE (checkpoint_id, relative_path),
+        CHECK ((state = 'active' AND content_sha256 IS NOT NULL) OR (state = 'deleted' AND content_sha256 IS NULL))
+      );
+      CREATE INDEX IF NOT EXISTS project_file_versions_path_idx ON project_file_versions(relative_path, checkpoint_id);
+
+      ALTER TABLE change_set_outputs RENAME TO change_set_outputs_v18;
+      CREATE TABLE change_set_outputs (
+        change_set_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        output_kind TEXT NOT NULL CHECK (output_kind IN (
+          'resource_revision', 'document_version', 'assertion_version',
+          'creative_document_revision', 'creative_relation_revision', 'constraint_profile_version',
+          'project_file_version'
+        )),
+        output_id TEXT NOT NULL,
+        output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (output_kind, output_id),
+        UNIQUE (change_set_id, item_id),
+        FOREIGN KEY (change_set_id, item_id)
+          REFERENCES change_set_items(change_set_id, id) ON DELETE CASCADE
+      );
+      INSERT INTO change_set_outputs SELECT * FROM change_set_outputs_v18;
+      DROP TABLE change_set_outputs_v18;
+      CREATE INDEX change_set_outputs_change_idx ON change_set_outputs(change_set_id, item_id);
+
+      ALTER TABLE agent_audit_links RENAME TO agent_audit_links_v18;
+      CREATE TABLE agent_audit_links (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        invocation_id TEXT REFERENCES agent_invocations(id),
+        tool_invocation_id TEXT REFERENCES agent_tool_invocations(id),
+        link_kind TEXT NOT NULL CHECK (link_kind IN (
+          'document_evidence', 'assertion_evidence', 'change_set_input', 'change_set_output',
+          'document_version_output', 'assertion_version_output', 'resource_revision_output',
+          'creative_document_revision_output', 'creative_relation_revision_output',
+          'constraint_profile_version_output', 'project_file_version_output', 'gm_resolution', 'style_profile'
+        )),
+        target_id TEXT NOT NULL,
+        target_sha256 TEXT,
+        ordinal INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO agent_audit_links SELECT * FROM agent_audit_links_v18;
+      DROP TABLE agent_audit_links_v18;
+      CREATE UNIQUE INDEX agent_audit_links_identity_idx
+        ON agent_audit_links(run_id, COALESCE(invocation_id, ''), COALESCE(tool_invocation_id, ''), link_kind, target_id);
+      UPDATE schema_meta SET version = 19 WHERE singleton = 1;
+    `);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

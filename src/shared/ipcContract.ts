@@ -188,7 +188,7 @@ const artifactLocatorSchema = z.discriminatedUnion("kind", [
 export const agentArtifactSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("tool_call"),
-    tool: z.enum(["retrieve_graph_evidence", "propose_change_set", "writer", "checker"]),
+    tool: z.enum(["retrieve_graph_evidence", "inspect_project_files", "propose_change_set", "writer", "checker"]),
     label: z.string().trim().min(1).max(120),
     status: z.enum(["succeeded", "failed", "not_run"]),
   }).strict(),
@@ -891,7 +891,7 @@ export const safeChangeSetSummarySchema = z.object({
 
 export const safeChangeSetItemSchema = z.object({
   id: z.string().min(1).max(160),
-  kind: z.enum(["fact", "resource", "document", "relation", "constraint"]),
+  kind: z.enum(["fact", "resource", "document", "relation", "constraint", "project_file"]),
   kindLabel: z.string().min(1).max(80),
   decision: z.enum(["pending", "accepted", "rejected", "draft"]),
   risk: z.enum(["low", "elevated"]),

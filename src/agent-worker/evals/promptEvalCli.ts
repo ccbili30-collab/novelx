@@ -26,7 +26,7 @@ function resolveReportDirectory(configured: string | undefined): string {
   return path.resolve(process.cwd(), "notes", "evidence", "novax-desktop-prompt-evals");
 }
 
-void main().catch((error: unknown) => {
+export const promptEvalCompletion = main().catch((error: unknown) => {
   const code = error && typeof error === "object" && "code" in error
     ? String(error.code)
     : "PROMPT_EVAL_RUNNER_FAILED";

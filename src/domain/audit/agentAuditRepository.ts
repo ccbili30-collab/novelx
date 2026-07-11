@@ -124,7 +124,8 @@ export interface AuditLinkInput {
       | "resource_revision_output"
       | "creative_document_revision_output"
       | "creative_relation_revision_output"
-      | "constraint_profile_version_output";
+      | "constraint_profile_version_output"
+      | "project_file_version_output";
     targetId: string;
     targetSha256: string | null;
   }>;
@@ -137,7 +138,8 @@ export interface ArtifactProvenanceRecord {
     | "assertion_version"
     | "creative_document_revision"
     | "creative_relation_revision"
-    | "constraint_profile_version";
+    | "constraint_profile_version"
+    | "project_file_version";
   artifactId: string;
   artifactSha256: string;
   changeSetId: string;
@@ -365,7 +367,8 @@ export class AgentAuditRepository implements AgentAuditStore {
             | "assertion_version_output"
             | "creative_document_revision_output"
             | "creative_relation_revision_output"
-            | "constraint_profile_version_output",
+            | "constraint_profile_version_output"
+            | "project_file_version_output",
           targetId: output.output_id,
           targetSha256: output.output_sha256,
         })),
@@ -704,7 +707,8 @@ function readArtifactKind(
     && value !== "assertion_version"
     && value !== "creative_document_revision"
     && value !== "creative_relation_revision"
-    && value !== "constraint_profile_version") {
+    && value !== "constraint_profile_version"
+    && value !== "project_file_version") {
     throw auditError("AGENT_AUDIT_DATA_INVALID", "Artifact provenance kind is invalid.");
   }
   return value;

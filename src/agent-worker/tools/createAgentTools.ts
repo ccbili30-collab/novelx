@@ -3,10 +3,14 @@ import { Type } from "typebox";
 import {
   proposeChangeSetArgsSchema,
   proposeChangeSetResultSchema,
+  inspectProjectFilesArgsSchema,
+  inspectProjectFilesResultSchema,
   retrieveGraphEvidenceArgsSchema,
   retrieveGraphEvidenceResultSchema,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
+  type InspectProjectFilesArgs,
+  type InspectProjectFilesResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
 } from "../../shared/agentWorkerProtocol";
@@ -17,6 +21,12 @@ const jsonObject = Type.Record(Type.String({ minLength: 1, maxLength: 240 }), Ty
 
 const retrieveParameters = Type.Object({
   scopeResourceIds: Type.Array(identifier, { minItems: 1, maxItems: 100 }),
+}, { additionalProperties: false });
+
+const inspectProjectFilesParameters = Type.Object({
+  mode: Type.Union([Type.Literal("overview"), Type.Literal("read"), Type.Literal("search")]),
+  path: Type.Optional(Type.String({ maxLength: 1_000 })),
+  query: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
 }, { additionalProperties: false });
 
 const assertionItem = Type.Object({
@@ -131,15 +141,38 @@ const constraintProfileItem = Type.Object({
   }, { additionalProperties: false }),
 }, { additionalProperties: false });
 
+const projectFilePutItem = Type.Object({
+  id: Type.String({ minLength: 1, maxLength: 160 }),
+  dependsOn: dependencyIds,
+  kind: Type.Literal("project_file.put"),
+  payload: Type.Object({
+    path: Type.String({ minLength: 1, maxLength: 1_000 }),
+    content: Type.String({ maxLength: 8_000_000 }),
+    expectedSha256: Type.Union([Type.String({ pattern: "^[a-f0-9]{64}$" }), Type.Null()]),
+  }, { additionalProperties: false }),
+}, { additionalProperties: false });
+
+const projectFileDeleteItem = Type.Object({
+  id: Type.String({ minLength: 1, maxLength: 160 }),
+  dependsOn: dependencyIds,
+  kind: Type.Literal("project_file.delete"),
+  payload: Type.Object({
+    path: Type.String({ minLength: 1, maxLength: 1_000 }),
+    expectedSha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  }, { additionalProperties: false }),
+}, { additionalProperties: false });
+
 const proposeParameters = Type.Object({
   summary: Type.String({ minLength: 1, maxLength: 2_000 }),
   items: Type.Array(Type.Union([
     assertionItem, resourceItem, documentItem, creativeDocumentItem, creativeRelationItem, constraintProfileItem,
+    projectFilePutItem, projectFileDeleteItem,
   ]), { minItems: 1, maxItems: 500 }),
 }, { additionalProperties: false });
 
 export interface AgentToolExecutor {
   retrieveGraphEvidence(args: RetrieveGraphEvidenceArgs, signal?: AbortSignal): Promise<RetrieveGraphEvidenceResult>;
+  inspectProjectFiles(args: InspectProjectFilesArgs, signal?: AbortSignal): Promise<InspectProjectFilesResult>;
   proposeChangeSet(args: ProposeChangeSetArgs, signal?: AbortSignal): Promise<ProposeChangeSetResult>;
 }
 
@@ -190,5 +223,28 @@ export function createAgentTools(executor: AgentToolExecutor): AgentTool[] {
     },
   };
 
-  return [retrieve, propose];
+  const inspectFiles: AgentTool<typeof inspectProjectFilesParameters> = {
+    name: "inspect_project_files",
+    label: "检查项目文件",
+    description: "List, read, or search real files inside the current project root without executing them.",
+    parameters: inspectProjectFilesParameters,
+    execute: async (_toolCallId, params, signal) => {
+      const result = inspectProjectFilesResultSchema.parse(await executor.inspectProjectFiles(
+        inspectProjectFilesArgsSchema.parse(params),
+        signal,
+      ));
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            result,
+            novaxInstruction: "Use only returned file content. Respect incomplete and omitted counts. Do not claim unread files were inspected.",
+          }),
+        }],
+        details: result,
+      };
+    },
+  };
+
+  return [retrieve, inspectFiles, propose];
 }

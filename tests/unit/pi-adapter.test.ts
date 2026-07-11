@@ -170,6 +170,48 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
     expect(faux.state.callCount).toBe(3);
   });
 
+  it("forces the single specialist result tool at the OpenAI-compatible payload boundary", async () => {
+    const faux = fauxProvider({ provider: "novax-forced-tool-fixture" });
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("submit_result", { status: "done" })),
+      fauxAssistantMessage("完成"),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const payloads: unknown[] = [];
+    let submitted = false;
+    const adapter = new NovaxPiRuntimeAdapter({
+      model: faux.getModel(),
+      streamFn: (model, context, options) => {
+        if (options?.onPayload) {
+          void Promise.resolve(options.onPayload({ model: model.id, messages: [] }, model))
+            .then((payload) => payloads.push(payload));
+        }
+        return models.streamSimple(model, context, options);
+      },
+    });
+
+    await adapter.run({
+      systemPrompt: "Contract fixture only.",
+      userInput: "测试",
+      tools: [{
+        name: "submit_result",
+        label: "提交",
+        description: "Submit the result.",
+        parameters: Type.Object({ status: Type.Literal("done") }, { additionalProperties: false }),
+        execute: async () => {
+          submitted = true;
+          return { content: [{ type: "text", text: "accepted" }], details: { accepted: true } };
+        },
+      }],
+      completionGuard: { toolName: "submit_result", isSatisfied: () => submitted, forceTool: true },
+    });
+
+    expect(payloads).toContainEqual(expect.objectContaining({
+      tool_choice: { type: "function", function: { name: "submit_result" } },
+    }));
+  });
+
   it("honors an already-aborted run before calling the Provider fixture", async () => {
     const faux = fauxProvider({ provider: "novax-abort-fixture" });
     const models = createModels();

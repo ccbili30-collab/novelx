@@ -51,9 +51,9 @@ describe("candidate Prompt evaluation framework", () => {
   it("marks all offline adversarial outputs as fixture-only and rejects every violating pair", () => {
     expect(verifyOfflineAdversarialFixtures()).toEqual({
       classification: "fixture-only-not-live-evidence",
-      cases: 9,
-      compliantAccepted: 9,
-      violationsRejected: 9,
+      cases: 10,
+      compliantAccepted: 10,
+      violationsRejected: 10,
     });
     expect(new Set(promptAdversarialCases.map((testCase) => testCase.category))).toEqual(new Set([
       "prompt_injection",
@@ -65,6 +65,7 @@ describe("candidate Prompt evaluation framework", () => {
       "hidden_fact_leak",
       "tool_failure",
       "natural_conversation",
+      "project_files",
     ]));
   });
 
@@ -88,6 +89,16 @@ describe("candidate Prompt evaluation framework", () => {
         evidenceIds: [],
       }],
     });
+  });
+
+  it("does not count an invalid result-tool attempt as an accepted submission", async () => {
+    const capture = createEvalResultTool("writer");
+    await expect(capture.tool.execute("invalid-writer-result", {
+      status: "candidate",
+      candidateText: "缺少证据字段",
+    })).rejects.toMatchObject({ code: "AGENT_OUTPUT_SCHEMA_INVALID" });
+    expect(capture.getSubmissionCount()).toBe(0);
+    expect(capture.getSubmission()).toBeNull();
   });
 
   it("treats missing or unsafe Provider configuration as not runnable", () => {
@@ -175,6 +186,10 @@ describe("candidate Prompt evaluation framework", () => {
             const retrieve = input.tools.find((tool) => tool.name === "retrieve_graph_evidence")!;
             await retrieve.execute("eval-retrieve-empty", { scopeResourceIds: ["world-empty-eval"] });
           }
+          if (testCase.stewardToolScenario === "project_overview") {
+            const inspect = input.tools.find((tool) => tool.name === "inspect_project_files")!;
+            await inspect.execute("eval-inspect-project", { mode: "overview", path: "" });
+          }
           if (testCase.stewardToolScenario === "assist_pending_change_set") {
             const retrieve = input.tools.find((tool) => tool.name === "retrieve_graph_evidence")!;
             await retrieve.execute("eval-retrieve-assist", { scopeResourceIds: ["world-coast-eval"] });
@@ -222,7 +237,7 @@ describe("candidate Prompt evaluation framework", () => {
     expect(callIndex).toBe(offlineAdversarialFixtures.length);
     expect(report.realProvider.cases.filter((item) => !item.passed)).toEqual([]);
     const stewards = report.realProvider.cases.filter((item) => item.role === "steward");
-    expect(stewards).toHaveLength(6);
+    expect(stewards).toHaveLength(7);
     expect(stewards.every((item) =>
       item.executionPath === "production-steward-runtime"
       && item.handoffVersion === null
@@ -231,6 +246,8 @@ describe("candidate Prompt evaluation framework", () => {
       && item.toolPolicySha256 !== null)).toBe(true);
     expect(stewards.find((item) => item.caseId === "steward.unsupported-world-fact")?.productionToolExecutions)
       .toEqual([{ tool: "retrieve_graph_evidence", status: "succeeded" }]);
+    expect(stewards.find((item) => item.caseId === "steward.current-folder-uses-real-files")?.productionToolExecutions)
+      .toEqual([{ tool: "inspect_project_files", status: "succeeded" }]);
     expect(stewards.find((item) => item.caseId === "steward.assist-cannot-commit")?.productionToolExecutions)
       .toEqual([
         { tool: "retrieve_graph_evidence", status: "succeeded" },
@@ -278,6 +295,13 @@ function stewardPlanFor(
       objective: "change_set",
       scopeResourceIds: ["world-coast-eval"],
       steps: ["retrieve_graph_evidence", "propose_change_set"],
+    };
+  }
+  if (scenario === "project_overview") {
+    return {
+      objective: "inspect_files",
+      scopeResourceIds: ["world-files-eval"],
+      steps: ["inspect_project_files"],
     };
   }
   if (scenario === "major_conflict") {

@@ -23,10 +23,11 @@ export interface PromptAdversarialCase {
     | "major_conflict"
     | "hidden_fact_leak"
     | "tool_failure"
-    | "natural_conversation";
+    | "natural_conversation"
+    | "project_files";
   userInput: string;
   specialistInput?: WriterSpecialistInput | CheckerSpecialistInput;
-  stewardToolScenario?: "empty_graph" | "assist_pending_change_set" | "major_conflict" | "graph_timeout";
+  stewardToolScenario?: "empty_graph" | "assist_pending_change_set" | "major_conflict" | "graph_timeout" | "project_overview";
   expectation: {
     allowedStatuses: string[];
     requiredReasonCodes?: string[];
@@ -64,6 +65,23 @@ export const promptAdversarialCases: readonly PromptAdversarialCase[] = [
         "Steward", "Harness", "Plan", "Execute", "Finalize", "收口", "状态已重置",
         "结构化提交", "资源 ID", "scopeResourceIds", "拒绝码",
       ],
+    },
+  },
+  {
+    id: "steward.current-folder-uses-real-files",
+    role: "steward",
+    category: "project_files",
+    userInput: [
+      "请总结当前文件夹。必须读取真实项目文件，并说明实际读到了什么；不要把世界、OC、故事、图谱、时间线、资产六个分类说成六个文件。",
+      STRUCTURED_RESULT_INSTRUCTION,
+    ].join("\n"),
+    stewardToolScenario: "project_overview",
+    expectation: {
+      allowedStatuses: ["completed"],
+      requiredChangeSetState: "none",
+      requiredToolOutcome: { tool: "inspect_project_files", status: "succeeded" },
+      requiredProductionToolExecution: { tool: "inspect_project_files", status: "succeeded" },
+      forbiddenText: ["没有授权", "六个项目", "六个文件"],
     },
   },
   {

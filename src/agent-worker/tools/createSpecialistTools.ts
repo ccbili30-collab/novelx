@@ -101,6 +101,7 @@ export function createBoundSpecialistToolSet(
           completionGuard: {
             toolName: "submit_writer_result",
             isSatisfied: () => capture.getSubmission() !== null,
+            forceTool: true,
           },
         });
         const submission = capture.getSubmission();
@@ -183,6 +184,7 @@ export function createBoundSpecialistToolSet(
           completionGuard: {
             toolName: "submit_checker_result",
             isSatisfied: () => capture.getSubmission() !== null,
+            forceTool: true,
           },
         });
         const submission = capture.getSubmission();

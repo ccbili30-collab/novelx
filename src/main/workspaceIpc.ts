@@ -106,6 +106,7 @@ import { CreativeDocumentRepository } from "../domain/workspace/creativeDocument
 import { CreativeRelationRepository } from "../domain/workspace/creativeRelationRepository";
 import { ConstraintProfileRepository } from "../domain/workspace/constraintProfileRepository";
 import { ConstraintProfileService } from "../domain/workspace/constraintProfileService";
+import { ProjectFileVersionService } from "../domain/workspace/projectFileVersionService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import { DocumentEditorService } from "../domain/workspace/documentEditorService";
 import { CreativeDocumentEditorService } from "../domain/workspace/creativeDocumentEditorService";
@@ -211,11 +212,18 @@ export class WorkspaceSession {
     if (this.#activeAgentLeases > 0) {
       throw Object.assign(new Error("An Agent run is using the current workspace."), { code: "WORKSPACE_AGENT_RUN_ACTIVE" });
     }
-    const checkpoints = new CheckpointRepository(this.requireWorkspace());
+    const workspace = this.requireWorkspace();
+    const checkpoints = new CheckpointRepository(workspace);
     const target = checkpoints.listActiveHistory().find((checkpoint) => checkpoint.id === checkpointId && !checkpoint.isHead);
     if (!target) throw Object.assign(new Error("Checkpoint is not restorable."), { code: "CHECKPOINT_NOT_FOUND" });
     const label = new Date().toISOString().replace(/[:.]/g, "-");
-    checkpoints.restoreFromCheckpoint(checkpointId, `回溯-${label}`);
+    const rollbackFiles = new ProjectFileVersionService(workspace).restoreToCheckpoint(checkpointId);
+    try {
+      checkpoints.restoreFromCheckpoint(checkpointId, `回溯-${label}`);
+    } catch (error) {
+      rollbackFiles();
+      throw error;
+    }
     return this.snapshot();
   }
 
@@ -426,6 +434,7 @@ export class WorkspaceSession {
   #serializeWrites(gateway: AgentToolGateway): AgentToolGateway {
     return {
       retrieveGraphEvidence: (args, context) => gateway.retrieveGraphEvidence(args, context),
+      inspectProjectFiles: (args, context) => gateway.inspectProjectFiles(args, context),
       proposeChangeSet: (args, context) => this.#writeQueue.run(
         context.signal,
         () => gateway.proposeChangeSet(args, context),

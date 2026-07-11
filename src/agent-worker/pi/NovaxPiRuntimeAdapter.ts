@@ -43,6 +43,7 @@ interface PiRunInput {
     toolName: string;
     isSatisfied(): boolean;
     createCorrection?(): string;
+    forceTool?: boolean;
   };
 }
 
@@ -114,6 +115,9 @@ export class NovaxPiRuntimeAdapter {
       return this.#streamFn({ ...model, maxTokens: decision.outputReserve }, context, {
         ...options,
         maxTokens: decision.outputReserve,
+        onPayload: input.completionGuard?.forceTool && !input.completionGuard.isSatisfied()
+          ? (payload) => forceOpenAiToolChoice(payload, input.completionGuard!.toolName)
+          : options?.onPayload,
       });
     };
     const agent = new Agent({
@@ -277,6 +281,14 @@ function createHistoryMessages(history: AgentSessionHistory | undefined, model: 
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function forceOpenAiToolChoice(payload: unknown, toolName: string): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  return {
+    ...(payload as Record<string, unknown>),
+    tool_choice: { type: "function", function: { name: toolName } },
+  };
 }
 
 export function createOpenAiCompatiblePiAdapter(profileInput: unknown): NovaxPiRuntimeAdapter {

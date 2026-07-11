@@ -77,6 +77,12 @@ process.on("message", (payload: unknown) => {
           args,
           signal,
         ),
+        inspectProjectFiles: (args, signal) => toolBridge.invoke(
+          command.runId,
+          "inspect_project_files",
+          args,
+          signal,
+        ),
         proposeChangeSet: (args, signal) => toolBridge.invoke(
           command.runId,
           "propose_change_set",
