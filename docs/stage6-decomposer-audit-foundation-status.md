@@ -12,11 +12,14 @@ Date: 2026-07-11
 - Decomposer Contracts（拆解器数据契约）已提升到共享层，Domain（领域层）、Agent Worker 和协议使用同一份严格 Schema。
 - Agent Worker 已支持类型化 `decompose.start` 命令和 started/completed/failed 事件。
 - Worker Controller（工作进程控制器）在 Prompt 未发布时会在访问 Provider 前失败关闭。
+- Decomposer Run Service（拆解器运行服务）将候选、候选首个修订、Import Job 终态和审计终态放在同一个 SQLite 事务中提交。
+- Decomposer Process Supervisor（拆解器进程监督器）验证 Worker 事件的 runId 和 Schema，处理完成、失败、取消和进程中断，并清除内存中的 Provider credential（模型提供方凭据）。
+- Workspace Session（工作区会话）提供受生命周期保护的拆解运行租约；应用退出时会处置拆解监督器。
 
 ## Not Completed
 
-- Decomposer Process Supervisor（拆解器进程监督器）尚未创建、取消或处理中断运行。
 - 当前 Decomposition Service（拆解服务）尚未使用新审计仓储。
+- 可见 UI 尚未连接拆解监督器；按钮仍保持禁用。
 - Decomposer Prompt 仍为 candidate（候选），没有真实 Provider eval（模型提供方评测）发布证据。
 - UI 按钮保持禁用。
 

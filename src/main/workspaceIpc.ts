@@ -125,6 +125,8 @@ import { PlayerAuditRepository } from "../domain/audit/playerAuditRepository";
 import { PlayerRunCommitService } from "../domain/play/playerRunCommitService";
 import { PlayerTurnContextService } from "../domain/play/playerTurnContextService";
 import { SourceImportService } from "../domain/import/sourceImportService";
+import { DecomposerRunService } from "../domain/import/decomposerRunService";
+import type { DecomposerRuntimeLease } from "./decomposerProcessSupervisor";
 import { SourceLibraryRepository, type SourceLibraryEntry } from "../domain/import/sourceLibraryRepository";
 import type { DecompositionCandidateRecord } from "../domain/import/decompositionCandidateRepository";
 
@@ -259,6 +261,14 @@ export class WorkspaceSession {
         this.#activeAgentLeases -= 1;
       },
     };
+  }
+
+  acquireDecomposerRuntimeLease(): DecomposerRuntimeLease | null {
+    const workspace = this.#workspace; if (!workspace) return null;
+    this.#activeAgentLeases += 1; let released = false;
+    return { service: new DecomposerRunService(workspace), release: () => {
+      if (released) return; released = true; this.#activeAgentLeases -= 1;
+    } };
   }
 
   getDocument(resourceId: string): EditorDocumentSnapshot {

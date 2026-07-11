@@ -10,6 +10,7 @@ import {
 } from "../shared/ipcContract";
 import { AgentProcessSupervisor, type AgentRuntimeLease } from "./agentProcessSupervisor";
 import { PlayerProcessSupervisor, type PlayerRuntimeLease } from "./playerProcessSupervisor";
+import { DecomposerProcessSupervisor, type DecomposerRuntimeLease } from "./decomposerProcessSupervisor";
 import type { ProviderRuntimeProfile } from "../shared/providerContract";
 import { ApplicationRegistryRepository } from "../domain/application/applicationRegistryRepository";
 
@@ -19,9 +20,11 @@ export function registerDesktopIpc(
   acquireRuntimeLease: () => AgentRuntimeLease | null = () => null,
   getProviderProfile: () => ProviderRuntimeProfile | null = () => null,
   acquirePlayerRuntimeLease: () => PlayerRuntimeLease | null = () => null,
+  acquireDecomposerRuntimeLease: () => DecomposerRuntimeLease | null = () => null,
 ): { dispose(): void } {
   const supervisor = new AgentProcessSupervisor(workerPath, { acquireRuntimeLease, getProviderProfile });
   const playerSupervisor = new PlayerProcessSupervisor(workerPath, { acquireRuntimeLease: acquirePlayerRuntimeLease, getProviderProfile });
+  const decomposerSupervisor = new DecomposerProcessSupervisor(workerPath, { acquireRuntimeLease: acquireDecomposerRuntimeLease, getProviderProfile });
 
   ipcMain.handle(desktopIpcChannels.systemStatus, () => systemStatusSchema.parse({
     platform: process.platform,
@@ -86,5 +89,5 @@ export function registerDesktopIpc(
   ipcMain.handle(desktopIpcChannels.playerTurnCancel, (_event, payload: unknown) => {
     playerSupervisor.cancel(playerTurnCancelRequestSchema.parse(payload).runId);
   });
-  return { dispose: () => { playerSupervisor.dispose(); supervisor.dispose(); } };
+  return { dispose: () => { decomposerSupervisor.dispose(); playerSupervisor.dispose(); supervisor.dispose(); } };
 }
