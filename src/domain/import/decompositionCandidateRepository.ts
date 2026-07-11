@@ -93,6 +93,13 @@ export class DecompositionCandidateRepository {
     if (!row) throw candidateError("DECOMPOSITION_CANDIDATE_NOT_FOUND");
     return mapCandidate(row);
   }
+
+  listForSource(sourceId: string): DecompositionCandidateRecord[] {
+    const ids = this.workspace.db.prepare(`
+      SELECT id FROM decomposition_candidates WHERE source_id = ? ORDER BY created_at, id
+    `).all(sourceId) as Array<{ id: string }>;
+    return ids.map((row) => this.getRequired(row.id));
+  }
 }
 
 function mapCandidate(row: Record<string, SQLOutputValue>): DecompositionCandidateRecord {

@@ -281,6 +281,71 @@ button { letter-spacing: 0; }
   .player-turn-stream, .player-composer { padding-left: 18px; padding-right: 18px; }
 }
 
+.import-workbench { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(190px, 240px) minmax(360px, 1fr) minmax(300px, 380px); overflow: hidden; background: var(--novax-color-paper); }
+.source-rail, .candidate-review-panel { min-width: 0; min-height: 0; padding: 13px 12px; overflow: auto; background: var(--novax-color-rail); border-color: var(--novax-color-line); }
+.source-rail { border-right: 1px solid var(--novax-color-line); }
+.candidate-review-panel { border-left: 1px solid var(--novax-color-line); }
+.import-heading { min-height: 32px; display: flex; align-items: center; gap: 8px; }
+.import-heading strong { margin-right: auto; }
+.import-heading > button { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--novax-color-text); }
+.import-heading > span { color: var(--novax-color-text-faint); font-size: 12px; }
+.source-rail > select, .start-profile-fields select, .start-profile-fields input, .start-profile-fields textarea { width: 100%; min-height: 34px; padding: 7px 8px; border: 1px solid var(--novax-color-border-control); border-radius: 4px; background: var(--novax-color-surface-control); color: var(--novax-color-text); }
+.source-list { display: grid; gap: 3px; margin-top: 9px; }
+.source-list button { min-height: 48px; display: grid; gap: 3px; padding: 7px 9px; border: 0; border-radius: 4px; background: transparent; color: var(--novax-color-text); text-align: left; }
+.source-list button:hover { background: var(--novax-color-surface-hover); }
+.source-list button[aria-pressed="true"] { background: var(--novax-color-surface-selected); }
+.source-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-list small { color: var(--novax-color-text-faint); }
+.source-canvas { position: relative; min-width: 0; min-height: 0; padding: 22px clamp(20px, 4vw, 52px); overflow: auto; }
+.source-summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding-bottom: 18px; border-bottom: 1px solid var(--novax-color-line); }
+.source-summary > div { min-width: 0; display: flex; align-items: center; gap: 11px; }
+.source-summary h1 { margin: 0; overflow-wrap: anywhere; font-size: 18px; }
+.source-summary p { margin: 4px 0 0; color: var(--novax-color-text-subtle); font-size: 12px; }
+.source-summary > button, .start-profile-create { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 7px 11px; border: 1px solid var(--novax-color-border-control); border-radius: 5px; background: var(--novax-color-surface-control); color: var(--novax-color-text); white-space: nowrap; }
+.decomposer-status { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--novax-color-line); }
+.decomposer-status > div { display: grid; gap: 4px; }
+.decomposer-status span { color: var(--novax-color-warning); font-size: 12px; }
+.decomposer-status button { min-height: 32px; padding: 6px 10px; border: 0; border-radius: 4px; background: var(--novax-color-disabled-surface); color: var(--novax-color-disabled); }
+.start-profile-builder { padding-top: 18px; }
+.start-profile-builder h2 { margin: 0 0 12px; font-size: 15px; }
+.start-profile-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.start-profile-fields textarea { grid-column: 1 / -1; resize: vertical; }
+.candidate-use-list { display: grid; gap: 1px; margin: 12px 0; border-top: 1px solid var(--novax-color-line); }
+.candidate-use-list label { display: grid; grid-template-columns: minmax(0, 1fr) 150px; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--novax-color-line); }
+.candidate-use-list label > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.candidate-use-list select { min-height: 30px; border: 1px solid var(--novax-color-border-control); background: var(--novax-color-surface-control); color: var(--novax-color-text); }
+.start-profile-create { margin-top: 12px; background: var(--novax-color-accent); border-color: var(--novax-color-accent); color: var(--novax-color-on-accent); }
+.start-profile-create:disabled { background: var(--novax-color-disabled-surface); border-color: transparent; color: var(--novax-color-disabled); }
+.import-empty { height: 100%; display: grid; place-content: center; justify-items: center; gap: 10px; color: var(--novax-color-text-faint); }
+.import-empty h1 { margin: 0; font-size: 15px; font-weight: 500; }
+.import-error { position: sticky; bottom: 0; display: flex; justify-content: space-between; gap: 10px; margin-top: 16px; padding: 9px 10px; border: 1px solid var(--novax-color-danger-border); border-radius: 5px; background: var(--novax-color-danger-surface); color: var(--novax-color-danger-strong); font-size: 13px; }
+.import-error button { border: 0; background: transparent; color: inherit; }
+.import-notice { position: sticky; bottom: 0; display: flex; justify-content: space-between; gap: 10px; margin-top: 16px; padding: 9px 10px; border: 1px solid var(--novax-color-success-border); border-radius: 5px; background: var(--novax-color-success-surface); color: var(--novax-color-accent); font-size: 13px; }
+.import-notice button { border: 0; background: transparent; color: inherit; }
+.candidate-review-list { display: grid; gap: 9px; padding-top: 6px; }
+.candidate-review { padding: 11px; border: 1px solid var(--novax-color-line); border-radius: 6px; background: var(--novax-color-paper-raised); }
+.candidate-review[data-status="accepted"] { border-left: 3px solid var(--novax-color-success); }
+.candidate-review[data-status="rejected"] { opacity: 0.68; }
+.candidate-review header { display: flex; justify-content: space-between; gap: 10px; }
+.candidate-review header > div { min-width: 0; display: grid; gap: 3px; }
+.candidate-review header strong { overflow-wrap: anywhere; font-size: 13px; }
+.candidate-review header span, .candidate-review header small { color: var(--novax-color-text-faint); font-size: 11px; }
+.candidate-fields { display: grid; gap: 7px; margin-top: 10px; }
+.candidate-fields label { display: grid; gap: 3px; }
+.candidate-fields label > span { color: var(--novax-color-text-subtle); font-size: 11px; }
+.candidate-fields input, .candidate-fields textarea { width: 100%; min-width: 0; padding: 6px 7px; border: 1px solid var(--novax-color-border-control); border-radius: 4px; background: var(--novax-color-surface-control); color: var(--novax-color-text); resize: vertical; }
+.candidate-temporal-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 2px 0 0; padding: 8px; border: 1px solid var(--novax-color-border-subtle); border-radius: 4px; }
+.candidate-temporal-fields legend { padding: 0 4px; color: var(--novax-color-text-subtle); font-size: 11px; }
+.candidate-temporal-fields label { display: grid; gap: 3px; }
+.candidate-temporal-fields select { width: 100%; min-width: 0; padding: 6px 7px; border: 1px solid var(--novax-color-border-control); border-radius: 4px; background: var(--novax-color-surface-control); color: var(--novax-color-text); }
+.candidate-review details { margin-top: 9px; color: var(--novax-color-text-subtle); font-size: 12px; }
+.candidate-review blockquote { margin: 7px 0 0; padding-left: 9px; border-left: 2px solid var(--novax-color-line); color: var(--novax-color-text); line-height: 1.5; white-space: pre-wrap; }
+.candidate-review footer { display: flex; justify-content: flex-end; gap: 5px; margin-top: 10px; }
+.candidate-review footer button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 1px solid var(--novax-color-border-control); border-radius: 4px; background: var(--novax-color-surface-control); color: var(--novax-color-text); }
+.candidate-review footer button.accept { background: var(--novax-color-success); border-color: var(--novax-color-success); color: white; }
+.candidate-empty { padding-top: 18px; color: var(--novax-color-text-faint); font-size: 12px; }
+@media (max-width: 1000px) { .import-workbench { grid-template-columns: 190px minmax(0, 1fr); } .candidate-review-panel { display: none; } }
+
 .titlebar, .statusbar {
   display: flex;
   align-items: center;

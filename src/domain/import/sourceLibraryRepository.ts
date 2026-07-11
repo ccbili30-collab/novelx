@@ -49,6 +49,10 @@ export class SourceLibraryRepository {
     return mapEntry(row);
   }
 
+  list(): SourceLibraryEntry[] {
+    return this.workspace.db.prepare("SELECT * FROM source_library_entries ORDER BY created_at, id").all().map(mapEntry);
+  }
+
   assertCanDecompose(id: string): SourceLibraryEntry {
     const entry = this.assertCurrentFile(id);
     if (entry.rightsAttestation === "unknown") throw sourceError("SOURCE_RIGHTS_ATTESTATION_REQUIRED");

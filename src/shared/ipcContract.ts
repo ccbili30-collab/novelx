@@ -53,6 +53,12 @@ export const desktopIpcChannels = {
   playerTurnStart: "novax:player-turn-start",
   playerTurnCancel: "novax:player-turn-cancel",
   playerTurnEvent: "novax:player-turn-event",
+  sourceList: "novax:source-list",
+  sourceAdd: "novax:source-add",
+  sourceParse: "novax:source-parse",
+  decompositionCandidateList: "novax:decomposition-candidate-list",
+  decompositionCandidateRevise: "novax:decomposition-candidate-revise",
+  decompositionCandidateDecide: "novax:decomposition-candidate-decide",
   workspaceRestore: "novax:workspace-restore",
   workspaceFlushRequest: "novax:workspace-flush-request",
   workspaceFlushComplete: "novax:workspace-flush-complete",
@@ -578,6 +584,58 @@ export const publicPlayTurnSchema = z.object({
   createdAt: z.iso.datetime(),
 }).strict();
 
+export const sourceLibraryEntrySchema = z.object({
+  id: opaqueIdSchema,
+  displayName: z.string().min(1).max(500),
+  format: z.enum(["txt", "markdown", "docx", "epub", "image"]),
+  byteSize: z.number().int().min(0),
+  rightsAttestation: z.enum(["user_owned", "licensed", "public_domain", "unknown"]),
+  state: z.enum(["registered", "parsed", "failed", "missing"]),
+  createdAt: z.iso.datetime(),
+}).strict();
+const sourceOperationErrorSchema = z.object({
+  code: z.string().min(1).max(120), message: z.string().min(1).max(240),
+}).strict();
+export const sourceListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), sources: z.array(sourceLibraryEntrySchema).max(100_000) }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
+export const sourceAddRequestSchema = z.object({ rightsAttestation: z.enum(["user_owned", "licensed", "public_domain", "unknown"]) }).strict();
+export const sourceAddResultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("added"), source: sourceLibraryEntrySchema }).strict(),
+  z.object({ status: z.literal("cancelled") }).strict(),
+  z.object({ status: z.literal("failed"), error: sourceOperationErrorSchema }).strict(),
+]);
+export const sourceParseRequestSchema = z.object({ sourceId: opaqueIdSchema }).strict();
+export const sourceParseResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), source: sourceLibraryEntrySchema, chunkCount: z.number().int().positive() }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
+export const decompositionCandidateReviewSchema = z.object({
+  id: opaqueIdSchema,
+  sourceId: opaqueIdSchema,
+  jobId: opaqueIdSchema,
+  kind: z.enum(["character", "world_rule", "location", "faction", "event", "style", "ambiguity"]),
+  payload: z.record(z.string(), z.json()),
+  confidence: z.number().min(0).max(1),
+  status: z.enum(["pending", "accepted", "rejected"]),
+  revision: z.number().int().positive(),
+  createdAt: z.iso.datetime(),
+  sources: z.array(z.object({
+    chunkId: opaqueIdSchema,
+    locator: z.record(z.string(), z.json()),
+    excerpt: z.string().max(2_000),
+    contentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict()).min(1).max(100),
+}).strict();
+export const decompositionCandidateListRequestSchema = z.object({ sourceId: opaqueIdSchema }).strict();
+export const decompositionCandidateListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), candidates: z.array(decompositionCandidateReviewSchema).max(100_000) }).strict(),
+  z.object({ ok: z.literal(false), error: sourceOperationErrorSchema }).strict(),
+]);
+export const decompositionCandidateReviseRequestSchema = z.object({ candidateId: opaqueIdSchema, payload: z.record(z.string(), z.json()) }).strict();
+export const decompositionCandidateDecideRequestSchema = z.object({ candidateId: opaqueIdSchema, decision: z.enum(["accepted", "rejected"]) }).strict();
+
 export const playthroughReconciliationStatusSchema = z.object({
   state: z.enum(["current", "canon_diverged"]),
   playthroughId: opaqueIdSchema,
@@ -1092,6 +1150,17 @@ export type PlaythroughResult = z.infer<typeof playthroughResultSchema>;
 export type PlaythroughListResult = z.infer<typeof playthroughListResultSchema>;
 export type PlayTurnListResult = z.infer<typeof playTurnListResultSchema>;
 export type PublicPlayTurn = z.infer<typeof publicPlayTurnSchema>;
+export type SourceLibraryEntry = z.infer<typeof sourceLibraryEntrySchema>;
+export type SourceListResult = z.infer<typeof sourceListResultSchema>;
+export type SourceAddRequest = z.infer<typeof sourceAddRequestSchema>;
+export type SourceAddResult = z.infer<typeof sourceAddResultSchema>;
+export type SourceParseRequest = z.infer<typeof sourceParseRequestSchema>;
+export type SourceParseResult = z.infer<typeof sourceParseResultSchema>;
+export type DecompositionCandidateReview = z.infer<typeof decompositionCandidateReviewSchema>;
+export type DecompositionCandidateListRequest = z.infer<typeof decompositionCandidateListRequestSchema>;
+export type DecompositionCandidateListResult = z.infer<typeof decompositionCandidateListResultSchema>;
+export type DecompositionCandidateReviseRequest = z.infer<typeof decompositionCandidateReviseRequestSchema>;
+export type DecompositionCandidateDecideRequest = z.infer<typeof decompositionCandidateDecideRequestSchema>;
 export type PlaythroughInspectResult = z.infer<typeof playthroughInspectResultSchema>;
 export type PlayerTurnStartRequest = z.infer<typeof playerTurnStartRequestSchema>;
 export type PlayerTurnStartResponse = z.infer<typeof playerTurnStartResponseSchema>;
@@ -1192,6 +1261,14 @@ export interface DesktopApi {
     runTurn(request: PlayerTurnStartRequest): Promise<PlayerTurnStartResponse>;
     cancelTurn(request: PlayerTurnCancelRequest): Promise<void>;
     subscribeTurns(listener: (event: PlayerTurnEvent) => void): () => void;
+  };
+  sourceLibrary: {
+    list(): Promise<SourceListResult>;
+    add(request: SourceAddRequest): Promise<SourceAddResult>;
+    parse(request: SourceParseRequest): Promise<SourceParseResult>;
+    listCandidates(request: DecompositionCandidateListRequest): Promise<DecompositionCandidateListResult>;
+    reviseCandidate(request: DecompositionCandidateReviseRequest): Promise<DecompositionCandidateListResult>;
+    decideCandidate(request: DecompositionCandidateDecideRequest): Promise<DecompositionCandidateListResult>;
   };
   document: {
     get(request: DocumentGetRequest): Promise<EditorDocumentSnapshot>;

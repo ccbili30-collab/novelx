@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { BookOpen, Boxes, Download, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings } from "lucide-react";
+import { BookOpen, Boxes, Download, FileInput, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings } from "lucide-react";
 import type { AgentArtifact, CollaborationListResult, CreativeWorkspaceMutation, HandoffSummary, ProjectAddResult, ProjectSummary, SessionSummary, WorkspaceSnapshot } from "../../shared/ipcContract";
 import type { DesktopUpdateState } from "../../shared/desktopUpdateContract";
 import { StewardRuntimePanel } from "./features/agent/StewardRuntimePanel";
@@ -21,6 +21,7 @@ import { MoveCreativeObjectDialog } from "./features/resources/MoveCreativeObjec
 import { DeleteCreativeObjectDialog, RenameCreativeObjectDialog } from "./features/resources/CreativeObjectCommandDialogs";
 import { applyThemePreference, readThemePreference, type NovaxTheme } from "../../shared/themePreference";
 import { PlayerWorkbench } from "./features/player/PlayerWorkbench";
+import { ImportWorkbench } from "./features/import/ImportWorkbench";
 
 const SemanticGraphView = lazy(async () => {
   const module = await import("./features/graph/SemanticGraphView");
@@ -32,7 +33,7 @@ const ProviderSettingsDialog = lazy(async () => {
   return { default: module.ProviderSettingsDialog };
 });
 
-type WorkbenchMode = "player" | "agent" | "ide";
+type WorkbenchMode = "player" | "agent" | "ide" | "import";
 type OnboardingState = Pick<ProjectAddResult, "project" | "detection">;
 
 export function App() {
@@ -517,6 +518,9 @@ export function App() {
           <button type="button" role="radio" aria-checked={mode === "ide"} onClick={() => setMode("ide")}>
             <PanelLeft size={14} aria-hidden="true" />IDE 模式
           </button>
+          <button type="button" role="radio" aria-checked={mode === "import"} onClick={() => setMode("import")}>
+            <FileInput size={14} aria-hidden="true" />导入
+          </button>
         </div>
         <button className="titlebar-command" data-testid="open-settings" type="button" onClick={() => setSettingsOpen(true)} title="设置">
           <Settings size={16} aria-hidden="true" /><span className="sr-only">设置</span>
@@ -527,7 +531,7 @@ export function App() {
         </button> : null}
       </header>
 
-      {mode === "player" ? <PlayerWorkbench workspace={workspace} /> : mode === "agent" ? (
+      {mode === "player" ? <PlayerWorkbench workspace={workspace} /> : mode === "import" ? <ImportWorkbench workspace={workspace} /> : mode === "agent" ? (
         <div className="workbench-grid workbench-grid--agent">
           <ProjectSessionRail
             projects={projects}
@@ -617,7 +621,7 @@ export function App() {
 
       <footer className="statusbar">
         <span>{activeProject ? projectStateLabel(activeProject.state) : "本地"}</span>
-        <span>{mode === "player" ? "玩家模式" : activeSession ? `Agent：${activeSession.title}` : "尚未选择 Agent 会话"}</span>
+        <span>{mode === "player" ? "玩家模式" : mode === "import" ? "来源导入" : activeSession ? `Agent：${activeSession.title}` : "尚未选择 Agent 会话"}</span>
       </footer>
 
       {creativeError ? <div className="creative-operation-error" role="alert"><span>{creativeError}</span><button type="button" onClick={() => setCreativeError(null)}>关闭</button></div> : null}

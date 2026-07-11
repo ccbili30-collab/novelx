@@ -56,6 +56,15 @@ import {
   playerTurnStartResponseSchema,
   playerTurnCancelRequestSchema,
   playerTurnEventSchema,
+  sourceListResultSchema,
+  sourceAddRequestSchema,
+  sourceAddResultSchema,
+  sourceParseRequestSchema,
+  sourceParseResultSchema,
+  decompositionCandidateListRequestSchema,
+  decompositionCandidateListResultSchema,
+  decompositionCandidateReviseRequestSchema,
+  decompositionCandidateDecideRequestSchema,
   nullableProjectAddResultSchema,
   projectInitializeRequestSchema,
   projectListResultSchema,
@@ -310,6 +319,26 @@ export function exposeDesktopApi(): void {
         };
         ipcRenderer.on(desktopIpcChannels.playerTurnEvent, handler);
         return () => ipcRenderer.removeListener(desktopIpcChannels.playerTurnEvent, handler);
+      },
+    },
+    sourceLibrary: {
+      async list() {
+        return sourceListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sourceList));
+      },
+      async add(request) {
+        return sourceAddResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sourceAdd, sourceAddRequestSchema.parse(request)));
+      },
+      async parse(request) {
+        return sourceParseResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sourceParse, sourceParseRequestSchema.parse(request)));
+      },
+      async listCandidates(request) {
+        return decompositionCandidateListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.decompositionCandidateList, decompositionCandidateListRequestSchema.parse(request)));
+      },
+      async reviseCandidate(request) {
+        return decompositionCandidateListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.decompositionCandidateRevise, decompositionCandidateReviseRequestSchema.parse(request)));
+      },
+      async decideCandidate(request) {
+        return decompositionCandidateListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.decompositionCandidateDecide, decompositionCandidateDecideRequestSchema.parse(request)));
       },
     },
     document: {

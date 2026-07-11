@@ -50,6 +50,15 @@ import {
   playthroughInspectResultSchema,
   playthroughListResultSchema,
   playTurnListResultSchema,
+  sourceListResultSchema,
+  sourceAddRequestSchema,
+  sourceAddResultSchema,
+  sourceParseRequestSchema,
+  sourceParseResultSchema,
+  decompositionCandidateListRequestSchema,
+  decompositionCandidateListResultSchema,
+  decompositionCandidateReviseRequestSchema,
+  decompositionCandidateDecideRequestSchema,
   workspaceRestoreRequestSchema,
   workspaceRestoreResultSchema,
   safeChangeSetDetailSchema,
@@ -84,6 +93,10 @@ import {
   type PlaythroughInspectResult,
   type PlaythroughListResult,
   type PlayTurnListResult,
+  type SourceListResult,
+  type SourceAddResult,
+  type SourceParseResult,
+  type DecompositionCandidateListResult,
 } from "../shared/ipcContract";
 import { openWorkspace, type WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
@@ -111,6 +124,9 @@ import type { PlayerRuntimeLease } from "./playerProcessSupervisor";
 import { PlayerAuditRepository } from "../domain/audit/playerAuditRepository";
 import { PlayerRunCommitService } from "../domain/play/playerRunCommitService";
 import { PlayerTurnContextService } from "../domain/play/playerTurnContextService";
+import { SourceImportService } from "../domain/import/sourceImportService";
+import { SourceLibraryRepository, type SourceLibraryEntry } from "../domain/import/sourceLibraryRepository";
+import type { DecompositionCandidateRecord } from "../domain/import/decompositionCandidateRepository";
 
 export class WorkspaceSession {
   #workspace: WorkspaceDatabase | null = null;
@@ -170,6 +186,8 @@ export class WorkspaceSession {
 
   listPlaythroughs(storyProfileId: string) { return new PlaythroughRepository(this.requireWorkspace()).listForStoryProfile(storyProfileId); }
   listPlayTurns(playthroughId: string) { return new PlaythroughRepository(this.requireWorkspace()).listTurns(playthroughId); }
+  listSources() { return new SourceLibraryRepository(this.requireWorkspace()).list(); }
+  getSourceImportService() { return new SourceImportService(this.requireWorkspace()); }
 
   inspectPlaythrough(playthroughId: string) {
     return new PlaythroughReconciliationService(this.requireWorkspace()).inspect(playthroughId);
@@ -448,6 +466,40 @@ export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolic
     const request = playTurnListRequestSchema.parse(payload);
     return session.listPlayTurns(request.playthroughId);
   }));
+  ipcMain.handle(desktopIpcChannels.sourceList, () => sourceListResult(() => session.listSources()));
+  ipcMain.handle(desktopIpcChannels.sourceAdd, async (event, payload: unknown) => {
+    const request = sourceAddRequestSchema.parse(payload);
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const options = {
+      title: "添加小说或世界资料",
+      properties: ["openFile"] as Electron.OpenDialogOptions["properties"],
+      filters: [{ name: "支持的资料", extensions: ["txt", "md", "markdown", "docx", "epub", "png", "jpg", "jpeg", "webp", "gif"] }],
+    };
+    const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+    if (result.canceled || !result.filePaths[0]) return sourceAddResultSchema.parse({ status: "cancelled" });
+    try {
+      const source = session.getSourceImportService().register(result.filePaths[0], request.rightsAttestation);
+      return sourceAddResultSchema.parse({ status: "added", source: publicSource(source) });
+    } catch (error) { return sourceAddResultSchema.parse({ status: "failed", error: publicSourceError(error) }); }
+  });
+  ipcMain.handle(desktopIpcChannels.sourceParse, (_event, payload: unknown) => sourceParseResult(() => {
+    const request = sourceParseRequestSchema.parse(payload);
+    return session.getSourceImportService().parse(request.sourceId);
+  }));
+  ipcMain.handle(desktopIpcChannels.decompositionCandidateList, (_event, payload: unknown) => decompositionCandidateListResult(() => {
+    const request = decompositionCandidateListRequestSchema.parse(payload);
+    return session.getSourceImportService().listCandidateReviews(request.sourceId);
+  }));
+  ipcMain.handle(desktopIpcChannels.decompositionCandidateRevise, (_event, payload: unknown) => decompositionCandidateListResult(() => {
+    const request = decompositionCandidateReviseRequestSchema.parse(payload);
+    const candidate = session.getSourceImportService().revise(request.candidateId, request.payload);
+    return session.getSourceImportService().listCandidateReviews(candidate.sourceId);
+  }));
+  ipcMain.handle(desktopIpcChannels.decompositionCandidateDecide, (_event, payload: unknown) => decompositionCandidateListResult(() => {
+    const request = decompositionCandidateDecideRequestSchema.parse(payload);
+    const candidate = session.getSourceImportService().decide(request.candidateId, request.decision);
+    return session.getSourceImportService().listCandidateReviews(candidate.sourceId);
+  }));
   ipcMain.handle(desktopIpcChannels.playthroughInspect, (_event, payload: unknown) => playthroughInspectResult(() => {
     const request = playthroughInspectRequestSchema.parse(payload);
     return session.inspectPlaythrough(request.playthroughId);
@@ -706,6 +758,45 @@ function playTurnListResult(operation: () => unknown): PlayTurnListResult {
     return playTurnListResultSchema.parse({ ok: true, turns: turns.map((turn) => ({ id: turn.id, playthroughId: turn.playthroughId,
       sequence: turn.sequence, playerAction: turn.playerAction, writerText: turn.writerText, stateSnapshot: turn.stateSnapshot, createdAt: turn.createdAt })) });
   } catch (error) { return playTurnListResultSchema.parse({ ok: false, error: publicPlayError(error) }); }
+}
+
+function sourceListResult(operation: () => unknown): SourceListResult {
+  try { return sourceListResultSchema.parse({ ok: true, sources: (operation() as SourceLibraryEntry[]).map(publicSource) }); }
+  catch (error) { return sourceListResultSchema.parse({ ok: false, error: publicSourceError(error) }); }
+}
+
+function sourceParseResult(operation: () => unknown): SourceParseResult {
+  try { const result = operation() as ReturnType<SourceImportService["parse"]>; return sourceParseResultSchema.parse({ ok: true, source: publicSource(result.source), chunkCount: result.chunkCount }); }
+  catch (error) { return sourceParseResultSchema.parse({ ok: false, error: publicSourceError(error) }); }
+}
+
+function decompositionCandidateListResult(operation: () => unknown): DecompositionCandidateListResult {
+  try { return decompositionCandidateListResultSchema.parse({ ok: true, candidates: (operation() as ReturnType<SourceImportService["listCandidateReviews"]>).map(publicCandidate) }); }
+  catch (error) { return decompositionCandidateListResultSchema.parse({ ok: false, error: publicSourceError(error) }); }
+}
+
+function publicSource(source: SourceLibraryEntry) {
+  return { id: source.id, displayName: source.displayName, format: source.format, byteSize: source.byteSize,
+    rightsAttestation: source.rightsAttestation, state: source.state, createdAt: source.createdAt };
+}
+
+function publicCandidate(candidate: DecompositionCandidateRecord & { sources: Array<{ chunkId: string; locator: Record<string, unknown>; excerpt: string; contentSha256: string }> }) {
+  return { id: candidate.id, sourceId: candidate.sourceId, jobId: candidate.jobId, kind: candidate.kind, payload: candidate.payload,
+    confidence: candidate.confidence, status: candidate.status, revision: candidate.revision, createdAt: candidate.createdAt, sources: candidate.sources };
+}
+
+function publicSourceError(error: unknown) {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code).slice(0, 120) : "SOURCE_OPERATION_FAILED";
+  const messages: Record<string, string> = {
+    SOURCE_RIGHTS_ATTESTATION_REQUIRED: "需要先确认资料的使用权。",
+    SOURCE_FILE_CHANGED: "来源文件已经变化，请重新添加。",
+    SOURCE_FILE_MISSING: "来源文件已被移动或删除。",
+    SOURCE_FORMAT_UNSUPPORTED: "暂不支持这种文件格式。",
+    SOURCE_TEXT_ENCODING_UNSUPPORTED: "无法识别文本编码。",
+    SOURCE_ARCHIVE_LIMIT_EXCEEDED: "压缩文档超过安全解析限制。",
+    DECOMPOSITION_CANDIDATE_ALREADY_DECIDED: "这个候选已经完成审核。",
+  };
+  return { code, message: messages[code] ?? "来源资料操作失败，请检查文件后重试。" };
 }
 
 function playthroughInspectResult(operation: () => unknown): PlaythroughInspectResult {
