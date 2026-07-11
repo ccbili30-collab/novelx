@@ -83,6 +83,11 @@ process.on("message", (payload: unknown) => {
           args,
           signal,
         ),
+        listProjectDirectory: (args, signal) => toolBridge.invoke(command.runId, "list_project_directory", args, signal),
+        statProjectFile: (args, signal) => toolBridge.invoke(command.runId, "stat_project_file", args, signal),
+        globProjectFiles: (args, signal) => toolBridge.invoke(command.runId, "glob_project_files", args, signal),
+        searchProjectFiles: (args, signal) => toolBridge.invoke(command.runId, "search_project_files", args, signal),
+        readProjectFile: (args, signal) => toolBridge.invoke(command.runId, "read_project_file", args, signal),
         proposeChangeSet: (args, signal) => toolBridge.invoke(
           command.runId,
           "propose_change_set",

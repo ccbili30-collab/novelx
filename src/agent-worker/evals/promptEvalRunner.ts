@@ -9,6 +9,7 @@ import { createOpenAiCompatiblePiAdapter } from "../pi/NovaxPiRuntimeAdapter";
 import { modelProfileSchema, type ModelProfile } from "../pi/modelProfile";
 import type { RuntimeAdapter } from "../pi/runtimeAdapterContract";
 import type { AgentToolExecutor } from "../tools/createAgentTools";
+import type { StewardOutput } from "../contracts/roleOutputs";
 import {
   SPECIALIST_HANDOFF_VERSION,
   type CheckerSpecialistInput,
@@ -146,7 +147,7 @@ async function runCase(
   let submissions = 0;
   let directResult: Awaited<ReturnType<EvalAdapter["run"]>> | null = null;
   const productionToolExecutions: Array<{
-    tool: "retrieve_graph_evidence" | "inspect_project_files" | "propose_change_set" | "writer" | "checker";
+    tool: StewardOutput["toolOutcomes"][number]["tool"];
     status: "succeeded" | "failed";
   }> = [];
   try {
@@ -263,11 +264,43 @@ async function runCase(
 function createEvaluationToolExecutor(
   scenario: (typeof promptAdversarialCases)[number]["stewardToolScenario"],
   executions: Array<{
-    tool: "retrieve_graph_evidence" | "inspect_project_files" | "propose_change_set" | "writer" | "checker";
+    tool: StewardOutput["toolOutcomes"][number]["tool"];
     status: "succeeded" | "failed";
   }>,
 ): AgentToolExecutor {
   return {
+    listProjectDirectory: async () => {
+      if (scenario !== "project_overview") throw evaluationFileToolFailure(executions, "list_project_directory");
+      executions.push({ tool: "list_project_directory", status: "succeeded" });
+      return evaluationProjectListing();
+    },
+    statProjectFile: async (args) => {
+      if (scenario !== "project_overview") throw evaluationFileToolFailure(executions, "stat_project_file");
+      const file = evaluationProjectFiles().find((candidate) => candidate.path === args.path);
+      if (!file) throw evalRunnerError("PROJECT_FILE_NOT_FOUND", "The requested evaluation file does not exist.");
+      executions.push({ tool: "stat_project_file", status: "succeeded" });
+      return { path: file.path, kind: "file" as const, size: file.size, modifiedAt: "2026-07-11T00:00:00.000Z", sha256: file.sha256 };
+    },
+    globProjectFiles: async (args) => {
+      if (scenario !== "project_overview") throw evaluationFileToolFailure(executions, "glob_project_files");
+      executions.push({ tool: "glob_project_files", status: "succeeded" });
+      return { pattern: args.pattern, entries: evaluationProjectListing().entries, incomplete: false, omittedEntries: 0 };
+    },
+    searchProjectFiles: async (args) => {
+      if (scenario !== "project_overview") throw evaluationFileToolFailure(executions, "search_project_files");
+      executions.push({ tool: "search_project_files", status: "succeeded" });
+      const matches = evaluationProjectFiles().flatMap((file) => file.content?.includes(args.query)
+        ? [{ path: file.path, line: 1, excerpt: file.content.slice(0, 500) }]
+        : []);
+      return { query: args.query, matches, scannedFiles: 4, skippedBinaryFiles: 0, incomplete: false };
+    },
+    readProjectFile: async (args) => {
+      if (scenario !== "project_overview") throw evaluationFileToolFailure(executions, "read_project_file");
+      const file = evaluationProjectFiles().find((candidate) => candidate.path === args.path);
+      if (!file) throw evalRunnerError("PROJECT_FILE_NOT_FOUND", "The requested evaluation file does not exist.");
+      executions.push({ tool: "read_project_file", status: "succeeded" });
+      return file;
+    },
     inspectProjectFiles: async () => {
       if (scenario !== "project_overview") {
         executions.push({ tool: "inspect_project_files", status: "failed" });
@@ -411,6 +444,38 @@ function evaluationFile(path: string, content: string) {
     originalChars: content.length,
     returnedChars: content.length,
   };
+}
+
+function evaluationProjectFiles() {
+  return [
+    evaluationFile("01-力量体系.md", "力量体系以潮汐共鸣为基础，施术者必须承担记忆损耗。"),
+    evaluationFile("02-场景地图与世界观.md", "银湾海岸由古代沉降与海水倒灌形成。"),
+    evaluationFile("03-人物关系图.md", "林砚与顾潮是共同调查海岸异变的搭档。"),
+    evaluationFile("04-物品大全.md", "潮汐罗盘可以记录最近一次空间折叠。"),
+  ];
+}
+
+function evaluationProjectListing() {
+  return {
+    root: ".",
+    entries: evaluationProjectFiles().map((file) => ({
+      path: file.path,
+      kind: "file" as const,
+      size: file.size,
+      modifiedAt: "2026-07-11T00:00:00.000Z",
+    })),
+    ignoredDirectories: [".git", ".novax", "node_modules"],
+    incomplete: false,
+    omittedEntries: 0,
+  };
+}
+
+function evaluationFileToolFailure(
+  executions: Array<{ tool: StewardOutput["toolOutcomes"][number]["tool"]; status: "succeeded" | "failed" }>,
+  tool: StewardOutput["toolOutcomes"][number]["tool"],
+) {
+  executions.push({ tool, status: "failed" });
+  return evalRunnerError("AGENT_TOOL_FAILED", "Project files are not configured for this evaluation case.");
 }
 
 function readSpecialistSubmissionCount(operations: AgentWorkerAuditOperation[]): number {

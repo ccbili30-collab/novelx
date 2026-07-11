@@ -11,15 +11,32 @@ import {
   agentWorkerToolRequestSchema,
   agentWorkerToolResponseSchema,
   proposeChangeSetResultSchema,
+  globProjectFilesResultSchema,
   inspectProjectFilesResultSchema,
+  listProjectDirectoryResultSchema,
+  readProjectFileResultSchema,
   retrieveGraphEvidenceResultSchema,
+  searchProjectFilesResultSchema,
+  statProjectFileResultSchema,
+  agentToolInternalErrorCodeSchema,
   type AgentWorkerToolRequest,
+  type AgentToolName,
   type AgentCollaborationContext,
   type AgentSessionHistory,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
   type InspectProjectFilesArgs,
   type InspectProjectFilesResult,
+  type GlobProjectFilesArgs,
+  type GlobProjectFilesResult,
+  type ListProjectDirectoryArgs,
+  type ListProjectDirectoryResult,
+  type ReadProjectFileArgs,
+  type ReadProjectFileResult,
+  type SearchProjectFilesArgs,
+  type SearchProjectFilesResult,
+  type StatProjectFileArgs,
+  type StatProjectFileResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
 } from "../shared/agentWorkerProtocol";
@@ -50,6 +67,11 @@ export interface AgentToolGateway {
     args: InspectProjectFilesArgs,
     context: AgentToolInvocationContext,
   ): Promise<InspectProjectFilesResult>;
+  listProjectDirectory(args: ListProjectDirectoryArgs, context: AgentToolInvocationContext): Promise<ListProjectDirectoryResult>;
+  statProjectFile(args: StatProjectFileArgs, context: AgentToolInvocationContext): Promise<StatProjectFileResult>;
+  globProjectFiles(args: GlobProjectFilesArgs, context: AgentToolInvocationContext): Promise<GlobProjectFilesResult>;
+  searchProjectFiles(args: SearchProjectFilesArgs, context: AgentToolInvocationContext): Promise<SearchProjectFilesResult>;
+  readProjectFile(args: ReadProjectFileArgs, context: AgentToolInvocationContext): Promise<ReadProjectFileResult>;
   proposeChangeSet(
     args: ProposeChangeSetArgs,
     context: AgentToolInvocationContext,
@@ -374,11 +396,18 @@ export class AgentProcessSupervisor {
       mode: run.mode,
       signal: controller.signal,
     };
-    const operation: Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ProposeChangeSetResult> = request.tool === "retrieve_graph_evidence"
-      ? Promise.resolve().then(() => run.gateway!.retrieveGraphEvidence(request.args, context))
-      : request.tool === "inspect_project_files"
-        ? Promise.resolve().then(() => run.gateway!.inspectProjectFiles(request.args, context))
-        : Promise.resolve().then(() => run.gateway!.proposeChangeSet(request.args, context));
+    const operation: Promise<unknown> = (async () => {
+      switch (request.tool) {
+        case "retrieve_graph_evidence": return await run.gateway!.retrieveGraphEvidence(request.args, context);
+        case "inspect_project_files": return await run.gateway!.inspectProjectFiles(request.args, context);
+        case "list_project_directory": return await run.gateway!.listProjectDirectory(request.args, context);
+        case "stat_project_file": return await run.gateway!.statProjectFile(request.args, context);
+        case "glob_project_files": return await run.gateway!.globProjectFiles(request.args, context);
+        case "search_project_files": return await run.gateway!.searchProjectFiles(request.args, context);
+        case "read_project_file": return await run.gateway!.readProjectFile(request.args, context);
+        case "propose_change_set": return await run.gateway!.proposeChangeSet(request.args, context);
+      }
+    })();
 
     void operation.then((result) => {
       if (!this.#takePending(run, request.requestId)) return;
@@ -434,8 +463,8 @@ export class AgentProcessSupervisor {
         });
         return;
       }
-      if (request.tool === "inspect_project_files") {
-        const parsed = inspectProjectFilesResultSchema.safeParse(result);
+      if (request.tool === "inspect_project_files" || isProjectFileTool(request.tool)) {
+        const parsed = projectFileResultSchema(request.tool).safeParse(result);
         if (!parsed.success) {
           if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
           this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
@@ -470,6 +499,7 @@ export class AgentProcessSupervisor {
         });
         return;
       }
+      if (request.tool !== "propose_change_set") return;
       const parsed = proposeChangeSetResultSchema.safeParse(result);
       if (!parsed.success) {
         if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
@@ -580,7 +610,7 @@ export class AgentProcessSupervisor {
     run: ActiveRun,
     runId: string,
     requestId: string,
-    code: "AGENT_TOOLS_REQUIRED" | "AGENT_TOOL_UNKNOWN" | "AGENT_TOOL_PROTOCOL_FAILED" | "AGENT_TOOL_TIMEOUT" | "AGENT_TOOL_FAILED" | "AGENT_RUN_CANCELLED",
+    code: ReturnType<typeof agentToolInternalErrorCodeSchema.parse>,
   ): void {
     const response = agentWorkerToolResponseSchema.parse({
       type: "tool.response",
@@ -815,9 +845,10 @@ function resolveRunScopes(requested: string[] | undefined, lease: AgentRuntimeLe
 type ActivityDomain = "world" | "oc" | "story" | "graph" | "timeline" | "asset";
 
 function toolPresentation(request: AgentWorkerToolRequest): { label: string; domains?: ActivityDomain[] } {
+  if (isProjectFileTool(request.tool)) return { label: "检查项目文件" };
   if (request.tool === "retrieve_graph_evidence") return { label: "检索项目事实", domains: ["graph"] };
   if (request.tool === "inspect_project_files") return { label: "检查项目文件" };
-  return { label: "生成候选变更", domains: proposalDomains(request.args) };
+  return { label: "生成候选变更", domains: proposalDomains(request.args as ProposeChangeSetArgs) };
 }
 
 function proposalDomains(args: ProposeChangeSetArgs): ActivityDomain[] {
@@ -866,12 +897,28 @@ export function createAgentWorkerEnvironment(source: NodeJS.ProcessEnv): NodeJS.
   return environment;
 }
 
-function readToolFailureCode(error: unknown): "AGENT_TOOLS_REQUIRED" | "AGENT_TOOL_FAILED" | "AGENT_RUN_CANCELLED" {
+function readToolFailureCode(error: unknown): ReturnType<typeof agentToolInternalErrorCodeSchema.parse> {
   if (error && typeof error === "object" && "code" in error) {
-    if (error.code === "AGENT_TOOLS_REQUIRED") return "AGENT_TOOLS_REQUIRED";
-    if (error.code === "AGENT_RUN_CANCELLED") return "AGENT_RUN_CANCELLED";
+    const parsed = agentToolInternalErrorCodeSchema.safeParse(error.code);
+    if (parsed.success) return parsed.data;
   }
   return "AGENT_TOOL_FAILED";
+}
+
+function isProjectFileTool(tool: AgentToolName): tool is "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" {
+  return ["list_project_directory", "stat_project_file", "glob_project_files", "search_project_files", "read_project_file"].includes(tool);
+}
+
+function projectFileResultSchema(tool: AgentToolName) {
+  switch (tool) {
+    case "inspect_project_files": return inspectProjectFilesResultSchema;
+    case "list_project_directory": return listProjectDirectoryResultSchema;
+    case "stat_project_file": return statProjectFileResultSchema;
+    case "glob_project_files": return globProjectFilesResultSchema;
+    case "search_project_files": return searchProjectFilesResultSchema;
+    case "read_project_file": return readProjectFileResultSchema;
+    default: throw new Error("Not a project file tool.");
+  }
 }
 
 function stewardInvocationId(runId: string): string {
@@ -928,4 +975,11 @@ const TOOL_ERROR_MESSAGES = {
   AGENT_TOOL_TIMEOUT: "Agent tool request timed out.",
   AGENT_TOOL_FAILED: "Agent tool request failed.",
   AGENT_RUN_CANCELLED: "Agent run was cancelled.",
+  PROJECT_FILE_PATH_OUTSIDE_ROOT: "Project file path is outside the project root.",
+  PROJECT_FILE_PATH_RESTRICTED: "Project file path is restricted.",
+  PROJECT_FILE_NOT_FOUND: "Project file or directory was not found.",
+  PROJECT_FILE_NOT_A_FILE: "Project file path is not a file.",
+  PROJECT_FILE_GLOB_INVALID: "Project file glob pattern is invalid.",
+  PROJECT_FILE_QUERY_INVALID: "Project file search query is invalid.",
+  PROJECT_FILE_OPERATION_FAILED: "Project file operation failed.",
 } as const;

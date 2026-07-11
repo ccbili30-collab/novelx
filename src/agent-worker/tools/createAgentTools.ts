@@ -5,12 +5,32 @@ import {
   proposeChangeSetResultSchema,
   inspectProjectFilesArgsSchema,
   inspectProjectFilesResultSchema,
+  listProjectDirectoryArgsSchema,
+  listProjectDirectoryResultSchema,
+  statProjectFileArgsSchema,
+  statProjectFileResultSchema,
+  globProjectFilesArgsSchema,
+  globProjectFilesResultSchema,
+  searchProjectFilesArgsSchema,
+  searchProjectFilesResultSchema,
+  readProjectFileArgsSchema,
+  readProjectFileResultSchema,
   retrieveGraphEvidenceArgsSchema,
   retrieveGraphEvidenceResultSchema,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
   type InspectProjectFilesArgs,
   type InspectProjectFilesResult,
+  type ListProjectDirectoryArgs,
+  type ListProjectDirectoryResult,
+  type StatProjectFileArgs,
+  type StatProjectFileResult,
+  type GlobProjectFilesArgs,
+  type GlobProjectFilesResult,
+  type SearchProjectFilesArgs,
+  type SearchProjectFilesResult,
+  type ReadProjectFileArgs,
+  type ReadProjectFileResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
 } from "../../shared/agentWorkerProtocol";
@@ -28,6 +48,21 @@ const inspectProjectFilesParameters = Type.Object({
   path: Type.Optional(Type.String({ maxLength: 1_000 })),
   query: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
 }, { additionalProperties: false });
+
+const optionalProjectPath = Type.Optional(Type.String({ maxLength: 1_000 }));
+const listProjectDirectoryParameters = Type.Object({ path: optionalProjectPath }, { additionalProperties: false });
+const statProjectFileParameters = Type.Object({
+  path: Type.String({ minLength: 1, maxLength: 1_000 }),
+}, { additionalProperties: false });
+const globProjectFilesParameters = Type.Object({
+  pattern: Type.String({ minLength: 1, maxLength: 1_000 }),
+  path: optionalProjectPath,
+}, { additionalProperties: false });
+const searchProjectFilesParameters = Type.Object({
+  query: Type.String({ minLength: 1, maxLength: 500 }),
+  path: optionalProjectPath,
+}, { additionalProperties: false });
+const readProjectFileParameters = statProjectFileParameters;
 
 const assertionItem = Type.Object({
   id: Type.String({ minLength: 1, maxLength: 160 }),
@@ -173,6 +208,11 @@ const proposeParameters = Type.Object({
 export interface AgentToolExecutor {
   retrieveGraphEvidence(args: RetrieveGraphEvidenceArgs, signal?: AbortSignal): Promise<RetrieveGraphEvidenceResult>;
   inspectProjectFiles(args: InspectProjectFilesArgs, signal?: AbortSignal): Promise<InspectProjectFilesResult>;
+  listProjectDirectory(args: ListProjectDirectoryArgs, signal?: AbortSignal): Promise<ListProjectDirectoryResult>;
+  statProjectFile(args: StatProjectFileArgs, signal?: AbortSignal): Promise<StatProjectFileResult>;
+  globProjectFiles(args: GlobProjectFilesArgs, signal?: AbortSignal): Promise<GlobProjectFilesResult>;
+  searchProjectFiles(args: SearchProjectFilesArgs, signal?: AbortSignal): Promise<SearchProjectFilesResult>;
+  readProjectFile(args: ReadProjectFileArgs, signal?: AbortSignal): Promise<ReadProjectFileResult>;
   proposeChangeSet(args: ProposeChangeSetArgs, signal?: AbortSignal): Promise<ProposeChangeSetResult>;
 }
 
@@ -246,5 +286,67 @@ export function createAgentTools(executor: AgentToolExecutor): AgentTool[] {
     },
   };
 
-  return [retrieve, inspectFiles, propose];
+  const listDirectory: AgentTool<typeof listProjectDirectoryParameters> = {
+    name: "list_project_directory",
+    label: "列出项目目录",
+    description: "List real files and directories under the current project root. Use this first when the user asks what the project contains; do not guess README.md.",
+    parameters: listProjectDirectoryParameters,
+    execute: async (_toolCallId, params, signal) => fileToolResult(
+      listProjectDirectoryResultSchema.parse(await executor.listProjectDirectory(listProjectDirectoryArgsSchema.parse(params), signal)),
+      "Choose paths from this real listing. If the listing is incomplete, disclose its omitted count and narrow the path or use glob_project_files.",
+    ),
+  };
+
+  const statFile: AgentTool<typeof statProjectFileParameters> = {
+    name: "stat_project_file",
+    label: "查看文件信息",
+    description: "Inspect the type, size, modified time, and SHA-256 of a known project path without reading its content.",
+    parameters: statProjectFileParameters,
+    execute: async (_toolCallId, params, signal) => fileToolResult(
+      statProjectFileResultSchema.parse(await executor.statProjectFile(statProjectFileArgsSchema.parse(params), signal)),
+      "Use this metadata only for the returned path. A missing path is not an authorization failure; discover the real path with list_project_directory or glob_project_files.",
+    ),
+  };
+
+  const globFiles: AgentTool<typeof globProjectFilesParameters> = {
+    name: "glob_project_files",
+    label: "匹配项目文件",
+    description: "Discover project paths by a glob pattern such as **/*.md. Use after listing, or as fallback when a guessed file does not exist.",
+    parameters: globProjectFilesParameters,
+    execute: async (_toolCallId, params, signal) => fileToolResult(
+      globProjectFilesResultSchema.parse(await executor.globProjectFiles(globProjectFilesArgsSchema.parse(params), signal)),
+      "Read only paths returned here. No matches means the pattern matched nothing, not that project access is unauthorized.",
+    ),
+  };
+
+  const searchFiles: AgentTool<typeof searchProjectFilesParameters> = {
+    name: "search_project_files",
+    label: "搜索项目内容",
+    description: "Search text content across real project files and return source paths, line numbers, and excerpts.",
+    parameters: searchProjectFilesParameters,
+    execute: async (_toolCallId, params, signal) => fileToolResult(
+      searchProjectFilesResultSchema.parse(await executor.searchProjectFiles(searchProjectFilesArgsSchema.parse(params), signal)),
+      "Use the returned path and line evidence. Respect incomplete and skipped-binary counts; no matches is not an authorization failure.",
+    ),
+  };
+
+  const readFile: AgentTool<typeof readProjectFileParameters> = {
+    name: "read_project_file",
+    label: "读取项目文件",
+    description: "Read one known real project file. Discover paths with list_project_directory or glob_project_files before reading when the file name is not certain.",
+    parameters: readProjectFileParameters,
+    execute: async (_toolCallId, params, signal) => fileToolResult(
+      readProjectFileResultSchema.parse(await executor.readProjectFile(readProjectFileArgsSchema.parse(params), signal)),
+      "Use only the returned content. Respect complete and returnedChars. If the path is not found, discover real paths instead of claiming missing authorization.",
+    ),
+  };
+
+  return [retrieve, listDirectory, statFile, globFiles, searchFiles, readFile, inspectFiles, propose];
+}
+
+function fileToolResult<T>(result: T, novaxInstruction: string) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify({ result, novaxInstruction }) }],
+    details: result,
+  };
 }

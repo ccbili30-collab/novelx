@@ -10,6 +10,7 @@ import stewardPromptV1_4 from "./prompts/steward/v1.4.md?raw";
 import stewardPromptV1_5 from "./prompts/steward/v1.5.md?raw";
 import stewardPromptV1_6 from "./prompts/steward/v1.6.md?raw";
 import stewardPromptV1_7 from "./prompts/steward/v1.7.md?raw";
+import stewardPromptV1_8FileToolsAddendum from "./prompts/steward/v1.8-file-tools-addendum.md?raw";
 import writerPrompt from "./prompts/writer/v1.md?raw";
 
 const promptContent: Record<string, string> = {
@@ -23,17 +24,20 @@ const promptContent: Record<string, string> = {
   "novax.steward@1.7.0": stewardPromptV1_5,
   "novax.steward@1.8.0": stewardPromptV1_6,
   "novax.steward@1.9.0": stewardPromptV1_7,
+  "novax.steward@1.10.0": `${stewardPromptV1_7}\n${stewardPromptV1_8FileToolsAddendum}`,
   "novax.writer@1.0.0": writerPrompt,
   "novax.writer@1.1.0": writerPrompt,
   "novax.writer@1.2.0": writerPrompt,
   "novax.writer@1.3.0": writerPrompt,
   "novax.writer@1.4.0": writerPrompt,
+  "novax.writer@1.5.0": writerPrompt,
   "novax.checker@1.0.0": checkerPrompt,
   "novax.checker@1.1.0": checkerPromptV1_1,
   "novax.checker@1.2.0": checkerPromptV1_1,
   "novax.checker@1.3.0": checkerPromptV1_1,
   "novax.checker@1.4.0": checkerPromptV1_1,
   "novax.checker@1.5.0": checkerPromptV1_1,
+  "novax.checker@1.6.0": checkerPromptV1_1,
 };
 
 export interface PublishedPrompt {

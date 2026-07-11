@@ -28,6 +28,17 @@ export interface ProjectFileListResult {
   omittedEntries: number;
 }
 
+export interface ProjectFileStatResult extends ProjectFileEntry {
+  sha256: string | null;
+}
+
+export interface ProjectFileGlobResult {
+  pattern: string;
+  entries: ProjectFileEntry[];
+  incomplete: boolean;
+  omittedEntries: number;
+}
+
 export interface ProjectFileReadResult {
   path: string;
   kind: "text" | "binary";
@@ -156,6 +167,35 @@ export class ProjectFileService {
     };
   }
 
+  stat(relativePath: string): ProjectFileStatResult {
+    const target = this.resolveExisting(relativePath, true);
+    const stats = fs.statSync(target);
+    return {
+      path: this.toRelative(target) || ".",
+      kind: stats.isDirectory() ? "directory" : "file",
+      size: stats.isFile() ? stats.size : null,
+      modifiedAt: stats.mtime.toISOString(),
+      sha256: stats.isFile() ? hashFile(target) : null,
+    };
+  }
+
+  glob(pattern: string, relativePath = ""): ProjectFileGlobResult {
+    const normalizedPattern = pattern.trim().replaceAll("\\", "/");
+    if (!normalizedPattern || normalizedPattern.length > 1_000 || path.posix.isAbsolute(normalizedPattern)
+      || /^[A-Za-z]:/.test(normalizedPattern) || normalizedPattern.split("/").includes("..")) {
+      throw fileError("PROJECT_FILE_GLOB_INVALID");
+    }
+    const matcher = globToRegExp(normalizedPattern);
+    const listing = this.list(relativePath);
+    const matches = listing.entries.filter((entry) => matcher.test(entry.path));
+    return {
+      pattern: normalizedPattern,
+      entries: matches,
+      incomplete: listing.incomplete,
+      omittedEntries: listing.omittedEntries,
+    };
+  }
+
   search(query: string, relativePath = ""): ProjectFileSearchResult {
     const needle = query.trim().toLocaleLowerCase();
     if (!needle || needle.length > 500) throw fileError("PROJECT_FILE_QUERY_INVALID");
@@ -214,7 +254,13 @@ export class ProjectFileService {
     const normalized = normalizeRelativePath(relativePath);
     const candidate = path.resolve(this.#rootPath, normalized);
     assertInside(this.#rootPath, candidate);
-    const real = fs.realpathSync.native(candidate);
+    let real: string;
+    try {
+      real = fs.realpathSync.native(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw fileError("PROJECT_FILE_NOT_FOUND");
+      throw error;
+    }
     assertInside(this.#rootRealPath, real);
     if (!allowDirectory && fs.statSync(real).isDirectory()) throw fileError("PROJECT_FILE_NOT_A_FILE");
     return real;
@@ -225,10 +271,27 @@ export class ProjectFileService {
   }
 }
 
+function globToRegExp(pattern: string): RegExp {
+  let source = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index] ?? "";
+    if (character === "*") {
+      if (pattern[index + 1] === "*") {
+        index += 1;
+        source += pattern[index + 1] === "/" ? "(?:.*/)?" : ".*";
+        if (pattern[index + 1] === "/") index += 1;
+      } else source += "[^/]*";
+    } else if (character === "?") source += "[^/]";
+    else source += character.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+  }
+  return new RegExp(`${source}$`, "iu");
+}
+
 function normalizeRelativePath(value: string): string {
-  const trimmed = value.trim().replaceAll("\\", "/");
-  if (!trimmed || trimmed === ".") return ".";
-  if (path.posix.isAbsolute(trimmed) || /^[A-Za-z]:/.test(trimmed)) throw fileError("PROJECT_FILE_PATH_OUTSIDE_ROOT");
+  let trimmed = value.trim().replaceAll("\\", "/");
+  if (!trimmed || trimmed === "." || trimmed === "/") return ".";
+  if (trimmed.startsWith("//") || /^[A-Za-z]:/.test(trimmed)) throw fileError("PROJECT_FILE_PATH_OUTSIDE_ROOT");
+  if (trimmed.startsWith("/")) trimmed = trimmed.slice(1);
   const segments = trimmed.split("/").filter(Boolean);
   if (segments.some((segment) => segment === ".." || IGNORED_DIRECTORIES.has(segment))) {
     throw fileError("PROJECT_FILE_PATH_RESTRICTED");

@@ -1,7 +1,12 @@
 import {
   proposeChangeSetResultSchema,
+  globProjectFilesResultSchema,
   inspectProjectFilesResultSchema,
+  listProjectDirectoryResultSchema,
+  readProjectFileResultSchema,
   retrieveGraphEvidenceResultSchema,
+  searchProjectFilesResultSchema,
+  statProjectFileResultSchema,
   type ProposeChangeSetArgs,
 } from "../shared/agentWorkerProtocol";
 import { ChangeSetService, type ChangeSetItem, type ChangeSetPolicyEvaluator } from "../domain/changeSet/changeSetService";
@@ -39,6 +44,26 @@ export function createWorkspaceAgentToolGateway(
           : { mode: "search" as const, ...files.search(args.query, args.path) };
       assertAvailable(context.signal);
       return inspectProjectFilesResultSchema.parse(result);
+    },
+    listProjectDirectory: async (args, context) => {
+      assertAvailable(context.signal);
+      return listProjectDirectoryResultSchema.parse(new ProjectFileService(workspace.rootPath).list(args.path));
+    },
+    statProjectFile: async (args, context) => {
+      assertAvailable(context.signal);
+      return statProjectFileResultSchema.parse(new ProjectFileService(workspace.rootPath).stat(args.path));
+    },
+    globProjectFiles: async (args, context) => {
+      assertAvailable(context.signal);
+      return globProjectFilesResultSchema.parse(new ProjectFileService(workspace.rootPath).glob(args.pattern, args.path));
+    },
+    searchProjectFiles: async (args, context) => {
+      assertAvailable(context.signal);
+      return searchProjectFilesResultSchema.parse(new ProjectFileService(workspace.rootPath).search(args.query, args.path));
+    },
+    readProjectFile: async (args, context) => {
+      assertAvailable(context.signal);
+      return readProjectFileResultSchema.parse(new ProjectFileService(workspace.rootPath).read(args.path));
     },
     proposeChangeSet: async (args, context) => {
       assertAvailable(context.signal);

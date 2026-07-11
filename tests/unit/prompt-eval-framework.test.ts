@@ -187,8 +187,10 @@ describe("candidate Prompt evaluation framework", () => {
             await retrieve.execute("eval-retrieve-empty", { scopeResourceIds: ["world-empty-eval"] });
           }
           if (testCase.stewardToolScenario === "project_overview") {
-            const inspect = input.tools.find((tool) => tool.name === "inspect_project_files")!;
-            await inspect.execute("eval-inspect-project", { mode: "overview", path: "" });
+            const list = input.tools.find((tool) => tool.name === "list_project_directory")!;
+            await list.execute("eval-list-project", { path: "" });
+            const read = input.tools.find((tool) => tool.name === "read_project_file")!;
+            await read.execute("eval-read-project", { path: "01-力量体系.md" });
           }
           if (testCase.stewardToolScenario === "assist_pending_change_set") {
             const retrieve = input.tools.find((tool) => tool.name === "retrieve_graph_evidence")!;
@@ -247,7 +249,10 @@ describe("candidate Prompt evaluation framework", () => {
     expect(stewards.find((item) => item.caseId === "steward.unsupported-world-fact")?.productionToolExecutions)
       .toEqual([{ tool: "retrieve_graph_evidence", status: "succeeded" }]);
     expect(stewards.find((item) => item.caseId === "steward.current-folder-uses-real-files")?.productionToolExecutions)
-      .toEqual([{ tool: "inspect_project_files", status: "succeeded" }]);
+      .toEqual([
+        { tool: "list_project_directory", status: "succeeded" },
+        { tool: "read_project_file", status: "succeeded" },
+      ]);
     expect(stewards.find((item) => item.caseId === "steward.assist-cannot-commit")?.productionToolExecutions)
       .toEqual([
         { tool: "retrieve_graph_evidence", status: "succeeded" },
@@ -301,7 +306,7 @@ function stewardPlanFor(
     return {
       objective: "inspect_files",
       scopeResourceIds: ["world-files-eval"],
-      steps: ["inspect_project_files"],
+      steps: ["list_project_directory", "read_project_file"],
     };
   }
   if (scenario === "major_conflict") {

@@ -3,11 +3,21 @@ import { Type, type TSchema } from "typebox";
 import { z } from "zod";
 import type { RoleOutputToolCapture } from "./contracts/roleOutputTool";
 import { stewardOutputSchema, type StewardOutput } from "./contracts/roleOutputs";
-import { inspectProjectFilesResultSchema, proposeChangeSetResultSchema, retrieveGraphEvidenceResultSchema } from "../shared/agentWorkerProtocol";
+import {
+  inspectProjectFilesResultSchema,
+  readProjectFileResultSchema,
+  proposeChangeSetResultSchema,
+  retrieveGraphEvidenceResultSchema,
+} from "../shared/agentWorkerProtocol";
 
 const operationalToolNames = [
   "retrieve_graph_evidence",
   "inspect_project_files",
+  "list_project_directory",
+  "stat_project_file",
+  "glob_project_files",
+  "search_project_files",
+  "read_project_file",
   "checker",
   "writer",
   "propose_change_set",
@@ -24,10 +34,15 @@ const planSchema = z.object({
   if (new Set(plan.scopeResourceIds).size !== plan.scopeResourceIds.length) {
     context.addIssue({ code: "custom", message: "Plan scopes must be unique." });
   }
-  if (new Set(plan.steps).size !== plan.steps.length) {
+  const repeatableFileTools = new Set<OperationalToolName>([
+    "list_project_directory", "stat_project_file", "glob_project_files", "search_project_files", "read_project_file",
+  ]);
+  if (plan.steps.some((step, index) => !repeatableFileTools.has(step) && plan.steps.indexOf(step) !== index)) {
     context.addIssue({ code: "custom", message: "Plan steps must be unique." });
   }
-  if (plan.steps.length > 0 && plan.steps[0] !== "retrieve_graph_evidence" && plan.steps[0] !== "inspect_project_files") {
+  if (plan.steps.length > 0 && ![
+    "retrieve_graph_evidence", "inspect_project_files", "list_project_directory", "glob_project_files",
+  ].includes(plan.steps[0])) {
     context.addIssue({ code: "custom", message: "Operational plans must retrieve project sources first." });
   }
   if (plan.steps.length > 0 && plan.scopeResourceIds.length === 0) {
@@ -35,7 +50,6 @@ const planSchema = z.object({
   }
   const requiredByObjective: Partial<Record<typeof plan.objective, OperationalToolName>> = {
     research: "retrieve_graph_evidence",
-    inspect_files: "inspect_project_files",
     change_set: "propose_change_set",
     draft: "writer",
     check: "checker",
@@ -43,6 +57,11 @@ const planSchema = z.object({
   const required = requiredByObjective[plan.objective];
   if (required && !plan.steps.includes(required)) {
     context.addIssue({ code: "custom", message: `Plan objective requires ${required}.` });
+  }
+  if (plan.objective === "inspect_files" && !plan.steps.some((step) => [
+    "list_project_directory", "glob_project_files", "search_project_files", "read_project_file", "inspect_project_files",
+  ].includes(step))) {
+    context.addIssue({ code: "custom", message: "File inspection plans require a project file tool." });
   }
   if (plan.objective === "discussion" && plan.steps.length !== 0) {
     context.addIssue({ code: "custom", message: "Discussion plans cannot execute domain tools." });
@@ -280,12 +299,24 @@ export function createStewardExecutionStateMachine(input: {
         ? inspection.data.files
         : inspection.data.mode === "read" ? [inspection.data.file] : [];
       for (const file of reads) allowedEvidenceIds.add(file.sha256);
-      inspectedFiles = reads.map((file) => ({
+      inspectedFiles.push(...reads.map((file) => ({
         path: file.path,
         sha256: file.sha256,
         kind: file.kind,
         complete: file.complete,
-      }));
+      })));
+      return;
+    }
+    if (name === "read_project_file") {
+      const read = readProjectFileResultSchema.safeParse(details);
+      if (!read.success) throw stateError("STEWARD_TOOL_RESULT_INVALID");
+      allowedEvidenceIds.add(read.data.sha256);
+      inspectedFiles.push({
+        path: read.data.path,
+        sha256: read.data.sha256,
+        kind: read.data.kind,
+        complete: read.data.complete,
+      });
       return;
     }
     if (name === "propose_change_set") {
@@ -397,7 +428,7 @@ function createPlanParameters(authorizedScopeResourceIds: string[]): TSchema {
       Type.Literal("orchestrate"),
     ]),
     scopeResourceIds: Type.Array(scopeItem, { maxItems: authorizedScopeResourceIds.length }),
-    steps: Type.Array(Type.Union(operationalToolNames.map((name) => Type.Literal(name))), { maxItems: 5 }),
+    steps: Type.Array(Type.Union(operationalToolNames.map((name) => Type.Literal(name))), { maxItems: 20 }),
   }, { additionalProperties: false });
 }
 

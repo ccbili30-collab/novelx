@@ -19,6 +19,11 @@ describe("Agent Worker tool bridge", () => {
         args,
         signal,
       ),
+      listProjectDirectory: (args, signal) => bridge.invoke("run-1", "list_project_directory", args, signal),
+      statProjectFile: (args, signal) => bridge.invoke("run-1", "stat_project_file", args, signal),
+      globProjectFiles: (args, signal) => bridge.invoke("run-1", "glob_project_files", args, signal),
+      searchProjectFiles: (args, signal) => bridge.invoke("run-1", "search_project_files", args, signal),
+      readProjectFile: (args, signal) => bridge.invoke("run-1", "read_project_file", args, signal),
       proposeChangeSet: (args, signal) => bridge.invoke(
         "run-1",
         "propose_change_set",
@@ -29,6 +34,11 @@ describe("Agent Worker tool bridge", () => {
 
     expect(tools.map((tool) => tool.name)).toEqual([
       "retrieve_graph_evidence",
+      "list_project_directory",
+      "stat_project_file",
+      "glob_project_files",
+      "search_project_files",
+      "read_project_file",
       "inspect_project_files",
       "propose_change_set",
     ]);
@@ -88,5 +98,19 @@ describe("Agent Worker tool bridge", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("preserves safe project-file failure codes from main", async () => {
+    let sent: AgentWorkerToolRequest | undefined;
+    const bridge = new AgentWorkerToolBridge((request) => { sent = request; return true; });
+    const pending = bridge.invoke("run-files", "read_project_file", { path: "README.md" });
+    expect(bridge.handleResponse({
+      type: "tool.response",
+      runId: "run-files",
+      requestId: sent!.requestId,
+      ok: false,
+      error: { code: "PROJECT_FILE_NOT_FOUND", message: "Project file or directory was not found." },
+    })).toBe(true);
+    await expect(pending).rejects.toMatchObject({ code: "PROJECT_FILE_NOT_FOUND" });
   });
 });
