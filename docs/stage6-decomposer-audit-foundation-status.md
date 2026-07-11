@@ -9,10 +9,12 @@ Date: 2026-07-11
 - 每个运行绑定有序来源块和内容哈希，不能用未记录的来源伪装输入证据。
 - 运行只能从 running（运行中）进入一次终态，并记录错误码、输出哈希和 Provider Receipt（模型提供方回执）。
 - 身份字段和已终态运行由数据库触发器阻止改写。
+- Decomposer Contracts（拆解器数据契约）已提升到共享层，Domain（领域层）、Agent Worker 和协议使用同一份严格 Schema。
+- Agent Worker 已支持类型化 `decompose.start` 命令和 started/completed/failed 事件。
+- Worker Controller（工作进程控制器）在 Prompt 未发布时会在访问 Provider 前失败关闭。
 
 ## Not Completed
 
-- Agent Worker（Agent 工作进程）尚未增加 Decomposer 命令和事件协议。
 - Decomposer Process Supervisor（拆解器进程监督器）尚未创建、取消或处理中断运行。
 - 当前 Decomposition Service（拆解服务）尚未使用新审计仓储。
 - Decomposer Prompt 仍为 candidate（候选），没有真实 Provider eval（模型提供方评测）发布证据。

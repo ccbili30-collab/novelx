@@ -254,7 +254,7 @@ function migrateDecomposerAuditSchema(db: DatabaseSync): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(`
-      CREATE TABLE decomposer_run_audits (
+      CREATE TABLE IF NOT EXISTS decomposer_run_audits (
         id TEXT PRIMARY KEY,
         job_id TEXT NOT NULL UNIQUE REFERENCES import_jobs(id) ON DELETE CASCADE,
         source_id TEXT NOT NULL REFERENCES source_library_entries(id) ON DELETE CASCADE,
@@ -272,7 +272,7 @@ function migrateDecomposerAuditSchema(db: DatabaseSync): void {
         started_at TEXT NOT NULL,
         finished_at TEXT
       );
-      CREATE TABLE decomposer_run_sources (
+      CREATE TABLE IF NOT EXISTS decomposer_run_sources (
         audit_id TEXT NOT NULL REFERENCES decomposer_run_audits(id) ON DELETE CASCADE,
         chunk_id TEXT NOT NULL REFERENCES source_chunks(id),
         content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
@@ -280,11 +280,11 @@ function migrateDecomposerAuditSchema(db: DatabaseSync): void {
         PRIMARY KEY (audit_id, chunk_id),
         UNIQUE (audit_id, ordinal)
       );
-      CREATE TRIGGER decomposer_audit_identity_guard
+      CREATE TRIGGER IF NOT EXISTS decomposer_audit_identity_guard
       BEFORE UPDATE OF job_id, source_id, provider_id, requested_model_id, provider_config_sha256,
         prompt_id, prompt_version, prompt_sha256, input_sha256, started_at ON decomposer_run_audits
       BEGIN SELECT RAISE(ABORT, 'DECOMPOSER_AUDIT_IDENTITY_IMMUTABLE'); END;
-      CREATE TRIGGER decomposer_audit_terminal_guard
+      CREATE TRIGGER IF NOT EXISTS decomposer_audit_terminal_guard
       BEFORE UPDATE ON decomposer_run_audits
       WHEN OLD.status <> 'running'
       BEGIN SELECT RAISE(ABORT, 'DECOMPOSER_AUDIT_TERMINAL'); END;

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SQLOutputValue } from "node:sqlite";
-import { decomposerOutputSchema, type DecompositionCandidateInput } from "../../agent-worker/import/decomposerContracts";
+import { decomposerOutputSchema, type DecompositionCandidateInput } from "../../shared/decomposerContracts";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 
 export interface DecompositionCandidateRecord {

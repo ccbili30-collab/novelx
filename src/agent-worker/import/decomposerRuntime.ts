@@ -2,7 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import type { ProviderRuntimeProfile } from "../../shared/providerContract";
 import type { RuntimeAdapter } from "../pi/runtimeAdapterContract";
-import { decomposerOutputSchema, type DecomposerOutput } from "./decomposerContracts";
+import { decomposerOutputSchema, type DecomposerOutput } from "../../shared/decomposerContracts";
 import type { DecomposerPrompt } from "./decomposerPromptRegistry";
 
 export interface DecomposerSourceChunk {
@@ -37,6 +37,16 @@ export async function runDecomposer(input: {
   createAdapter(profile: ProviderRuntimeProfile): RuntimeAdapter;
   signal: AbortSignal;
 }): Promise<DecomposerOutput> {
+  return (await runDecomposerWithReceipt(input)).output;
+}
+
+export async function runDecomposerWithReceipt(input: {
+  chunks: DecomposerSourceChunk[];
+  providerProfile: ProviderRuntimeProfile;
+  prompt: DecomposerPrompt;
+  createAdapter(profile: ProviderRuntimeProfile): RuntimeAdapter;
+  signal: AbortSignal;
+}): Promise<{ output: DecomposerOutput; receipt: Awaited<ReturnType<RuntimeAdapter["run"]>>["receipt"] }> {
   if (input.prompt.status !== "active" || !input.prompt.publicationEvidence) throw runtimeError("DECOMPOSER_PROMPT_NOT_PUBLISHED");
   if (!input.chunks.length) throw runtimeError("DECOMPOSER_SOURCE_REQUIRED");
   const allowedIds = new Set(input.chunks.map((chunk) => chunk.id));
@@ -62,7 +72,7 @@ export async function runDecomposer(input: {
     JSON.stringify({ contract: "novax.decomposer@1.0.0", chunks: input.chunks }),
     "完成后必须且只能调用一次 submit_decomposition。",
   ].join("\n");
-  await input.createAdapter(input.providerProfile).run({
+  const result = await input.createAdapter(input.providerProfile).run({
     systemPrompt: input.prompt.content,
     userInput: handoff,
     tools: [tool],
@@ -73,7 +83,7 @@ export async function runDecomposer(input: {
   const output = submission as DecomposerOutput;
   const citedIds = output.candidates.flatMap((candidate) => candidate.sourceChunkIds).concat(output.unresolvedSourceChunkIds);
   if (citedIds.some((sourceChunkId) => !allowedIds.has(sourceChunkId))) throw runtimeError("DECOMPOSER_SOURCE_MISMATCH");
-  return output;
+  return { output, receipt: result.receipt };
 }
 
 function runtimeError(code: string): Error & { code: string } {
