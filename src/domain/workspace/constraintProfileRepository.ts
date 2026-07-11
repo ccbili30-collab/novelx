@@ -68,6 +68,24 @@ export class ConstraintProfileRepository {
     return rows.map(mapProfile);
   }
 
+  listAtCheckpoint(checkpointId: string): ConstraintProfileRecord[] {
+    const rows = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+        SELECT ?, 0
+        UNION ALL
+        SELECT c.parent_checkpoint_id, ancestry.depth + 1 FROM checkpoints c
+        JOIN ancestry ON c.id = ancestry.checkpoint_id WHERE c.parent_checkpoint_id IS NOT NULL
+      ), ranked AS (
+        SELECT cpv.*, ancestry.depth,
+          ROW_NUMBER() OVER (PARTITION BY cpv.profile_id ORDER BY ancestry.depth ASC) AS revision_rank
+        FROM constraint_profile_versions cpv JOIN ancestry ON ancestry.checkpoint_id = cpv.created_checkpoint_id
+      )
+      SELECT * FROM ranked WHERE revision_rank = 1 AND state = 'active'
+      ORDER BY CASE WHEN scope_resource_id IS NULL THEN 0 ELSE 1 END, title, profile_id
+    `).all(checkpointId);
+    return rows.map(mapProfile);
+  }
+
   getCurrent(profileId: string, branchId = this.#checkpoints.getActiveBranch().id): ConstraintProfileRecord | null {
     return this.listCurrent(branchId).find((profile) => profile.profileId === profileId) ?? null;
   }

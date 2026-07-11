@@ -58,6 +58,18 @@ export class PlaythroughRepository {
   }
 
   appendTurn(input: { playthroughId: string; playerAction: string; gmResolution: unknown; writerText: string; stateSnapshot: unknown }): PlayTurnRecord {
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const turn = this.appendTurnWithinTransaction(input);
+      this.workspace.db.exec("COMMIT");
+      return turn;
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  appendTurnWithinTransaction(input: { playthroughId: string; playerAction: string; gmResolution: unknown; writerText: string; stateSnapshot: unknown }): PlayTurnRecord {
     const playthrough = this.getRequired(input.playthroughId);
     if (playthrough.status !== "active") throw playError("PLAYTHROUGH_NOT_ACTIVE");
     const previous = playthrough.currentTurnId ? this.getTurnRequired(playthrough.currentTurnId) : null;
@@ -67,23 +79,16 @@ export class PlaythroughRepository {
     const stateJson = canonicalJson(input.stateSnapshot);
     const writerText = input.writerText;
     const createdAt = new Date().toISOString();
-    this.workspace.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.workspace.db.prepare(`
+    this.workspace.db.prepare(`
         INSERT INTO play_turns (
           id, playthrough_id, parent_turn_id, sequence, player_action, gm_resolution_json,
           gm_resolution_sha256, writer_text, writer_sha256, state_snapshot_json, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, playthrough.id, previous?.id ?? null, sequence, input.playerAction, gmJson,
         canonicalAuditHash(input.gmResolution), writerText, canonicalAuditHash(writerText), stateJson, createdAt);
-      const updated = this.workspace.db.prepare("UPDATE playthroughs SET current_turn_id = ? WHERE id = ? AND current_turn_id IS ?")
-        .run(id, playthrough.id, previous?.id ?? null);
-      if (updated.changes !== 1) throw playError("PLAYTHROUGH_CONCURRENT_TURN");
-      this.workspace.db.exec("COMMIT");
-    } catch (error) {
-      this.workspace.db.exec("ROLLBACK");
-      throw error;
-    }
+    const updated = this.workspace.db.prepare("UPDATE playthroughs SET current_turn_id = ? WHERE id = ? AND current_turn_id IS ?")
+      .run(id, playthrough.id, previous?.id ?? null);
+    if (updated.changes !== 1) throw playError("PLAYTHROUGH_CONCURRENT_TURN");
     return this.getTurnRequired(id);
   }
 

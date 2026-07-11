@@ -99,6 +99,10 @@ import { PlaythroughRepository } from "../domain/play/playthroughRepository";
 import { StartProfileRepository } from "../domain/play/startProfileRepository";
 import { PlaythroughReconciliationService } from "../domain/play/playthroughReconciliationService";
 import type { AgentRuntimeLease } from "./agentProcessSupervisor";
+import type { PlayerRuntimeLease } from "./playerProcessSupervisor";
+import { PlayerAuditRepository } from "../domain/audit/playerAuditRepository";
+import { PlayerRunCommitService } from "../domain/play/playerRunCommitService";
+import { PlayerTurnContextService } from "../domain/play/playerTurnContextService";
 
 export class WorkspaceSession {
   #workspace: WorkspaceDatabase | null = null;
@@ -198,6 +202,26 @@ export class WorkspaceSession {
     return {
       gateway: this.#serializeWrites(createWorkspaceAgentToolGateway(workspace, policy, () => this.#workspace === workspace)),
       audit: new AgentAuditRepository(workspace),
+      release: () => {
+        if (released) return;
+        released = true;
+        this.#activeAgentLeases -= 1;
+      },
+    };
+  }
+
+  acquirePlayerRuntimeLease(): PlayerRuntimeLease | null {
+    const workspace = this.#workspace;
+    if (!workspace) return null;
+    this.#activeAgentLeases += 1;
+    let released = false;
+    return {
+      audit: new PlayerAuditRepository(workspace),
+      commit: new PlayerRunCommitService(workspace),
+      prepare: (input) => {
+        if (this.#workspace !== workspace) throw Object.assign(new Error("Workspace changed."), { code: "PLAYER_WORKSPACE_REQUIRED" });
+        return new PlayerTurnContextService(workspace).prepare(input);
+      },
       release: () => {
         if (released) return;
         released = true;

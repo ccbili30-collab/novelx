@@ -47,6 +47,9 @@ export const desktopIpcChannels = {
   playthroughCreate: "novax:playthrough-create",
   playthroughInspect: "novax:playthrough-inspect",
   playthroughResolve: "novax:playthrough-resolve",
+  playerTurnStart: "novax:player-turn-start",
+  playerTurnCancel: "novax:player-turn-cancel",
+  playerTurnEvent: "novax:player-turn-event",
   workspaceRestore: "novax:workspace-restore",
   workspaceFlushRequest: "novax:workspace-flush-request",
   workspaceFlushComplete: "novax:workspace-flush-complete",
@@ -532,6 +535,33 @@ export const playthroughResolveRequestSchema = z.object({
   playthroughId: opaqueIdSchema,
   decision: z.enum(["continue_pinned", "fork_from_current"]),
 }).strict();
+
+export const playerTurnStartRequestSchema = z.object({
+  playthroughId: opaqueIdSchema,
+  playerAction: z.string().trim().min(1).max(12_000),
+}).strict();
+export const playerTurnStartResponseSchema = z.object({ runId: opaqueIdSchema }).strict();
+export const playerTurnCancelRequestSchema = z.object({ runId: opaqueIdSchema }).strict();
+export const playerTurnEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("started"), runId: opaqueIdSchema }).strict(),
+  z.object({
+    type: z.literal("completed"),
+    runId: opaqueIdSchema,
+    turn: z.object({
+      id: opaqueIdSchema,
+      playthroughId: opaqueIdSchema,
+      sequence: z.number().int().positive(),
+      writerText: z.string().min(1).max(100_000),
+      stateSnapshot: z.record(z.string().min(1).max(240), z.json()),
+      createdAt: z.iso.datetime(),
+    }).strict(),
+  }).strict(),
+  z.object({
+    type: z.literal("failed"),
+    runId: opaqueIdSchema,
+    error: z.object({ code: z.string().min(1).max(120), message: z.string().min(1).max(240) }).strict(),
+  }).strict(),
+]);
 
 export const playthroughReconciliationStatusSchema = z.object({
   state: z.enum(["current", "canon_diverged"]),
@@ -1030,6 +1060,10 @@ export type PlaythroughResolveRequest = z.infer<typeof playthroughResolveRequest
 export type PlaythroughInspectRequest = z.infer<typeof playthroughInspectRequestSchema>;
 export type PlaythroughResult = z.infer<typeof playthroughResultSchema>;
 export type PlaythroughInspectResult = z.infer<typeof playthroughInspectResultSchema>;
+export type PlayerTurnStartRequest = z.infer<typeof playerTurnStartRequestSchema>;
+export type PlayerTurnStartResponse = z.infer<typeof playerTurnStartResponseSchema>;
+export type PlayerTurnCancelRequest = z.infer<typeof playerTurnCancelRequestSchema>;
+export type PlayerTurnEvent = z.infer<typeof playerTurnEventSchema>;
 export type WorkspaceRestoreRequest = z.infer<typeof workspaceRestoreRequestSchema>;
 export type WorkspaceRestoreResult = z.infer<typeof workspaceRestoreResultSchema>;
 export type WorkspaceFlushRequest = z.infer<typeof workspaceFlushRequestSchema>;
@@ -1119,6 +1153,9 @@ export interface DesktopApi {
     createPlaythrough(request: PlaythroughCreateRequest): Promise<PlaythroughResult>;
     inspect(request: PlaythroughInspectRequest): Promise<PlaythroughInspectResult>;
     resolve(request: PlaythroughResolveRequest): Promise<PlaythroughResult>;
+    runTurn(request: PlayerTurnStartRequest): Promise<PlayerTurnStartResponse>;
+    cancelTurn(request: PlayerTurnCancelRequest): Promise<void>;
+    subscribeTurns(listener: (event: PlayerTurnEvent) => void): () => void;
   };
   document: {
     get(request: DocumentGetRequest): Promise<EditorDocumentSnapshot>;

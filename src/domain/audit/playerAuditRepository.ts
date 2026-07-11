@@ -105,16 +105,42 @@ export class PlayerAuditRepository {
   }
 
   appendRunTerminal(input: { runId: string; eventType: "completed" | "blocked" | "failed" | "cancelled" | "interrupted"; errorCode: string | null }): void {
-    if (input.eventType === "completed") {
-      const roles = this.workspace.db.prepare(`
-        SELECT i.role FROM player_agent_invocations i
-        JOIN player_agent_audit_events e ON e.invocation_id = i.id AND e.entity_type = 'invocation' AND e.event_type = 'completed'
-        WHERE i.run_id = ? ORDER BY i.role
-      `).all(input.runId).map((row) => String((row as { role: string }).role));
-      if (roles.join(",") !== "checker,gm,writer") throw auditError("PLAYER_AUDIT_INCOMPLETE");
-    }
+    if (input.eventType === "completed") this.assertReadyForCompletion(input.runId);
     this.insertEvent({ runId: input.runId, invocationId: null, toolInvocationId: null, entityType: "run", eventType: input.eventType,
       errorCode: input.errorCode, receipt: null, structuredSubmissionCount: null, outputSha256: null, resultSha256: null });
+  }
+
+  assertReadyForCompletion(runId: string): void {
+    const roles = this.workspace.db.prepare(`
+      SELECT i.role FROM player_agent_invocations i
+      JOIN player_agent_audit_events e ON e.invocation_id = i.id AND e.entity_type = 'invocation' AND e.event_type = 'completed'
+      WHERE i.run_id = ? ORDER BY i.role
+    `).all(runId).map((row) => String((row as { role: string }).role));
+    if (roles.join(",") !== "checker,gm,writer") throw auditError("PLAYER_AUDIT_INCOMPLETE");
+    const openTools = this.workspace.db.prepare(`
+      SELECT COUNT(*) AS count FROM player_agent_tool_invocations t
+      WHERE t.run_id = ? AND NOT EXISTS (
+        SELECT 1 FROM player_agent_audit_events e WHERE e.tool_invocation_id = t.id AND e.entity_type = 'tool'
+      )
+    `).get(runId) as { count: number };
+    if (openTools.count !== 0) throw auditError("PLAYER_AUDIT_INCOMPLETE");
+  }
+
+  terminalizeOpenRun(runId: string, eventType: "blocked" | "failed" | "cancelled" | "interrupted", errorCode: string): void {
+    if (this.workspace.db.prepare("SELECT 1 FROM player_agent_audit_events WHERE run_id = ? AND entity_type = 'run'").get(runId)) return;
+    const tools = this.workspace.db.prepare(`
+      SELECT id, invocation_id FROM player_agent_tool_invocations t WHERE run_id = ?
+      AND NOT EXISTS (SELECT 1 FROM player_agent_audit_events e WHERE e.tool_invocation_id = t.id AND e.entity_type = 'tool')
+    `).all(runId) as Array<{ id: string; invocation_id: string }>;
+    for (const tool of tools) this.appendToolTerminal({ runId, invocationId: tool.invocation_id, toolInvocationId: tool.id,
+      eventType: eventType === "cancelled" ? "cancelled" : eventType === "interrupted" ? "interrupted" : "failed", errorCode, resultSha256: null });
+    const invocations = this.workspace.db.prepare(`
+      SELECT id FROM player_agent_invocations i WHERE run_id = ?
+      AND NOT EXISTS (SELECT 1 FROM player_agent_audit_events e WHERE e.invocation_id = i.id AND e.entity_type = 'invocation')
+    `).all(runId) as Array<{ id: string }>;
+    for (const invocation of invocations) this.appendInvocationTerminal({ runId, invocationId: invocation.id, eventType, errorCode,
+      receipt: emptyReceipt(), structuredSubmissionCount: 0, outputSha256: null });
+    this.appendRunTerminal({ runId, eventType, errorCode });
   }
 
   private insertEvent(input: {
@@ -143,4 +169,10 @@ export class PlayerAuditRepository {
 
 function auditError(code: string): Error & { code: string } {
   return Object.assign(new Error("Player audit contract failed."), { code });
+}
+
+function emptyReceipt(): PlayerAuditReceipt {
+  return { actualProviderId: null, actualModelId: null, responseIdSha256: null, stopReason: null,
+    inputTokens: null, outputTokens: null, totalTokens: null, contextPolicyVersion: null,
+    maxChargedInputBytes: null, configuredContextWindow: null, safetyReserve: null, outputReserve: null };
 }

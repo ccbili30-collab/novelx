@@ -41,6 +41,7 @@ describe("PlaythroughReconciliationService", () => {
 
     expect(service.inspect(oldPlay.id)).toMatchObject({ state: "canon_diverged", pinnedCommitId: baseCommitId, currentCommitId });
     expect(service.resolve({ playthroughId: oldPlay.id, decision: "continue_pinned" }).id).toBe(oldPlay.id);
+    expect(service.inspect(oldPlay.id)).toMatchObject({ state: "current", pinnedCommitId: baseCommitId, currentCommitId });
     const fork = service.resolve({ playthroughId: oldPlay.id, decision: "fork_from_current" });
 
     expect(fork).toMatchObject({ parentPlaythroughId: oldPlay.id, baselineCommitId: currentCommitId, currentTurnId: null });

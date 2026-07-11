@@ -45,11 +45,18 @@ export const playerWorkerTurnStartCommandSchema = z.object({
   currentState: z.record(z.string().min(1).max(240), z.json()),
   recentMemory: z.string().max(100_000),
   luck: z.number().min(0).max(1),
-  styleConstraints: z.array(z.string().trim().min(1).max(2_000)).max(100),
+  styleConstraints: z.array(z.object({
+    id,
+    content: z.string().trim().min(1).max(2_000),
+    sha256,
+  }).strict()).max(100),
   providerProfile: providerRuntimeProfileSchema.nullable(),
 }).strict().superRefine((value, context) => {
   if (new Set(value.evidence.map((item) => item.id)).size !== value.evidence.length) {
     context.addIssue({ code: "custom", message: "Player evidence ids must be unique." });
+  }
+  if (new Set(value.styleConstraints.map((item) => item.id)).size !== value.styleConstraints.length) {
+    context.addIssue({ code: "custom", message: "Player style constraint ids must be unique." });
   }
   if (value.evidence.reduce((total, item) => total + item.content.length, 0) > 500_000) {
     context.addIssue({ code: "custom", message: "Player evidence packet is too large." });

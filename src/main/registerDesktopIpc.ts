@@ -2,10 +2,14 @@ import { ipcMain } from "electron";
 import {
   agentRunCancelRequestSchema,
   agentRunStartRequestSchema,
+  playerTurnStartRequestSchema,
+  playerTurnStartResponseSchema,
+  playerTurnCancelRequestSchema,
   desktopIpcChannels,
   systemStatusSchema,
 } from "../shared/ipcContract";
 import { AgentProcessSupervisor, type AgentRuntimeLease } from "./agentProcessSupervisor";
+import { PlayerProcessSupervisor, type PlayerRuntimeLease } from "./playerProcessSupervisor";
 import type { ProviderRuntimeProfile } from "../shared/providerContract";
 import { ApplicationRegistryRepository } from "../domain/application/applicationRegistryRepository";
 
@@ -14,8 +18,10 @@ export function registerDesktopIpc(
   applicationRegistry: ApplicationRegistryRepository,
   acquireRuntimeLease: () => AgentRuntimeLease | null = () => null,
   getProviderProfile: () => ProviderRuntimeProfile | null = () => null,
-): AgentProcessSupervisor {
+  acquirePlayerRuntimeLease: () => PlayerRuntimeLease | null = () => null,
+): { dispose(): void } {
   const supervisor = new AgentProcessSupervisor(workerPath, { acquireRuntimeLease, getProviderProfile });
+  const playerSupervisor = new PlayerProcessSupervisor(workerPath, { acquireRuntimeLease: acquirePlayerRuntimeLease, getProviderProfile });
 
   ipcMain.handle(desktopIpcChannels.systemStatus, () => systemStatusSchema.parse({
     platform: process.platform,
@@ -70,5 +76,15 @@ export function registerDesktopIpc(
     const request = agentRunCancelRequestSchema.parse(payload);
     supervisor.cancel(request.runId);
   });
-  return supervisor;
+  ipcMain.handle(desktopIpcChannels.playerTurnStart, (event, payload: unknown) => {
+    const request = playerTurnStartRequestSchema.parse(payload);
+    const runId = playerSupervisor.start(request, (playerEvent) => {
+      if (!event.sender.isDestroyed()) event.sender.send(desktopIpcChannels.playerTurnEvent, playerEvent);
+    });
+    return playerTurnStartResponseSchema.parse({ runId });
+  });
+  ipcMain.handle(desktopIpcChannels.playerTurnCancel, (_event, payload: unknown) => {
+    playerSupervisor.cancel(playerTurnCancelRequestSchema.parse(payload).runId);
+  });
+  return { dispose: () => { playerSupervisor.dispose(); supervisor.dispose(); } };
 }

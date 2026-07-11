@@ -26,8 +26,13 @@ export class PlaythroughReconciliationService {
     const playthrough = this.#plays.getRequired(playthroughId);
     const currentCommitId = new CheckpointRepository(this.workspace).getActiveBranch().headCheckpointId;
     const diverged = playthrough.baselineCommitId !== currentCommitId;
+    const acceptedPinned = diverged && Boolean(this.workspace.db.prepare(`
+      SELECT 1 FROM canon_reconciliation_decisions
+      WHERE playthrough_id = ? AND current_commit_id = ? AND decision = 'continue_pinned'
+      ORDER BY created_at DESC, rowid DESC LIMIT 1
+    `).get(playthrough.id, currentCommitId));
     return {
-      state: diverged ? "canon_diverged" : "current",
+      state: diverged && !acceptedPinned ? "canon_diverged" : "current",
       playthroughId: playthrough.id,
       pinnedCommitId: playthrough.baselineCommitId,
       currentCommitId,

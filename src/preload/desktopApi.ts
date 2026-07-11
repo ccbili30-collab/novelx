@@ -47,6 +47,10 @@ import {
   playthroughResolveRequestSchema,
   playthroughResultSchema,
   playthroughInspectResultSchema,
+  playerTurnStartRequestSchema,
+  playerTurnStartResponseSchema,
+  playerTurnCancelRequestSchema,
+  playerTurnEventSchema,
   nullableProjectAddResultSchema,
   projectInitializeRequestSchema,
   projectListResultSchema,
@@ -275,6 +279,21 @@ export function exposeDesktopApi(): void {
       async resolve(request) {
         const safeRequest = playthroughResolveRequestSchema.parse(request);
         return playthroughResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughResolve, safeRequest));
+      },
+      async runTurn(request) {
+        const safeRequest = playerTurnStartRequestSchema.parse(request);
+        return playerTurnStartResponseSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playerTurnStart, safeRequest));
+      },
+      async cancelTurn(request) {
+        await ipcRenderer.invoke(desktopIpcChannels.playerTurnCancel, playerTurnCancelRequestSchema.parse(request));
+      },
+      subscribeTurns(listener) {
+        const handler = (_event: IpcRendererEvent, payload: unknown) => {
+          const parsed = playerTurnEventSchema.safeParse(payload);
+          if (parsed.success) listener(parsed.data);
+        };
+        ipcRenderer.on(desktopIpcChannels.playerTurnEvent, handler);
+        return () => ipcRenderer.removeListener(desktopIpcChannels.playerTurnEvent, handler);
       },
     },
     document: {

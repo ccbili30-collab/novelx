@@ -37,7 +37,7 @@ export async function handlePlayerWorkerCommand(input: {
   }
   try {
     const provider = command.providerProfile;
-    if (command.evidence.some((item) => createHash("sha256").update(item.content, "utf8").digest("hex") !== item.sha256)) {
+    if ([...command.evidence, ...command.styleConstraints].some((item) => createHash("sha256").update(item.content, "utf8").digest("hex") !== item.sha256)) {
       throw playerError("PLAYER_EVIDENCE_HASH_MISMATCH");
     }
     const gmPrompt = dependencies.loadGmPrompt();
@@ -61,7 +61,7 @@ export async function handlePlayerWorkerCommand(input: {
         recentMemory: command.recentMemory,
         luck: command.luck,
       },
-      styleConstraints: command.styleConstraints,
+      styleConstraints: command.styleConstraints.map((item) => item.content),
       providerProfile: provider,
       gmPrompt,
       createAdapter: dependencies.createAdapter,

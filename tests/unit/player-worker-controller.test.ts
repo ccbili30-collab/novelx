@@ -60,7 +60,8 @@ describe("Player Worker controller", () => {
 
 function command(): PlayerWorkerTurnStartCommand {
   const content = "洞穴入口只在退潮时开放。";
-  return { type: "play.start", runId: "player-run-1", playthroughId: "playthrough-1", playerAction: "进入洞穴", evidence: [{ id: "evidence-1", content, sha256: createHash("sha256").update(content, "utf8").digest("hex") }], currentState: { location: "海岸" }, recentMemory: "玩家抵达海岸。", luck: 0.5, styleConstraints: ["克制"], providerProfile: { providerId: "test", displayName: "Test", baseUrl: "https://example.test/v1", apiKey: "secret", modelId: "model", contextWindow: 128_000, maxTokens: null, reasoning: false, input: ["text"] } };
+  const style = "克制";
+  return { type: "play.start", runId: "player-run-1", playthroughId: "playthrough-1", playerAction: "进入洞穴", evidence: [{ id: "evidence-1", content, sha256: createHash("sha256").update(content, "utf8").digest("hex") }], currentState: { location: "海岸" }, recentMemory: "玩家抵达海岸。", luck: 0.5, styleConstraints: [{ id: "style-1", content: style, sha256: createHash("sha256").update(style, "utf8").digest("hex") }], providerProfile: { providerId: "test", displayName: "Test", baseUrl: "https://example.test/v1", apiKey: "secret", modelId: "model", contextWindow: 128_000, maxTokens: null, reasoning: false, input: ["text"] } };
 }
 
 function activeGmPrompt() { return { ...loadGmPrompt(), content: "GM", status: "active" as const, publicationEvidence: { reportPath: "evidence.json", reportSha256: "b".repeat(64), providerId: "test", modelId: "model", evaluatedAt: new Date().toISOString() } }; }
