@@ -36,7 +36,7 @@ test("shows the same safe Project Doctor report in Agent and IDE modes", async (
     await page.getByRole("radio", { name: "IDE 模式" }).click();
     await page.locator(".project-tool-list").getByRole("button", { name: "项目体检" }).click();
     await expect(page.getByRole("dialog", { name: "项目体检" })).toBeVisible();
-    await expect(page.getByText("尚未纳入本批检查：时间线、检索索引、摘要、角色认知。")).toBeVisible();
+    await expect(page.getByText("尚未实现的投影：", { exact: false })).toHaveCount(0);
   } finally {
     await app.close();
     fs.rmSync(workspaceRoot, { recursive: true, force: true });

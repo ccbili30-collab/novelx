@@ -4,7 +4,7 @@ import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 import { CheckpointRepository } from "../version/checkpointRepository";
 import { CreativeCommitService } from "../commit/creativeCommitService";
 import { ProjectionCoordinator } from "../projection/projectionCoordinator";
-import { SemanticGraphProjector } from "../projection/semanticGraphProjector";
+import { createDefaultProjectors } from "../projection/defaultProjectors";
 
 export type ChangeSetMode = "free" | "assist";
 export type ChangeSetStatus = "pending" | "committed" | "rejected" | "failed";
@@ -136,7 +136,7 @@ export class ChangeSetRepository {
       this.markCommitted(id, checkpointId);
       new CreativeCommitService(this.workspace).sealCheckpoint(checkpointId);
       this.workspace.db.exec("COMMIT");
-      new ProjectionCoordinator(this.workspace, [new SemanticGraphProjector(this.workspace)]).runAll(checkpointId);
+      new ProjectionCoordinator(this.workspace, createDefaultProjectors(this.workspace)).runAll(checkpointId);
       return checkpointId;
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");

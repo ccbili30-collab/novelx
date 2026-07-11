@@ -2,6 +2,7 @@ import { CreativeCommitRepository } from "../commit/creativeCommitRepository";
 import { CreativeCommitService } from "../commit/creativeCommitService";
 import { ProjectionCoordinator } from "../projection/projectionCoordinator";
 import { SemanticGraphProjector } from "../projection/semanticGraphProjector";
+import { listProjectionCapabilities } from "../projection/projectionCatalog";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 
 export type ProjectDoctorIssueCode =
@@ -100,7 +101,9 @@ export class ProjectDoctorService {
         successfulHeadProjections,
       },
       issues,
-      deferredCapabilities: ["timeline", "retrieval", "summary", "character_knowledge"],
+      deferredCapabilities: listProjectionCapabilities()
+        .filter((capability) => capability.status === "planned" && capability.kind !== "semantic_graph")
+        .map((capability) => capability.kind as "timeline" | "retrieval" | "summary" | "character_knowledge"),
     };
   }
 }

@@ -37,7 +37,7 @@ describe("ProjectionCoordinator", () => {
     });
     const coordinator = new ProjectionCoordinator(workspace, [new SemanticGraphProjector(workspace)]);
 
-    const first = coordinator.listRuns(checkpointId)[0]!;
+    const first = coordinator.listRuns(checkpointId).find((run) => run.projectionKind === "semantic_graph")!;
     const replay = coordinator.replay(checkpointId, "semantic_graph");
 
     expect(first).toMatchObject({ projectionKind: "semantic_graph", attempt: 1, status: "succeeded", errorCode: null });

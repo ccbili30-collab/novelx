@@ -12,7 +12,7 @@ import { AgentAuditRepository } from "../audit/agentAuditRepository";
 import { canonicalAuditHash } from "../audit/canonicalAuditHash";
 import { CreativeCommitService } from "../commit/creativeCommitService";
 import { ProjectionCoordinator } from "../projection/projectionCoordinator";
-import { SemanticGraphProjector } from "../projection/semanticGraphProjector";
+import { createDefaultProjectors } from "../projection/defaultProjectors";
 import {
   ChangeSetRepository,
   type ChangeSetConflictRecord,
@@ -550,7 +550,7 @@ export class ChangeSetService {
       new AgentAuditRepository(this.workspace).linkChangeSetOutputs(changeSetId);
       new CreativeCommitService(this.workspace).sealCheckpoint(checkpointId);
       this.workspace.db.exec("COMMIT");
-      new ProjectionCoordinator(this.workspace, [new SemanticGraphProjector(this.workspace)]).runAll(checkpointId);
+      new ProjectionCoordinator(this.workspace, createDefaultProjectors(this.workspace)).runAll(checkpointId);
       return this.#repository.getRequired(changeSetId);
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");

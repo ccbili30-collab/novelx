@@ -56,8 +56,15 @@ function DoctorReport({ report }: { report: ProjectDoctorReport }) {
         <div><strong>{item.title}</strong><p>{item.description}</p><small>{item.count} 项 · {item.repairAvailable ? "后续可提供修复" : "需要人工核查"}</small></div>
       </div>)}
     </div>}
-    <div className="project-doctor-deferred">尚未纳入本批检查：时间线、检索索引、摘要、角色认知。</div>
+    {report.deferredCapabilities.length ? <div className="project-doctor-deferred">尚未实现的投影：{report.deferredCapabilities.map(capabilityLabel).join("、")}。</div> : null}
   </>;
+}
+
+function capabilityLabel(value: ProjectDoctorReport["deferredCapabilities"][number]): string {
+  if (value === "timeline") return "时间线";
+  if (value === "retrieval") return "检索索引";
+  if (value === "summary") return "摘要";
+  return "角色认知";
 }
 
 function summarizeIssues(report: ProjectDoctorReport) {

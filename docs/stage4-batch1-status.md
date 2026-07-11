@@ -2,6 +2,8 @@
 
 Date: 2026-07-11
 
+This report is superseded for projection status by `docs/stage4-6-batch2-status.md`.
+
 ## Completed
 
 - Creative Commit（创作提交）uses the existing checkpoint ID as its stable identity.

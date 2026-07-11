@@ -11,7 +11,7 @@ export interface ProjectionResult {
 export interface CreativeProjector {
   readonly kind: string;
   inputSha256(commit: CreativeCommitRecord): string;
-  project(commit: CreativeCommitRecord): ProjectionResult;
+  project(commit: CreativeCommitRecord, runId: string): ProjectionResult;
 }
 
 export interface ProjectionRunRecord {
@@ -71,7 +71,7 @@ export class ProjectionCoordinator {
       ) VALUES (?, ?, ?, ?, 'running', ?, NULL, NULL, ?, NULL)
     `).run(id, commit.id, projector.kind, attemptRow.attempt, inputSha256, startedAt);
     try {
-      const output = projector.project(commit);
+      const output = projector.project(commit, id);
       this.workspace.db.prepare(`
         UPDATE projection_runs SET status = 'succeeded', output_sha256 = ?, finished_at = ? WHERE id = ?
       `).run(output.outputSha256, new Date().toISOString(), id);

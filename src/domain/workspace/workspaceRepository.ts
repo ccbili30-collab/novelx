@@ -23,6 +23,7 @@ export function openWorkspace(rootPathInput: string): WorkspaceDatabase {
     PRAGMA busy_timeout = 5000;
   `);
   migrate(db);
+  ensureOptionalRetrievalIndex(db);
   const state = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get() as { workspace_id: string };
 
   return {
@@ -179,7 +180,19 @@ function migrate(db: DatabaseSync): void {
     migrateCreativeCommitProjectionSchema(db);
     schema = { version: 10 };
   }
-  if (schema.version !== 10) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 10) {
+    migrateProjectionArtifactSchema(db);
+    schema = { version: 11 };
+  }
+  if (schema.version === 11) {
+    migrateStoryPlaythroughSchema(db);
+    schema = { version: 12 };
+  }
+  if (schema.version === 12) {
+    migrateSourceImportSchema(db);
+    schema = { version: 13 };
+  }
+  if (schema.version !== 13) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -219,6 +232,212 @@ function migrate(db: DatabaseSync): void {
     db.exec("ROLLBACK");
     throw error;
   }
+}
+
+function migrateSourceImportSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS source_library_entries (
+        id TEXT PRIMARY KEY,
+        original_path TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        format TEXT NOT NULL CHECK (format IN ('txt', 'markdown', 'docx', 'epub', 'image')),
+        content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+        byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+        rights_attestation TEXT NOT NULL CHECK (rights_attestation IN ('user_owned', 'licensed', 'public_domain', 'unknown')),
+        state TEXT NOT NULL CHECK (state IN ('registered', 'parsed', 'failed', 'missing')),
+        created_at TEXT NOT NULL,
+        UNIQUE (original_path, content_sha256)
+      );
+      CREATE INDEX IF NOT EXISTS source_library_hash_idx
+        ON source_library_entries(content_sha256, format);
+      CREATE TABLE IF NOT EXISTS source_chunks (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES source_library_entries(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        locator_json TEXT NOT NULL CHECK (json_valid(locator_json)),
+        content TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+        created_at TEXT NOT NULL,
+        UNIQUE (source_id, ordinal)
+      );
+      CREATE TABLE IF NOT EXISTS import_jobs (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES source_library_entries(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('parse', 'decompose')),
+        attempt INTEGER NOT NULL CHECK (attempt > 0),
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+        error_code TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        UNIQUE (source_id, kind, attempt)
+      );
+      CREATE TABLE IF NOT EXISTS decomposition_candidates (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES source_library_entries(id) ON DELETE CASCADE,
+        job_id TEXT NOT NULL REFERENCES import_jobs(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('character', 'world_rule', 'location', 'faction', 'event', 'style', 'ambiguity')),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        confidence_milli INTEGER NOT NULL CHECK (confidence_milli BETWEEN 0 AND 1000),
+        source_locator_json TEXT NOT NULL CHECK (json_valid(source_locator_json)),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected')),
+        created_at TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS source_chunks_update_guard
+      BEFORE UPDATE ON source_chunks BEGIN
+        SELECT RAISE(ABORT, 'SOURCE_CHUNK_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS source_chunks_delete_guard
+      BEFORE DELETE ON source_chunks BEGIN
+        SELECT RAISE(ABORT, 'SOURCE_CHUNK_IMMUTABLE');
+      END;
+      UPDATE schema_meta SET version = 13 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateStoryPlaythroughSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS story_profiles (
+        id TEXT PRIMARY KEY,
+        story_resource_id TEXT NOT NULL REFERENCES resources(id),
+        world_resource_id TEXT NOT NULL REFERENCES resources(id),
+        canon_commit_id TEXT NOT NULL REFERENCES creative_commits(id),
+        title TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'archived')),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS story_profiles_story_idx
+        ON story_profiles(story_resource_id, status, created_at);
+      CREATE TABLE IF NOT EXISTS story_profile_oc_bindings (
+        story_profile_id TEXT NOT NULL REFERENCES story_profiles(id) ON DELETE CASCADE,
+        oc_resource_id TEXT NOT NULL REFERENCES resources(id),
+        variant_resource_id TEXT REFERENCES resources(id),
+        PRIMARY KEY (story_profile_id, oc_resource_id)
+      );
+      CREATE TABLE IF NOT EXISTS playthroughs (
+        id TEXT PRIMARY KEY,
+        story_profile_id TEXT NOT NULL REFERENCES story_profiles(id),
+        baseline_commit_id TEXT NOT NULL REFERENCES creative_commits(id),
+        parent_playthrough_id TEXT REFERENCES playthroughs(id),
+        current_turn_id TEXT,
+        status TEXT NOT NULL CHECK (status IN ('active', 'archived')),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS playthroughs_profile_idx
+        ON playthroughs(story_profile_id, status, created_at);
+      CREATE TABLE IF NOT EXISTS play_turns (
+        id TEXT PRIMARY KEY,
+        playthrough_id TEXT NOT NULL REFERENCES playthroughs(id) ON DELETE CASCADE,
+        parent_turn_id TEXT REFERENCES play_turns(id),
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        player_action TEXT NOT NULL,
+        gm_resolution_json TEXT NOT NULL CHECK (json_valid(gm_resolution_json)),
+        gm_resolution_sha256 TEXT NOT NULL CHECK (length(gm_resolution_sha256) = 64),
+        writer_text TEXT NOT NULL,
+        writer_sha256 TEXT NOT NULL CHECK (length(writer_sha256) = 64),
+        state_snapshot_json TEXT NOT NULL CHECK (json_valid(state_snapshot_json)),
+        created_at TEXT NOT NULL,
+        UNIQUE (playthrough_id, sequence)
+      );
+      CREATE TABLE IF NOT EXISTS canon_reconciliation_decisions (
+        id TEXT PRIMARY KEY,
+        playthrough_id TEXT NOT NULL REFERENCES playthroughs(id),
+        current_commit_id TEXT NOT NULL REFERENCES creative_commits(id),
+        decision TEXT NOT NULL CHECK (decision IN ('continue_pinned', 'fork_from_current')),
+        forked_playthrough_id TEXT REFERENCES playthroughs(id),
+        created_at TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS play_turns_update_guard
+      BEFORE UPDATE ON play_turns BEGIN
+        SELECT RAISE(ABORT, 'PLAY_TURN_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS play_turns_delete_guard
+      BEFORE DELETE ON play_turns BEGIN
+        SELECT RAISE(ABORT, 'PLAY_TURN_IMMUTABLE');
+      END;
+      UPDATE schema_meta SET version = 12 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateProjectionArtifactSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS projection_artifacts (
+        run_id TEXT NOT NULL REFERENCES projection_runs(id) ON DELETE CASCADE,
+        artifact_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        source_refs_json TEXT NOT NULL CHECK (json_valid(source_refs_json)),
+        artifact_sha256 TEXT NOT NULL CHECK (length(artifact_sha256) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, artifact_key)
+      );
+      CREATE INDEX IF NOT EXISTS projection_artifacts_run_idx
+        ON projection_artifacts(run_id, artifact_key);
+      CREATE TABLE IF NOT EXISTS retrieval_index_capability (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        available INTEGER NOT NULL CHECK (available IN (0, 1)),
+        checked_at TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS projection_artifacts_insert_guard
+      BEFORE INSERT ON projection_artifacts
+      WHEN (SELECT status FROM projection_runs WHERE id = NEW.run_id) <> 'running'
+      BEGIN
+        SELECT RAISE(ABORT, 'PROJECTION_RUN_NOT_WRITABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS projection_artifacts_update_guard
+      BEFORE UPDATE ON projection_artifacts
+      BEGIN
+        SELECT RAISE(ABORT, 'PROJECTION_ARTIFACT_IMMUTABLE');
+      END;
+      CREATE TRIGGER IF NOT EXISTS projection_artifacts_delete_guard
+      BEFORE DELETE ON projection_artifacts
+      BEGIN
+        SELECT RAISE(ABORT, 'PROJECTION_ARTIFACT_IMMUTABLE');
+      END;
+      UPDATE schema_meta SET version = 11 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function ensureOptionalRetrievalIndex(db: DatabaseSync): void {
+  let available = 1;
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_fts USING fts5(
+        run_id UNINDEXED,
+        commit_id UNINDEXED,
+        artifact_key UNINDEXED,
+        title,
+        content,
+        tokenize = 'trigram'
+      );
+    `);
+  } catch {
+    available = 0;
+  }
+  db.prepare(`
+    INSERT INTO retrieval_index_capability (singleton, available, checked_at)
+    VALUES (1, ?, ?)
+    ON CONFLICT(singleton) DO UPDATE SET available = excluded.available, checked_at = excluded.checked_at
+  `).run(available, new Date().toISOString());
 }
 
 function migrateCreativeCommitProjectionSchema(db: DatabaseSync): void {

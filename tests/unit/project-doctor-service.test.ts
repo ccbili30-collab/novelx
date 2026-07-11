@@ -28,7 +28,7 @@ describe("ProjectDoctorService", () => {
     expect(report.issues).toEqual([
       expect.objectContaining({ code: "COMMIT_UNSEALED", severity: "warning", repairAvailable: true }),
     ]);
-    expect(report.deferredCapabilities).toEqual(["timeline", "retrieval", "summary", "character_knowledge"]);
+    expect(report.deferredCapabilities).toEqual([]);
   });
 
   it("reports a healthy sealed branch head with a successful graph projection", () => {

@@ -18,14 +18,14 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates schema 10 creative commit and projection storage", () => {
+  it("creates schema 13 projection, playthrough, and source import storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 10 });
+      .toEqual({ version: 13 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
@@ -34,6 +34,16 @@ describe("local workspace persistence", () => {
       "creative_commits",
       "creative_commit_entries",
       "projection_runs",
+      "projection_artifacts",
+      "story_profiles",
+      "story_profile_oc_bindings",
+      "playthroughs",
+      "play_turns",
+      "canon_reconciliation_decisions",
+      "source_library_entries",
+      "source_chunks",
+      "import_jobs",
+      "decomposition_candidates",
     ]));
     expect(listIndexes(workspace)).toEqual(expect.arrayContaining([
       "creative_documents_resource_idx",
@@ -42,6 +52,7 @@ describe("local workspace persistence", () => {
       "constraint_profile_versions_scope_idx",
       "creative_commits_branch_idx",
       "projection_runs_commit_idx",
+      "projection_artifacts_run_idx",
     ]));
     expect(workspace.db.prepare("SELECT id, kind, sealed_at FROM creative_commits").all()).toMatchObject([
       { kind: "initialization", sealed_at: null },
