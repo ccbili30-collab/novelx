@@ -3,6 +3,7 @@ import { BookOpen, Boxes, Download, FileInput, Image, LoaderCircle, MessageSquar
 import type { AgentArtifact, CollaborationListResult, CreativeWorkspaceMutation, HandoffSummary, ProjectAddResult, ProjectSummary, SessionSummary, WorkspaceSnapshot } from "../../shared/ipcContract";
 import type { DesktopUpdateState } from "../../shared/desktopUpdateContract";
 import { StewardRuntimePanel } from "./features/agent/StewardRuntimePanel";
+import { resolveAgentScopeResourceIds } from "../../shared/agentScope";
 import { ProjectActivityPanel } from "./features/activity/ProjectActivityPanel";
 import { ChangeSetWorkbench } from "./features/change-set/ChangeSetWorkbench";
 import { EditorHost, type EditorHostHandle } from "./features/editor/EditorHost";
@@ -466,6 +467,7 @@ export function App() {
     await window.novaxDesktop.session.export({ sessionId });
   }
 
+  const agentScopeResourceIds = resolveAgentScopeResourceIds(workspace, selectedResourceId);
   const agentPanel = (
     <section className="agent-conversation-panel" aria-label="大管家">
       <div className="panel-heading">
@@ -476,7 +478,7 @@ export function App() {
         workspace={workspace}
         projectId={activeProjectId}
         session={activeSession}
-        scopeResourceIds={selectedResourceId ? [selectedResourceId] : []}
+        scopeResourceIds={agentScopeResourceIds}
         changeSetRefreshKey={changeSetRefreshKey}
         messageRefreshKey={sessionMessageRefreshKey}
         selectedChangeSetId={selectedChangeSetId}

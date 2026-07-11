@@ -206,6 +206,39 @@ describe("Steward tool handoff state machine", () => {
       escalations: [],
     });
   });
+
+  it("rejects internal process reports as the user-facing message", async () => {
+    const machine = createStewardExecutionStateMachine({
+      mode: "free",
+      userInput: "hello",
+      authorizedScopeResourceIds: [],
+      operationalTools: [],
+      resultCapture: createRoleOutputTool("steward"),
+    });
+    await tool(machine.tools, "submit_steward_plan").execute("plan", {
+      objective: "discussion",
+      scopeResourceIds: [],
+      steps: [],
+    });
+
+    await expect(tool(machine.tools, "submit_steward_result").execute("result-meta", {
+      status: "completed",
+      message: "Steward 状态已重置，本次任务已正确收口。",
+      evidenceIds: [],
+      toolOutcomes: [],
+      changeSet: { state: "none", changeSetId: null },
+      escalations: [],
+    })).rejects.toMatchObject({ code: "STEWARD_FINAL_MESSAGE_INTERNAL_LANGUAGE" });
+
+    await tool(machine.tools, "submit_steward_result").execute("result-natural", {
+      status: "completed",
+      message: "你好，需要我帮你整理世界观、检查设定，还是继续写故事？",
+      evidenceIds: [],
+      toolOutcomes: [],
+      changeSet: { state: "none", changeSetId: null },
+      escalations: [],
+    });
+  });
 });
 
 function createMachine(mode: "free" | "assist", operationalTools: AgentTool[]) {
