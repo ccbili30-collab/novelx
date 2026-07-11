@@ -14,11 +14,11 @@ describe("versioned Prompt registry", () => {
       rollbackTo,
       hashLength: sha256.length,
     }))).toEqual([
-      { id: "novax.steward", role: "steward", version: "1.9.0", status: "active", rollbackTo: "1.8.0", hashLength: 64 },
-      { id: "novax.writer", role: "writer", version: "1.4.0", status: "active", rollbackTo: "1.3.0", hashLength: 64 },
-      { id: "novax.checker", role: "checker", version: "1.5.0", status: "active", rollbackTo: "1.4.0", hashLength: 64 },
+      { id: "novax.steward", role: "steward", version: "1.10.0", status: "active", rollbackTo: "1.9.0", hashLength: 64 },
+      { id: "novax.writer", role: "writer", version: "1.5.0", status: "active", rollbackTo: "1.4.0", hashLength: 64 },
+      { id: "novax.checker", role: "checker", version: "1.6.0", status: "active", rollbackTo: "1.5.0", hashLength: 64 },
     ]);
-    expect(verifyPromptRegistry()).toEqual({ ok: true, verified: 21 });
+    expect(verifyPromptRegistry()).toEqual({ ok: true, verified: 24 });
     expect(promptManifest.filter((prompt) => prompt.id === "novax.steward").map(({ version, status }) => ({
       version,
       status,
@@ -32,7 +32,8 @@ describe("versioned Prompt registry", () => {
       { version: "1.6.0", status: "deprecated" },
       { version: "1.7.0", status: "deprecated" },
       { version: "1.8.0", status: "deprecated" },
-      { version: "1.9.0", status: "active" },
+      { version: "1.9.0", status: "deprecated" },
+      { version: "1.10.0", status: "active" },
     ]);
     expect(loadCandidatePromptSet()).toEqual([]);
   });
@@ -45,7 +46,7 @@ describe("versioned Prompt registry", () => {
       providerId: "openai-compatible",
       modelId: "deepseek-chat",
       actualModelIds: ["deepseek-v4-flash"],
-      reportSha256: "82ad79c6f81373e69d4f378ca20b4511eddecaf5668007f18d272d06235e68da",
+      reportSha256: "5553370e327e6d325f4b23e579919b90e6e91ae7ea1dfe42095b422972d95e4c",
     });
   });
 

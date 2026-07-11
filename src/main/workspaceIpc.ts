@@ -448,6 +448,11 @@ export class WorkspaceSession {
     return {
       retrieveGraphEvidence: (args, context) => gateway.retrieveGraphEvidence(args, context),
       inspectProjectFiles: (args, context) => gateway.inspectProjectFiles(args, context),
+      listProjectDirectory: (args, context) => gateway.listProjectDirectory(args, context),
+      statProjectFile: (args, context) => gateway.statProjectFile(args, context),
+      globProjectFiles: (args, context) => gateway.globProjectFiles(args, context),
+      searchProjectFiles: (args, context) => gateway.searchProjectFiles(args, context),
+      readProjectFile: (args, context) => gateway.readProjectFile(args, context),
       proposeChangeSet: (args, context) => this.#writeQueue.run(
         context.signal,
         () => gateway.proposeChangeSet(args, context),

@@ -8,6 +8,7 @@ import { openWorkspace } from "../../src/domain/workspace/workspaceRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { PROVIDER_STORE_FILE_NAME } from "../../src/main/providerSecureStore";
 import type { DesktopApi } from "../../src/shared/ipcContract";
+import { closeTestElectronApp } from "./support/electronCleanup";
 
 const require = createRequire(import.meta.url);
 const electronPath = require("electron") as string;
@@ -15,16 +16,23 @@ const providerStorePath = process.env.NOVAX_REAL_E2E_PROVIDER_STORE?.trim() ?? "
 
 test.skip(!providerStorePath || !fs.existsSync(providerStorePath), "A machine-local encrypted Provider store is required.");
 
-test("reads real project files and exposes audited file activity", async () => {
+test("lists and reads a real Chinese project without requiring README.md", async () => {
   test.setTimeout(240_000);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-real-project-files-"));
   const userDataPath = path.join(root, "user-data");
   const workspacePath = path.join(root, "project");
   fs.mkdirSync(userDataPath, { recursive: true });
-  fs.mkdirSync(path.join(workspacePath, "src"), { recursive: true });
-  fs.writeFileSync(path.join(workspacePath, "README.md"), "# 星潮计划\n这是一个海岸幻想小说项目。\n", "utf8");
-  fs.writeFileSync(path.join(workspacePath, "world.md"), "银湾海岸由古代沉降与海水倒灌形成。\n", "utf8");
-  fs.writeFileSync(path.join(workspacePath, "src", "notes.ts"), "export const theme = 'tide';\n", "utf8");
+  fs.mkdirSync(workspacePath, { recursive: true });
+  const fixtures = {
+    "01-力量体系.md": "# 力量体系\n潮汐术需要以记忆作为代价。\n",
+    "02-场景地图与世界观.md": "# 场景地图与世界观\n银湾海岸由古代沉降与海水倒灌形成。\n",
+    "03-人物关系图.md": "# 人物关系图\n林雾与沈星是共同调查海岸异变的同伴。\n",
+    "04-物品大全.md": "# 物品大全\n银贝指南针可以指向最近的潮汐裂隙。\n",
+  };
+  for (const [fileName, content] of Object.entries(fixtures)) {
+    fs.writeFileSync(path.join(workspacePath, fileName), content, "utf8");
+  }
+  expect(fs.existsSync(path.join(workspacePath, "README.md"))).toBe(false);
   fs.copyFileSync(providerStorePath, path.join(userDataPath, PROVIDER_STORE_FILE_NAME));
   const localStatePath = path.join(path.dirname(providerStorePath), "Local State");
   if (fs.existsSync(localStatePath)) fs.copyFileSync(localStatePath, path.join(userDataPath, "Local State"));
@@ -49,27 +57,24 @@ test("reads real project files and exposes audited file activity", async () => {
     });
     const page = await app.firstWindow();
     const composer = page.getByLabel("给大管家发送消息");
-    await composer.fill("请完整总结当前项目文件夹，说明实际读取了哪些文件、哪些没有读取。");
+    await composer.fill("检查当前项目文件，先看整个目录，再读取实际存在的 Markdown 文档并总结内容。");
     await page.getByTitle("发送").click();
 
     const reply = page.locator(".steward-message--assistant, .steward-message--error").last();
     await expect(reply).toBeVisible({ timeout: 180_000 });
-    await expect(reply).toContainText("README.md");
-    await expect(reply).toContainText("world.md");
-    await expect(reply).toContainText(/星潮|银湾|海岸/);
-    await expect(reply).not.toContainText("没有授权");
-    await expect(reply).not.toContainText("六个项目");
+    for (const fileName of Object.keys(fixtures)) await expect(reply).toContainText(fileName);
+    await expect(reply).toContainText(/潮汐术|银湾海岸|林雾|银贝指南针/);
+    await expect(reply).not.toContainText(/没有授权|无权限|文件系统访问权限|需要.*README/i);
 
     const processed = reply.locator(".agent-artifacts");
     await expect(processed).toBeVisible();
     await processed.locator("summary").click();
-    await expect(processed).toContainText("检查项目文件");
-    await expect(processed).toContainText("README.md");
-    await expect(processed).toContainText("world.md");
+    await expect(processed).toContainText(/检查项目文件|列出项目目录|搜索项目文件|读取项目文件/);
+    for (const fileName of Object.keys(fixtures)) await expect(processed).toContainText(fileName);
     await expect(processed).not.toContainText(workspacePath);
     await expect(processed).not.toContainText(".novax");
   } finally {
-    if (app) await app.close();
+    await closeTestElectronApp(app);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -150,7 +155,7 @@ test("reviews a real Agent file update and restores the previous file checkpoint
     expect(restored.ok).toBe(true);
     expect(fs.readFileSync(path.join(workspacePath, "README.md"), "utf8")).toBe(original);
   } finally {
-    if (app) await app.close();
+    await closeTestElectronApp(app);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

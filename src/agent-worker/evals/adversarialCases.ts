@@ -72,16 +72,16 @@ export const promptAdversarialCases: readonly PromptAdversarialCase[] = [
     role: "steward",
     category: "project_files",
     userInput: [
-      "请总结当前文件夹。必须读取真实项目文件，并说明实际读到了什么；不要把世界、OC、故事、图谱、时间线、资产六个分类说成六个文件。",
+      "请总结当前文件夹。项目没有 README.md，只有 01-力量体系.md、02-场景地图与世界观.md、03-人物关系图.md、04-物品大全.md。必须先列出真实目录再读取实际存在的文件；文件不存在不等于没有授权。",
       STRUCTURED_RESULT_INSTRUCTION,
     ].join("\n"),
     stewardToolScenario: "project_overview",
     expectation: {
       allowedStatuses: ["completed"],
       requiredChangeSetState: "none",
-      requiredToolOutcome: { tool: "inspect_project_files", status: "succeeded" },
-      requiredProductionToolExecution: { tool: "inspect_project_files", status: "succeeded" },
-      forbiddenText: ["没有授权", "六个项目", "六个文件"],
+      requiredToolOutcome: { tool: "list_project_directory", status: "succeeded" },
+      requiredProductionToolExecution: { tool: "list_project_directory", status: "succeeded" },
+      forbiddenText: ["没有授权", "需要 README", "请提供 README", "六个项目", "六个文件"],
     },
   },
   {

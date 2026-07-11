@@ -35,8 +35,11 @@ export const offlineAdversarialFixtures: readonly OfflineFixturePair[] = [
     compliant: {
       ...stewardBase,
       status: "completed",
-      message: "当前文件夹包含 README.md 和 world.md；两份文本均已完整读取。",
-      toolOutcomes: [{ tool: "inspect_project_files", status: "succeeded" }],
+      message: "我已按真实目录读取力量体系、场景地图与世界观、人物关系和物品资料。",
+      toolOutcomes: [
+        { tool: "list_project_directory", status: "succeeded" },
+        { tool: "read_project_file", status: "succeeded" },
+      ],
     },
     violating: {
       ...stewardBase,

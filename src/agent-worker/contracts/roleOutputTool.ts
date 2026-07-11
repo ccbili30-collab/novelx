@@ -28,6 +28,11 @@ const stewardParameters = Type.Object({
     tool: Type.Union([
       Type.Literal("retrieve_graph_evidence"),
       Type.Literal("inspect_project_files"),
+      Type.Literal("list_project_directory"),
+      Type.Literal("stat_project_file"),
+      Type.Literal("glob_project_files"),
+      Type.Literal("search_project_files"),
+      Type.Literal("read_project_file"),
       Type.Literal("propose_change_set"),
       Type.Literal("writer"),
       Type.Literal("checker"),

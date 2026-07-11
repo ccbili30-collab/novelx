@@ -240,7 +240,10 @@ const artifactLocatorSchema = z.discriminatedUnion("kind", [
 export const agentArtifactSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("tool_call"),
-    tool: z.enum(["retrieve_graph_evidence", "inspect_project_files", "propose_change_set", "writer", "checker"]),
+    tool: z.enum([
+      "retrieve_graph_evidence", "inspect_project_files", "list_project_directory", "stat_project_file",
+      "glob_project_files", "search_project_files", "read_project_file", "propose_change_set", "writer", "checker",
+    ]),
     label: z.string().trim().min(1).max(120),
     status: z.enum(["succeeded", "failed", "not_run"]),
   }).strict(),

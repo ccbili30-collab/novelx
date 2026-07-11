@@ -140,7 +140,7 @@ export async function runStewardRuntime(input: {
 
 function attachPublicTrace(
   cause: unknown,
-  executions: Array<{ tool: "retrieve_graph_evidence" | "inspect_project_files" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
+  executions: Array<{ tool: "retrieve_graph_evidence" | "inspect_project_files" | "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
 ): unknown {
   if (!cause || typeof cause !== "object") return cause;
   return Object.assign(cause, { publicToolOutcomes: executions.map((execution) => ({ ...execution })) });

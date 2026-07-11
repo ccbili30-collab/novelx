@@ -24,7 +24,10 @@ export const stewardOutputSchema = z.object({
   message: messageSchema,
   evidenceIds: z.array(identifierSchema).max(200),
   toolOutcomes: z.array(z.object({
-    tool: z.enum(["retrieve_graph_evidence", "inspect_project_files", "propose_change_set", "writer", "checker"]),
+    tool: z.enum([
+      "retrieve_graph_evidence", "inspect_project_files", "list_project_directory", "stat_project_file",
+      "glob_project_files", "search_project_files", "read_project_file", "propose_change_set", "writer", "checker",
+    ]),
     status: z.enum(["succeeded", "failed", "not_run"]),
   }).strict()).max(20),
   changeSet: z.object({

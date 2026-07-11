@@ -53,6 +53,48 @@ const projectFileListingSchema = z.object({
   omittedEntries: z.number().int().min(0),
 }).strict();
 
+export const listProjectDirectoryArgsSchema = z.object({
+  path: z.string().trim().max(1_000).optional().default(""),
+}).strict();
+export const listProjectDirectoryResultSchema = projectFileListingSchema;
+
+export const statProjectFileArgsSchema = z.object({
+  path: z.string().trim().min(1).max(1_000),
+}).strict();
+export const statProjectFileResultSchema = projectFileEntrySchema.extend({
+  sha256: sha256Schema.nullable(),
+}).strict();
+
+export const globProjectFilesArgsSchema = z.object({
+  pattern: z.string().trim().min(1).max(1_000),
+  path: z.string().trim().max(1_000).optional().default(""),
+}).strict();
+export const globProjectFilesResultSchema = z.object({
+  pattern: z.string().min(1).max(1_000),
+  entries: z.array(projectFileEntrySchema).max(2_000),
+  incomplete: z.boolean(),
+  omittedEntries: z.number().int().min(0),
+}).strict();
+
+export const searchProjectFilesArgsSchema = z.object({
+  query: z.string().trim().min(1).max(500),
+  path: z.string().trim().max(1_000).optional().default(""),
+}).strict();
+export const searchProjectFilesResultSchema = z.object({
+  query: z.string().min(1).max(500),
+  matches: z.array(z.object({
+    path: z.string().min(1).max(4_000),
+    line: z.number().int().positive(),
+    excerpt: z.string().max(500),
+  }).strict()).max(200),
+  scannedFiles: z.number().int().min(0).max(2_000),
+  skippedBinaryFiles: z.number().int().min(0),
+  incomplete: z.boolean(),
+}).strict();
+
+export const readProjectFileArgsSchema = statProjectFileArgsSchema;
+export const readProjectFileResultSchema = projectFileReadSchema;
+
 export const inspectProjectFilesResultSchema = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("overview"),
@@ -361,6 +403,11 @@ export const proposeChangeSetResultSchema = z.object({
 
 export const agentToolNameSchema = z.enum([
   "retrieve_graph_evidence",
+  "list_project_directory",
+  "stat_project_file",
+  "glob_project_files",
+  "search_project_files",
+  "read_project_file",
   "inspect_project_files",
   "propose_change_set",
 ]);
@@ -435,6 +482,11 @@ export const agentWorkerToolRequestSchema = z.discriminatedUnion("tool", [
     tool: z.literal("inspect_project_files"),
     args: inspectProjectFilesArgsSchema,
   }).strict(),
+  z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("list_project_directory"), args: listProjectDirectoryArgsSchema }).strict(),
+  z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("stat_project_file"), args: statProjectFileArgsSchema }).strict(),
+  z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("glob_project_files"), args: globProjectFilesArgsSchema }).strict(),
+  z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("search_project_files"), args: searchProjectFilesArgsSchema }).strict(),
+  z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("read_project_file"), args: readProjectFileArgsSchema }).strict(),
   z.object({
     type: z.literal("tool.request"),
     runId: z.string().min(1).max(120),
@@ -453,7 +505,9 @@ export const agentToolInternalErrorCodeSchema = z.enum([
   "AGENT_RUN_CANCELLED",
   "PROJECT_FILE_PATH_OUTSIDE_ROOT",
   "PROJECT_FILE_PATH_RESTRICTED",
+  "PROJECT_FILE_NOT_FOUND",
   "PROJECT_FILE_NOT_A_FILE",
+  "PROJECT_FILE_GLOB_INVALID",
   "PROJECT_FILE_QUERY_INVALID",
   "PROJECT_FILE_OPERATION_FAILED",
 ]);
@@ -475,6 +529,11 @@ const agentWorkerToolSuccessResponseSchema = z.discriminatedUnion("tool", [
     tool: z.literal("inspect_project_files"),
     result: inspectProjectFilesResultSchema,
   }).strict(),
+  z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("list_project_directory"), result: listProjectDirectoryResultSchema }).strict(),
+  z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("stat_project_file"), result: statProjectFileResultSchema }).strict(),
+  z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("glob_project_files"), result: globProjectFilesResultSchema }).strict(),
+  z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("search_project_files"), result: searchProjectFilesResultSchema }).strict(),
+  z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("read_project_file"), result: readProjectFileResultSchema }).strict(),
   z.object({
     type: z.literal("tool.response"),
     runId: z.string().min(1).max(120),
@@ -634,6 +693,16 @@ export type RetrieveGraphEvidenceArgs = z.infer<typeof retrieveGraphEvidenceArgs
 export type RetrieveGraphEvidenceResult = z.infer<typeof retrieveGraphEvidenceResultSchema>;
 export type InspectProjectFilesArgs = z.infer<typeof inspectProjectFilesArgsSchema>;
 export type InspectProjectFilesResult = z.infer<typeof inspectProjectFilesResultSchema>;
+export type ListProjectDirectoryArgs = z.infer<typeof listProjectDirectoryArgsSchema>;
+export type ListProjectDirectoryResult = z.infer<typeof listProjectDirectoryResultSchema>;
+export type StatProjectFileArgs = z.infer<typeof statProjectFileArgsSchema>;
+export type StatProjectFileResult = z.infer<typeof statProjectFileResultSchema>;
+export type GlobProjectFilesArgs = z.infer<typeof globProjectFilesArgsSchema>;
+export type GlobProjectFilesResult = z.infer<typeof globProjectFilesResultSchema>;
+export type SearchProjectFilesArgs = z.infer<typeof searchProjectFilesArgsSchema>;
+export type SearchProjectFilesResult = z.infer<typeof searchProjectFilesResultSchema>;
+export type ReadProjectFileArgs = z.infer<typeof readProjectFileArgsSchema>;
+export type ReadProjectFileResult = z.infer<typeof readProjectFileResultSchema>;
 export type ProposeChangeSetArgs = z.infer<typeof proposeChangeSetArgsSchema>;
 export type ProposeChangeSetResult = z.infer<typeof proposeChangeSetResultSchema>;
 export type AgentToolName = z.infer<typeof agentToolNameSchema>;

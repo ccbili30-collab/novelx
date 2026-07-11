@@ -27,7 +27,10 @@ const realProviderCaseSchema = z.object({
   contextPolicyVersion: z.string().min(1).max(160).nullable(),
   correctionAttempts: z.number().int().min(0).max(10),
   productionToolExecutions: z.array(z.object({
-    tool: z.enum(["retrieve_graph_evidence", "inspect_project_files", "propose_change_set", "writer", "checker"]),
+    tool: z.enum([
+      "retrieve_graph_evidence", "inspect_project_files", "list_project_directory", "stat_project_file",
+      "glob_project_files", "search_project_files", "read_project_file", "propose_change_set", "writer", "checker",
+    ]),
     status: z.enum(["succeeded", "failed"]),
   }).strict()).max(20),
 }).strict();

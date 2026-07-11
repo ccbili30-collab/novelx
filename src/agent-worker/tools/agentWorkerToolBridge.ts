@@ -3,12 +3,22 @@ import {
   agentWorkerToolRequestSchema,
   agentWorkerToolResponseSchema,
   inspectProjectFilesResultSchema,
+  globProjectFilesResultSchema,
+  listProjectDirectoryResultSchema,
+  readProjectFileResultSchema,
+  searchProjectFilesResultSchema,
+  statProjectFileResultSchema,
   proposeChangeSetResultSchema,
   retrieveGraphEvidenceResultSchema,
   type AgentToolName,
   type AgentWorkerToolRequest,
   type InspectProjectFilesArgs,
   type InspectProjectFilesResult,
+  type GlobProjectFilesArgs, type GlobProjectFilesResult,
+  type ListProjectDirectoryArgs, type ListProjectDirectoryResult,
+  type ReadProjectFileArgs, type ReadProjectFileResult,
+  type SearchProjectFilesArgs, type SearchProjectFilesResult,
+  type StatProjectFileArgs, type StatProjectFileResult,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
   type RetrieveGraphEvidenceArgs,
@@ -48,6 +58,11 @@ export class AgentWorkerToolBridge {
     args: InspectProjectFilesArgs,
     signal?: AbortSignal,
   ): Promise<InspectProjectFilesResult>;
+  invoke(runId: string, tool: "list_project_directory", args: ListProjectDirectoryArgs, signal?: AbortSignal): Promise<ListProjectDirectoryResult>;
+  invoke(runId: string, tool: "stat_project_file", args: StatProjectFileArgs, signal?: AbortSignal): Promise<StatProjectFileResult>;
+  invoke(runId: string, tool: "glob_project_files", args: GlobProjectFilesArgs, signal?: AbortSignal): Promise<GlobProjectFilesResult>;
+  invoke(runId: string, tool: "search_project_files", args: SearchProjectFilesArgs, signal?: AbortSignal): Promise<SearchProjectFilesResult>;
+  invoke(runId: string, tool: "read_project_file", args: ReadProjectFileArgs, signal?: AbortSignal): Promise<ReadProjectFileResult>;
   invoke(
     runId: string,
     tool: "propose_change_set",
@@ -57,9 +72,9 @@ export class AgentWorkerToolBridge {
   invoke(
     runId: string,
     tool: AgentToolName,
-    args: RetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ProposeChangeSetArgs,
+    args: RetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ListProjectDirectoryArgs | StatProjectFileArgs | GlobProjectFilesArgs | SearchProjectFilesArgs | ReadProjectFileArgs | ProposeChangeSetArgs,
     signal?: AbortSignal,
-  ): Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ProposeChangeSetResult> {
+  ): Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ListProjectDirectoryResult | StatProjectFileResult | GlobProjectFilesResult | SearchProjectFilesResult | ReadProjectFileResult | ProposeChangeSetResult> {
     if (signal?.aborted) return Promise.reject(toolBridgeError("AGENT_RUN_CANCELLED", "Agent run was cancelled."));
     const request = agentWorkerToolRequestSchema.parse({
       type: "tool.request",
@@ -114,11 +129,15 @@ export class AgentWorkerToolBridge {
       this.#settle(response.requestId, undefined, toolBridgeError("AGENT_TOOL_PROTOCOL_FAILED", "Agent tool response name mismatch."));
       return true;
     }
-    const result = response.tool === "retrieve_graph_evidence"
-      ? retrieveGraphEvidenceResultSchema.safeParse(response.result)
-      : response.tool === "inspect_project_files"
-        ? inspectProjectFilesResultSchema.safeParse(response.result)
-        : proposeChangeSetResultSchema.safeParse(response.result);
+    const resultSchema = response.tool === "retrieve_graph_evidence" ? retrieveGraphEvidenceResultSchema
+      : response.tool === "inspect_project_files" ? inspectProjectFilesResultSchema
+        : response.tool === "list_project_directory" ? listProjectDirectoryResultSchema
+          : response.tool === "stat_project_file" ? statProjectFileResultSchema
+            : response.tool === "glob_project_files" ? globProjectFilesResultSchema
+              : response.tool === "search_project_files" ? searchProjectFilesResultSchema
+                : response.tool === "read_project_file" ? readProjectFileResultSchema
+                  : proposeChangeSetResultSchema;
+    const result = resultSchema.safeParse(response.result);
     if (!result.success) {
       this.#settle(response.requestId, undefined, toolBridgeError("AGENT_TOOL_PROTOCOL_FAILED", "Agent tool response is invalid."));
       return true;

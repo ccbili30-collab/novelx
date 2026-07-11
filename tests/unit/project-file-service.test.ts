@@ -12,6 +12,20 @@ afterEach(() => {
 });
 
 describe("ProjectFileService", () => {
+  it("treats common project-root aliases as the current project root", () => {
+    const root = createRoot();
+    fs.writeFileSync(path.join(root, "world.md"), "world", "utf8");
+    const service = new ProjectFileService(root);
+
+    expect(service.list("").entries.map((entry) => entry.path)).toContain("world.md");
+    expect(service.list(".").entries.map((entry) => entry.path)).toContain("world.md");
+    expect(service.list("/").entries.map((entry) => entry.path)).toContain("world.md");
+    expect(service.list("\\").entries.map((entry) => entry.path)).toContain("world.md");
+    expect(service.read("/world.md").content).toBe("world");
+    expect(service.read("\\world.md").content).toBe("world");
+    expect(() => service.read("//server/share.md")).toThrow(expect.objectContaining({ code: "PROJECT_FILE_PATH_OUTSIDE_ROOT" }));
+  });
+
   it("lists and searches arbitrary project text and code while excluding internal metadata", () => {
     const root = createRoot();
     fs.mkdirSync(path.join(root, "notes"));
@@ -71,6 +85,31 @@ describe("ProjectFileService", () => {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
     }
+  });
+
+  it("stats and globs real files without requiring a README", () => {
+    const root = createRoot();
+    fs.mkdirSync(path.join(root, "设定"));
+    fs.writeFileSync(path.join(root, "01-力量体系.md"), "灵力", "utf8");
+    fs.writeFileSync(path.join(root, "设定", "02-海岸线.md"), "曲折海岸", "utf8");
+    const service = new ProjectFileService(root);
+
+    expect(service.stat("01-力量体系.md")).toMatchObject({
+      path: "01-力量体系.md",
+      kind: "file",
+      size: 6,
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(service.glob("**/*.md").entries.map((entry) => entry.path)).toEqual([
+      "01-力量体系.md",
+      "设定/02-海岸线.md",
+    ]);
+  });
+
+  it("maps a missing path to PROJECT_FILE_NOT_FOUND", () => {
+    const service = new ProjectFileService(createRoot());
+    expect(() => service.read("README.md")).toThrow(expect.objectContaining({ code: "PROJECT_FILE_NOT_FOUND" }));
+    expect(() => service.stat("missing.md")).toThrow(expect.objectContaining({ code: "PROJECT_FILE_NOT_FOUND" }));
   });
 });
 
