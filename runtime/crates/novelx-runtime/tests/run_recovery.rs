@@ -31,7 +31,7 @@ fn persists_transitions_and_recovers_after_reopening_sqlite() {
     assert_eq!(expected_state, RunState::Completed);
     assert_eq!(expected_sequence, 6);
 
-    let events = journal.read_run("run-1").unwrap();
+    let events = journal.read_aggregate("run-1", "run", "run-1", 0).unwrap();
     assert_eq!(
         events[0].payload,
         json!({
@@ -63,7 +63,7 @@ fn illegal_or_second_terminal_transition_writes_nothing() {
         ))
     ));
     assert_eq!(run.last_sequence(), 1);
-    assert_eq!(journal.read_run("run-1").unwrap().len(), 1);
+    assert_eq!(journal.read_run("run-1", 0).unwrap().len(), 1);
 
     run.cancel(&mut journal, metadata("message-3", Some("user request")))
         .unwrap();
@@ -75,7 +75,7 @@ fn illegal_or_second_terminal_transition_writes_nothing() {
     ));
     assert_eq!(run.state(), RunState::Cancelled);
     assert_eq!(run.last_sequence(), 2);
-    assert_eq!(journal.read_run("run-1").unwrap().len(), 2);
+    assert_eq!(journal.read_run("run-1", 0).unwrap().len(), 2);
 }
 
 #[test]
@@ -86,10 +86,14 @@ fn duplicate_creation_message_and_stale_aggregate_fail_closed() {
         RunAggregate::create(&mut first_journal, "run-1", metadata("message-1", None)).unwrap();
 
     let duplicate =
-        RunAggregate::create(&mut first_journal, "run-1", metadata("message-1", None)).unwrap_err();
+        RunAggregate::create(&mut first_journal, "run-1", metadata("message-other", None))
+            .unwrap_err();
     assert!(matches!(
         duplicate,
-        RunAggregateError::Journal(EventJournalError::DuplicateMessageId { .. })
+        RunAggregateError::Journal(EventJournalError::RunSequenceConflict {
+            expected: 0,
+            actual: 1
+        })
     ));
 
     let mut second_journal = fixture.open();
@@ -148,14 +152,19 @@ fn replay_rejects_unknown_duplicate_and_mismatched_events() {
             _ => unreachable!(),
         };
         journal
-            .append_after(
+            .append(
                 NewRuntimeEvent {
                     run_id: "run-1".to_owned(),
+                    aggregate_type: "run".to_owned(),
+                    aggregate_id: "run-1".to_owned(),
                     message_id: "message-2".to_owned(),
+                    idempotency_key: "message-2".to_owned(),
                     event_type: event_type.to_owned(),
+                    event_version: 1,
                     payload,
                     created_at: "2026-07-12T00:00:01Z".to_owned(),
                 },
+                1,
                 1,
             )
             .unwrap();

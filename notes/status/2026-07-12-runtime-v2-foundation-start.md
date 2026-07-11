@@ -17,11 +17,13 @@
 - Accepted the dual-order event addressing model: one global Run order plus aggregate type/id and local aggregate order.
 - Added the pure ToolCall authorization/execution/terminal state machine with conservative retry and parallelism rules.
 - Added a strict TypeScript protocol contract for typed Runtime errors instead of collapsing every failure into a planning error.
+- Migrated the event journal to dual ordering: global Run sequence plus addressed aggregate type/id/local sequence.
+- Added a checksum-verified migration ledger and a tested real 0001-to-0002 SQLite rebuild migration.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 23 tests.
+- Rust workspace tests pass: 25 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
 - Runtime V2 protocol, process-supervisor and real cross-language integration tests pass: 28 tests.
@@ -33,6 +35,7 @@
 - The Electron application entry point does not launch the supervisor yet; the supervisor exists only as an independently tested module.
 - The runtime still accepts only the initialization handshake and does not process Run commands after readiness.
 - The ToolCall state machine exists, but its event-backed ledger, Provider call, context compiler, full recovery controller and domain tools are not implemented.
+- Startup verifies migration checksums but does not yet perform a complete recurring audit of every target column, index and immutable trigger.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.
 

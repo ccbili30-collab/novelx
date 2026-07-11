@@ -2,15 +2,22 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_event_journal.sql");
+const MIGRATION_0002: &str = include_str!("../migrations/0002_event_stream_addressing.sql");
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewRuntimeEvent {
     pub run_id: String,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
     pub message_id: String,
+    pub idempotency_key: String,
     pub event_type: String,
+    pub event_version: u32,
     pub payload: Value,
     pub created_at: String,
 }
@@ -18,9 +25,14 @@ pub struct NewRuntimeEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeEvent {
     pub run_id: String,
-    pub sequence: u64,
+    pub run_sequence: u64,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub aggregate_sequence: u64,
     pub message_id: String,
+    pub idempotency_key: String,
     pub event_type: String,
+    pub event_version: u32,
     pub payload: Value,
     pub created_at: String,
 }
@@ -31,16 +43,26 @@ pub enum EventJournalError {
     EmptyField(&'static str),
     #[error("runtime event sequence is outside the supported range")]
     SequenceOutOfRange,
-    #[error("runtime event message_id `{message_id}` already belongs to a different event")]
+    #[error("runtime event version must be greater than zero")]
+    InvalidEventVersion,
+    #[error("runtime event message_id `{message_id}` is already used")]
     MessageIdConflict { message_id: String },
-    #[error("runtime event message_id `{message_id}` is duplicated")]
-    DuplicateMessageId { message_id: String },
+    #[error("runtime event idempotency key `{idempotency_key}` conflicts with another event")]
+    IdempotencyConflict { idempotency_key: String },
     #[error("runtime run sequence conflict: expected {expected}, actual {actual}")]
     RunSequenceConflict { expected: u64, actual: u64 },
+    #[error("runtime aggregate sequence conflict: expected {expected}, actual {actual}")]
+    AggregateSequenceConflict { expected: u64, actual: u64 },
+    #[error("runtime migration {version} checksum mismatch")]
+    MigrationChecksumMismatch { version: u32 },
+    #[error("runtime migration 0002 verification failed")]
+    MigrationVerificationFailed,
     #[error("runtime event payload is not valid JSON: {0}")]
     InvalidPayload(#[from] serde_json::Error),
     #[error("runtime event journal storage failed: {0}")]
     Storage(#[from] rusqlite::Error),
+    #[error("runtime migration timestamp failed: {0}")]
+    Timestamp(#[from] time::error::Format),
 }
 
 pub struct EventJournal {
@@ -49,98 +71,91 @@ pub struct EventJournal {
 
 impl EventJournal {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EventJournalError> {
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-        connection.execute_batch(MIGRATION_0001)?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS runtime_schema_migrations (\
+             version INTEGER PRIMARY KEY CHECK (version > 0),\
+             applied_at TEXT NOT NULL, checksum TEXT NOT NULL CHECK (length(checksum) = 64)\
+             ) STRICT;",
+        )?;
+        apply_simple_migration(&mut connection, 1, MIGRATION_0001)?;
+        apply_addressing_migration(&mut connection)?;
         Ok(Self { connection })
     }
 
-    pub fn append(&mut self, event: NewRuntimeEvent) -> Result<RuntimeEvent, EventJournalError> {
-        validate(&event)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        if let Some(existing) = find_by_message_id(&transaction, &event.message_id)? {
-            if !same_semantic_event(&existing, &event) {
-                return Err(EventJournalError::MessageIdConflict {
-                    message_id: event.message_id,
-                });
-            }
-            transaction.commit()?;
-            return Ok(existing);
-        }
-
-        let next_sequence: i64 = transaction.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM runtime_events WHERE run_id = ?1",
-            [&event.run_id],
-            |row| row.get(0),
-        )?;
-        if next_sequence <= 0 {
-            return Err(EventJournalError::SequenceOutOfRange);
-        }
-        let payload_json = serde_json::to_string(&event.payload)?;
-        transaction.execute(
-            "INSERT INTO runtime_events \
-             (run_id, sequence, message_id, event_type, payload_json, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                event.run_id,
-                next_sequence,
-                event.message_id,
-                event.event_type,
-                payload_json,
-                event.created_at,
-            ],
-        )?;
-        let inserted = find_by_message_id(&transaction, &event.message_id)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        transaction.commit()?;
-        Ok(inserted)
-    }
-
-    pub fn append_after(
+    pub fn append(
         &mut self,
         event: NewRuntimeEvent,
-        expected_previous_sequence: u64,
+        expected_run_sequence: u64,
+        expected_aggregate_sequence: u64,
     ) -> Result<RuntimeEvent, EventJournalError> {
         validate(&event)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        if let Some(existing) =
+            find_by_idempotency_key(&transaction, &event.run_id, &event.idempotency_key)?
+        {
+            if same_semantic_event(
+                &existing,
+                &event,
+                expected_run_sequence,
+                expected_aggregate_sequence,
+            ) {
+                transaction.commit()?;
+                return Ok(existing);
+            }
+            return Err(EventJournalError::IdempotencyConflict {
+                idempotency_key: event.idempotency_key,
+            });
+        }
         if find_by_message_id(&transaction, &event.message_id)?.is_some() {
-            return Err(EventJournalError::DuplicateMessageId {
+            return Err(EventJournalError::MessageIdConflict {
                 message_id: event.message_id,
             });
         }
-        let actual: i64 = transaction.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) FROM runtime_events WHERE run_id = ?1",
-            [&event.run_id],
-            |row| row.get(0),
-        )?;
-        let actual = u64::try_from(actual).map_err(|_| EventJournalError::SequenceOutOfRange)?;
-        if actual != expected_previous_sequence {
+
+        let actual_run = current_run_sequence(&transaction, &event.run_id)?;
+        if actual_run != expected_run_sequence {
             return Err(EventJournalError::RunSequenceConflict {
-                expected: expected_previous_sequence,
-                actual,
+                expected: expected_run_sequence,
+                actual: actual_run,
             });
         }
-        let next_sequence = actual
-            .checked_add(1)
-            .ok_or(EventJournalError::SequenceOutOfRange)?;
-        let next_sequence =
-            i64::try_from(next_sequence).map_err(|_| EventJournalError::SequenceOutOfRange)?;
+        let actual_aggregate = current_aggregate_sequence(
+            &transaction,
+            &event.run_id,
+            &event.aggregate_type,
+            &event.aggregate_id,
+        )?;
+        if actual_aggregate != expected_aggregate_sequence {
+            return Err(EventJournalError::AggregateSequenceConflict {
+                expected: expected_aggregate_sequence,
+                actual: actual_aggregate,
+            });
+        }
+
+        let run_sequence = checked_next(actual_run)?;
+        let aggregate_sequence = checked_next(actual_aggregate)?;
         let payload_json = serde_json::to_string(&event.payload)?;
         transaction.execute(
-            "INSERT INTO runtime_events \
-             (run_id, sequence, message_id, event_type, payload_json, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO runtime_events (\
+             run_id, run_sequence, aggregate_type, aggregate_id, aggregate_sequence,\
+             message_id, idempotency_key, event_type, event_version, payload_json, created_at\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 event.run_id,
-                next_sequence,
+                to_sql_integer(run_sequence)?,
+                event.aggregate_type,
+                event.aggregate_id,
+                to_sql_integer(aggregate_sequence)?,
                 event.message_id,
+                event.idempotency_key,
                 event.event_type,
+                i64::from(event.event_version),
                 payload_json,
                 event.created_at,
             ],
@@ -151,23 +166,138 @@ impl EventJournal {
         Ok(inserted)
     }
 
-    pub fn read_run(&self, run_id: &str) -> Result<Vec<RuntimeEvent>, EventJournalError> {
-        if run_id.trim().is_empty() {
-            return Err(EventJournalError::EmptyField("run_id"));
-        }
-        let mut statement = self.connection.prepare(
-            "SELECT run_id, sequence, message_id, event_type, payload_json, created_at \
-             FROM runtime_events WHERE run_id = ?1 ORDER BY sequence ASC",
+    pub fn read_run(
+        &self,
+        run_id: &str,
+        after: u64,
+    ) -> Result<Vec<RuntimeEvent>, EventJournalError> {
+        require_non_empty("run_id", run_id)?;
+        let mut statement = self.connection.prepare(&format!(
+            "{} WHERE run_id = ?1 AND run_sequence > ?2 ORDER BY run_sequence ASC",
+            select_event_sql()
+        ))?;
+        let rows = statement.query_map(params![run_id, to_sql_integer(after)?], map_event_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn read_aggregate(
+        &self,
+        run_id: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        after: u64,
+    ) -> Result<Vec<RuntimeEvent>, EventJournalError> {
+        require_non_empty("run_id", run_id)?;
+        require_non_empty("aggregate_type", aggregate_type)?;
+        require_non_empty("aggregate_id", aggregate_id)?;
+        let mut statement = self.connection.prepare(&format!(
+            "{} WHERE run_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3 \
+             AND aggregate_sequence > ?4 ORDER BY aggregate_sequence ASC",
+            select_event_sql()
+        ))?;
+        let rows = statement.query_map(
+            params![run_id, aggregate_type, aggregate_id, to_sql_integer(after)?],
+            map_event_row,
         )?;
-        let rows = statement.query_map([run_id], map_event_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 
-fn same_semantic_event(existing: &RuntimeEvent, candidate: &NewRuntimeEvent) -> bool {
+fn apply_simple_migration(
+    connection: &mut Connection,
+    version: u32,
+    sql: &str,
+) -> Result<(), EventJournalError> {
+    let checksum = checksum(sql);
+    if verify_existing_migration(connection, version, &checksum)? {
+        return Ok(());
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(sql)?;
+    record_migration(&transaction, version, &checksum)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn apply_addressing_migration(connection: &mut Connection) -> Result<(), EventJournalError> {
+    let checksum = checksum(MIGRATION_0002);
+    if verify_existing_migration(connection, 2, &checksum)? {
+        return Ok(());
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(MIGRATION_0002)?;
+    let old_count: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM runtime_events_0001", [], |row| {
+            row.get(0)
+        })?;
+    let mismatches: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM runtime_events_0001 old LEFT JOIN runtime_events current \
+         ON current.run_id = old.run_id AND current.run_sequence = old.sequence \
+         WHERE current.run_id IS NULL OR current.aggregate_type <> 'run' OR current.aggregate_id <> old.run_id \
+         OR current.aggregate_sequence <> old.sequence OR current.message_id <> old.message_id \
+         OR current.idempotency_key <> old.message_id OR current.event_type <> old.event_type \
+         OR current.event_version <> 1 OR current.payload_json <> old.payload_json OR current.created_at <> old.created_at",
+        [],
+        |row| row.get(0),
+    )?;
+    let new_count: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM runtime_events", [], |row| row.get(0))?;
+    if old_count != new_count || mismatches != 0 {
+        return Err(EventJournalError::MigrationVerificationFailed);
+    }
+    transaction.execute_batch("DROP TABLE runtime_events_0001;")?;
+    record_migration(&transaction, 2, &checksum)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn verify_existing_migration(
+    connection: &Connection,
+    version: u32,
+    expected_checksum: &str,
+) -> Result<bool, EventJournalError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT checksum FROM runtime_schema_migrations WHERE version = ?1",
+            [version],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        None => Ok(false),
+        Some(value) if value == expected_checksum => Ok(true),
+        Some(_) => Err(EventJournalError::MigrationChecksumMismatch { version }),
+    }
+}
+
+fn record_migration(
+    transaction: &Transaction<'_>,
+    version: u32,
+    migration_checksum: &str,
+) -> Result<(), EventJournalError> {
+    let applied_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    transaction.execute(
+        "INSERT INTO runtime_schema_migrations (version, applied_at, checksum) VALUES (?1, ?2, ?3)",
+        params![version, applied_at, migration_checksum],
+    )?;
+    Ok(())
+}
+
+fn same_semantic_event(
+    existing: &RuntimeEvent,
+    candidate: &NewRuntimeEvent,
+    expected_run_sequence: u64,
+    expected_aggregate_sequence: u64,
+) -> bool {
     existing.run_id == candidate.run_id
+        && expected_run_sequence.checked_add(1) == Some(existing.run_sequence)
+        && existing.aggregate_type == candidate.aggregate_type
+        && existing.aggregate_id == candidate.aggregate_id
+        && expected_aggregate_sequence.checked_add(1) == Some(existing.aggregate_sequence)
         && existing.message_id == candidate.message_id
+        && existing.idempotency_key == candidate.idempotency_key
         && existing.event_type == candidate.event_type
+        && existing.event_version == candidate.event_version
         && existing.payload == candidate.payload
         && existing.created_at == candidate.created_at
 }
@@ -175,15 +305,53 @@ fn same_semantic_event(existing: &RuntimeEvent, candidate: &NewRuntimeEvent) -> 
 fn validate(event: &NewRuntimeEvent) -> Result<(), EventJournalError> {
     for (field, value) in [
         ("run_id", event.run_id.as_str()),
+        ("aggregate_type", event.aggregate_type.as_str()),
+        ("aggregate_id", event.aggregate_id.as_str()),
         ("message_id", event.message_id.as_str()),
+        ("idempotency_key", event.idempotency_key.as_str()),
         ("event_type", event.event_type.as_str()),
         ("created_at", event.created_at.as_str()),
     ] {
-        if value.trim().is_empty() {
-            return Err(EventJournalError::EmptyField(field));
-        }
+        require_non_empty(field, value)?;
+    }
+    if event.event_version == 0 {
+        return Err(EventJournalError::InvalidEventVersion);
     }
     Ok(())
+}
+
+fn require_non_empty(field: &'static str, value: &str) -> Result<(), EventJournalError> {
+    if value.trim().is_empty() {
+        return Err(EventJournalError::EmptyField(field));
+    }
+    Ok(())
+}
+
+fn current_run_sequence(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+) -> Result<u64, EventJournalError> {
+    let value: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(run_sequence), 0) FROM runtime_events WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    u64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)
+}
+
+fn current_aggregate_sequence(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    aggregate_type: &str,
+    aggregate_id: &str,
+) -> Result<u64, EventJournalError> {
+    let value: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(aggregate_sequence), 0) FROM runtime_events \
+         WHERE run_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3",
+        params![run_id, aggregate_type, aggregate_id],
+        |row| row.get(0),
+    )?;
+    u64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)
 }
 
 fn find_by_message_id(
@@ -192,8 +360,7 @@ fn find_by_message_id(
 ) -> Result<Option<RuntimeEvent>, EventJournalError> {
     transaction
         .query_row(
-            "SELECT run_id, sequence, message_id, event_type, payload_json, created_at \
-             FROM runtime_events WHERE message_id = ?1",
+            &format!("{} WHERE message_id = ?1", select_event_sql()),
             [message_id],
             map_event_row,
         )
@@ -201,24 +368,76 @@ fn find_by_message_id(
         .map_err(Into::into)
 }
 
+fn find_by_idempotency_key(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    idempotency_key: &str,
+) -> Result<Option<RuntimeEvent>, EventJournalError> {
+    transaction
+        .query_row(
+            &format!(
+                "{} WHERE run_id = ?1 AND idempotency_key = ?2",
+                select_event_sql()
+            ),
+            params![run_id, idempotency_key],
+            map_event_row,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn select_event_sql() -> &'static str {
+    "SELECT run_id, run_sequence, aggregate_type, aggregate_id, aggregate_sequence, \
+     message_id, idempotency_key, event_type, event_version, payload_json, created_at FROM runtime_events"
+}
+
 fn map_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeEvent> {
-    let sequence: i64 = row.get(1)?;
-    let payload_json: String = row.get(4)?;
+    let payload_json: String = row.get(9)?;
     let payload = serde_json::from_str(&payload_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(error))
     })?;
+    let event_version: i64 = row.get(8)?;
     Ok(RuntimeEvent {
         run_id: row.get(0)?,
-        sequence: u64::try_from(sequence).map_err(|error| {
+        run_sequence: from_sql_integer(row.get(1)?, 1)?,
+        aggregate_type: row.get(2)?,
+        aggregate_id: row.get(3)?,
+        aggregate_sequence: from_sql_integer(row.get(4)?, 4)?,
+        message_id: row.get(5)?,
+        idempotency_key: row.get(6)?,
+        event_type: row.get(7)?,
+        event_version: u32::try_from(event_version).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                1,
+                8,
                 rusqlite::types::Type::Integer,
                 Box::new(error),
             )
         })?,
-        message_id: row.get(2)?,
-        event_type: row.get(3)?,
         payload,
-        created_at: row.get(5)?,
+        created_at: row.get(10)?,
     })
+}
+
+fn checked_next(value: u64) -> Result<u64, EventJournalError> {
+    value
+        .checked_add(1)
+        .ok_or(EventJournalError::SequenceOutOfRange)
+}
+
+fn to_sql_integer(value: u64) -> Result<i64, EventJournalError> {
+    i64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)
+}
+
+fn from_sql_integer(value: i64, column: usize) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
+fn checksum(sql: &str) -> String {
+    format!("{:x}", Sha256::digest(sql.as_bytes()))
 }

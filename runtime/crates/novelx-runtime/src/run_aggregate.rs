@@ -8,7 +8,8 @@ use crate::run_state::{RunState, RunStateMachine, TransitionError};
 pub struct RunAggregate {
     run_id: String,
     machine: RunStateMachine,
-    last_sequence: u64,
+    last_run_sequence: u64,
+    last_aggregate_sequence: u64,
 }
 
 pub struct EventMetadata<'a> {
@@ -24,17 +25,22 @@ impl RunAggregate {
         metadata: EventMetadata<'_>,
     ) -> Result<Self, RunAggregateError> {
         let event = transition_event(run_id, metadata, "run.created", None, RunState::Created);
-        let stored = journal.append_after(event, 0)?;
+        let stored = journal.append(event, 0, 0)?;
         Ok(Self {
             run_id: run_id.to_owned(),
             machine: RunStateMachine::new(),
-            last_sequence: stored.sequence,
+            last_run_sequence: stored.run_sequence,
+            last_aggregate_sequence: stored.aggregate_sequence,
         })
     }
 
     pub fn recover(journal: &EventJournal, run_id: &str) -> Result<Self, RunAggregateError> {
-        let events = journal.read_run(run_id)?;
-        replay(run_id, &events)
+        let events = journal.read_aggregate(run_id, "run", run_id, 0)?;
+        let last_run_sequence = journal
+            .read_run(run_id, 0)?
+            .last()
+            .map_or(0, |event| event.run_sequence);
+        replay(run_id, &events, last_run_sequence)
     }
 
     pub fn run_id(&self) -> &str {
@@ -46,7 +52,11 @@ impl RunAggregate {
     }
 
     pub const fn last_sequence(&self) -> u64 {
-        self.last_sequence
+        self.last_aggregate_sequence
+    }
+
+    pub const fn last_run_sequence(&self) -> u64 {
+        self.last_run_sequence
     }
 
     pub fn prepare(
@@ -130,7 +140,7 @@ impl RunAggregate {
         let previous = self.machine.state();
         let mut candidate = self.machine;
         transition_machine(&mut candidate, target)?;
-        let stored = journal.append_after(
+        let stored = journal.append(
             transition_event(
                 &self.run_id,
                 metadata,
@@ -138,10 +148,12 @@ impl RunAggregate {
                 Some(previous),
                 target,
             ),
-            self.last_sequence,
+            self.last_run_sequence,
+            self.last_aggregate_sequence,
         )?;
         self.machine = candidate;
-        self.last_sequence = stored.sequence;
+        self.last_run_sequence = stored.run_sequence;
+        self.last_aggregate_sequence = stored.aggregate_sequence;
         Ok(())
     }
 }
@@ -166,14 +178,18 @@ pub enum RunAggregateError {
     Journal(#[from] EventJournalError),
 }
 
-fn replay(run_id: &str, events: &[RuntimeEvent]) -> Result<RunAggregate, RunAggregateError> {
+fn replay(
+    run_id: &str,
+    events: &[RuntimeEvent],
+    last_run_sequence: u64,
+) -> Result<RunAggregate, RunAggregateError> {
     let first = events
         .first()
         .ok_or_else(|| RunAggregateError::NotFound(run_id.to_owned()))?;
-    if first.sequence != 1 {
+    if first.aggregate_sequence != 1 {
         return Err(RunAggregateError::SequenceGap {
             expected: 1,
-            actual: first.sequence,
+            actual: first.aggregate_sequence,
         });
     }
     let payload = parse_payload(&first.payload)?;
@@ -186,14 +202,15 @@ fn replay(run_id: &str, events: &[RuntimeEvent]) -> Result<RunAggregate, RunAggr
     let mut aggregate = RunAggregate {
         run_id: run_id.to_owned(),
         machine: RunStateMachine::new(),
-        last_sequence: 1,
+        last_run_sequence,
+        last_aggregate_sequence: 1,
     };
     for event in &events[1..] {
-        let expected = aggregate.last_sequence + 1;
-        if event.sequence != expected {
+        let expected = aggregate.last_aggregate_sequence + 1;
+        if event.aggregate_sequence != expected {
             return Err(RunAggregateError::SequenceGap {
                 expected,
-                actual: event.sequence,
+                actual: event.aggregate_sequence,
             });
         }
         if event.event_type == "run.created" {
@@ -205,7 +222,7 @@ fn replay(run_id: &str, events: &[RuntimeEvent]) -> Result<RunAggregate, RunAggr
             return Err(RunAggregateError::StateMismatch);
         }
         transition_machine(&mut aggregate.machine, target)?;
-        aggregate.last_sequence = event.sequence;
+        aggregate.last_aggregate_sequence = event.aggregate_sequence;
     }
     Ok(aggregate)
 }
@@ -249,8 +266,12 @@ fn transition_event(
 ) -> NewRuntimeEvent {
     NewRuntimeEvent {
         run_id: run_id.to_owned(),
+        aggregate_type: "run".to_owned(),
+        aggregate_id: run_id.to_owned(),
         message_id: metadata.message_id.to_owned(),
+        idempotency_key: metadata.message_id.to_owned(),
         event_type: event_type.to_owned(),
+        event_version: 1,
         payload: json!({
             "previousState": previous.map(state_name),
             "currentState": state_name(current),
