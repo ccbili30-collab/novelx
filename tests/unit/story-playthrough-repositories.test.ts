@@ -7,6 +7,8 @@ import { PlaythroughRepository } from "../../src/domain/play/playthroughReposito
 import { StoryProfileRepository } from "../../src/domain/story/storyProfileRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
+import { CreativeWorkspaceService } from "../../src/domain/workspace/creativeWorkspaceService";
+import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 
 let workspace: WorkspaceDatabase | null = null;
 let root = "";
@@ -61,5 +63,20 @@ describe("Story Profile and Playthrough repositories", () => {
       canonCommitId: unsealed.id,
       title: "无效基线",
     })).toThrow();
+  });
+
+  it("seals manual UI mutations so visible world and story objects can become a canon baseline", () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-manual-profile-"));
+    workspace = openWorkspace(root);
+    const creative = new CreativeWorkspaceService(workspace);
+    creative.mutate({ action: "create_resource", domain: "world", objectKind: "world", title: "潮汐世界", parentId: null });
+    creative.mutate({ action: "create_resource", domain: "story", objectKind: "story", title: "潮痕", parentId: null });
+    const resources = new ResourceRepository(workspace);
+    const world = resources.listVisibleCurrent().find((item) => item.title === "潮汐世界")!;
+    const story = resources.listVisibleCurrent().find((item) => item.title === "潮痕")!;
+    const head = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+
+    expect(new StoryProfileRepository(workspace).create({ storyResourceId: story.id, worldResourceId: world.id, canonCommitId: head, title: "潮痕" }))
+      .toMatchObject({ storyResourceId: story.id, worldResourceId: world.id, canonCommitId: head });
   });
 });

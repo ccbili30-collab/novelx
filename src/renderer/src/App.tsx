@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Boxes, Download, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings } from "lucide-react";
+import { BookOpen, Boxes, Download, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings } from "lucide-react";
 import type { AgentArtifact, CollaborationListResult, CreativeWorkspaceMutation, HandoffSummary, ProjectAddResult, ProjectSummary, SessionSummary, WorkspaceSnapshot } from "../../shared/ipcContract";
 import type { DesktopUpdateState } from "../../shared/desktopUpdateContract";
 import { StewardRuntimePanel } from "./features/agent/StewardRuntimePanel";
@@ -20,6 +20,7 @@ import { ObjectMetadataPanel } from "./features/resources/ObjectMetadataPanel";
 import { MoveCreativeObjectDialog } from "./features/resources/MoveCreativeObjectDialog";
 import { DeleteCreativeObjectDialog, RenameCreativeObjectDialog } from "./features/resources/CreativeObjectCommandDialogs";
 import { applyThemePreference, readThemePreference, type NovaxTheme } from "../../shared/themePreference";
+import { PlayerWorkbench } from "./features/player/PlayerWorkbench";
 
 const SemanticGraphView = lazy(async () => {
   const module = await import("./features/graph/SemanticGraphView");
@@ -31,7 +32,7 @@ const ProviderSettingsDialog = lazy(async () => {
   return { default: module.ProviderSettingsDialog };
 });
 
-type WorkbenchMode = "agent" | "ide";
+type WorkbenchMode = "player" | "agent" | "ide";
 type OnboardingState = Pick<ProjectAddResult, "project" | "detection">;
 
 export function App() {
@@ -507,6 +508,9 @@ export function App() {
         <strong className="brand">novelx</strong>
         <span className="workspace-state">{activeProject?.name ?? "未选择项目"}</span>
         <div className="mode-switch" role="radiogroup" aria-label="工作台模式">
+          <button type="button" role="radio" aria-checked={mode === "player"} onClick={() => setMode("player")}>
+            <BookOpen size={14} aria-hidden="true" />玩家模式
+          </button>
           <button type="button" role="radio" aria-checked={mode === "agent"} onClick={() => setMode("agent")}>
             <MessageSquareText size={14} aria-hidden="true" />Agent 模式
           </button>
@@ -523,7 +527,7 @@ export function App() {
         </button> : null}
       </header>
 
-      {mode === "agent" ? (
+      {mode === "player" ? <PlayerWorkbench workspace={workspace} /> : mode === "agent" ? (
         <div className="workbench-grid workbench-grid--agent">
           <ProjectSessionRail
             projects={projects}
@@ -613,7 +617,7 @@ export function App() {
 
       <footer className="statusbar">
         <span>{activeProject ? projectStateLabel(activeProject.state) : "本地"}</span>
-        <span>{activeSession ? `Agent：${activeSession.title}` : "尚未选择 Agent 会话"}</span>
+        <span>{mode === "player" ? "玩家模式" : activeSession ? `Agent：${activeSession.title}` : "尚未选择 Agent 会话"}</span>
       </footer>
 
       {creativeError ? <div className="creative-operation-error" role="alert"><span>{creativeError}</span><button type="button" onClick={() => setCreativeError(null)}>关闭</button></div> : null}

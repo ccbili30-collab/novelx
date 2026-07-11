@@ -36,15 +36,20 @@ import {
   projectDoctorResultSchema,
   storyProfileCreateRequestSchema,
   storyProfileCreateResultSchema,
+  storyProfileListResultSchema,
   startProfileCreateRequestSchema,
   startProfileListRequestSchema,
   startProfileResultSchema,
   startProfileListResultSchema,
   playthroughCreateRequestSchema,
+  playthroughListRequestSchema,
+  playTurnListRequestSchema,
   playthroughInspectRequestSchema,
   playthroughResolveRequestSchema,
   playthroughResultSchema,
   playthroughInspectResultSchema,
+  playthroughListResultSchema,
+  playTurnListResultSchema,
   workspaceRestoreRequestSchema,
   workspaceRestoreResultSchema,
   safeChangeSetDetailSchema,
@@ -72,10 +77,13 @@ import {
   type WorkspaceRestoreResult,
   type ProjectDoctorResult,
   type StoryProfileCreateResult,
+  type StoryProfileListResult,
   type StartProfileResult,
   type StartProfileListResult,
   type PlaythroughResult,
   type PlaythroughInspectResult,
+  type PlaythroughListResult,
+  type PlayTurnListResult,
 } from "../shared/ipcContract";
 import { openWorkspace, type WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
@@ -146,6 +154,8 @@ export class WorkspaceSession {
     return new StoryProfileRepository(workspace).create({ ...input, canonCommitId });
   }
 
+  listStoryProfiles() { return new StoryProfileRepository(this.requireWorkspace()).list(); }
+
   createStartProfile(input: Parameters<StartProfileRepository["create"]>[0]) {
     return new StartProfileRepository(this.requireWorkspace()).create(input);
   }
@@ -157,6 +167,9 @@ export class WorkspaceSession {
   createPlaythroughFromStart(storyProfileId: string, startProfileId?: string | null) {
     return new PlaythroughRepository(this.requireWorkspace()).create({ storyProfileId, startProfileId });
   }
+
+  listPlaythroughs(storyProfileId: string) { return new PlaythroughRepository(this.requireWorkspace()).listForStoryProfile(storyProfileId); }
+  listPlayTurns(playthroughId: string) { return new PlaythroughRepository(this.requireWorkspace()).listTurns(playthroughId); }
 
   inspectPlaythrough(playthroughId: string) {
     return new PlaythroughReconciliationService(this.requireWorkspace()).inspect(playthroughId);
@@ -414,6 +427,7 @@ export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolic
     const request = storyProfileCreateRequestSchema.parse(payload);
     return session.createStoryProfile(request);
   }));
+  ipcMain.handle(desktopIpcChannels.storyProfileList, () => storyProfileListResult(() => session.listStoryProfiles()));
   ipcMain.handle(desktopIpcChannels.startProfileCreate, (_event, payload: unknown) => startProfileResult(() => {
     const request = startProfileCreateRequestSchema.parse(payload);
     return session.createStartProfile(request);
@@ -425,6 +439,14 @@ export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolic
   ipcMain.handle(desktopIpcChannels.playthroughCreate, (_event, payload: unknown) => playthroughResult(() => {
     const request = playthroughCreateRequestSchema.parse(payload);
     return session.createPlaythroughFromStart(request.storyProfileId, request.startProfileId);
+  }));
+  ipcMain.handle(desktopIpcChannels.playthroughList, (_event, payload: unknown) => playthroughListResult(() => {
+    const request = playthroughListRequestSchema.parse(payload);
+    return session.listPlaythroughs(request.storyProfileId);
+  }));
+  ipcMain.handle(desktopIpcChannels.playTurnList, (_event, payload: unknown) => playTurnListResult(() => {
+    const request = playTurnListRequestSchema.parse(payload);
+    return session.listPlayTurns(request.playthroughId);
   }));
   ipcMain.handle(desktopIpcChannels.playthroughInspect, (_event, payload: unknown) => playthroughInspectResult(() => {
     const request = playthroughInspectRequestSchema.parse(payload);
@@ -644,6 +666,11 @@ function storyProfileResult(operation: () => unknown): StoryProfileCreateResult 
   }
 }
 
+function storyProfileListResult(operation: () => unknown): StoryProfileListResult {
+  try { return storyProfileListResultSchema.parse({ ok: true, profiles: operation() }); }
+  catch (error) { return storyProfileListResultSchema.parse({ ok: false, error: publicPlayError(error) }); }
+}
+
 function startProfileResult(operation: () => unknown): StartProfileResult {
   try {
     return startProfileResultSchema.parse({ ok: true, startProfile: operation() });
@@ -666,6 +693,19 @@ function playthroughResult(operation: () => unknown): PlaythroughResult {
   } catch (error) {
     return playthroughResultSchema.parse({ ok: false, error: publicPlayError(error) });
   }
+}
+
+function playthroughListResult(operation: () => unknown): PlaythroughListResult {
+  try { return playthroughListResultSchema.parse({ ok: true, playthroughs: operation() }); }
+  catch (error) { return playthroughListResultSchema.parse({ ok: false, error: publicPlayError(error) }); }
+}
+
+function playTurnListResult(operation: () => unknown): PlayTurnListResult {
+  try {
+    const turns = operation() as Array<{ id: string; playthroughId: string; sequence: number; playerAction: string; writerText: string; stateSnapshot: unknown; createdAt: string }>;
+    return playTurnListResultSchema.parse({ ok: true, turns: turns.map((turn) => ({ id: turn.id, playthroughId: turn.playthroughId,
+      sequence: turn.sequence, playerAction: turn.playerAction, writerText: turn.writerText, stateSnapshot: turn.stateSnapshot, createdAt: turn.createdAt })) });
+  } catch (error) { return playTurnListResultSchema.parse({ ok: false, error: publicPlayError(error) }); }
 }
 
 function playthroughInspectResult(operation: () => unknown): PlaythroughInspectResult {

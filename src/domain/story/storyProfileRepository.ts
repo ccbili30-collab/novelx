@@ -74,6 +74,11 @@ export class StoryProfileRepository {
     });
     return profile;
   }
+
+  list(): StoryProfileRecord[] {
+    return (this.workspace.db.prepare("SELECT id FROM story_profiles ORDER BY created_at, id").all() as Array<{ id: string }>)
+      .map((row) => this.getRequired(row.id));
+  }
 }
 
 function normalizeBindings(bindings: Array<{ ocResourceId: string; variantResourceId?: string | null }>, resources: ResourceRepository) {

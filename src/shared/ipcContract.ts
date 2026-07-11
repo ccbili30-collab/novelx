@@ -42,9 +42,12 @@ export const desktopIpcChannels = {
   workspaceContextBudget: "novax:workspace-context-budget",
   workspaceDoctor: "novax:workspace-doctor",
   storyProfileCreate: "novax:story-profile-create",
+  storyProfileList: "novax:story-profile-list",
   startProfileCreate: "novax:start-profile-create",
   startProfileList: "novax:start-profile-list",
   playthroughCreate: "novax:playthrough-create",
+  playthroughList: "novax:playthrough-list",
+  playTurnList: "novax:play-turn-list",
   playthroughInspect: "novax:playthrough-inspect",
   playthroughResolve: "novax:playthrough-resolve",
   playerTurnStart: "novax:player-turn-start",
@@ -530,6 +533,8 @@ export const playthroughCreateRequestSchema = z.object({
   storyProfileId: opaqueIdSchema,
   startProfileId: opaqueIdSchema.nullable().optional(),
 }).strict();
+export const playthroughListRequestSchema = z.object({ storyProfileId: opaqueIdSchema }).strict();
+export const playTurnListRequestSchema = z.object({ playthroughId: opaqueIdSchema }).strict();
 export const playthroughInspectRequestSchema = z.object({ playthroughId: opaqueIdSchema }).strict();
 export const playthroughResolveRequestSchema = z.object({
   playthroughId: opaqueIdSchema,
@@ -563,6 +568,16 @@ export const playerTurnEventSchema = z.discriminatedUnion("type", [
   }).strict(),
 ]);
 
+export const publicPlayTurnSchema = z.object({
+  id: opaqueIdSchema,
+  playthroughId: opaqueIdSchema,
+  sequence: z.number().int().positive(),
+  playerAction: z.string().min(1).max(12_000),
+  writerText: z.string().min(1).max(100_000),
+  stateSnapshot: z.record(z.string().min(1).max(240), z.json()),
+  createdAt: z.iso.datetime(),
+}).strict();
+
 export const playthroughReconciliationStatusSchema = z.object({
   state: z.enum(["current", "canon_diverged"]),
   playthroughId: opaqueIdSchema,
@@ -583,6 +598,10 @@ export const storyProfileCreateResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), profile: storyProfileSchema }).strict(),
   z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
 ]);
+export const storyProfileListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), profiles: z.array(storyProfileSchema).max(10_000) }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
 export const startProfileResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), startProfile: startProfileSchema }).strict(),
   z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
@@ -593,6 +612,14 @@ export const startProfileListResultSchema = z.discriminatedUnion("ok", [
 ]);
 export const playthroughResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), playthrough: playthroughSchema }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const playthroughListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), playthroughs: z.array(playthroughSchema).max(10_000) }).strict(),
+  z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
+]);
+export const playTurnListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), turns: z.array(publicPlayTurnSchema).max(100_000) }).strict(),
   z.object({ ok: z.literal(false), error: playOperationErrorSchema }).strict(),
 ]);
 export const playthroughInspectResultSchema = z.discriminatedUnion("ok", [
@@ -1049,6 +1076,7 @@ export type ProjectDoctorResult = z.infer<typeof projectDoctorResultSchema>;
 export type StoryProfile = z.infer<typeof storyProfileSchema>;
 export type StoryProfileCreateRequest = z.input<typeof storyProfileCreateRequestSchema>;
 export type StoryProfileCreateResult = z.infer<typeof storyProfileCreateResultSchema>;
+export type StoryProfileListResult = z.infer<typeof storyProfileListResultSchema>;
 export type StartProfile = z.infer<typeof startProfileSchema>;
 export type StartProfileCreateRequest = z.input<typeof startProfileCreateRequestSchema>;
 export type StartProfileListRequest = z.infer<typeof startProfileListRequestSchema>;
@@ -1056,9 +1084,14 @@ export type StartProfileResult = z.infer<typeof startProfileResultSchema>;
 export type StartProfileListResult = z.infer<typeof startProfileListResultSchema>;
 export type Playthrough = z.infer<typeof playthroughSchema>;
 export type PlaythroughCreateRequest = z.infer<typeof playthroughCreateRequestSchema>;
+export type PlaythroughListRequest = z.infer<typeof playthroughListRequestSchema>;
+export type PlayTurnListRequest = z.infer<typeof playTurnListRequestSchema>;
 export type PlaythroughResolveRequest = z.infer<typeof playthroughResolveRequestSchema>;
 export type PlaythroughInspectRequest = z.infer<typeof playthroughInspectRequestSchema>;
 export type PlaythroughResult = z.infer<typeof playthroughResultSchema>;
+export type PlaythroughListResult = z.infer<typeof playthroughListResultSchema>;
+export type PlayTurnListResult = z.infer<typeof playTurnListResultSchema>;
+export type PublicPlayTurn = z.infer<typeof publicPlayTurnSchema>;
 export type PlaythroughInspectResult = z.infer<typeof playthroughInspectResultSchema>;
 export type PlayerTurnStartRequest = z.infer<typeof playerTurnStartRequestSchema>;
 export type PlayerTurnStartResponse = z.infer<typeof playerTurnStartResponseSchema>;
@@ -1148,9 +1181,12 @@ export interface DesktopApi {
   };
   play: {
     createStoryProfile(request: StoryProfileCreateRequest): Promise<StoryProfileCreateResult>;
+    listStoryProfiles(): Promise<StoryProfileListResult>;
     createStartProfile(request: StartProfileCreateRequest): Promise<StartProfileResult>;
     listStartProfiles(request: StartProfileListRequest): Promise<StartProfileListResult>;
     createPlaythrough(request: PlaythroughCreateRequest): Promise<PlaythroughResult>;
+    listPlaythroughs(request: PlaythroughListRequest): Promise<PlaythroughListResult>;
+    listTurns(request: PlayTurnListRequest): Promise<PlayTurnListResult>;
     inspect(request: PlaythroughInspectRequest): Promise<PlaythroughInspectResult>;
     resolve(request: PlaythroughResolveRequest): Promise<PlaythroughResult>;
     runTurn(request: PlayerTurnStartRequest): Promise<PlayerTurnStartResponse>;

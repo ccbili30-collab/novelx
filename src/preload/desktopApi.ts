@@ -38,15 +38,20 @@ import {
   projectDoctorResultSchema,
   storyProfileCreateRequestSchema,
   storyProfileCreateResultSchema,
+  storyProfileListResultSchema,
   startProfileCreateRequestSchema,
   startProfileListRequestSchema,
   startProfileResultSchema,
   startProfileListResultSchema,
   playthroughCreateRequestSchema,
+  playthroughListRequestSchema,
+  playTurnListRequestSchema,
   playthroughInspectRequestSchema,
   playthroughResolveRequestSchema,
   playthroughResultSchema,
   playthroughInspectResultSchema,
+  playthroughListResultSchema,
+  playTurnListResultSchema,
   playerTurnStartRequestSchema,
   playerTurnStartResponseSchema,
   playerTurnCancelRequestSchema,
@@ -260,6 +265,9 @@ export function exposeDesktopApi(): void {
         const safeRequest = storyProfileCreateRequestSchema.parse(request);
         return storyProfileCreateResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.storyProfileCreate, safeRequest));
       },
+      async listStoryProfiles() {
+        return storyProfileListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.storyProfileList));
+      },
       async createStartProfile(request) {
         const safeRequest = startProfileCreateRequestSchema.parse(request);
         return startProfileResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.startProfileCreate, safeRequest));
@@ -271,6 +279,14 @@ export function exposeDesktopApi(): void {
       async createPlaythrough(request) {
         const safeRequest = playthroughCreateRequestSchema.parse(request);
         return playthroughResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughCreate, safeRequest));
+      },
+      async listPlaythroughs(request) {
+        const safeRequest = playthroughListRequestSchema.parse(request);
+        return playthroughListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playthroughList, safeRequest));
+      },
+      async listTurns(request) {
+        const safeRequest = playTurnListRequestSchema.parse(request);
+        return playTurnListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.playTurnList, safeRequest));
       },
       async inspect(request) {
         const safeRequest = playthroughInspectRequestSchema.parse(request);

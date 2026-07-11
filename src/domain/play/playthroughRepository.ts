@@ -103,6 +103,20 @@ export class PlaythroughRepository {
     if (!row) throw playError("PLAY_TURN_NOT_FOUND");
     return mapTurn(row);
   }
+
+  listForStoryProfile(storyProfileId: string): PlaythroughRecord[] {
+    new StoryProfileRepository(this.workspace).getRequired(storyProfileId);
+    return this.workspace.db.prepare(`
+      SELECT * FROM playthroughs WHERE story_profile_id = ? ORDER BY created_at, id
+    `).all(storyProfileId).map(mapPlaythrough);
+  }
+
+  listTurns(playthroughId: string): PlayTurnRecord[] {
+    this.getRequired(playthroughId);
+    return this.workspace.db.prepare(`
+      SELECT * FROM play_turns WHERE playthrough_id = ? ORDER BY sequence
+    `).all(playthroughId).map(mapTurn);
+  }
 }
 
 function mapPlaythrough(row: Record<string, SQLOutputValue>): PlaythroughRecord {
