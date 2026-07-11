@@ -1,0 +1,34 @@
+appId: com.novax.desktop
+productName: novelx
+asar: true
+compression: normal
+npmRebuild: false
+
+directories:
+  output: release
+
+files:
+  - out/**/*
+  - package.json
+  - "!node_modules/**/{test,tests,__tests__,test-results,playwright-report,coverage}/**/*"
+  - "!node_modules/**/*.map"
+  - "!node_modules/**/*.d.ts"
+  - "!node_modules/**/*.d.mts"
+  - "!node_modules/**/*.d.cts"
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: novelx-Setup-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+
+publish: null

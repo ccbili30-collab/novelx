@@ -1,0 +1,5 @@
+extends: ./electron-builder.yml
+
+publish:
+  - provider: generic
+    url: ${env.NOVAX_UPDATE_URL}

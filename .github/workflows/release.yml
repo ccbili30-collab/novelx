@@ -1,0 +1,39 @@
+name: Release Windows installer
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      NOVAX_UPDATE_URL: https://github.com/ccbili30-collab/novelx/releases/latest/download
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run package:update
+      - name: Publish release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:GITHUB_REF_NAME --title $env:GITHUB_REF_NAME --generate-notes
+          }
+          gh release upload $env:GITHUB_REF_NAME `
+            release/novelx-Setup-*.exe `
+            release/novelx-Setup-*.exe.blockmap `
+            release/latest.yml `
+            --clobber

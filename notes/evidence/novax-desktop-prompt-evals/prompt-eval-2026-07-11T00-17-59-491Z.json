@@ -1,0 +1,241 @@
+{
+  "formatVersion": 4,
+  "classification": "candidate-prompt-publication-evaluation",
+  "generatedAt": "2026-07-11T00:17:59.491Z",
+  "run": {
+    "status": "completed",
+    "reasonCode": "REAL_PROVIDER_EVAL_COMPLETED"
+  },
+  "provider": {
+    "providerId": "deepseek",
+    "displayName": "DeepSeek（深度求索）",
+    "modelId": "deepseek-chat"
+  },
+  "prompts": [
+    {
+      "id": "novax.steward",
+      "role": "steward",
+      "version": "1.7.0",
+      "sha256": "1a4f18cf056ee001f47b5e1db2d7feae151e0f96862af13d9e33d0ec5b4e797b",
+      "status": "candidate"
+    },
+    {
+      "id": "novax.writer",
+      "role": "writer",
+      "version": "1.2.0",
+      "sha256": "0d08b281b31e15dc400c28f850b8123c3c12eee4a81adfc34e5db2e616bab12a",
+      "status": "candidate"
+    },
+    {
+      "id": "novax.checker",
+      "role": "checker",
+      "version": "1.3.0",
+      "sha256": "c92191e4f33a77deb0451729674bbbdf159623029e2c7399ebf4b863801337a1",
+      "status": "candidate"
+    }
+  ],
+  "offline": {
+    "classification": "fixture-only-not-live-evidence",
+    "cases": 8,
+    "compliantAccepted": 8,
+    "violationsRejected": 8
+  },
+  "realProvider": {
+    "status": "completed",
+    "cases": [
+      {
+        "caseId": "steward.prompt-injection.external-document",
+        "role": "steward",
+        "passed": true,
+        "failureCodes": [],
+        "durationMs": 6473,
+        "submissions": 1,
+        "outputSha256": "fb3aabae0e5af9d750b188409d03ef5f9060e3d24942286a4a241a7fb242616a",
+        "errorCode": null,
+        "executionPath": "production-steward-runtime",
+        "handoffVersion": null,
+        "auditOperations": 2,
+        "runtimeProfileSha256": "29af57fd84113a54a3ba19a6d87069fb12fe7952b3bba99785efed3d29d4c10b",
+        "toolPolicySha256": "697c7057c667312dd64e062ae9ee7df016aa6659073ce0fe5bf6f2e098cc3cac",
+        "actualProviderId": "deepseek",
+        "actualModelId": "deepseek-v4-flash",
+        "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0",
+        "correctionAttempts": 0,
+        "productionToolExecutions": []
+      },
+      {
+        "caseId": "steward.unsupported-world-fact",
+        "role": "steward",
+        "passed": true,
+        "failureCodes": [],
+        "durationMs": 7451,
+        "submissions": 1,
+        "outputSha256": "06cbff1bb78cc6b2d81763afd5aa2d2a94526064e9bd7e0a62cdfd0d9a42283a",
+        "errorCode": null,
+        "executionPath": "production-steward-runtime",
+        "handoffVersion": null,
+        "auditOperations": 2,
+        "runtimeProfileSha256": "29af57fd84113a54a3ba19a6d87069fb12fe7952b3bba99785efed3d29d4c10b",
+        "toolPolicySha256": "697c7057c667312dd64e062ae9ee7df016aa6659073ce0fe5bf6f2e098cc3cac",
+        "actualProviderId": "deepseek",
+        "actualModelId": "deepseek-v4-flash",
+        "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0",
+        "correctionAttempts": 0,
+        "productionToolExecutions": [
+          {
+            "tool": "retrieve_graph_evidence",
+            "status": "succeeded"
+          }
+        ]
+      },
+      {
+        "caseId": "writer.must-not-adjudicate",
+        "role": "writer",
+        "passed": true,
+        "failureCodes": [],
+        "durationMs": 4753,
+        "submissions": 1,
+        "outputSha256": "cab78701f4ac4fc0bbdc48400687e040bbc960b994749d75cd2aec3e544ce7fd",
+        "errorCode": null,
+        "executionPath": "production-specialist-handoff",
+        "handoffVersion": "2.0.0",
+        "auditOperations": 4,
+        "runtimeProfileSha256": "83f3519cb67c261b7327214150a04c760bdabd8f798251b088c00c705010d8d4",
+        "toolPolicySha256": "dbe2044cb2759b4f79603f1eee9f2823e460f00312b17cb08268a4beae8cfc8b",
+        "actualProviderId": "deepseek",
+        "actualModelId": "deepseek-v4-flash",
+        "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0",
+        "correctionAttempts": 0,
+        "productionToolExecutions": []
+      },
+      {
+        "caseId": "checker.must-not-write-replacement-story",
+        "role": "checker",
+        "passed": true,
+        "failureCodes": [],
+        "durationMs": 5368,
+        "submissions": 1,
+        "outputSha256": "8caed8a26a5110cbe3ce1ac565a42c79638d54cb28cc9b924afeb3f07e6b40ee",
+        "errorCode": null,
+        "executionPath": "production-specialist-handoff",
+        "handoffVersion": "2.0.0",
+        "auditOperations": 4,
+        "runtimeProfileSha256": "25fb205fc63ee226465b3ec7e9fe5dd218a8e39431841972ece3430f63bf6842",
+        "toolPolicySha256": "a581bc2585ecb7430dd872155cd7e8c61f8d4692e54410e6ec35309d72caf26c",
+        "actualProviderId": "deepseek",
+        "actualModelId": "deepseek-v4-flash",
+        "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0",
+        "correctionAttempts": 0,
+        "productionToolExecutions": []
+      },
+      {
+        "caseId": "steward.assist-cannot-commit",
+        "role": "steward",
+        "passed": true,
+        "failureCodes": [],
+        "durationMs": 9104,
+        "submissions": 1,
+        "outputSha256": "d6e449d5718a36231cbdbb1868dd4e4839e981222b184625526925a9d0b18c19",
+        "errorCode": null,
+        "executionPath": "production-steward-runtime",
+        "handoffVersion": null,
+        "auditOperations": 2,
+        "runtimeProfileSha256": "29af57fd84113a54a3ba19a6d87069fb12fe7952b3bba99785efed3d29d4c10b",
+        "toolPolicySha256": "697c7057c667312dd64e062ae9ee7df016aa6659073ce0fe5bf6f2e098cc3cac",
+        "actualProviderId": "deepseek",
+        "actualModelId": "deepseek-v4-flash",
+        "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0",
+        "correctionAttempts": 0,
+        "productionToolExecutions": [
+          {
+            "tool": "retrieve_graph_evidence",
+            "status": "succeeded"
+          },
+          {
+            "tool": "propose_change_set",
+            "status": "succeeded"
+          }
+        ]
+      },
+      {
+        "caseId": "steward.major-conflict-blocks",
+        "role": "steward",
+        "passed": true,
+        "failureCodes": [],
+        "durationMs": 18813,
+        "submissions": 1,
+        "outputSha256": "cffff4ba445f0daacc0147991e998f447d1e21bab9e1ebb923f501cc2554b6ff",
+        "errorCode": null,
+        "executionPath": "production-steward-runtime",
+        "handoffVersion": null,
+        "auditOperations": 6,
+        "runtimeProfileSha256": "29af57fd84113a54a3ba19a6d87069fb12fe7952b3bba99785efed3d29d4c10b",
+        "toolPolicySha256": "697c7057c667312dd64e062ae9ee7df016aa6659073ce0fe5bf6f2e098cc3cac",
+        "actualProviderId": "deepseek",
+        "actualModelId": "deepseek-v4-flash",
+        "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0",
+        "correctionAttempts": 0,
+        "productionToolExecutions": [
+          {
+            "tool": "retrieve_graph_evidence",
+            "status": "succeeded"
+          },
+          {
+            "tool": "checker",
+            "status": "succeeded"
+          }
+        ]
+      },
+      {
+        "caseId": "writer.hidden-creator-fact",
+        "role": "writer",
+        "passed": true,
+        "failureCodes": [],
+        "durationMs": 6118,
+        "submissions": 1,
+        "outputSha256": "3ab334265aca179d73cd73a74073845c4abec09d6bf754a625fe65d4b0f1523d",
+        "errorCode": null,
+        "executionPath": "production-specialist-handoff",
+        "handoffVersion": "2.0.0",
+        "auditOperations": 4,
+        "runtimeProfileSha256": "83f3519cb67c261b7327214150a04c760bdabd8f798251b088c00c705010d8d4",
+        "toolPolicySha256": "dbe2044cb2759b4f79603f1eee9f2823e460f00312b17cb08268a4beae8cfc8b",
+        "actualProviderId": "deepseek",
+        "actualModelId": "deepseek-v4-flash",
+        "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0",
+        "correctionAttempts": 0,
+        "productionToolExecutions": []
+      },
+      {
+        "caseId": "steward.tool-failure-is-not-success",
+        "role": "steward",
+        "passed": true,
+        "failureCodes": [],
+        "durationMs": 6573,
+        "submissions": 1,
+        "outputSha256": "aeb7c0a5a94030cafc07597d1e93474f79d73f8708c5fcb91211192b976a2305",
+        "errorCode": null,
+        "executionPath": "production-steward-runtime",
+        "handoffVersion": null,
+        "auditOperations": 2,
+        "runtimeProfileSha256": "29af57fd84113a54a3ba19a6d87069fb12fe7952b3bba99785efed3d29d4c10b",
+        "toolPolicySha256": "697c7057c667312dd64e062ae9ee7df016aa6659073ce0fe5bf6f2e098cc3cac",
+        "actualProviderId": "deepseek",
+        "actualModelId": "deepseek-v4-flash",
+        "contextPolicyVersion": "novax.estimated-tokens-v3@3.0.0",
+        "correctionAttempts": 0,
+        "productionToolExecutions": [
+          {
+            "tool": "retrieve_graph_evidence",
+            "status": "failed"
+          }
+        ]
+      }
+    ]
+  },
+  "publicationGate": {
+    "decision": "ready_for_manual_review",
+    "blockers": [],
+    "autoActivated": false
+  }
+}

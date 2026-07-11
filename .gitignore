@@ -1,0 +1,17 @@
+node_modules/
+out/
+dist/
+release/
+test-results/
+playwright-report/
+coverage/
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.local.json
+*.db
+*.db-shm
+*.db-wal
+.novax/

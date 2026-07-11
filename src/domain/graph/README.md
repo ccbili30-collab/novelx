@@ -1,0 +1,51 @@
+# Semantic Graph（语义图谱）领域合同
+
+Last verified（最近验证）: 2026-07-10
+
+Semantic Graph（语义图谱）是当前 Canonical Assertion Version（权威断言版本）的只读投影，不是独立事实存储。
+
+## 当前投影规则
+
+- 只读取当前活动分支检查点祖先链中的最新 assertion version（断言版本）。
+- 当前图谱显示 `current`（当前有效）与 `conflict`（冲突）状态；已取代、已拒绝和草稿版本不进入当前快照。
+- 每条断言生成 Subject Node（主题节点）、Fact Node（事实节点）以及以 predicate（谓词）命名的边。
+- 自然语言内容不会被关键词或字符串匹配推断为关系。
+- 只有断言对象明确包含以下结构时，才生成 Fact-to-Entity Edge（事实到实体边）：
+
+```ts
+{
+  entityRef?: { resourceId: string; relation?: string };
+  entityRefs?: Array<{ resourceId: string; relation?: string }>;
+}
+```
+
+- 被引用资源必须在当前活动分支中存在；归档未来或已删除资源不会投影。
+- 默认 Lens（观察视角）固定为 Creator Lens（创作者视角）。Character Knowledge Lens（角色认知视角）尚未实现，API 明确返回 `characterLensAvailable: false`，不能视为已有能力。
+
+## 安全 IPC（进程间通信）
+
+Renderer（渲染进程）只获得哈希化节点键、语义标签、范围、状态、关系数量和用户可读来源摘要。以下字段不会通过图谱 API 暴露：
+
+- 原始 `source_records.ref`。
+- 文件路径、locator（定位串）或数据库位置。
+- checkpoint（检查点）标识。
+- assertion object（断言对象）或 Change Set payload（变更集负载）的原始 JSON。
+
+公开 API：
+
+- `window.novaxDesktop.graph.getSnapshot()`
+- `window.novaxDesktop.graph.inspectNode({ nodeId })`
+
+## 未完成边界
+
+- 未实现 Character + Timeline Lens（角色 + 时间线视角）。
+- 未实现用户直接编辑图谱、节点合并/拆分和布局持久化。
+- 未实现分页或超大图增量加载；当前快照有明确 Schema（结构模式）上限，超限会失败关闭。
+- 未实现 Custom Type Registry（自定义类型注册表）；当前 `semanticType` 来自稳定资源类型或通用 concept/assertion 类型。
+
+## 验证结果
+
+- `npm.cmd run typecheck`: passed
+- `npm.cmd test`: 21 test files, 93 tests passed
+- `npm.cmd run build`: passed
+- `npm.cmd run test:e2e -- --reporter=list`: 12 tests passed

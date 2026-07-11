@@ -1,0 +1,63 @@
+{
+  "name": "novelx-desktop",
+  "version": "0.1.0",
+  "description": "AI-assisted novel and worldbuilding workbench.",
+  "author": "novelx",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ccbili30-collab/novelx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ccbili30-collab/novelx/issues"
+  },
+  "homepage": "https://github.com/ccbili30-collab/novelx#readme",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "prebuild": "npm run verify:prompt-publication",
+    "build": "electron-vite build",
+    "build:prompt-evals": "vite build --config prompt-eval.vite.config.ts",
+    "eval:prompts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\run-prompt-evals.ps1",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "package:dir": "npm run build && node ./node_modules/electron-builder/cli.js --win --x64 --dir",
+    "package:win": "npm run build && node ./node_modules/electron-builder/cli.js --win nsis --x64",
+    "package:update": "npm run build && node ./node_modules/electron-builder/cli.js --config electron-builder.update.yml --win nsis --x64 --publish never",
+    "verify:prompt-publication": "node ./scripts/verify-prompt-publication.mjs",
+    "verify:package": "node scripts/verify-package.mjs",
+    "verify:installer": "node scripts/verify-installer.mjs"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "^3.0.0",
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@xyflow/react": "^12.11.2",
+    "electron-updater": "^6.8.9",
+    "lucide-react": "1.24.0",
+    "mermaid": "^11.12.2",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "typebox": "1.1.38",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@types/node": "26.1.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron": "43.1.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "5.0.0",
+    "typescript": "6.0.3",
+    "vite": "7.3.6",
+    "vitest": "4.1.10"
+  }
+}
