@@ -4,10 +4,13 @@ import {
   RuntimeV2ProtocolVersionError,
   parseRuntimeV2Envelope,
   parseRuntimeV2HelloEnvelope,
+  parseRuntimeV2InitializeEnvelope,
+  parseRuntimeV2ReadyEnvelope,
   runtimeV2EnvelopeSchema,
 } from "../../src/shared/runtimeV2Protocol";
 
 const MESSAGE_ID = "35bf2cb7-b0db-44e7-985d-664f9cd98f97";
+const INITIALIZE_MESSAGE_ID = "63987751-050a-4df7-af86-b30f333ceb0d";
 
 function helloEnvelope(overrides: Record<string, unknown> = {}) {
   return {
@@ -27,6 +30,62 @@ function helloEnvelope(overrides: Record<string, unknown> = {}) {
         commit: "development",
         target: "x86_64-pc-windows-msvc",
       },
+    },
+    ...overrides,
+  };
+}
+
+function initializeEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1,
+    messageId: INITIALIZE_MESSAGE_ID,
+    messageType: "command",
+    name: "runtime.initialize",
+    sentAt: "2026-07-12T00:00:01Z",
+    correlationId: null,
+    runId: null,
+    sequence: 2,
+    payload: {
+      selectedProtocolVersion: 1,
+      application: {
+        id: "novelx.desktop",
+        version: "0.2.7",
+        commit: "desktop-development",
+      },
+      workspaceDatabasePath: "C:\\NovelX\\Project\\.novax\\workspace.db",
+      featureFlags: {
+        runtime_v2: true,
+        recovery: false,
+      },
+      hostCapabilityVersions: {
+        project_tools: "1.0.0",
+        change_set: "2.0.0",
+      },
+    },
+    ...overrides,
+  };
+}
+
+function readyEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1,
+    messageId: "b1ca577f-49ea-4936-b552-a6f96c802d53",
+    messageType: "control",
+    name: "runtime.ready",
+    sentAt: "2026-07-12T00:00:02Z",
+    correlationId: INITIALIZE_MESSAGE_ID,
+    runId: null,
+    sequence: 2,
+    payload: {
+      selectedProtocolVersion: 1,
+      runtime: {
+        version: "0.1.0",
+        build: {
+          commit: "runtime-development",
+          target: "x86_64-pc-windows-msvc",
+        },
+      },
+      recoveredRunCount: 0,
     },
     ...overrides,
   };
@@ -96,6 +155,65 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
       payload: {
         ...helloEnvelope().payload,
         secret: "must-not-cross-handshake",
+      },
+    }))).toThrow();
+  });
+
+  it("accepts a strict runtime.initialize command with nullable workspace", () => {
+    expect(parseRuntimeV2InitializeEnvelope(initializeEnvelope())).toEqual(initializeEnvelope());
+    expect(parseRuntimeV2InitializeEnvelope(initializeEnvelope({
+      payload: {
+        ...initializeEnvelope().payload,
+        workspaceDatabasePath: null,
+      },
+    })).payload.workspaceDatabasePath).toBeNull();
+  });
+
+  it("rejects invalid runtime.initialize identities, versions and secrets", () => {
+    expect(() => parseRuntimeV2InitializeEnvelope(initializeEnvelope({ messageType: "control" }))).toThrow();
+    expect(() => parseRuntimeV2InitializeEnvelope(initializeEnvelope({
+      payload: {
+        ...initializeEnvelope().payload,
+        selectedProtocolVersion: 2,
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2InitializeEnvelope(initializeEnvelope({
+      payload: {
+        ...initializeEnvelope().payload,
+        apiKey: "must-not-cross-handshake",
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2InitializeEnvelope(initializeEnvelope({
+      payload: {
+        ...initializeEnvelope().payload,
+        hostCapabilityVersions: { project_tools: "latest" },
+      },
+    }))).toThrow();
+  });
+
+  it("accepts a strict runtime.ready control correlated to initialize", () => {
+    expect(parseRuntimeV2ReadyEnvelope(readyEnvelope())).toEqual(readyEnvelope());
+    expect(parseRuntimeV2ReadyEnvelope(readyEnvelope({
+      payload: {
+        ...readyEnvelope().payload,
+        recoveredRunCount: 3,
+      },
+    })).payload.recoveredRunCount).toBe(3);
+  });
+
+  it("rejects uncorrelated or malformed runtime.ready messages", () => {
+    expect(() => parseRuntimeV2ReadyEnvelope(readyEnvelope({ correlationId: null }))).toThrow();
+    expect(() => parseRuntimeV2ReadyEnvelope(readyEnvelope({ runId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2ReadyEnvelope(readyEnvelope({
+      payload: {
+        ...readyEnvelope().payload,
+        recoveredRunCount: -1,
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ReadyEnvelope(readyEnvelope({
+      payload: {
+        ...readyEnvelope().payload,
+        selectedProtocolVersion: 2,
       },
     }))).toThrow();
   });

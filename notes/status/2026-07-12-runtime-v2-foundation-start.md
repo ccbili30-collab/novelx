@@ -10,11 +10,12 @@
 - Created the Rust workspace with `novelx-protocol` and `novelx-runtime` crates.
 - Implemented and verified a real `runtime.hello` JSON message and protocol-version rejection tests.
 - Added a legal Run state machine, an immutable SQLite event journal, strict duplicate-message conflict detection, and a TypeScript/Zod protocol mirror.
+- Added a real Rust handshake loop and matched Rust/TypeScript schemas for `runtime.hello`, `runtime.initialize` and `runtime.ready`.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 11 tests.
+- Rust workspace tests pass: 14 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
 - `git diff --check` passes.

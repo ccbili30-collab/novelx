@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -106,6 +108,39 @@ pub struct RuntimeHello {
     pub protocol_versions: Vec<u16>,
     pub capabilities: Vec<String>,
     pub build: RuntimeBuild,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeApplicationIdentity {
+    pub id: String,
+    pub version: String,
+    pub commit: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeInitialize {
+    pub selected_protocol_version: u16,
+    pub application: RuntimeApplicationIdentity,
+    pub workspace_database_path: Option<String>,
+    pub feature_flags: BTreeMap<String, bool>,
+    pub host_capability_versions: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeIdentity {
+    pub version: String,
+    pub build: RuntimeBuild,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeReady {
+    pub selected_protocol_version: u16,
+    pub runtime: RuntimeIdentity,
+    pub recovered_run_count: u64,
 }
 
 #[cfg(test)]

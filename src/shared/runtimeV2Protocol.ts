@@ -2,6 +2,13 @@ import { z } from "zod";
 
 export const RUNTIME_V2_PROTOCOL_VERSION = 1 as const;
 
+const semanticVersionSchema = z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
+const versionedCapabilityKeySchema = z.string().trim().regex(/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/).max(160);
+const runtimeV2BuildSchema = z.object({
+  commit: z.string().trim().min(1).max(160),
+  target: z.string().trim().min(1).max(240),
+}).strict();
+
 export const runtimeV2MessageTypeSchema = z.enum([
   "command",
   "event",
@@ -22,13 +29,10 @@ export const runtimeV2EnvelopeSchema = z.object({
 }).strict();
 
 export const runtimeV2HelloPayloadSchema = z.object({
-  runtimeVersion: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/),
+  runtimeVersion: semanticVersionSchema,
   protocolVersions: z.array(z.number().int().min(0).max(65_535)).min(1).max(32),
   capabilities: z.array(z.string().trim().min(1).max(160)).max(200),
-  build: z.object({
-    commit: z.string().trim().min(1).max(160),
-    target: z.string().trim().min(1).max(240),
-  }).strict(),
+  build: runtimeV2BuildSchema,
 }).strict().superRefine((payload, context) => {
   if (!payload.protocolVersions.includes(RUNTIME_V2_PROTOCOL_VERSION)) {
     context.addIssue({
@@ -61,10 +65,51 @@ export const runtimeV2HelloEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   payload: runtimeV2HelloPayloadSchema,
 }).strict();
 
+export const runtimeV2InitializePayloadSchema = z.object({
+  selectedProtocolVersion: z.literal(RUNTIME_V2_PROTOCOL_VERSION),
+  application: z.object({
+    id: z.string().trim().regex(/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/).max(160),
+    version: semanticVersionSchema,
+    commit: z.string().trim().min(1).max(160),
+  }).strict(),
+  workspaceDatabasePath: z.string().trim().min(1).max(32_767).nullable(),
+  featureFlags: z.record(versionedCapabilityKeySchema, z.boolean()),
+  hostCapabilityVersions: z.record(versionedCapabilityKeySchema, semanticVersionSchema),
+}).strict();
+
+export const runtimeV2InitializeEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("runtime.initialize"),
+  correlationId: z.null(),
+  runId: z.null(),
+  payload: runtimeV2InitializePayloadSchema,
+}).strict();
+
+export const runtimeV2ReadyPayloadSchema = z.object({
+  selectedProtocolVersion: z.literal(RUNTIME_V2_PROTOCOL_VERSION),
+  runtime: z.object({
+    version: semanticVersionSchema,
+    build: runtimeV2BuildSchema,
+  }).strict(),
+  recoveredRunCount: z.number().int().min(0).safe(),
+}).strict();
+
+export const runtimeV2ReadyEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("control"),
+  name: z.literal("runtime.ready"),
+  correlationId: z.uuid(),
+  runId: z.null(),
+  payload: runtimeV2ReadyPayloadSchema,
+}).strict();
+
 export type RuntimeV2MessageType = z.infer<typeof runtimeV2MessageTypeSchema>;
 export type RuntimeV2Envelope = z.infer<typeof runtimeV2EnvelopeSchema>;
 export type RuntimeV2HelloPayload = z.infer<typeof runtimeV2HelloPayloadSchema>;
 export type RuntimeV2HelloEnvelope = z.infer<typeof runtimeV2HelloEnvelopeSchema>;
+export type RuntimeV2InitializePayload = z.infer<typeof runtimeV2InitializePayloadSchema>;
+export type RuntimeV2InitializeEnvelope = z.infer<typeof runtimeV2InitializeEnvelopeSchema>;
+export type RuntimeV2ReadyPayload = z.infer<typeof runtimeV2ReadyPayloadSchema>;
+export type RuntimeV2ReadyEnvelope = z.infer<typeof runtimeV2ReadyEnvelopeSchema>;
 
 export class RuntimeV2ProtocolVersionError extends Error {
   readonly code = "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED";
@@ -88,6 +133,18 @@ export function parseRuntimeV2HelloEnvelope(value: unknown): RuntimeV2HelloEnvel
   const version = readProtocolVersion(value);
   if (version !== RUNTIME_V2_PROTOCOL_VERSION) throw new RuntimeV2ProtocolVersionError(version);
   return runtimeV2HelloEnvelopeSchema.parse(value);
+}
+
+export function parseRuntimeV2InitializeEnvelope(value: unknown): RuntimeV2InitializeEnvelope {
+  const version = readProtocolVersion(value);
+  if (version !== RUNTIME_V2_PROTOCOL_VERSION) throw new RuntimeV2ProtocolVersionError(version);
+  return runtimeV2InitializeEnvelopeSchema.parse(value);
+}
+
+export function parseRuntimeV2ReadyEnvelope(value: unknown): RuntimeV2ReadyEnvelope {
+  const version = readProtocolVersion(value);
+  if (version !== RUNTIME_V2_PROTOCOL_VERSION) throw new RuntimeV2ProtocolVersionError(version);
+  return runtimeV2ReadyEnvelopeSchema.parse(value);
 }
 
 function readProtocolVersion(value: unknown): unknown {

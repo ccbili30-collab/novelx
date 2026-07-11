@@ -57,7 +57,49 @@ Runtime starts by emitting `runtime.hello`:
 
 Electron answers with `runtime.initialize`, selecting one protocol version and providing application identity, workspace database location, public feature flags and host capability versions. Credentials are never included in the handshake.
 
-Runtime responds with `runtime.ready` only after migrations, journal integrity checks and incomplete-run discovery succeed. Failure produces `runtime.initialization_failed`; Electron must not route live work to Runtime V2.
+The V1 payload is strict; unknown fields are rejected:
+
+```json
+{
+  "selectedProtocolVersion": 1,
+  "application": {
+    "id": "novelx.desktop",
+    "version": "0.2.7",
+    "commit": "desktop-development"
+  },
+  "workspaceDatabasePath": "C:\\NovelX\\project\\.novax\\workspace.db",
+  "featureFlags": {
+    "runtime_v2": true,
+    "recovery": false
+  },
+  "hostCapabilityVersions": {
+    "project_tools": "1.0.0",
+    "change_set": "2.0.0"
+  }
+}
+```
+
+`runtime.initialize` must be a `command` message, must use protocol version `1`, and must set both `correlationId` and `runId` to `null`.
+
+The handshake-only foundation responds with `runtime.ready` after validating this payload. Before Runtime V2 is allowed to accept live work, initialization will also include migrations, journal integrity checks and incomplete-run discovery; failure then produces `runtime.initialization_failed`, and Electron must not route live work to Runtime V2.
+
+The current handshake-only binary emits this strict `runtime.ready` payload after validating initialization:
+
+```json
+{
+  "selectedProtocolVersion": 1,
+  "runtime": {
+    "version": "0.1.0",
+    "build": {
+      "commit": "runtime-development",
+      "target": "x86_64-pc-windows-msvc"
+    }
+  },
+  "recoveredRunCount": 0
+}
+```
+
+The `runtime.ready` envelope uses sequence `2` and correlates to the `messageId` of `runtime.initialize`. After readiness, the handshake-only binary performs no run action and waits for stdin EOF. Any additional line is a protocol error and terminates the process with a non-zero exit code.
 
 ## 4. Run Commands
 
