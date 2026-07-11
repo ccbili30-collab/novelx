@@ -1,0 +1,16 @@
+[package]
+name = "novelx-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "novelx-runtime"
+path = "src/main.rs"
+
+[dependencies]
+novelx-protocol = { path = "../novelx-protocol" }
+serde_json.workspace = true
+time.workspace = true
+

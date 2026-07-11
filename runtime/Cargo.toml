@@ -1,0 +1,18 @@
+[workspace]
+members = [
+  "crates/novelx-protocol",
+  "crates/novelx-runtime",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-only"
+rust-version = "1.95"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+time = { version = "0.3", features = ["formatting"] }
+uuid = { version = "1.18", features = ["serde", "v4"] }
+
