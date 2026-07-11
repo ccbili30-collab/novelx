@@ -61,6 +61,10 @@ import {
   decompositionCandidateDecideRequestSchema,
   importCandidateProposeRequestSchema,
   importCandidateProposeResultSchema,
+  projectFileListRequestSchema,
+  projectFileListResultSchema,
+  projectFileReadRequestSchema,
+  projectFileReadResultSchema,
   workspaceRestoreRequestSchema,
   workspaceRestoreResultSchema,
   safeChangeSetDetailSchema,
@@ -107,6 +111,7 @@ import { CreativeRelationRepository } from "../domain/workspace/creativeRelation
 import { ConstraintProfileRepository } from "../domain/workspace/constraintProfileRepository";
 import { ConstraintProfileService } from "../domain/workspace/constraintProfileService";
 import { ProjectFileVersionService } from "../domain/workspace/projectFileVersionService";
+import { ProjectFileService } from "../domain/workspace/projectFileService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import { DocumentEditorService } from "../domain/workspace/documentEditorService";
 import { CreativeDocumentEditorService } from "../domain/workspace/creativeDocumentEditorService";
@@ -156,6 +161,14 @@ export class WorkspaceSession {
 
   getCurrent(): WorkspaceSnapshot | null {
     return this.#workspace ? this.snapshot() : null;
+  }
+
+  listProjectFiles(relativePath = "") {
+    return new ProjectFileService(this.requireWorkspace().rootPath).list(relativePath);
+  }
+
+  readProjectFile(relativePath: string) {
+    return new ProjectFileService(this.requireWorkspace().rootPath).read(relativePath);
   }
 
   listCheckpointHistory(): CheckpointHistoryEntry[] {
@@ -476,6 +489,22 @@ export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolic
     nullableContextBudgetAuditSchema.parse(session.getCurrent() ? session.getLatestContextBudget() : null)
   ));
   ipcMain.handle(desktopIpcChannels.workspaceDoctor, () => projectDoctorResult(() => session.inspectProject()));
+  ipcMain.handle(desktopIpcChannels.projectFileList, (_event, payload: unknown) => {
+    const request = projectFileListRequestSchema.parse(payload ?? {});
+    try {
+      return projectFileListResultSchema.parse({ ok: true, ...session.listProjectFiles(request.relativePath) });
+    } catch (error) {
+      return projectFileListResultSchema.parse({ ok: false, error: publicProjectFileError(error) });
+    }
+  });
+  ipcMain.handle(desktopIpcChannels.projectFileRead, (_event, payload: unknown) => {
+    const request = projectFileReadRequestSchema.parse(payload);
+    try {
+      return projectFileReadResultSchema.parse({ ok: true, file: session.readProjectFile(request.path) });
+    } catch (error) {
+      return projectFileReadResultSchema.parse({ ok: false, error: publicProjectFileError(error) });
+    }
+  });
   ipcMain.handle(desktopIpcChannels.storyProfileCreate, (_event, payload: unknown) => storyProfileResult(() => {
     const request = storyProfileCreateRequestSchema.parse(payload);
     return session.createStoryProfile(request);
@@ -692,6 +721,17 @@ function readPublicCode(error: unknown, fallback: string): string {
     return (error as { code: string }).code.slice(0, 120);
   }
   return fallback;
+}
+
+function publicProjectFileError(error: unknown): { code: string; message: string } {
+  const code = readPublicCode(error, "PROJECT_FILE_OPERATION_FAILED");
+  const messages: Record<string, string> = {
+    WORKSPACE_NOT_OPEN: "尚未打开项目。",
+    PROJECT_FILE_PATH_OUTSIDE_ROOT: "不能读取项目目录之外的文件。",
+    PROJECT_FILE_PATH_RESTRICTED: "这个路径属于 NovelX 内部目录，不能在这里打开。",
+    PROJECT_FILE_NOT_A_FILE: "所选项目内容不是可读取的文件。",
+  };
+  return { code, message: messages[code] ?? "读取项目文件失败，请重新扫描项目后再试。" };
 }
 
 function readCreativeErrorMessage(error: unknown): string {

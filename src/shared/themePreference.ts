@@ -1,4 +1,4 @@
-export const NOVAX_THEMES = ["white", "dark", "high-contrast"] as const;
+export const NOVAX_THEMES = ["white", "cloude", "dark", "high-contrast"] as const;
 
 export type NovaxTheme = typeof NOVAX_THEMES[number];
 

@@ -68,6 +68,8 @@ export const desktopIpcChannels = {
   workspaceFlushRequest: "novax:workspace-flush-request",
   workspaceFlushComplete: "novax:workspace-flush-complete",
   workspaceMutate: "novax:workspace-mutate",
+  projectFileList: "novax:project-file-list",
+  projectFileRead: "novax:project-file-read",
   documentGet: "novax:document-get",
   documentSaveWorking: "novax:document-save-working",
   documentSaveStable: "novax:document-save-stable",
@@ -137,6 +139,56 @@ export const projectInitializeRequestSchema = z.object({
   projectId: opaqueIdSchema,
   strategy: z.enum(["new", "adopt"]),
 }).strict();
+
+export const projectFileListRequestSchema = z.object({
+  relativePath: z.string().max(32_768).optional().default(""),
+}).strict();
+
+export const projectFileEntrySchema = z.object({
+  path: z.string().min(1).max(32_768),
+  kind: z.enum(["file", "directory"]),
+  size: z.number().int().nonnegative().nullable(),
+  modifiedAt: z.iso.datetime(),
+}).strict();
+
+export const projectFileListResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    root: z.string().min(1).max(32_768),
+    entries: z.array(projectFileEntrySchema).max(2_000),
+    ignoredDirectories: z.array(z.string().min(1).max(240)).max(100),
+    incomplete: z.boolean(),
+    omittedEntries: z.number().int().nonnegative(),
+  }).strict(),
+  z.object({
+    ok: z.literal(false),
+    error: z.object({ code: z.string().min(1).max(120), message: z.string().min(1).max(500) }).strict(),
+  }).strict(),
+]);
+
+export const projectFileReadRequestSchema = z.object({
+  path: z.string().trim().min(1).max(32_768),
+}).strict();
+
+export const projectFileReadResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    file: z.object({
+      path: z.string().min(1).max(32_768),
+      kind: z.enum(["text", "binary"]),
+      size: z.number().int().nonnegative(),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      content: z.string().nullable(),
+      complete: z.boolean(),
+      originalChars: z.number().int().nonnegative().nullable(),
+      returnedChars: z.number().int().nonnegative(),
+    }).strict(),
+  }).strict(),
+  z.object({
+    ok: z.literal(false),
+    error: z.object({ code: z.string().min(1).max(120), message: z.string().min(1).max(500) }).strict(),
+  }).strict(),
+]);
 
 export const sessionSummarySchema = z.object({
   id: opaqueIdSchema,
@@ -1149,6 +1201,11 @@ export type ProjectRemoveRequest = z.infer<typeof projectRemoveRequestSchema>;
 export type ProjectRestoreRequest = z.infer<typeof projectRestoreRequestSchema>;
 export type ProjectRescanRequest = z.infer<typeof projectRescanRequestSchema>;
 export type ProjectInitializeRequest = z.infer<typeof projectInitializeRequestSchema>;
+export type ProjectFileListRequest = z.input<typeof projectFileListRequestSchema>;
+export type ProjectFileEntry = z.infer<typeof projectFileEntrySchema>;
+export type ProjectFileListResult = z.infer<typeof projectFileListResultSchema>;
+export type ProjectFileReadRequest = z.infer<typeof projectFileReadRequestSchema>;
+export type ProjectFileReadResult = z.infer<typeof projectFileReadResultSchema>;
 export type SessionSummary = z.infer<typeof sessionSummarySchema>;
 export type SessionListRequest = z.input<typeof sessionListRequestSchema>;
 export type SessionListResult = z.infer<typeof sessionListResultSchema>;
@@ -1303,6 +1360,8 @@ export interface DesktopApi {
     subscribeFlushRequest(listener: (request: WorkspaceFlushRequest) => void): () => void;
     completeFlush(request: WorkspaceFlushComplete): void;
     mutate(request: CreativeWorkspaceMutation): Promise<WorkspaceSnapshot>;
+    listProjectFiles(request?: ProjectFileListRequest): Promise<ProjectFileListResult>;
+    readProjectFile(request: ProjectFileReadRequest): Promise<ProjectFileReadResult>;
   };
   play: {
     createStoryProfile(request: StoryProfileCreateRequest): Promise<StoryProfileCreateResult>;

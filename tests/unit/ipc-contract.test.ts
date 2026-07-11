@@ -88,6 +88,8 @@ describe("desktop IPC contract", () => {
       updateEvent: "novax:update-event",
       projectList: "novax:project-list",
       projectAdd: "novax:project-add",
+      projectFileList: "novax:project-file-list",
+      projectFileRead: "novax:project-file-read",
       projectSelect: "novax:project-select",
       projectRemove: "novax:project-remove",
       projectRestore: "novax:project-restore",

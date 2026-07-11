@@ -6,7 +6,7 @@
 .agent-markdown ul, .agent-markdown ol { padding-left: 1.4em; }
 .agent-markdown blockquote { margin-left: 0; padding-left: 0.8em; border-left: 2px solid var(--line); color: var(--muted); }
 .agent-markdown pre { max-width: 100%; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--paper) 84%, black); }
-.agent-markdown code { font-family: Consolas, "Cascadia Code", monospace; font-size: 0.9em; }
+.agent-markdown code { font-family: var(--novax-font-code); font-size: 0.9em; }
 .agent-markdown table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
 .agent-markdown th, .agent-markdown td { padding: 5px 8px; border: 1px solid var(--line); text-align: left; }
 .agent-markdown__blocked-media, .agent-mermaid--blocked { display: block; padding: 8px 10px; border-left: 3px solid var(--danger); color: var(--muted); }

@@ -20,8 +20,14 @@ describe("theme preference", () => {
     const storage = { setItem: (key: string, value: string) => void values.set(key, value) };
     applyThemePreference("dark", root, storage);
     expect(root.dataset.theme).toBe("dark");
+    applyThemePreference("cloude", root, storage);
+    expect(root.dataset.theme).toBe("cloude");
     applyThemePreference("white", root, storage);
     expect(root.dataset.theme).toBe("white");
     expect(values.get("novax.appearance.theme")).toBe("white");
+  });
+
+  it("restores the cloude theme from storage", () => {
+    expect(readThemePreference({ getItem: () => "cloude" })).toBe("cloude");
   });
 });

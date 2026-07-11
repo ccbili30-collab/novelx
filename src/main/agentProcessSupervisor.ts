@@ -62,7 +62,7 @@ export interface AgentWorkerProcess {
   once(event: "spawn", listener: () => void): this;
   once(event: "error", listener: (error: Error) => void): this;
   once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
-  send(message: unknown): boolean;
+  send(message: unknown, callback?: (error: Error | null) => void): boolean;
   kill(): boolean;
 }
 
@@ -89,6 +89,17 @@ interface AgentProcessSupervisorOptions {
   toolTimeoutMs?: number;
   cancelGraceMs?: number;
   spawnWorker?(workerPath: string): AgentWorkerProcess;
+  reportWorkerDiagnostic?(diagnostic: AgentWorkerDiagnostic): void;
+}
+
+export interface AgentWorkerDiagnostic {
+  runId: string;
+  event: "process_error" | "process_exit" | "send_failed";
+  phase: "runtime" | "startup" | "tool_response" | "audit_response";
+  errorName?: string;
+  errorMessage?: string;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
 }
 
 export interface AgentRuntimeLease {
@@ -107,6 +118,7 @@ export class AgentProcessSupervisor {
   readonly #toolTimeoutMs: number;
   readonly #cancelGraceMs: number;
   readonly #spawnWorker: (workerPath: string) => AgentWorkerProcess;
+  readonly #reportWorkerDiagnostic: (diagnostic: AgentWorkerDiagnostic) => void;
 
   constructor(workerPath: string, options: AgentProcessSupervisorOptions = {}) {
     this.#workerPath = workerPath;
@@ -115,6 +127,7 @@ export class AgentProcessSupervisor {
     this.#toolTimeoutMs = options.toolTimeoutMs ?? 15_000;
     this.#cancelGraceMs = options.cancelGraceMs ?? 1_000;
     this.#spawnWorker = options.spawnWorker ?? spawnWorkerProcess;
+    this.#reportWorkerDiagnostic = options.reportWorkerDiagnostic ?? (() => undefined);
   }
 
   start(
@@ -169,8 +182,20 @@ export class AgentProcessSupervisor {
     this.#runs.set(runId, run);
 
     child.on("message", (payload: unknown) => this.#handleWorkerMessage(runId, payload));
-    child.once("error", () => this.#interrupt(runId));
-    child.once("exit", () => this.#interrupt(runId));
+    child.once("error", (error) => this.#interrupt(runId, {
+      runId,
+      event: "process_error",
+      phase: "runtime",
+      errorName: error.name,
+      errorMessage: error.message,
+    }));
+    child.once("exit", (exitCode, signal) => this.#interrupt(runId, {
+      runId,
+      event: "process_exit",
+      phase: "runtime",
+      exitCode,
+      signal,
+    }));
     child.once("spawn", () => {
       const { projectId: _projectId, sessionId: _sessionId, scopeResourceIds: _requestedScopes, ...workerRequest } = request;
       const command = agentWorkerRunStartCommandSchema.parse({
@@ -183,7 +208,7 @@ export class AgentProcessSupervisor {
         toolsAvailable: true,
         providerProfile,
       });
-      if (!child.send(command)) this.#interrupt(runId);
+      this.#sendWorkerMessage(runId, run, command, "startup");
     });
 
     return runId;
@@ -545,7 +570,7 @@ export class AgentProcessSupervisor {
       return;
     }
     try {
-      if (!run.child.send(parsed.data)) this.#interruptByRun(run);
+      this.#sendWorkerMessageByRun(run, parsed.data, "tool_response");
     } catch {
       this.#interruptByRun(run);
     }
@@ -565,7 +590,7 @@ export class AgentProcessSupervisor {
       error: { code, message: TOOL_ERROR_MESSAGES[code] },
     });
     try {
-      if (!run.child.send(response)) this.#interrupt(runId);
+      this.#sendWorkerMessage(runId, run, response, "tool_response");
     } catch {
       this.#interrupt(runId);
     }
@@ -580,9 +605,16 @@ export class AgentProcessSupervisor {
     run.releaseLease();
   }
 
-  #interrupt(runId: string): void {
+  #interrupt(runId: string, diagnostic?: AgentWorkerDiagnostic): void {
     const run = this.#runs.get(runId);
     if (!run) return;
+    if (diagnostic) {
+      try {
+        this.#reportWorkerDiagnostic(diagnostic);
+      } catch {
+        // Diagnostics cannot replace the fail-closed runtime path.
+      }
+    }
     try {
       run.audit.terminalizeOpenRun(runId, "interrupted", "AGENT_WORKER_INTERRUPTED");
     } catch {
@@ -598,6 +630,48 @@ export class AgentProcessSupervisor {
     for (const [runId, active] of this.#runs) {
       if (active === run) {
         this.#interrupt(runId);
+        return;
+      }
+    }
+  }
+
+  #sendWorkerMessage(
+    runId: string,
+    run: ActiveRun,
+    message: unknown,
+    phase: AgentWorkerDiagnostic["phase"],
+  ): void {
+    try {
+      run.child.send(message, (error) => {
+        if (!error) return;
+        this.#interrupt(runId, {
+          runId,
+          event: "send_failed",
+          phase,
+          errorName: error.name,
+          errorMessage: error.message,
+        });
+      });
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error("Agent Worker send failed.");
+      this.#interrupt(runId, {
+        runId,
+        event: "send_failed",
+        phase,
+        errorName: normalized.name,
+        errorMessage: normalized.message,
+      });
+    }
+  }
+
+  #sendWorkerMessageByRun(
+    run: ActiveRun,
+    message: unknown,
+    phase: AgentWorkerDiagnostic["phase"],
+  ): void {
+    for (const [runId, active] of this.#runs) {
+      if (active === run) {
+        this.#sendWorkerMessage(runId, run, message, phase);
         return;
       }
     }
@@ -713,7 +787,7 @@ export class AgentProcessSupervisor {
           error: { code: "AGENT_AUDIT_REQUIRED", message: "Agent audit persistence failed." },
         });
     try {
-      if (!run.child.send(response)) this.#interruptByRun(run);
+      this.#sendWorkerMessageByRun(run, response, "audit_response");
     } catch {
       this.#interruptByRun(run);
     }
