@@ -10,6 +10,9 @@ import { CreativeRelationRepository } from "../workspace/creativeRelationReposit
 import { ConstraintProfileRepository } from "../workspace/constraintProfileRepository";
 import { AgentAuditRepository } from "../audit/agentAuditRepository";
 import { canonicalAuditHash } from "../audit/canonicalAuditHash";
+import { CreativeCommitService } from "../commit/creativeCommitService";
+import { ProjectionCoordinator } from "../projection/projectionCoordinator";
+import { SemanticGraphProjector } from "../projection/semanticGraphProjector";
 import {
   ChangeSetRepository,
   type ChangeSetConflictRecord,
@@ -545,7 +548,9 @@ export class ChangeSetService {
       }
       this.#repository.markCommitted(changeSetId, checkpointId);
       new AgentAuditRepository(this.workspace).linkChangeSetOutputs(changeSetId);
+      new CreativeCommitService(this.workspace).sealCheckpoint(checkpointId);
       this.workspace.db.exec("COMMIT");
+      new ProjectionCoordinator(this.workspace, [new SemanticGraphProjector(this.workspace)]).runAll(checkpointId);
       return this.#repository.getRequired(changeSetId);
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");

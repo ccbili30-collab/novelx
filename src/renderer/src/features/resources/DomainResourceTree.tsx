@@ -1,4 +1,4 @@
-import { BookOpenText, ChevronDown, CircleUserRound, Clock3, FileText, FolderInput, GitBranch, Image, Map, Network, Pencil, Plus, Trash2 } from "lucide-react";
+import { BookOpenText, ChevronDown, CircleUserRound, Clock3, FileText, FolderInput, GitBranch, Image, Map, Network, Pencil, Plus, Stethoscope, Trash2 } from "lucide-react";
 import type { WorkspaceSnapshot } from "../../../../shared/ipcContract";
 
 type WorkspaceResource = WorkspaceSnapshot["resources"][number];
@@ -26,6 +26,7 @@ interface DomainResourceTreeProps {
   onMove(resource: WorkspaceResource): void;
   onDelete(resource: WorkspaceResource): void;
   onOpenHistory(): void;
+  onOpenDoctor(): void;
 }
 
 export function DomainResourceTree(props: DomainResourceTreeProps) {
@@ -92,6 +93,7 @@ export function DomainResourceTree(props: DomainResourceTreeProps) {
         </div><div className="project-tool-list" aria-label="项目工具">
           <span>项目工具</span>
           <button type="button" onClick={props.onOpenHistory}><GitBranch size={14} aria-hidden="true" /><span>版本与分支</span></button>
+          <button type="button" onClick={props.onOpenDoctor}><Stethoscope size={14} aria-hidden="true" /><span>项目体检</span></button>
         </div></>
       )}
     </aside>

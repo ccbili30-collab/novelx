@@ -2,6 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { SQLOutputValue } from "node:sqlite";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 import { CheckpointRepository } from "../version/checkpointRepository";
+import { CreativeCommitService } from "../commit/creativeCommitService";
+import { ProjectionCoordinator } from "../projection/projectionCoordinator";
+import { SemanticGraphProjector } from "../projection/semanticGraphProjector";
 
 export type ChangeSetMode = "free" | "assist";
 export type ChangeSetStatus = "pending" | "committed" | "rejected" | "failed";
@@ -131,7 +134,9 @@ export class ChangeSetRepository {
       const checkpointId = this.#checkpoints.appendCheckpoint(changeSet.branchId, label);
       apply(checkpointId);
       this.markCommitted(id, checkpointId);
+      new CreativeCommitService(this.workspace).sealCheckpoint(checkpointId);
       this.workspace.db.exec("COMMIT");
+      new ProjectionCoordinator(this.workspace, [new SemanticGraphProjector(this.workspace)]).runAll(checkpointId);
       return checkpointId;
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");

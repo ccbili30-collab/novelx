@@ -175,7 +175,11 @@ function migrate(db: DatabaseSync): void {
     migrateCheckpointAttributionSchema(db);
     schema = { version: 9 };
   }
-  if (schema.version !== 9) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 9) {
+    migrateCreativeCommitProjectionSchema(db);
+    schema = { version: 10 };
+  }
+  if (schema.version !== 10) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -190,6 +194,12 @@ function migrate(db: DatabaseSync): void {
       .run(branchId, "main", now);
     db.prepare("INSERT INTO checkpoints (id, branch_id, parent_checkpoint_id, sequence, label, actor_kind, source_change_set_id, created_at) VALUES (?, ?, NULL, 0, ?, 'import', NULL, ?)")
       .run(checkpointId, branchId, "工作区初始化", now);
+    db.prepare(`
+      INSERT INTO creative_commits (
+        id, branch_id, parent_commit_id, kind, actor_kind, source_change_set_id,
+        label, manifest_sha256, sealed_at, created_at
+      ) VALUES (?, ?, NULL, 'initialization', 'import', NULL, ?, NULL, NULL, ?)
+    `).run(checkpointId, branchId, "工作区初始化", now);
     db.prepare("UPDATE branches SET head_checkpoint_id = ? WHERE id = ?").run(checkpointId, branchId);
     db.prepare("INSERT INTO workspace_state (singleton, workspace_id, active_branch_id) VALUES (1, ?, ?)")
       .run(workspaceId, branchId);
@@ -204,6 +214,94 @@ function migrate(db: DatabaseSync): void {
       insertResource.run(resourceId);
       insertRevision.run(randomUUID(), resourceId, type, title, checkpointId, index, now);
     }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateCreativeCommitProjectionSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS creative_commits (
+        id TEXT PRIMARY KEY REFERENCES checkpoints(id) ON DELETE CASCADE,
+        branch_id TEXT NOT NULL REFERENCES branches(id),
+        parent_commit_id TEXT REFERENCES creative_commits(id),
+        kind TEXT NOT NULL CHECK (kind IN ('initialization', 'manual', 'change_set', 'import', 'retcon')),
+        actor_kind TEXT NOT NULL CHECK (actor_kind IN ('user', 'agent', 'import')),
+        source_change_set_id TEXT,
+        label TEXT NOT NULL,
+        manifest_sha256 TEXT CHECK (manifest_sha256 IS NULL OR length(manifest_sha256) = 64),
+        sealed_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS creative_commits_branch_idx ON creative_commits(branch_id, created_at, id);
+      CREATE TABLE IF NOT EXISTS creative_commit_entries (
+        commit_id TEXT NOT NULL REFERENCES creative_commits(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        artifact_kind TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        artifact_sha256 TEXT NOT NULL CHECK (length(artifact_sha256) = 64),
+        source_item_id TEXT,
+        PRIMARY KEY (commit_id, artifact_kind, artifact_id),
+        UNIQUE (commit_id, ordinal)
+      );
+      CREATE TABLE IF NOT EXISTS projection_runs (
+        id TEXT PRIMARY KEY,
+        commit_id TEXT NOT NULL REFERENCES creative_commits(id) ON DELETE CASCADE,
+        projection_kind TEXT NOT NULL,
+        attempt INTEGER NOT NULL CHECK (attempt > 0),
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+        input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+        output_sha256 TEXT CHECK (output_sha256 IS NULL OR length(output_sha256) = 64),
+        error_code TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        UNIQUE (commit_id, projection_kind, attempt)
+      );
+      CREATE INDEX IF NOT EXISTS projection_runs_commit_idx
+        ON projection_runs(commit_id, projection_kind, attempt DESC);
+      CREATE TRIGGER IF NOT EXISTS creative_commits_sealed_immutable
+      BEFORE UPDATE OF manifest_sha256, sealed_at ON creative_commits
+      WHEN OLD.sealed_at IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'CREATIVE_COMMIT_ALREADY_SEALED');
+      END;
+      CREATE TRIGGER IF NOT EXISTS creative_commit_entries_insert_guard
+      BEFORE INSERT ON creative_commit_entries
+      WHEN (SELECT sealed_at FROM creative_commits WHERE id = NEW.commit_id) IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'CREATIVE_COMMIT_ALREADY_SEALED');
+      END;
+      CREATE TRIGGER IF NOT EXISTS creative_commit_entries_update_guard
+      BEFORE UPDATE ON creative_commit_entries
+      WHEN (SELECT sealed_at FROM creative_commits WHERE id = OLD.commit_id) IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'CREATIVE_COMMIT_ALREADY_SEALED');
+      END;
+      CREATE TRIGGER IF NOT EXISTS creative_commit_entries_delete_guard
+      BEFORE DELETE ON creative_commit_entries
+      WHEN (SELECT sealed_at FROM creative_commits WHERE id = OLD.commit_id) IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'CREATIVE_COMMIT_ALREADY_SEALED');
+      END;
+      INSERT OR IGNORE INTO creative_commits (
+        id, branch_id, parent_commit_id, kind, actor_kind, source_change_set_id,
+        label, manifest_sha256, sealed_at, created_at
+      )
+      SELECT id, branch_id, parent_checkpoint_id,
+        CASE
+          WHEN sequence = 0 THEN 'initialization'
+          WHEN source_change_set_id IS NOT NULL THEN 'change_set'
+          WHEN actor_kind = 'import' THEN 'import'
+          ELSE 'manual'
+        END,
+        actor_kind, source_change_set_id, label, NULL, NULL, created_at
+      FROM checkpoints;
+      UPDATE schema_meta SET version = 10 WHERE singleton = 1;
+    `);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

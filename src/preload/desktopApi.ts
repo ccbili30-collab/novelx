@@ -35,6 +35,7 @@ import {
   graphSnapshotResultSchema,
   nullableWorkspaceSnapshotSchema,
   nullableContextBudgetAuditSchema,
+  projectDoctorResultSchema,
   nullableProjectAddResultSchema,
   projectInitializeRequestSchema,
   projectListResultSchema,
@@ -214,6 +215,9 @@ export function exposeDesktopApi(): void {
       },
       async getLatestContextBudget() {
         return nullableContextBudgetAuditSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.workspaceContextBudget));
+      },
+      async inspectProject() {
+        return projectDoctorResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.workspaceDoctor));
       },
       async restore(request) {
         const safeRequest = workspaceRestoreRequestSchema.parse(request);

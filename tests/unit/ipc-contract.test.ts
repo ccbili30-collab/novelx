@@ -109,6 +109,7 @@ describe("desktop IPC contract", () => {
       workspaceOpen: "novax:workspace-open",
       workspaceCurrent: "novax:workspace-current",
       workspaceHistory: "novax:workspace-history",
+      workspaceDoctor: "novax:workspace-doctor",
       workspaceContextBudget: "novax:workspace-context-budget",
       workspaceRestore: "novax:workspace-restore",
       workspaceFlushRequest: "novax:workspace-flush-request",

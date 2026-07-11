@@ -9,6 +9,7 @@ import {
   Plus,
   RefreshCw,
   GitBranch,
+  Stethoscope,
   Trash2,
 } from "lucide-react";
 import type { MouseEvent } from "react";
@@ -34,6 +35,7 @@ interface ProjectSessionRailProps {
   onDeleteSession?(sessionId: string): Promise<void>;
   onExportSession?(sessionId: string): Promise<void>;
   onOpenProjectHistory?(projectId: string): Promise<void>;
+  onOpenProjectDoctor?(projectId: string): Promise<void>;
 }
 
 export function ProjectSessionRail(props: ProjectSessionRailProps) {
@@ -104,12 +106,13 @@ export function ProjectSessionRail(props: ProjectSessionRailProps) {
 }
 
 function ProjectActions({ project, props }: { project: ProjectSummary; props: ProjectSessionRailProps }) {
-  if (!props.onRemoveProject && !props.onRescanProject && !props.onOpenProjectHistory) return null;
+  if (!props.onRemoveProject && !props.onRescanProject && !props.onOpenProjectHistory && !props.onOpenProjectDoctor) return null;
   return (
     <details className="rail-actions">
       <summary title="项目操作"><MoreHorizontal size={14} aria-hidden="true" /></summary>
       <div className="rail-actions__menu">
         {props.onOpenProjectHistory ? <button type="button" onClick={(event) => { closeActionMenu(event); void props.onOpenProjectHistory?.(project.id); }}><GitBranch size={13} />版本与分支</button> : null}
+        {props.onOpenProjectDoctor ? <button type="button" onClick={(event) => { closeActionMenu(event); void props.onOpenProjectDoctor?.(project.id); }}><Stethoscope size={13} />项目体检</button> : null}
         {props.onRescanProject ? <button type="button" onClick={(event) => { closeActionMenu(event); void props.onRescanProject?.(project.id); }}><RefreshCw size={13} />重新扫描</button> : null}
         {props.onRemoveProject ? <button type="button" onClick={(event) => {
           closeActionMenu(event);

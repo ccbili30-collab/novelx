@@ -18,26 +18,34 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates the schema 6 creative object storage", () => {
+  it("creates schema 10 creative commit and projection storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 9 });
+      .toEqual({ version: 10 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
       "constraint_profile_versions",
       "working_constraint_profiles",
+      "creative_commits",
+      "creative_commit_entries",
+      "projection_runs",
     ]));
     expect(listIndexes(workspace)).toEqual(expect.arrayContaining([
       "creative_documents_resource_idx",
       "creative_relation_versions_identity_idx",
       "creative_relation_versions_target_idx",
       "constraint_profile_versions_scope_idx",
+      "creative_commits_branch_idx",
+      "projection_runs_commit_idx",
     ]));
+    expect(workspace.db.prepare("SELECT id, kind, sealed_at FROM creative_commits").all()).toMatchObject([
+      { kind: "initialization", sealed_at: null },
+    ]);
   });
 
   it("keeps logical domain roots internal until they contain user content or are renamed", () => {

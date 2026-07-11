@@ -10,6 +10,7 @@ import { CreativeDocumentEditorHost } from "./features/editor/CreativeDocumentEd
 import { DocumentTabs } from "./features/editor/DocumentTabs";
 import { CreateDocumentDialog } from "./features/editor/CreateDocumentDialog";
 import { CheckpointHistoryDialog } from "./features/history/CheckpointHistoryDialog";
+import { ProjectDoctorDialog } from "./features/doctor/ProjectDoctorDialog";
 import { ProjectOnboardingDialog } from "./features/projects/ProjectOnboardingDialog";
 import { ProjectSessionRail } from "./features/projects/ProjectSessionRail";
 import { HandoffDialog } from "./features/projects/HandoffDialog";
@@ -51,6 +52,7 @@ export function App() {
   const [sessionMessageRefreshKey, setSessionMessageRefreshKey] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [doctorOpen, setDoctorOpen] = useState(false);
   const [updateState, setUpdateState] = useState<DesktopUpdateState | null>(null);
   const [addingProject, setAddingProject] = useState(false);
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
@@ -489,6 +491,12 @@ export function App() {
     setHistoryOpen(true);
   }
 
+  async function openProjectDoctor(projectId = activeProjectId) {
+    if (!projectId) return;
+    if (projectId !== activeProjectId) await selectProject(projectId);
+    setDoctorOpen(true);
+  }
+
   const showUpdateCommand = updateState
     ? ["available", "downloading", "downloaded", "error"].includes(updateState.kind)
     : false;
@@ -537,6 +545,7 @@ export function App() {
             onDeleteSession={deleteSession}
             onExportSession={exportSession}
             onOpenProjectHistory={openProjectVersions}
+            onOpenProjectDoctor={openProjectDoctor}
           />
           {agentPanel}
           {selectedChangeSetId ? (
@@ -569,6 +578,7 @@ export function App() {
             onMove={setMoveResource}
             onDelete={setDeleteResourceTarget}
             onOpenHistory={() => void openProjectVersions()}
+            onOpenDoctor={() => void openProjectDoctor()}
           />
           <section className="canvas" aria-label="创作内容">
             {selectedChangeSetId ? (
@@ -617,6 +627,7 @@ export function App() {
         setSelectedChangeSetId(null);
         setChangeSetRefreshKey((value) => value + 1);
       }} /> : null}
+      {doctorOpen && workspace ? <ProjectDoctorDialog workspaceId={workspace.workspaceId} onClose={() => setDoctorOpen(false)} /> : null}
       {createObjectTarget ? <CreateCreativeObjectDialog
         domain={createObjectTarget.domain}
         parent={createObjectTarget.parent}

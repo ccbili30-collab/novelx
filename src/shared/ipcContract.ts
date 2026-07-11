@@ -40,6 +40,7 @@ export const desktopIpcChannels = {
   workspaceCurrent: "novax:workspace-current",
   workspaceHistory: "novax:workspace-history",
   workspaceContextBudget: "novax:workspace-context-budget",
+  workspaceDoctor: "novax:workspace-doctor",
   workspaceRestore: "novax:workspace-restore",
   workspaceFlushRequest: "novax:workspace-flush-request",
   workspaceFlushComplete: "novax:workspace-flush-complete",
@@ -415,6 +416,44 @@ export const contextBudgetAuditSchema = z.object({
 }).strict();
 
 export const nullableContextBudgetAuditSchema = contextBudgetAuditSchema.nullable();
+
+export const projectDoctorIssueSchema = z.object({
+  code: z.enum([
+    "COMMIT_UNSEALED",
+    "COMMIT_MANIFEST_MISMATCH",
+    "PROJECTION_MISSING",
+    "PROJECTION_FAILED",
+    "PROJECTION_STALE",
+  ]),
+  severity: z.enum(["warning", "blocked"]),
+  commitId: opaqueIdSchema,
+  projectionKind: z.string().min(1).max(120).nullable(),
+  repairAvailable: z.boolean(),
+}).strict();
+
+export const projectDoctorReportSchema = z.object({
+  status: z.enum(["healthy", "warning", "blocked"]),
+  checkedAt: z.iso.datetime(),
+  counts: z.object({
+    commits: z.number().int().min(0),
+    sealedCommits: z.number().int().min(0),
+    openBranchHeads: z.number().int().min(0),
+    successfulHeadProjections: z.number().int().min(0),
+  }).strict(),
+  issues: z.array(projectDoctorIssueSchema).max(100_000),
+  deferredCapabilities: z.array(z.enum(["timeline", "retrieval", "summary", "character_knowledge"])).max(4),
+}).strict();
+
+export const projectDoctorResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), report: projectDoctorReportSchema }).strict(),
+  z.object({
+    ok: z.literal(false),
+    error: z.object({
+      code: z.enum(["WORKSPACE_NOT_OPEN", "PROJECT_DOCTOR_FAILED"]),
+      message: z.string().min(1).max(240),
+    }).strict(),
+  }).strict(),
+]);
 
 export const workspaceRestoreRequestSchema = z.object({
   checkpointId: z.string().min(1).max(120),
@@ -860,6 +899,8 @@ export type CreativeMutationResult = z.infer<typeof creativeMutationResultSchema
 export type CheckpointHistoryEntry = z.infer<typeof checkpointHistoryEntrySchema>;
 export type WorkspaceHistoryResult = z.infer<typeof workspaceHistoryResultSchema>;
 export type ContextBudgetAudit = z.infer<typeof contextBudgetAuditSchema>;
+export type ProjectDoctorReport = z.infer<typeof projectDoctorReportSchema>;
+export type ProjectDoctorResult = z.infer<typeof projectDoctorResultSchema>;
 export type WorkspaceRestoreRequest = z.infer<typeof workspaceRestoreRequestSchema>;
 export type WorkspaceRestoreResult = z.infer<typeof workspaceRestoreResultSchema>;
 export type WorkspaceFlushRequest = z.infer<typeof workspaceFlushRequestSchema>;
@@ -936,6 +977,7 @@ export interface DesktopApi {
     getCurrent(): Promise<WorkspaceSnapshot | null>;
     listHistory(): Promise<WorkspaceHistoryResult>;
     getLatestContextBudget(): Promise<ContextBudgetAudit | null>;
+    inspectProject(): Promise<ProjectDoctorResult>;
     restore(request: WorkspaceRestoreRequest): Promise<WorkspaceRestoreResult>;
     subscribeFlushRequest(listener: (request: WorkspaceFlushRequest) => void): () => void;
     completeFlush(request: WorkspaceFlushComplete): void;

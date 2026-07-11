@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SQLOutputValue } from "node:sqlite";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
+import { CreativeCommitRepository, type CreativeCommitKind } from "../commit/creativeCommitRepository";
 
 export interface BranchRecord {
   id: string;
@@ -91,13 +92,31 @@ export class CheckpointRepository {
     const parent = this.workspace.db.prepare("SELECT sequence FROM checkpoints WHERE id = ?")
       .get(branch.headCheckpointId) as { sequence: number };
     const id = randomUUID();
+    const actorKind = attribution.actorKind ?? "user";
+    const sourceChangeSetId = attribution.sourceChangeSetId ?? null;
+    const createdAt = new Date().toISOString();
     this.workspace.db.prepare(`
       INSERT INTO checkpoints (id, branch_id, parent_checkpoint_id, sequence, label, actor_kind, source_change_set_id, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, branchId, branch.headCheckpointId, parent.sequence + 1, label.trim(), attribution.actorKind ?? "user", attribution.sourceChangeSetId ?? null, new Date().toISOString());
+    `).run(id, branchId, branch.headCheckpointId, parent.sequence + 1, label.trim(), actorKind, sourceChangeSetId, createdAt);
+    new CreativeCommitRepository(this.workspace).createEnvelope({
+      id,
+      branchId,
+      parentCommitId: branch.headCheckpointId,
+      kind: commitKind(actorKind, sourceChangeSetId),
+      actorKind,
+      sourceChangeSetId,
+      label: label.trim(),
+      createdAt,
+    });
     this.workspace.db.prepare("UPDATE branches SET head_checkpoint_id = ? WHERE id = ?").run(id, branchId);
     return id;
   }
+}
+
+function commitKind(actorKind: "user" | "agent" | "import", sourceChangeSetId: string | null): CreativeCommitKind {
+  if (sourceChangeSetId) return "change_set";
+  return actorKind === "import" ? "import" : "manual";
 }
 
 function mapBranch(row: Record<string, SQLOutputValue>): BranchRecord {

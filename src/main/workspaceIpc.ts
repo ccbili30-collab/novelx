@@ -33,6 +33,7 @@ import {
   workspaceSnapshotSchema,
   workspaceHistoryResultSchema,
   nullableContextBudgetAuditSchema,
+  projectDoctorResultSchema,
   workspaceRestoreRequestSchema,
   workspaceRestoreResultSchema,
   safeChangeSetDetailSchema,
@@ -58,6 +59,7 @@ import {
   type CheckpointHistoryEntry,
   type WorkspaceHistoryResult,
   type WorkspaceRestoreResult,
+  type ProjectDoctorResult,
 } from "../shared/ipcContract";
 import { openWorkspace, type WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
@@ -75,6 +77,7 @@ import { SemanticGraphService } from "../domain/graph/semanticGraphService";
 import type { AgentToolGateway } from "./agentProcessSupervisor";
 import { createWorkspaceAgentToolGateway } from "./workspaceAgentToolGateway";
 import { AgentAuditRepository } from "../domain/audit/agentAuditRepository";
+import { ProjectDoctorService } from "../domain/doctor/projectDoctorService";
 import type { AgentRuntimeLease } from "./agentProcessSupervisor";
 
 export class WorkspaceSession {
@@ -107,6 +110,10 @@ export class WorkspaceSession {
 
   getLatestContextBudget() {
     return new AgentAuditRepository(this.requireWorkspace()).getLatestContextBudget();
+  }
+
+  inspectProject() {
+    return new ProjectDoctorService(this.requireWorkspace()).inspect();
   }
 
   getActiveCheckpointId(): string {
@@ -332,6 +339,7 @@ export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolic
   ipcMain.handle(desktopIpcChannels.workspaceContextBudget, () => (
     nullableContextBudgetAuditSchema.parse(session.getCurrent() ? session.getLatestContextBudget() : null)
   ));
+  ipcMain.handle(desktopIpcChannels.workspaceDoctor, () => projectDoctorResult(() => session.inspectProject()));
   ipcMain.handle(desktopIpcChannels.workspaceRestore, (_event, payload: unknown) => {
     const request = workspaceRestoreRequestSchema.parse(payload);
     return workspaceRestoreResult(() => session.restoreCheckpoint(request.checkpointId));
@@ -516,6 +524,21 @@ function workspaceRestoreResult(operation: () => WorkspaceSnapshot): WorkspaceRe
     return workspaceRestoreResultSchema.parse({ ok: true, workspace: operation() });
   } catch (error) {
     return workspaceRestoreResultSchema.parse({ ok: false, error: publicWorkspaceHistoryError(error) });
+  }
+}
+
+function projectDoctorResult(operation: () => unknown): ProjectDoctorResult {
+  try {
+    return projectDoctorResultSchema.parse({ ok: true, report: operation() });
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      && String((error as { code: unknown }).code) === "WORKSPACE_NOT_OPEN"
+      ? "WORKSPACE_NOT_OPEN"
+      : "PROJECT_DOCTOR_FAILED";
+    const message = code === "WORKSPACE_NOT_OPEN"
+      ? "尚未打开工作区。"
+      : "项目体检失败，请重试。";
+    return projectDoctorResultSchema.parse({ ok: false, error: { code, message } });
   }
 }
 
