@@ -42,20 +42,51 @@ fn allocates_run_and_aggregate_sequences_and_reads_after_cursors() {
 }
 
 #[test]
-fn idempotency_returns_exact_event_and_conflicting_semantics_fail() {
+fn idempotency_ignores_retry_transport_identity_but_rejects_conflicts() {
     let fixture = Fixture::new();
     let mut journal = fixture.open();
     let original_event = event("run-a", "run", "run-a", "m1", "stable-key", 1);
     let original = journal.append(original_event.clone(), 0, 0).unwrap();
-    assert_eq!(journal.append(original_event, 0, 0).unwrap(), original);
+    assert_eq!(
+        journal.append(original_event.clone(), 0, 0).unwrap(),
+        original
+    );
 
-    let mut conflict = event("run-a", "run", "run-a", "m2", "stable-key", 2);
-    conflict.event_type = "different.type".to_owned();
+    let mut retried = original_event.clone();
+    retried.message_id = "m-retry".to_owned();
+    retried.created_at = "2026-07-12T00:00:09Z".to_owned();
+    assert_eq!(journal.append(retried, 0, 0).unwrap(), original);
+
+    let conflict = event("run-a", "run", "run-a", "m2", "stable-key", 2);
     assert!(matches!(
-        journal.append(conflict, 1, 1),
+        journal.append(conflict, 0, 0),
         Err(EventJournalError::IdempotencyConflict { idempotency_key }) if idempotency_key == "stable-key"
     ));
-    assert_eq!(journal.read_run("run-a", 0).unwrap(), vec![original]);
+
+    let occupied = journal
+        .append(
+            event("run-a", "tool", "tool-b", "m-occupied", "key-b", 3),
+            1,
+            0,
+        )
+        .unwrap();
+    let mut masked = original_event.clone();
+    masked.message_id = occupied.message_id.clone();
+    assert!(matches!(
+        journal.append(masked, 0, 0),
+        Err(EventJournalError::MessageIdConflict { message_id }) if message_id == "m-occupied"
+    ));
+
+    let mut same_message_different_payload = original_event;
+    same_message_different_payload.payload = json!({ "value": 999 });
+    assert!(matches!(
+        journal.append(same_message_different_payload, 0, 0),
+        Err(EventJournalError::MessageIdConflict { message_id }) if message_id == "m1"
+    ));
+    assert_eq!(
+        journal.read_run("run-a", 0).unwrap(),
+        vec![original, occupied]
+    );
 }
 
 #[test]
@@ -95,21 +126,15 @@ fn extreme_expected_sequences_return_errors_without_panicking() {
     let fixture = Fixture::new();
     let mut journal = fixture.open();
     let candidate = event("run-max", "run", "run-max", "m-max", "k-max", 1);
-    journal.append(candidate.clone(), 0, 0).unwrap();
     assert!(matches!(
         journal.append(candidate.clone(), u64::MAX, 0),
-        Err(EventJournalError::IdempotencyConflict { .. })
-    ));
-    let other = event("run-other", "run", "run-other", "m-other", "k-other", 1);
-    assert!(matches!(
-        journal.append(other.clone(), u64::MAX, 0),
         Err(EventJournalError::RunSequenceConflict {
             expected: u64::MAX,
             actual: 0
         })
     ));
     assert!(matches!(
-        journal.append(other, 0, u64::MAX),
+        journal.append(candidate, 0, u64::MAX),
         Err(EventJournalError::AggregateSequenceConflict {
             expected: u64::MAX,
             actual: 0
@@ -255,6 +280,55 @@ fn rejects_a_tampered_migration_checksum() {
     assert!(matches!(
         EventJournal::open(&fixture.database_path),
         Err(EventJournalError::MigrationChecksumMismatch { version: 1 })
+    ));
+}
+
+#[test]
+fn schema_integrity_gate_rejects_a_missing_immutable_trigger() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let connection = Connection::open(&fixture.database_path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER runtime_events_no_delete;")
+        .unwrap();
+    drop(connection);
+    assert_schema_integrity_failure(&fixture);
+}
+
+#[test]
+fn schema_integrity_gate_rejects_a_replaced_index() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let connection = Connection::open(&fixture.database_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX runtime_events_run_type_order; \
+         CREATE INDEX runtime_events_run_type_order ON runtime_events (event_type);",
+        )
+        .unwrap();
+    drop(connection);
+    assert_schema_integrity_failure(&fixture);
+}
+
+#[test]
+fn schema_integrity_gate_rejects_a_table_with_missing_columns() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let connection = Connection::open(&fixture.database_path).unwrap();
+    connection.execute_batch(
+        "DROP TRIGGER runtime_events_no_update; \
+         DROP TRIGGER runtime_events_no_delete; \
+         DROP TABLE runtime_events; \
+         CREATE TABLE runtime_events (run_id TEXT NOT NULL, run_sequence INTEGER NOT NULL, PRIMARY KEY (run_id, run_sequence)) STRICT;",
+    ).unwrap();
+    drop(connection);
+    assert_schema_integrity_failure(&fixture);
+}
+
+fn assert_schema_integrity_failure(fixture: &Fixture) {
+    assert!(matches!(
+        EventJournal::open(&fixture.database_path),
+        Err(EventJournalError::SchemaIntegrityFailed)
     ));
 }
 

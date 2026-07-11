@@ -19,11 +19,13 @@
 - Added a strict TypeScript protocol contract for typed Runtime errors instead of collapsing every failure into a planning error.
 - Migrated the event journal to dual ordering: global Run sequence plus addressed aggregate type/id/local sequence.
 - Added a checksum-verified migration ledger and a tested real 0001-to-0002 SQLite rebuild migration.
+- Added a startup schema-integrity gate for migration columns, addressed-event constraints, indexes and immutable triggers.
+- Added the event-backed ToolCall Aggregate with strict recovery, independent business idempotency keys and SHA-256 argument identity.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 25 tests.
+- Rust workspace tests pass: 36 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
 - Runtime V2 protocol, process-supervisor and real cross-language integration tests pass: 28 tests.
@@ -34,8 +36,8 @@
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor exists only as an independently tested module.
 - The runtime still accepts only the initialization handshake and does not process Run commands after readiness.
-- The ToolCall state machine exists, but its event-backed ledger, Provider call, context compiler, full recovery controller and domain tools are not implemented.
-- Startup verifies migration checksums but does not yet perform a complete recurring audit of every target column, index and immutable trigger.
+- The ToolCall state machine and event-backed aggregate exist, but the real tool executor, Provider call, context compiler, recovery coordinator and domain tools are not implemented.
+- Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.
 

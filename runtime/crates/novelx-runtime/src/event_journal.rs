@@ -57,6 +57,8 @@ pub enum EventJournalError {
     MigrationChecksumMismatch { version: u32 },
     #[error("runtime migration 0002 verification failed")]
     MigrationVerificationFailed,
+    #[error("runtime event journal schema integrity check failed")]
+    SchemaIntegrityFailed,
     #[error("runtime event payload is not valid JSON: {0}")]
     InvalidPayload(#[from] serde_json::Error),
     #[error("runtime event journal storage failed: {0}")]
@@ -80,8 +82,10 @@ impl EventJournal {
              applied_at TEXT NOT NULL, checksum TEXT NOT NULL CHECK (length(checksum) = 64)\
              ) STRICT;",
         )?;
+        verify_migration_ledger_schema(&connection)?;
         apply_simple_migration(&mut connection, 1, MIGRATION_0001)?;
         apply_addressing_migration(&mut connection)?;
+        verify_schema_integrity(&connection)?;
         Ok(Self { connection })
     }
 
@@ -96,10 +100,24 @@ impl EventJournal {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
+        if let Some(existing) = find_by_message_id(&transaction, &event.message_id)? {
+            if same_full_event(
+                &existing,
+                &event,
+                expected_run_sequence,
+                expected_aggregate_sequence,
+            ) {
+                transaction.commit()?;
+                return Ok(existing);
+            }
+            return Err(EventJournalError::MessageIdConflict {
+                message_id: event.message_id,
+            });
+        }
         if let Some(existing) =
             find_by_idempotency_key(&transaction, &event.run_id, &event.idempotency_key)?
         {
-            if same_semantic_event(
+            if same_idempotent_intent(
                 &existing,
                 &event,
                 expected_run_sequence,
@@ -110,11 +128,6 @@ impl EventJournal {
             }
             return Err(EventJournalError::IdempotencyConflict {
                 idempotency_key: event.idempotency_key,
-            });
-        }
-        if find_by_message_id(&transaction, &event.message_id)?.is_some() {
-            return Err(EventJournalError::MessageIdConflict {
-                message_id: event.message_id,
             });
         }
 
@@ -283,7 +296,22 @@ fn record_migration(
     Ok(())
 }
 
-fn same_semantic_event(
+fn same_full_event(
+    existing: &RuntimeEvent,
+    candidate: &NewRuntimeEvent,
+    expected_run_sequence: u64,
+    expected_aggregate_sequence: u64,
+) -> bool {
+    same_idempotent_intent(
+        existing,
+        candidate,
+        expected_run_sequence,
+        expected_aggregate_sequence,
+    ) && existing.message_id == candidate.message_id
+        && existing.created_at == candidate.created_at
+}
+
+fn same_idempotent_intent(
     existing: &RuntimeEvent,
     candidate: &NewRuntimeEvent,
     expected_run_sequence: u64,
@@ -294,12 +322,10 @@ fn same_semantic_event(
         && existing.aggregate_type == candidate.aggregate_type
         && existing.aggregate_id == candidate.aggregate_id
         && expected_aggregate_sequence.checked_add(1) == Some(existing.aggregate_sequence)
-        && existing.message_id == candidate.message_id
         && existing.idempotency_key == candidate.idempotency_key
         && existing.event_type == candidate.event_type
         && existing.event_version == candidate.event_version
         && existing.payload == candidate.payload
-        && existing.created_at == candidate.created_at
 }
 
 fn validate(event: &NewRuntimeEvent) -> Result<(), EventJournalError> {
@@ -440,4 +466,200 @@ fn from_sql_integer(value: i64, column: usize) -> rusqlite::Result<u64> {
 
 fn checksum(sql: &str) -> String {
     format!("{:x}", Sha256::digest(sql.as_bytes()))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ColumnDefinition {
+    name: String,
+    data_type: String,
+    not_null: bool,
+    primary_key_position: i64,
+}
+
+fn verify_migration_ledger_schema(connection: &Connection) -> Result<(), EventJournalError> {
+    let expected = [
+        ("version", "INTEGER", false, 1),
+        ("applied_at", "TEXT", true, 0),
+        ("checksum", "TEXT", true, 0),
+    ];
+    verify_columns(connection, "runtime_schema_migrations", &expected)
+}
+
+fn verify_schema_integrity(connection: &Connection) -> Result<(), EventJournalError> {
+    verify_migration_ledger_schema(connection)?;
+    let expected_columns = [
+        ("run_id", "TEXT", true, 1),
+        ("run_sequence", "INTEGER", true, 2),
+        ("aggregate_type", "TEXT", true, 0),
+        ("aggregate_id", "TEXT", true, 0),
+        ("aggregate_sequence", "INTEGER", true, 0),
+        ("message_id", "TEXT", true, 0),
+        ("idempotency_key", "TEXT", true, 0),
+        ("event_type", "TEXT", true, 0),
+        ("event_version", "INTEGER", true, 0),
+        ("payload_json", "TEXT", true, 0),
+        ("created_at", "TEXT", true, 0),
+    ];
+    verify_columns(connection, "runtime_events", &expected_columns)?;
+
+    let unique_indexes = list_unique_index_columns(connection, "runtime_events")?;
+    let expected_unique = [
+        vec!["run_id".to_owned(), "run_sequence".to_owned()],
+        vec![
+            "run_id".to_owned(),
+            "aggregate_type".to_owned(),
+            "aggregate_id".to_owned(),
+            "aggregate_sequence".to_owned(),
+        ],
+        vec!["message_id".to_owned()],
+        vec!["run_id".to_owned(), "idempotency_key".to_owned()],
+    ];
+    if unique_indexes.len() != expected_unique.len()
+        || expected_unique
+            .iter()
+            .any(|expected| !unique_indexes.contains(expected))
+    {
+        return Err(EventJournalError::SchemaIntegrityFailed);
+    }
+
+    verify_named_index(
+        connection,
+        "runtime_events_aggregate_replay",
+        &[
+            "run_id",
+            "aggregate_type",
+            "aggregate_id",
+            "aggregate_sequence",
+        ],
+    )?;
+    verify_named_index(
+        connection,
+        "runtime_events_run_type_order",
+        &["run_id", "aggregate_type", "run_sequence"],
+    )?;
+    verify_trigger(connection, "runtime_events_no_update", "update")?;
+    verify_trigger(connection, "runtime_events_no_delete", "delete")?;
+    Ok(())
+}
+
+fn verify_columns(
+    connection: &Connection,
+    table: &str,
+    expected: &[(&str, &str, bool, i64)],
+) -> Result<(), EventJournalError> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?;
+    let actual = statement
+        .query_map([], |row| {
+            Ok(ColumnDefinition {
+                name: row.get(1)?,
+                data_type: row.get::<_, String>(2)?.to_ascii_uppercase(),
+                not_null: row.get::<_, i64>(3)? != 0,
+                primary_key_position: row.get(5)?,
+            })
+        })
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?;
+    let expected = expected
+        .iter()
+        .map(
+            |(name, data_type, not_null, primary_key_position)| ColumnDefinition {
+                name: (*name).to_owned(),
+                data_type: (*data_type).to_owned(),
+                not_null: *not_null,
+                primary_key_position: *primary_key_position,
+            },
+        )
+        .collect::<Vec<_>>();
+    if actual != expected {
+        return Err(EventJournalError::SchemaIntegrityFailed);
+    }
+    Ok(())
+}
+
+fn list_unique_index_columns(
+    connection: &Connection,
+    table: &str,
+) -> Result<Vec<Vec<String>>, EventJournalError> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA index_list({table})"))
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?;
+    let names = statement
+        .query_map([], |row| {
+            let unique: i64 = row.get(2)?;
+            let origin: String = row.get(3)?;
+            Ok((row.get::<_, String>(1)?, unique != 0, origin))
+        })
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?;
+    names
+        .into_iter()
+        .filter(|(_, unique, origin)| *unique && (origin == "u" || origin == "pk"))
+        .map(|(name, _, _)| index_columns(connection, &name))
+        .collect()
+}
+
+fn verify_named_index(
+    connection: &Connection,
+    name: &str,
+    expected_columns: &[&str],
+) -> Result<(), EventJournalError> {
+    let exists: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1 AND tbl_name = 'runtime_events'",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?;
+    let actual = exists
+        .ok_or(EventJournalError::SchemaIntegrityFailed)
+        .and_then(|_| index_columns(connection, name))?;
+    if actual != expected_columns {
+        return Err(EventJournalError::SchemaIntegrityFailed);
+    }
+    Ok(())
+}
+
+fn index_columns(connection: &Connection, name: &str) -> Result<Vec<String>, EventJournalError> {
+    let escaped = name.replace('"', "\"\"");
+    let mut statement = connection
+        .prepare(&format!("PRAGMA index_info(\"{escaped}\")"))
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?;
+    statement
+        .query_map([], |row| row.get(2))
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)
+}
+
+fn verify_trigger(
+    connection: &Connection,
+    name: &str,
+    operation: &str,
+) -> Result<(), EventJournalError> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1 AND tbl_name = 'runtime_events'",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?;
+    let normalized = sql
+        .ok_or(EventJournalError::SchemaIntegrityFailed)?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let expected = format!(
+        "create trigger {name} before {operation} on runtime_events begin select raise(abort, 'runtime_event_immutable'); end"
+    );
+    if normalized != expected {
+        return Err(EventJournalError::SchemaIntegrityFailed);
+    }
+    Ok(())
 }
