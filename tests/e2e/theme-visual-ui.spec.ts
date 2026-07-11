@@ -64,7 +64,7 @@ test("persists the supported themes and keeps long rich content usable at the mi
     })).toBe(true);
     await page.screenshot({ path: "test-results/novax-theme-minimum-window-1100x700.png", fullPage: false });
     await settingsButton.click({ force: true });
-    for (const theme of ["white", "dark", "high-contrast"] as const) {
+    for (const theme of ["white", "cloude", "dark", "high-contrast"] as const) {
       await page.getByTestId(`theme-${theme}`).click();
       await expect.poll(() => page.evaluate(() => document.documentElement.getAttribute("data-theme"))).toBe(theme);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);

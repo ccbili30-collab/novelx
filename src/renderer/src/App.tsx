@@ -562,10 +562,12 @@ export function App() {
             <section className="agent-artifact-panel"><ChangeSetWorkbench changeSetId={selectedChangeSetId} onChanged={() => setChangeSetRefreshKey((value) => value + 1)} /></section>
           ) : (
             <ProjectActivityPanel
+              projectId={activeProjectId}
               workspace={workspace}
               session={activeSession}
               activity={activity}
               collaboration={collaboration}
+              refreshKey={changeSetRefreshKey}
               onOpenResource={openActivityResource}
               onViewAll={() => setMode("ide")}
               onCreateHandoff={() => setHandoffOpen(true)}

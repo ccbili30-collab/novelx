@@ -79,6 +79,10 @@ import {
   projectRescanRequestSchema,
   projectSelectRequestSchema,
   projectSelectResultSchema,
+  projectFileListRequestSchema,
+  projectFileListResultSchema,
+  projectFileReadRequestSchema,
+  projectFileReadResultSchema,
   sessionArchiveRequestSchema,
   sessionClearRequestSchema,
   sessionDeleteRequestSchema,
@@ -279,6 +283,18 @@ export function exposeDesktopApi(): void {
         );
         if (result.ok) return result.workspace;
         throw new Error(result.error.message);
+      },
+      async listProjectFiles(request = {}) {
+        const safeRequest = projectFileListRequestSchema.parse(request);
+        return projectFileListResultSchema.parse(
+          await ipcRenderer.invoke(desktopIpcChannels.projectFileList, safeRequest),
+        );
+      },
+      async readProjectFile(request) {
+        const safeRequest = projectFileReadRequestSchema.parse(request);
+        return projectFileReadResultSchema.parse(
+          await ipcRenderer.invoke(desktopIpcChannels.projectFileRead, safeRequest),
+        );
       },
     },
     play: {

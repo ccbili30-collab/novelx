@@ -200,6 +200,7 @@ export function ProviderSettingsDialog({ theme, onThemeChange, onClose }: Provid
             <div className="theme-options" role="radiogroup" aria-label="外观主题">
               {([
                 ["white", "白色"],
+                ["cloude", "cloude"],
                 ["dark", "深色"],
                 ["high-contrast", "高对比度"],
               ] as const).map(([value, label]) => (

@@ -12,10 +12,12 @@ import type { AgentAuditStore } from "../../src/domain/audit/agentAuditRepositor
 class FakeWorkerProcess extends EventEmitter implements AgentWorkerProcess {
   killed = false;
   readonly sent: unknown[] = [];
+  returnBackpressureAfter = Number.POSITIVE_INFINITY;
 
-  send(message: unknown): boolean {
+  send(message: unknown, callback?: (error: Error | null) => void): boolean {
     this.sent.push(message);
-    return true;
+    queueMicrotask(() => callback?.(null));
+    return this.sent.length <= this.returnBackpressureAfter;
   }
 
   kill(): boolean {
@@ -162,6 +164,58 @@ describe("Agent Process Supervisor internal tool gateway", () => {
       { type: "run.activity", runId, label: "检索项目事实", phase: "started", domains: ["graph"] },
       { type: "run.activity", runId, label: "检索项目事实", phase: "completed", domains: ["graph", "world"] },
     ]);
+  });
+
+  it("does not interrupt a large tool response when child IPC reports backpressure", async () => {
+    const child = new FakeWorkerProcess();
+    child.returnBackpressureAfter = 1;
+    const events: unknown[] = [];
+    const largeContent = "x".repeat(119_500);
+    const supervisor = new AgentProcessSupervisor("worker.js", {
+      acquireRuntimeLease: () => createLease(createGateway({
+        inspectProjectFiles: async () => ({
+          mode: "overview",
+          listing: {
+            root: ".",
+            entries: [],
+            ignoredDirectories: [".git", ".novax", "node_modules"],
+            incomplete: false,
+            omittedEntries: 0,
+          },
+          files: ["large-a.md", "large-b.md"].map((filePath) => ({
+            path: filePath,
+            kind: "text" as const,
+            size: largeContent.length,
+            sha256: "a".repeat(64),
+            content: largeContent,
+            complete: true,
+            originalChars: largeContent.length,
+            returnedChars: largeContent.length,
+          })),
+          omittedReadableFiles: 0,
+          totalReturnedChars: largeContent.length * 2,
+        }),
+      })),
+      spawnWorker: () => child,
+    });
+    const runId = supervisor.start(runRequest(), (event) => events.push(event));
+    child.spawn();
+    child.receive({
+      type: "tool.request",
+      runId,
+      requestId: "99999999-9999-4999-8999-999999999999",
+      tool: "inspect_project_files",
+      args: { mode: "overview", path: "" },
+    });
+
+    await vi.waitFor(() => expect(child.sent).toHaveLength(2));
+    expect(Buffer.byteLength(JSON.stringify(child.sent[1]), "utf8")).toBeGreaterThan(200_000);
+    expect(child.killed).toBe(false);
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "run.failed" }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "run.activity",
+      phase: "completed",
+    }));
   });
 
   it("passes only Main-admitted private session history to the Worker", () => {

@@ -30,9 +30,21 @@ const graphTokenNames = [
 ] as const;
 
 describe("renderer theme token contract", () => {
-  it.each(["white", "dark", "high-contrast"])("defines graph semantics for the %s theme", (theme) => {
+  it.each(["white", "cloude", "dark", "high-contrast"])("defines graph semantics for the %s theme", (theme) => {
     const block = themeBlock(theme);
     for (const token of graphTokenNames) expect(block).toContain(`${token}:`);
+  });
+
+  it("maps the supplied cloude palette and typography into Novax tokens", () => {
+    const block = themeBlock("cloude");
+    expect(block).toContain("--novax-color-accent: #da7756;");
+    expect(block).toContain("--novax-color-ink: #141413;");
+    expect(block).toContain("--novax-color-app: #f5f4ee;");
+    expect(block).toContain("--novax-color-diff-added: #00c853;");
+    expect(block).toContain("--novax-color-diff-removed: #ff5f38;");
+    expect(block).toContain("--novax-color-skill: #cc7d5e;");
+    expect(block).toContain('--novax-font-code: "JetBrainsMono NFM"');
+    expect(block).toContain('--novax-font-ui: ui-serif, Georgia, Cambria, "Times New Roman", Times, "Noto Serif SC", serif;');
   });
 
   it("keeps graph component colors theme-resolved", () => {

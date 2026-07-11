@@ -17,6 +17,7 @@ import { PlayerProcessSupervisor, type PlayerRuntimeLease } from "./playerProces
 import { DecomposerProcessSupervisor, type DecomposerRuntimeLease } from "./decomposerProcessSupervisor";
 import type { ProviderRuntimeProfile } from "../shared/providerContract";
 import { ApplicationRegistryRepository } from "../domain/application/applicationRegistryRepository";
+import { createAgentWorkerDiagnosticReporter } from "./agentWorkerDiagnosticLog";
 
 export function registerDesktopIpc(
   workerPath: string,
@@ -25,8 +26,13 @@ export function registerDesktopIpc(
   getProviderProfile: () => ProviderRuntimeProfile | null = () => null,
   acquirePlayerRuntimeLease: () => PlayerRuntimeLease | null = () => null,
   acquireDecomposerRuntimeLease: () => DecomposerRuntimeLease | null = () => null,
+  userDataPath?: string,
 ): { dispose(): void } {
-  const supervisor = new AgentProcessSupervisor(workerPath, { acquireRuntimeLease, getProviderProfile });
+  const supervisor = new AgentProcessSupervisor(workerPath, {
+    acquireRuntimeLease,
+    getProviderProfile,
+    reportWorkerDiagnostic: userDataPath ? createAgentWorkerDiagnosticReporter(userDataPath) : undefined,
+  });
   const playerSupervisor = new PlayerProcessSupervisor(workerPath, { acquireRuntimeLease: acquirePlayerRuntimeLease, getProviderProfile });
   const decomposerSupervisor = new DecomposerProcessSupervisor(workerPath, { acquireRuntimeLease: acquireDecomposerRuntimeLease, getProviderProfile });
 
