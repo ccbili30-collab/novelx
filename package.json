@@ -36,7 +36,8 @@
     "verify:decomposer-prompt-publication": "node ./scripts/verify-decomposer-prompt-publication.mjs",
     "verify:gm-prompt-publication": "node ./scripts/verify-gm-prompt-publication.mjs",
     "verify:package": "node scripts/verify-package.mjs",
-    "verify:installer": "node scripts/verify-installer.mjs"
+    "verify:installer": "node scripts/verify-installer.mjs",
+    "verify:update-from-old-client": "node scripts/verify-old-client-update.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
