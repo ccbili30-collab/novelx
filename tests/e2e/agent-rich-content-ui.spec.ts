@@ -20,6 +20,12 @@ test("renders GFM, Mermaid, blocked Markdown media, and structured Artifacts", a
   const session = registry.createSession(project.id, "结构化展示");
   registry.appendMessage({
     sessionId: session.id,
+    role: "user",
+    outcome: null,
+    text: "typo message",
+  });
+  registry.appendMessage({
+    sessionId: session.id,
     role: "assistant",
     outcome: "blocked",
     text: [
@@ -70,6 +76,17 @@ test("renders GFM, Mermaid, blocked Markdown media, and structured Artifacts", a
     await expect(page.getByText("角色立绘", { exact: true })).toBeVisible();
     await expect(page.locator("img[src^='data:image/gif']")).toHaveCount(1);
     await expect(page.locator("img[src^='https://tracker.invalid']")).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "待审查变更" })).toHaveCount(0);
+
+    const userMessage = page.locator(".steward-message--user").filter({ hasText: "typo message" });
+    await userMessage.hover();
+    await page.screenshot({ path: "test-results/novax-message-actions-hover.png", fullPage: true });
+    await userMessage.getByTitle("复制").click();
+    await expect(page.getByText("已复制", { exact: true })).toBeVisible();
+    await userMessage.getByTitle("修改上一句").click();
+    await expect(page.getByLabel("给大管家发送消息")).toHaveValue("typo message");
+    await expect(page.locator(".steward-message--user").filter({ hasText: "typo message" })).toHaveCount(0);
+    await expect(page.getByRole("table")).toHaveCount(0);
   } finally {
     if (app) await app.close();
     fs.rmSync(root, { recursive: true, force: true });

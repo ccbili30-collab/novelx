@@ -20,6 +20,8 @@ import {
   sessionListResultSchema,
   sessionMessageListRequestSchema,
   sessionMessageListResultSchema,
+  sessionRetractLastRequestSchema,
+  sessionRetractLastResultSchema,
   sessionRenameRequestSchema,
   sessionSummarySchema,
   type ProjectAddResult,
@@ -158,6 +160,31 @@ export function registerProjectSessionIpc(
     const request = sessionMessageListRequestSchema.parse(payload);
     return sessionMessageListResultSchema.parse({ messages: registry.listMessages(request.sessionId) });
   });
+  ipcMain.handle(desktopIpcChannels.sessionRetractLast, (_event, payload: unknown) => {
+    const request = sessionRetractLastRequestSchema.parse(payload);
+    try {
+      const result = registry.retractLastUserExchange(request.sessionId);
+      return sessionRetractLastResultSchema.parse({
+        ok: true,
+        text: result.text,
+        session: result.session,
+        messages: registry.listMessages(request.sessionId),
+      });
+    } catch (error) {
+      const code = readSessionRetractCode(error);
+      return sessionRetractLastResultSchema.parse({
+        ok: false,
+        code,
+        message: code === "SESSION_RUN_ACTIVE"
+          ? "大管家仍在处理，暂时不能修改这条消息。"
+          : code === "SESSION_LAST_EXCHANGE_HAS_PROJECT_EFFECTS"
+            ? "这条消息已经产生项目变更，不能直接撤回。"
+            : code === "SESSION_LAST_USER_MESSAGE_NOT_FOUND"
+              ? "当前没有可以修改的上一条消息。"
+              : "上一条消息撤回失败。",
+      });
+    }
+  });
   ipcMain.handle(desktopIpcChannels.collaborationList, (_event, payload: unknown) => {
     const request = collaborationListRequestSchema.parse(payload);
     return collaborationListResultSchema.parse({
@@ -273,6 +300,16 @@ function publicDetection(detection: ProjectDirectoryDetection) {
 
 function projectError(code: string): Error & { code: string } {
   return Object.assign(new Error(code), { code });
+}
+
+function readSessionRetractCode(error: unknown): "SESSION_RUN_ACTIVE" | "SESSION_LAST_USER_MESSAGE_NOT_FOUND" | "SESSION_LAST_EXCHANGE_HAS_PROJECT_EFFECTS" | "SESSION_RETRACT_FAILED" {
+  if (!error || typeof error !== "object" || !("code" in error)) return "SESSION_RETRACT_FAILED";
+  const code = error.code;
+  return code === "SESSION_RUN_ACTIVE"
+    || code === "SESSION_LAST_USER_MESSAGE_NOT_FOUND"
+    || code === "SESSION_LAST_EXCHANGE_HAS_PROJECT_EFFECTS"
+    ? code
+    : "SESSION_RETRACT_FAILED";
 }
 
 function sessionExportDialogOptions(title: string) {

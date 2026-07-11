@@ -87,6 +87,8 @@ interface AgentProcessSupervisorOptions {
 export interface AgentRuntimeLease {
   gateway: AgentToolGateway;
   audit: AgentAuditStore;
+  authorizedScopeResourceIds?: string[];
+  defaultScopeResourceIds?: string[];
   release(): void;
 }
 
@@ -124,6 +126,12 @@ export class AgentProcessSupervisor {
       queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_TOOLS_REQUIRED" }), artifacts: [] }));
       return runId;
     }
+    const scopeResourceIds = resolveRunScopes(request.scopeResourceIds, lease);
+    if (!scopeResourceIds) {
+      lease.release();
+      queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_RUN_FAILED" }), artifacts: [] }));
+      return runId;
+    }
     const providerConfigSha256 = providerProfile ? hashProviderConfig(providerProfile) : null;
     try {
       lease.audit.beginRun({
@@ -157,11 +165,12 @@ export class AgentProcessSupervisor {
     child.once("error", () => this.#interrupt(runId));
     child.once("exit", () => this.#interrupt(runId));
     child.once("spawn", () => {
-      const { projectId: _projectId, sessionId: _sessionId, ...workerRequest } = request;
+      const { projectId: _projectId, sessionId: _sessionId, scopeResourceIds: _requestedScopes, ...workerRequest } = request;
       const command = agentWorkerRunStartCommandSchema.parse({
         type: "run.start",
         runId,
         ...workerRequest,
+        scopeResourceIds,
         sessionHistory,
         collaborationContext,
         toolsAvailable: true,
@@ -670,6 +679,17 @@ export class AgentProcessSupervisor {
     run.emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }), artifacts: [] });
     this.#finish(runId);
   }
+}
+
+function resolveRunScopes(requested: string[] | undefined, lease: AgentRuntimeLease): string[] | null {
+  const authorized = lease.authorizedScopeResourceIds;
+  if (!authorized && !lease.defaultScopeResourceIds) return [...new Set(requested ?? [])];
+  const defaults = lease.defaultScopeResourceIds ?? [];
+  const selected = requested && requested.length > 0 ? [...new Set(requested)] : defaults;
+  if (selected.length === 0 || selected.length > 100) return null;
+  if (!authorized) return selected;
+  const allowed = new Set(authorized);
+  return selected.every((scopeId) => allowed.has(scopeId)) ? selected : null;
 }
 
 type ActivityDomain = "world" | "oc" | "story" | "graph" | "timeline" | "asset";

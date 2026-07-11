@@ -102,6 +102,7 @@ describe("desktop IPC contract", () => {
       sessionDelete: "novax:session-delete",
       sessionExport: "novax:session-export",
       sessionMessages: "novax:session-messages",
+      sessionRetractLast: "novax:session-retract-last",
       collaborationList: "novax:collaboration-list",
       sharedMemoryPublish: "novax:shared-memory-publish",
       sourceList: "novax:source-list",

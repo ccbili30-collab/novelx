@@ -10,6 +10,12 @@ export function resolveAgentScopeResourceIds(
   if (!workspace) return [];
 
   const projectResources = workspace.resources.filter((resource) => resource.objectKind !== "domain_root");
+  if (projectResources.length === 0) {
+    return workspace.resources
+      .filter((resource) => resource.objectKind === "domain_root")
+      .slice(0, MAX_AGENT_SCOPES)
+      .map((resource) => resource.id);
+  }
   if (projectResources.length <= MAX_AGENT_SCOPES) return projectResources.map((resource) => resource.id);
 
   const rootIds = new Set(workspace.resources

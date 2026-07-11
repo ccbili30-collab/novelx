@@ -178,6 +178,46 @@ describe("Agent Process Supervisor internal tool gateway", () => {
     });
   });
 
+  it("uses the backend project scope when Renderer did not select a resource", () => {
+    const child = new FakeWorkerProcess();
+    const supervisor = new AgentProcessSupervisor("worker.js", {
+      acquireRuntimeLease: () => ({
+        ...createLease(),
+        authorizedScopeResourceIds: ["root-world", "root-story"],
+        defaultScopeResourceIds: ["root-world", "root-story"],
+      }),
+      spawnWorker: () => child,
+    });
+    supervisor.start(runRequest(), () => undefined);
+    child.spawn();
+
+    expect(child.sent[0]).toMatchObject({
+      type: "run.start",
+      scopeResourceIds: ["root-world", "root-story"],
+    });
+  });
+
+  it("rejects a Renderer scope that is outside the current backend workspace", async () => {
+    const child = new FakeWorkerProcess();
+    const events: unknown[] = [];
+    const spawnWorker = vi.fn(() => child);
+    const supervisor = new AgentProcessSupervisor("worker.js", {
+      acquireRuntimeLease: () => ({
+        ...createLease(),
+        authorizedScopeResourceIds: ["world-1"],
+        defaultScopeResourceIds: ["world-1"],
+      }),
+      spawnWorker,
+    });
+    supervisor.start({ ...runRequest(), scopeResourceIds: ["other-project-world"] }, (event) => events.push(event));
+
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "run.failed",
+      code: "AGENT_RUN_FAILED",
+    })));
+    expect(spawnWorker).not.toHaveBeenCalled();
+  });
+
   it("fails unknown tools closed without invoking the gateway", () => {
     const child = new FakeWorkerProcess();
     const retrieve = vi.fn();

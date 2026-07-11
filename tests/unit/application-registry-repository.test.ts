@@ -129,6 +129,64 @@ describe("ApplicationRegistryRepository", () => {
     repository.close();
   });
 
+  it("retracts only the latest side-effect-free user exchange for correction", () => {
+    const root = createRoot();
+    const projectPath = path.join(root, "message-correction");
+    fs.mkdirSync(projectPath);
+    const repository = new ApplicationRegistryRepository(path.join(root, "user-data", "application.db"));
+    const project = repository.registerProject(projectPath, "ready");
+    const session = repository.createSession(project.id, "Correction");
+    repository.appendMessage({ sessionId: session.id, role: "user", text: "first", outcome: null });
+    repository.appendMessage({ sessionId: session.id, role: "assistant", text: "first reply", outcome: "completed" });
+    repository.appendMessage({ sessionId: session.id, role: "user", text: "typo", outcome: null });
+    repository.appendMessage({ sessionId: session.id, role: "error", text: "blocked", outcome: "blocked" });
+
+    expect(repository.retractLastUserExchange(session.id)).toMatchObject({ text: "typo" });
+    expect(repository.listMessages(session.id).map((message) => message.text)).toEqual(["first", "first reply"]);
+    expect(repository.getSession(session.id)).toMatchObject({ state: "idle", messageCount: 2 });
+    repository.close();
+  });
+
+  it("blocks correction when the latest exchange produced a project Change Set", () => {
+    const root = createRoot();
+    const projectPath = path.join(root, "message-side-effect");
+    fs.mkdirSync(projectPath);
+    const repository = new ApplicationRegistryRepository(path.join(root, "user-data", "application.db"));
+    const project = repository.registerProject(projectPath, "ready");
+    const session = repository.createSession(project.id, "Protected correction");
+    repository.appendMessage({ sessionId: session.id, role: "user", text: "change it", outcome: null });
+    repository.appendMessage({
+      sessionId: session.id,
+      role: "assistant",
+      text: "pending",
+      outcome: "review",
+      artifacts: [{ kind: "change_set", changeSetId: "change-1", state: "pending_review" }],
+    });
+
+    expect(() => repository.retractLastUserExchange(session.id)).toThrow(expect.objectContaining({
+      code: "SESSION_LAST_EXCHANGE_HAS_PROJECT_EFFECTS",
+    }));
+    expect(repository.listMessages(session.id)).toHaveLength(2);
+    repository.close();
+  });
+
+  it("blocks correction while the session is running", () => {
+    const root = createRoot();
+    const projectPath = path.join(root, "message-running");
+    fs.mkdirSync(projectPath);
+    const repository = new ApplicationRegistryRepository(path.join(root, "user-data", "application.db"));
+    const project = repository.registerProject(projectPath, "ready");
+    const session = repository.createSession(project.id, "Running correction");
+    repository.appendMessage({ sessionId: session.id, role: "user", text: "wait", outcome: null });
+    repository.setSessionState(session.id, "working");
+
+    expect(() => repository.retractLastUserExchange(session.id)).toThrow(expect.objectContaining({
+      code: "SESSION_RUN_ACTIVE",
+    }));
+    expect(repository.listMessages(session.id)).toHaveLength(1);
+    repository.close();
+  });
+
   it("admits only a bounded, explicitly incomplete suffix of private conversation history", () => {
     const root = createRoot();
     const projectPath = path.join(root, "history-budget");

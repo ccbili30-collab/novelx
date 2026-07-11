@@ -11,10 +11,10 @@ describe("Agent project scope", () => {
     expect(resolveAgentScopeResourceIds(workspace(), null)).toEqual(["world-1", "story-1"]);
   });
 
-  it("does not expose domain roots as writable Agent scopes", () => {
+  it("falls back to project domain roots when an initialized project has no creative objects", () => {
     const empty = workspace();
     empty.resources = empty.resources.filter((resource) => resource.objectKind === "domain_root");
-    expect(resolveAgentScopeResourceIds(empty, null)).toEqual([]);
+    expect(resolveAgentScopeResourceIds(empty, null)).toEqual(["root-world", "root-story"]);
   });
 });
 

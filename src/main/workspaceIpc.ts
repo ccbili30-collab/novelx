@@ -235,10 +235,13 @@ export class WorkspaceSession {
     const policy = this.#changeSetPolicy;
     if (!workspace || !policy) return null;
     this.#activeAgentLeases += 1;
+    const scopes = resolveWorkspaceAgentScopes(workspace);
     let released = false;
     return {
       gateway: this.#serializeWrites(createWorkspaceAgentToolGateway(workspace, policy, () => this.#workspace === workspace)),
       audit: new AgentAuditRepository(workspace),
+      authorizedScopeResourceIds: scopes.authorized,
+      defaultScopeResourceIds: scopes.defaults,
       release: () => {
         if (released) return;
         released = true;
@@ -429,6 +432,15 @@ export class WorkspaceSession {
       ),
     };
   }
+}
+
+function resolveWorkspaceAgentScopes(workspace: WorkspaceDatabase): { authorized: string[]; defaults: string[] } {
+  const resources = new ResourceRepository(workspace).listCurrent();
+  const authorized = resources.map((resource) => resource.id);
+  const projectObjects = resources.filter((resource) => resource.objectKind !== "domain_root");
+  const roots = resources.filter((resource) => resource.objectKind === "domain_root");
+  const defaults = (projectObjects.length > 0 ? projectObjects : roots).slice(0, 100).map((resource) => resource.id);
+  return { authorized, defaults };
 }
 
 export class ProjectWriteQueue {

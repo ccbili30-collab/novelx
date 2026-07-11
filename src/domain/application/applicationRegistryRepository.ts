@@ -298,6 +298,36 @@ export class ApplicationRegistryRepository {
     return rows.map(mapSessionMessage);
   }
 
+  retractLastUserExchange(sessionId: string): { text: string; session: SessionSummary } {
+    const session = this.getSession(sessionId);
+    if (session.state === "working") throw registryError("SESSION_RUN_ACTIVE");
+    const user = this.#db.prepare(`
+      SELECT sequence, text FROM agent_messages
+      WHERE session_id = ? AND role = 'user'
+      ORDER BY sequence DESC LIMIT 1
+    `).get(sessionId) as Record<string, SQLOutputValue> | undefined;
+    if (!user) throw registryError("SESSION_LAST_USER_MESSAGE_NOT_FOUND");
+    const sequence = readNumber(user, "sequence");
+    const tail = this.#db.prepare(`
+      SELECT role, outcome, artifacts_json FROM agent_messages
+      WHERE session_id = ? AND sequence >= ? ORDER BY sequence ASC
+    `).all(sessionId, sequence) as Record<string, SQLOutputValue>[];
+    if (tail.slice(1).some((row) => messageHasProjectEffects(row))) {
+      throw registryError("SESSION_LAST_EXCHANGE_HAS_PROJECT_EFFECTS");
+    }
+    const now = new Date().toISOString();
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#db.prepare("DELETE FROM agent_messages WHERE session_id = ? AND sequence >= ?").run(sessionId, sequence);
+      this.#db.prepare("UPDATE agent_sessions SET state = 'idle', updated_at = ? WHERE id = ?").run(now, sessionId);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+    return { text: readString(user, "text"), session: this.getSession(sessionId) };
+  }
+
   clearSessionMessages(sessionId: string): SessionSummary {
     this.getSession(sessionId);
     this.#db.exec("BEGIN IMMEDIATE");
@@ -719,6 +749,18 @@ function normalizeScopeIds(values: string[]): string[] {
     throw registryError("COLLABORATION_SCOPE_INVALID");
   }
   return normalized;
+}
+
+function messageHasProjectEffects(row: Record<string, SQLOutputValue>): boolean {
+  if (row.outcome === "review") return true;
+  const parsed = JSON.parse(readString(row, "artifacts_json")) as unknown;
+  if (!Array.isArray(parsed)) return true;
+  return parsed.some((artifact) => (
+    artifact !== null
+    && typeof artifact === "object"
+    && "kind" in artifact
+    && artifact.kind === "change_set"
+  ));
 }
 
 function mapRegisteredProject(row: Record<string, SQLOutputValue>): RegisteredProject {

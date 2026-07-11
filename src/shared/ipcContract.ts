@@ -32,6 +32,7 @@ export const desktopIpcChannels = {
   sessionDelete: "novax:session-delete",
   sessionExport: "novax:session-export",
   sessionMessages: "novax:session-messages",
+  sessionRetractLast: "novax:session-retract-last",
   collaborationList: "novax:collaboration-list",
   sharedMemoryPublish: "novax:shared-memory-publish",
   handoffCreate: "novax:handoff-create",
@@ -247,6 +248,25 @@ export const sessionMessageListRequestSchema = z.object({ sessionId: opaqueIdSch
 export const sessionMessageListResultSchema = z.object({
   messages: z.array(sessionMessageSchema).max(100_000),
 }).strict();
+export const sessionRetractLastRequestSchema = z.object({ sessionId: opaqueIdSchema }).strict();
+export const sessionRetractLastResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    text: z.string().min(1).max(12_000),
+    session: sessionSummarySchema,
+    messages: z.array(sessionMessageSchema).max(100_000),
+  }).strict(),
+  z.object({
+    ok: z.literal(false),
+    code: z.enum([
+      "SESSION_RUN_ACTIVE",
+      "SESSION_LAST_USER_MESSAGE_NOT_FOUND",
+      "SESSION_LAST_EXCHANGE_HAS_PROJECT_EFFECTS",
+      "SESSION_RETRACT_FAILED",
+    ]),
+    message: z.string().min(1).max(500),
+  }).strict(),
+]);
 
 const collaborationScopeIdsSchema = z.array(z.string().trim().min(1).max(120)).max(100);
 
@@ -1143,6 +1163,8 @@ export type SessionMessage = z.infer<typeof sessionMessageSchema>;
 export type AgentArtifact = z.infer<typeof agentArtifactSchema>;
 export type SessionMessageListRequest = z.infer<typeof sessionMessageListRequestSchema>;
 export type SessionMessageListResult = z.infer<typeof sessionMessageListResultSchema>;
+export type SessionRetractLastRequest = z.infer<typeof sessionRetractLastRequestSchema>;
+export type SessionRetractLastResult = z.infer<typeof sessionRetractLastResultSchema>;
 export type SharedMemorySummary = z.infer<typeof sharedMemorySummarySchema>;
 export type HandoffSummary = z.infer<typeof handoffSummarySchema>;
 export type CollaborationListRequest = z.infer<typeof collaborationListRequestSchema>;
@@ -1263,6 +1285,7 @@ export interface DesktopApi {
     delete(request: SessionDeleteRequest): Promise<SessionListResult>;
     export(request: SessionExportRequest): Promise<SessionExportResult>;
     messages(request: SessionMessageListRequest): Promise<SessionMessageListResult>;
+    retractLast(request: SessionRetractLastRequest): Promise<SessionRetractLastResult>;
   };
   collaboration: {
     list(request: CollaborationListRequest): Promise<CollaborationListResult>;

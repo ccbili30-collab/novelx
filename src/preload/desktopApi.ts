@@ -89,6 +89,8 @@ import {
   sessionListResultSchema,
   sessionMessageListRequestSchema,
   sessionMessageListResultSchema,
+  sessionRetractLastRequestSchema,
+  sessionRetractLastResultSchema,
   sessionRenameRequestSchema,
   sessionSummarySchema,
   sharedMemoryPublishRequestSchema,
@@ -214,6 +216,10 @@ export function exposeDesktopApi(): void {
       async messages(request) {
         const safeRequest = sessionMessageListRequestSchema.parse(request);
         return sessionMessageListResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sessionMessages, safeRequest));
+      },
+      async retractLast(request) {
+        const safeRequest = sessionRetractLastRequestSchema.parse(request);
+        return sessionRetractLastResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.sessionRetractLast, safeRequest));
       },
     },
     collaboration: {
