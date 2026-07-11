@@ -24,6 +24,8 @@ describe("Agent Worker tool bridge", () => {
       globProjectFiles: (args, signal) => bridge.invoke("run-1", "glob_project_files", args, signal),
       searchProjectFiles: (args, signal) => bridge.invoke("run-1", "search_project_files", args, signal),
       readProjectFile: (args, signal) => bridge.invoke("run-1", "read_project_file", args, signal),
+      saveTaskNote: (args, signal) => bridge.invoke("run-1", "save_task_note", args, signal),
+      listTaskNotes: (args, signal) => bridge.invoke("run-1", "list_task_notes", args, signal),
       proposeChangeSet: (args, signal) => bridge.invoke(
         "run-1",
         "propose_change_set",
@@ -39,6 +41,8 @@ describe("Agent Worker tool bridge", () => {
       "glob_project_files",
       "search_project_files",
       "read_project_file",
+      "save_task_note",
+      "list_task_notes",
       "inspect_project_files",
       "propose_change_set",
     ]);

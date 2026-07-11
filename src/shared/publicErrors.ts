@@ -5,7 +5,7 @@ const publicMessages: Record<PublicError["code"], string> = {
   PROMPT_SET_NOT_PUBLISHED: "Agent 提示词尚未通过发布验证。",
   AGENT_TOOLS_REQUIRED: "Agent 领域工具尚未就绪。",
   AGENT_AUDIT_REQUIRED: "Agent 运行审计不可用，任务已阻止。",
-  AGENT_CONTEXT_BUDGET_EXCEEDED: "当前资料超过模型的安全上下文预算，请缩小任务范围。",
+  AGENT_CONTEXT_BUDGET_EXCEEDED: "最小资料分块仍无法进入模型的安全上下文，任务已停止且未丢弃未处理资料。",
   PROVIDER_RUNTIME_FAILED: "模型服务运行失败。",
   PROVIDER_OUTPUT_INCOMPLETE: "模型输出被截断。",
   PROVIDER_PROTOCOL_FAILED: "模型服务返回了无效结果。",

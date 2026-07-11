@@ -216,7 +216,11 @@ function migrate(db: DatabaseSync): void {
     migrateProjectFileVersionSchema(db);
     schema = { version: 19 };
   }
-  if (schema.version !== 19) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 19) {
+    migrateAgentTaskNoteSchema(db);
+    schema = { version: 20 };
+  }
+  if (schema.version !== 20) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -251,6 +255,33 @@ function migrate(db: DatabaseSync): void {
       insertResource.run(resourceId);
       insertRevision.run(randomUUID(), resourceId, type, title, checkpointId, index, now);
     }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateAgentTaskNoteSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_task_notes (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        source_sha256 TEXT NOT NULL CHECK (length(source_sha256) = 64),
+        start_char INTEGER NOT NULL CHECK (start_char >= 0),
+        end_char INTEGER NOT NULL CHECK (end_char > start_char),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (run_id, source_path, source_sha256, start_char, end_char)
+      );
+      CREATE INDEX IF NOT EXISTS agent_task_notes_run_idx ON agent_task_notes(run_id, source_path, start_char, id);
+      UPDATE schema_meta SET version = 20 WHERE singleton = 1;
+    `);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

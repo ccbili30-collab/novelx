@@ -21,8 +21,14 @@ import { ObjectMetadataPanel } from "./features/resources/ObjectMetadataPanel";
 import { MoveCreativeObjectDialog } from "./features/resources/MoveCreativeObjectDialog";
 import { DeleteCreativeObjectDialog, RenameCreativeObjectDialog } from "./features/resources/CreativeObjectCommandDialogs";
 import { applyThemePreference, readThemePreference, type NovaxTheme } from "../../shared/themePreference";
+import {
+  applyBackgroundPreference,
+  readBackgroundPreference,
+  type NovaxBackgroundPreference,
+} from "../../shared/backgroundPreference";
 import { PlayerWorkbench } from "./features/player/PlayerWorkbench";
 import { ImportWorkbench } from "./features/import/ImportWorkbench";
+import snowBackgroundUrl from "./assets/snow.svg?url";
 
 const SemanticGraphView = lazy(async () => {
   const module = await import("./features/graph/SemanticGraphView");
@@ -39,6 +45,7 @@ type OnboardingState = Pick<ProjectAddResult, "project" | "detection">;
 
 export function App() {
   const [theme, setTheme] = useState<NovaxTheme>(() => readThemePreference(window.localStorage));
+  const [background, setBackground] = useState<NovaxBackgroundPreference>(() => readBackgroundPreference(window.localStorage));
   const [mode, setMode] = useState<WorkbenchMode>("agent");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [removedProjects, setRemovedProjects] = useState<ProjectSummary[]>([]);
@@ -106,6 +113,16 @@ export function App() {
   useEffect(() => {
     applyThemePreference(theme, document.documentElement, window.localStorage);
   }, [theme]);
+
+  useEffect(() => {
+    applyBackgroundPreference(background, snowBackgroundUrl, document.documentElement, window.localStorage);
+  }, [background]);
+
+  function changeBackground(next: NovaxBackgroundPreference): boolean {
+    const saved = applyBackgroundPreference(next, snowBackgroundUrl, document.documentElement, window.localStorage);
+    if (saved) setBackground(next);
+    return saved;
+  }
 
   useEffect(() => window.novaxDesktop.workspace.subscribeFlushRequest((request) => {
     void flushEditor().then(
@@ -630,7 +647,13 @@ export function App() {
 
       {creativeError ? <div className="creative-operation-error" role="alert"><span>{creativeError}</span><button type="button" onClick={() => setCreativeError(null)}>关闭</button></div> : null}
 
-      {settingsOpen ? <Suspense fallback={null}><ProviderSettingsDialog theme={theme} onThemeChange={setTheme} onClose={() => setSettingsOpen(false)} /></Suspense> : null}
+      {settingsOpen ? <Suspense fallback={null}><ProviderSettingsDialog
+        theme={theme}
+        background={background}
+        onThemeChange={setTheme}
+        onBackgroundChange={changeBackground}
+        onClose={() => setSettingsOpen(false)}
+      /></Suspense> : null}
       {historyOpen && workspace ? <CheckpointHistoryDialog workspaceId={workspace.workspaceId} onClose={() => setHistoryOpen(false)} onRestored={(restored) => {
         setWorkspace(restored);
         setSelectedResourceId(null);

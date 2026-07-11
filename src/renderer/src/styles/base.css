@@ -48,6 +48,8 @@
   --novax-theme-swatch-cloude-accent: #da7756;
   --novax-theme-swatch-dark: #20242a;
   --novax-theme-swatch-contrast: linear-gradient(90deg, #000000 50%, #ffffff 50%);
+  --novax-workspace-background: none;
+  --novax-snow-background: none;
   --novax-font-ui: "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif;
   --novax-font-display: "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif;
   --novax-font-code: Consolas, "Cascadia Code", monospace;
@@ -506,6 +508,35 @@ button { letter-spacing: 0; }
 }
 .canvas { grid-area: canvas; min-width: 0; min-height: 0; overflow: hidden; background: var(--paper); }
 .canvas > .empty-state { width: 100%; height: 100%; place-content: center; }
+
+:root:not([data-background="none"]) .workbench-grid--agent > .agent-conversation-panel,
+:root:not([data-background="none"]) .workbench-grid--ide > .canvas {
+  position: relative;
+  isolation: isolate;
+  background: var(--novax-color-conversation);
+}
+:root:not([data-background="none"]) .workbench-grid--agent > .agent-conversation-panel::before,
+:root:not([data-background="none"]) .workbench-grid--ide > .canvas::before {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  background-image: var(--novax-workspace-background);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: min(52vw, 520px) auto;
+  content: "";
+  opacity: .2;
+  pointer-events: none;
+}
+:root:not([data-background="none"]) .workbench-grid--agent > .agent-conversation-panel > *,
+:root:not([data-background="none"]) .workbench-grid--ide > .canvas > * { position: relative; z-index: 1; }
+:root:not([data-background="none"]) .workbench-grid--agent .steward-feed {
+  background: color-mix(in srgb, var(--novax-color-conversation) 86%, transparent);
+}
+:root:not([data-background="none"]) .workbench-grid--agent .steward-composer,
+:root:not([data-background="none"]) .workbench-grid--agent > .agent-conversation-panel > .panel-heading {
+  background: color-mix(in srgb, var(--novax-color-conversation) 94%, transparent);
+}
 
 .panel-heading {
   display: flex;
@@ -1046,6 +1077,7 @@ button { letter-spacing: 0; }
 .settings-scroll { min-height: 0; overflow: auto; padding: 16px 18px 18px; }
 .appearance-settings { display: grid; gap: 10px; margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .appearance-settings > div:first-child { display: grid; gap: 2px; }
+.background-settings-heading { display: grid; gap: 2px; margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--novax-color-border-subtle); }
 .appearance-settings strong { color: var(--novax-color-text-strong); font-size: 12px; }
 .appearance-settings span { color: var(--novax-color-text-subtle); font-size: 10px; }
 .theme-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
@@ -1057,6 +1089,11 @@ button { letter-spacing: 0; }
 .theme-swatch--cloude { background: linear-gradient(135deg, var(--novax-theme-swatch-cloude) 0 58%, var(--novax-theme-swatch-cloude-accent) 58% 100%); }
 .theme-swatch--dark { background: var(--novax-theme-swatch-dark); }
 .theme-swatch--high-contrast { background: var(--novax-theme-swatch-contrast); }
+.background-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.background-options button { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; height: 38px; padding: 0 9px; border: 1px solid var(--novax-color-border-control); border-radius: 5px; background: var(--novax-color-surface-control); color: var(--novax-color-text-subtle); font-size: 10px; cursor: pointer; }
+.background-options button[aria-checked="true"] { border-color: var(--novax-color-accent); background: var(--novax-color-surface-selected); color: var(--novax-color-text-strong); box-shadow: 0 0 0 1px var(--novax-color-focus-ring); }
+.background-preview { width: 20px; height: 24px; flex: none; border: 1px solid var(--novax-color-border-control); border-radius: 3px; background-color: var(--novax-color-paper); background-position: center; background-repeat: no-repeat; background-size: contain; }
+.background-preview--snow { background-image: var(--novax-snow-background); }
 .provider-status {
   display: flex;
   align-items: center;

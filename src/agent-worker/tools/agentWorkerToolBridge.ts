@@ -6,6 +6,8 @@ import {
   globProjectFilesResultSchema,
   listProjectDirectoryResultSchema,
   readProjectFileResultSchema,
+  saveTaskNoteResultSchema,
+  listTaskNotesResultSchema,
   searchProjectFilesResultSchema,
   statProjectFileResultSchema,
   proposeChangeSetResultSchema,
@@ -17,6 +19,8 @@ import {
   type GlobProjectFilesArgs, type GlobProjectFilesResult,
   type ListProjectDirectoryArgs, type ListProjectDirectoryResult,
   type ReadProjectFileArgs, type ReadProjectFileResult,
+  type SaveTaskNoteArgs, type SaveTaskNoteResult,
+  type ListTaskNotesArgs, type ListTaskNotesResult,
   type SearchProjectFilesArgs, type SearchProjectFilesResult,
   type StatProjectFileArgs, type StatProjectFileResult,
   type ProposeChangeSetArgs,
@@ -63,6 +67,8 @@ export class AgentWorkerToolBridge {
   invoke(runId: string, tool: "glob_project_files", args: GlobProjectFilesArgs, signal?: AbortSignal): Promise<GlobProjectFilesResult>;
   invoke(runId: string, tool: "search_project_files", args: SearchProjectFilesArgs, signal?: AbortSignal): Promise<SearchProjectFilesResult>;
   invoke(runId: string, tool: "read_project_file", args: ReadProjectFileArgs, signal?: AbortSignal): Promise<ReadProjectFileResult>;
+  invoke(runId: string, tool: "save_task_note", args: SaveTaskNoteArgs, signal?: AbortSignal): Promise<SaveTaskNoteResult>;
+  invoke(runId: string, tool: "list_task_notes", args: ListTaskNotesArgs, signal?: AbortSignal): Promise<ListTaskNotesResult>;
   invoke(
     runId: string,
     tool: "propose_change_set",
@@ -72,9 +78,9 @@ export class AgentWorkerToolBridge {
   invoke(
     runId: string,
     tool: AgentToolName,
-    args: RetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ListProjectDirectoryArgs | StatProjectFileArgs | GlobProjectFilesArgs | SearchProjectFilesArgs | ReadProjectFileArgs | ProposeChangeSetArgs,
+    args: RetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ListProjectDirectoryArgs | StatProjectFileArgs | GlobProjectFilesArgs | SearchProjectFilesArgs | ReadProjectFileArgs | SaveTaskNoteArgs | ListTaskNotesArgs | ProposeChangeSetArgs,
     signal?: AbortSignal,
-  ): Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ListProjectDirectoryResult | StatProjectFileResult | GlobProjectFilesResult | SearchProjectFilesResult | ReadProjectFileResult | ProposeChangeSetResult> {
+  ): Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ListProjectDirectoryResult | StatProjectFileResult | GlobProjectFilesResult | SearchProjectFilesResult | ReadProjectFileResult | SaveTaskNoteResult | ListTaskNotesResult | ProposeChangeSetResult> {
     if (signal?.aborted) return Promise.reject(toolBridgeError("AGENT_RUN_CANCELLED", "Agent run was cancelled."));
     const request = agentWorkerToolRequestSchema.parse({
       type: "tool.request",
@@ -136,7 +142,9 @@ export class AgentWorkerToolBridge {
             : response.tool === "glob_project_files" ? globProjectFilesResultSchema
               : response.tool === "search_project_files" ? searchProjectFilesResultSchema
                 : response.tool === "read_project_file" ? readProjectFileResultSchema
-                  : proposeChangeSetResultSchema;
+                  : response.tool === "save_task_note" ? saveTaskNoteResultSchema
+                    : response.tool === "list_task_notes" ? listTaskNotesResultSchema
+                      : proposeChangeSetResultSchema;
     const result = resultSchema.safeParse(response.result);
     if (!result.success) {
       this.#settle(response.requestId, undefined, toolBridgeError("AGENT_TOOL_PROTOCOL_FAILED", "Agent tool response is invalid."));

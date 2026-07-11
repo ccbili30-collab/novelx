@@ -73,6 +73,7 @@ export async function runStewardRuntime(input: {
       authorizedScopeResourceIds: input.scopeResourceIds,
       operationalTools: input.tools,
       resultCapture: input.resultCapture,
+      longReadMaxChars: resolveLongReadMaxChars(input.providerProfile.contextWindow),
     });
     stateMachine = machine;
     const adapterResult = await input.adapter.run({
@@ -91,6 +92,8 @@ export async function runStewardRuntime(input: {
           machine.finalizationContract(),
           machine.lastFinalRejectionCode() ?? "STRUCTURED_RESULT_REQUIRED",
         ),
+        forceTool: true,
+        requiredToolName: () => machine.requiredNextTool(),
       },
     });
     if (input.signal?.aborted) throw stewardRuntimeError("AGENT_RUN_CANCELLED");
@@ -138,9 +141,14 @@ export async function runStewardRuntime(input: {
   }
 }
 
+export function resolveLongReadMaxChars(contextWindow: number): number {
+  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) return 4_000;
+  return Math.min(8_000, Math.max(4_000, Math.floor(contextWindow / 16)));
+}
+
 function attachPublicTrace(
   cause: unknown,
-  executions: Array<{ tool: "retrieve_graph_evidence" | "inspect_project_files" | "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
+  executions: Array<{ tool: "retrieve_graph_evidence" | "inspect_project_files" | "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "save_task_note" | "list_task_notes" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
 ): unknown {
   if (!cause || typeof cause !== "object") return cause;
   return Object.assign(cause, { publicToolOutcomes: executions.map((execution) => ({ ...execution })) });

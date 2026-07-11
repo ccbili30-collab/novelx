@@ -15,6 +15,10 @@ import {
   searchProjectFilesResultSchema,
   readProjectFileArgsSchema,
   readProjectFileResultSchema,
+  saveTaskNoteArgsSchema,
+  saveTaskNoteResultSchema,
+  listTaskNotesArgsSchema,
+  listTaskNotesResultSchema,
   retrieveGraphEvidenceArgsSchema,
   retrieveGraphEvidenceResultSchema,
   type ProposeChangeSetArgs,
@@ -31,6 +35,10 @@ import {
   type SearchProjectFilesResult,
   type ReadProjectFileArgs,
   type ReadProjectFileResult,
+  type SaveTaskNoteArgs,
+  type SaveTaskNoteResult,
+  type ListTaskNotesArgs,
+  type ListTaskNotesResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
 } from "../../shared/agentWorkerProtocol";
@@ -62,7 +70,26 @@ const searchProjectFilesParameters = Type.Object({
   query: Type.String({ minLength: 1, maxLength: 500 }),
   path: optionalProjectPath,
 }, { additionalProperties: false });
-const readProjectFileParameters = statProjectFileParameters;
+const readProjectFileParameters = Type.Object({
+  path: Type.Optional(Type.String({ minLength: 1, maxLength: 1_000 })),
+  offsetChars: Type.Optional(Type.Integer({ minimum: 0, default: 0 })),
+  maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 120_000, default: 4_000 })),
+}, { additionalProperties: false });
+const taskNoteSourceParameters = Type.Object({
+  path: Type.String({ minLength: 1, maxLength: 4_000 }),
+  sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  startChar: Type.Integer({ minimum: 0 }),
+  endChar: Type.Integer({ minimum: 1 }),
+}, { additionalProperties: false });
+const saveTaskNoteParameters = Type.Object({
+  title: Type.String({ minLength: 1, maxLength: 240 }),
+  content: Type.String({ minLength: 1, maxLength: 1_000 }),
+  source: Type.Optional(taskNoteSourceParameters),
+}, { additionalProperties: false });
+const listTaskNotesParameters = Type.Object({
+  offset: Type.Optional(Type.Integer({ minimum: 0, default: 0 })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 100 })),
+}, { additionalProperties: false });
 
 const assertionItem = Type.Object({
   id: Type.String({ minLength: 1, maxLength: 160 }),
@@ -213,6 +240,8 @@ export interface AgentToolExecutor {
   globProjectFiles(args: GlobProjectFilesArgs, signal?: AbortSignal): Promise<GlobProjectFilesResult>;
   searchProjectFiles(args: SearchProjectFilesArgs, signal?: AbortSignal): Promise<SearchProjectFilesResult>;
   readProjectFile(args: ReadProjectFileArgs, signal?: AbortSignal): Promise<ReadProjectFileResult>;
+  saveTaskNote(args: SaveTaskNoteArgs, signal?: AbortSignal): Promise<SaveTaskNoteResult>;
+  listTaskNotes(args: ListTaskNotesArgs, signal?: AbortSignal): Promise<ListTaskNotesResult>;
   proposeChangeSet(args: ProposeChangeSetArgs, signal?: AbortSignal): Promise<ProposeChangeSetResult>;
 }
 
@@ -333,15 +362,37 @@ export function createAgentTools(executor: AgentToolExecutor): AgentTool[] {
   const readFile: AgentTool<typeof readProjectFileParameters> = {
     name: "read_project_file",
     label: "读取项目文件",
-    description: "Read one known real project file. Discover paths with list_project_directory or glob_project_files before reading when the file name is not certain.",
+    description: "Read one bounded range of a known project file. Use offsetChars/endChar to continue large files; default chunks are intentionally small enough for long tasks.",
     parameters: readProjectFileParameters,
     execute: async (_toolCallId, params, signal) => fileToolResult(
       readProjectFileResultSchema.parse(await executor.readProjectFile(readProjectFileArgsSchema.parse(params), signal)),
-      "Use only the returned content. Respect complete and returnedChars. If the path is not found, discover real paths instead of claiming missing authorization.",
+      "Use only the returned content. If hasMore is true, persist a source-linked task note before continuing at endChar. If the path is not found, discover real paths instead of claiming missing authorization.",
     ),
   };
 
-  return [retrieve, listDirectory, statFile, globFiles, searchFiles, readFile, inspectFiles, propose];
+  const saveNote: AgentTool<typeof saveTaskNoteParameters> = {
+    name: "save_task_note",
+    label: "保存任务笔记",
+    description: "Persist a concise working note for exactly one previously read file range. This is task memory, not canonical story data.",
+    parameters: saveTaskNoteParameters,
+    execute: async (_toolCallId, params, signal) => fileToolResult(
+      saveTaskNoteResultSchema.parse(await executor.saveTaskNote(saveTaskNoteArgsSchema.parse(params), signal)),
+      "The covered source range is now durable. Continue at its endChar or list notes for recovery.",
+    ),
+  };
+
+  const listNotes: AgentTool<typeof listTaskNotesParameters> = {
+    name: "list_task_notes",
+    label: "读取任务笔记",
+    description: "Read a bounded page of durable notes created during this run. Use for recovery and final synthesis; paginate when nextOffset is present.",
+    parameters: listTaskNotesParameters,
+    execute: async (_toolCallId, params, signal) => fileToolResult(
+      listTaskNotesResultSchema.parse(await executor.listTaskNotes(listTaskNotesArgsSchema.parse(params), signal)),
+      "These notes are source-linked working memory. Re-read their exact source range before resolving uncertainty or conflict.",
+    ),
+  };
+
+  return [retrieve, listDirectory, statFile, globFiles, searchFiles, readFile, saveNote, listNotes, inspectFiles, propose];
 }
 
 function fileToolResult<T>(result: T, novaxInstruction: string) {

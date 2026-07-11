@@ -6,7 +6,7 @@ import {
 } from "../../shared/contextAdmissionContract";
 
 export { CONTEXT_ADMISSION_POLICY_VERSION } from "../../shared/contextAdmissionContract";
-export const MAX_PROVIDER_REQUESTS_PER_INVOCATION = 8;
+export const MAX_PROVIDER_REQUESTS_PER_INVOCATION = 128;
 
 export interface ContextAdmissionDecision {
   policyVersion: typeof CONTEXT_ADMISSION_POLICY_VERSION;
@@ -141,6 +141,103 @@ export function assertContextAdmission(input: Parameters<typeof evaluateContextA
   const decision = evaluateContextAdmission(input);
   if (!decision.accepted) throw contextAdmissionError("AGENT_CONTEXT_BUDGET_EXCEEDED");
   return decision;
+}
+
+export function compactDurablyNotedFileChunks(context: Context): Context {
+  const durableNotes = new Map<string, string>();
+  const coveredToolCallIds = new Set<string>();
+  const receipts: Array<{ noteId: string; source: Record<string, unknown> }> = [];
+  for (const message of context.messages) {
+    if (message.role !== "toolResult" || message.toolName !== "save_task_note" || message.isError) continue;
+    const payload = readToolPayload(message.content);
+    const note = readResultObject(payload);
+    const source = note && readObject(note.source);
+    if (!note || !source || typeof note.id !== "string") continue;
+    const key = sourceRangeKey(source);
+    if (key) {
+      durableNotes.set(key, note.id);
+      coveredToolCallIds.add(message.toolCallId);
+      receipts.push({ noteId: note.id, source });
+    }
+  }
+  if (durableNotes.size === 0) return context;
+  for (const message of context.messages) {
+    if (message.role !== "toolResult" || message.toolName !== "read_project_file" || message.isError) continue;
+    const result = readResultObject(readToolPayload(message.content));
+    const key = result && sourceRangeKey(result);
+    if (key && durableNotes.has(key)) coveredToolCallIds.add(message.toolCallId);
+  }
+
+  const messages: Context["messages"] = [];
+  let receiptInserted = false;
+  for (const message of context.messages) {
+    if (message.role === "toolResult" && coveredToolCallIds.has(message.toolCallId)) {
+      if (!receiptInserted) {
+        messages.push(createDurableReceiptMessage(receipts, message.timestamp));
+        receiptInserted = true;
+      }
+      continue;
+    }
+    if (message.role === "assistant") {
+      const content = message.content.filter((item) => item.type !== "toolCall" || !coveredToolCallIds.has(item.id));
+      if (content.length === 0) {
+        if (!receiptInserted) {
+          messages.push(createDurableReceiptMessage(receipts, message.timestamp));
+          receiptInserted = true;
+        }
+        continue;
+      }
+      messages.push(content.length === message.content.length ? message : { ...message, content });
+      continue;
+    }
+    messages.push(message);
+  }
+  if (!receiptInserted) messages.push(createDurableReceiptMessage(receipts, Date.now()));
+  return { ...context, messages };
+}
+
+function createDurableReceiptMessage(
+  receipts: Array<{ noteId: string; source: Record<string, unknown> }>,
+  timestamp: number,
+): Context["messages"][number] {
+  return {
+    role: "user",
+    content: JSON.stringify({
+      novaxState: "durable_file_receipts",
+      instruction: "Covered source ranges are stored in workspace task notes. Continue with the Harness-required tool.",
+      receipts,
+    }),
+    timestamp,
+  };
+}
+
+function readToolPayload(content: unknown): unknown {
+  if (!Array.isArray(content)) return null;
+  for (const item of content) {
+    if (!item || typeof item !== "object" || !("type" in item) || item.type !== "text" || !("text" in item)) continue;
+    try {
+      return JSON.parse(String(item.text));
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function readResultObject(payload: unknown): Record<string, unknown> | null {
+  const object = readObject(payload);
+  return object ? readObject(object.result) : null;
+}
+
+function readObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function sourceRangeKey(value: Record<string, unknown>): string | null {
+  const { path, sha256, startChar, endChar } = value;
+  if (typeof path !== "string" || typeof sha256 !== "string"
+    || !Number.isSafeInteger(startChar) || !Number.isSafeInteger(endChar)) return null;
+  return `${path}\u0000${sha256}\u0000${startChar}\u0000${endChar}`;
 }
 
 function contextAdmissionError(code: "AGENT_CONTEXT_BUDGET_EXCEEDED" | "PROVIDER_PROTOCOL_FAILED"): Error & { code: string } {

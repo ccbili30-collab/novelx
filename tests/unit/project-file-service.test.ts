@@ -111,6 +111,32 @@ describe("ProjectFileService", () => {
     expect(() => service.read("README.md")).toThrow(expect.objectContaining({ code: "PROJECT_FILE_NOT_FOUND" }));
     expect(() => service.stat("missing.md")).toThrow(expect.objectContaining({ code: "PROJECT_FILE_NOT_FOUND" }));
   });
+
+  it("reads stable bounded character ranges for long-running Agent tasks", () => {
+    const root = createRoot();
+    fs.writeFileSync(path.join(root, "long.md"), "甲乙丙丁戊己庚辛壬癸", "utf8");
+    const service = new ProjectFileService(root);
+
+    const first = service.read("long.md", { offsetChars: 0, maxChars: 4 });
+    const second = service.read("long.md", { offsetChars: first.endChar, maxChars: 4 });
+    const final = service.read("long.md", { offsetChars: second.endChar, maxChars: 4 });
+
+    expect(first).toMatchObject({ content: "甲乙丙丁", startChar: 0, endChar: 4, hasMore: true, complete: false });
+    expect(second).toMatchObject({ content: "戊己庚辛", startChar: 4, endChar: 8, hasMore: true, complete: false });
+    expect(final).toMatchObject({ content: "壬癸", startChar: 8, endChar: 10, hasMore: false, complete: true });
+    expect(new Set([first.sha256, second.sha256, final.sha256]).size).toBe(1);
+  });
+
+  it("rejects invalid read ranges instead of silently clipping them", () => {
+    const root = createRoot();
+    fs.writeFileSync(path.join(root, "world.md"), "world", "utf8");
+    const service = new ProjectFileService(root);
+
+    expect(() => service.read("world.md", { offsetChars: -1, maxChars: 10 }))
+      .toThrow(expect.objectContaining({ code: "PROJECT_FILE_RANGE_INVALID" }));
+    expect(() => service.read("world.md", { offsetChars: 0, maxChars: 0 }))
+      .toThrow(expect.objectContaining({ code: "PROJECT_FILE_RANGE_INVALID" }));
+  });
 });
 
 function createRoot(): string {

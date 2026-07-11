@@ -52,7 +52,7 @@ describe("Steward tool handoff state machine", () => {
       toolOutcomes: [{ tool: "retrieve_graph_evidence", status: "succeeded" }],
       changeSet: { state: "committed", changeSetId: "change-1" },
       escalations: [],
-    })).rejects.toMatchObject({ code: "STEWARD_FINAL_TOOL_OUTCOMES_MISMATCH" });
+    })).rejects.toMatchObject({ code: "STEWARD_FINAL_CHANGE_SET_MISMATCH" });
 
     await tool(machine.tools, "submit_steward_result").execute("result-good", {
       status: "awaiting_confirmation",
@@ -162,7 +162,7 @@ describe("Steward tool handoff state machine", () => {
       toolOutcomes: [{ tool: "retrieve_graph_evidence", status: "succeeded" }],
       changeSet: { state: "none", changeSetId: null },
       escalations: [],
-    })).rejects.toMatchObject({ code: "STEWARD_FINAL_TOOL_OUTCOMES_MISMATCH" });
+    })).rejects.toMatchObject({ code: "STEWARD_FINAL_BLOCK_STATE_MISMATCH" });
 
     await tool(machine.tools, "submit_steward_result").execute("result-failed", {
       status: "blocked",
@@ -205,6 +205,64 @@ describe("Steward tool handoff state machine", () => {
       changeSet: { state: "none", changeSetId: null },
       escalations: [],
     });
+  });
+
+  it("uses the configured long-read chunk size while preserving the exact next offset", async () => {
+    const read = successfulTool("read_project_file", {
+      path: "世界.md",
+      sha256: "a".repeat(64),
+      kind: "text",
+      content: "设定",
+      size: 6,
+      startChar: 0,
+      endChar: 2,
+      complete: true,
+      hasMore: false,
+      originalChars: 2,
+      returnedChars: 2,
+    });
+    const machine = createStewardExecutionStateMachine({
+      mode: "free",
+      userInput: "读取当前项目里的全部 Markdown 文档。",
+      authorizedScopeResourceIds: [],
+      operationalTools: [
+        successfulTool("list_project_directory", {
+          root: "C:\\project",
+          entries: [{
+            path: "世界.md",
+            kind: "file",
+            size: 6,
+            modifiedAt: "2026-07-12T00:00:00.000Z",
+          }],
+          ignoredDirectories: [".novax"],
+          incomplete: false,
+          omittedEntries: 0,
+        }),
+        read,
+        successfulTool("save_task_note", {
+          id: "note-1",
+          runId: "run-1",
+          title: "设定",
+          content: "设定",
+          source: { path: "世界.md", sha256: "a".repeat(64), startChar: 0, endChar: 2 },
+          createdAt: "2026-07-12T00:00:00.000Z",
+          updatedAt: "2026-07-12T00:00:00.000Z",
+        }),
+        successfulTool("list_task_notes", { notes: [], nextOffset: null }),
+      ],
+      resultCapture: createRoleOutputTool("steward"),
+      longReadMaxChars: 8_000,
+    });
+
+    await tool(machine.tools, "list_project_directory").execute("list-1", { path: "" });
+    await tool(machine.tools, "read_project_file").execute("read-1", { path: "wrong.md", offsetChars: 99 });
+
+    expect(read.execute).toHaveBeenCalledWith(
+      "read-1",
+      { path: "世界.md", offsetChars: 0, maxChars: 8_000 },
+      undefined,
+      undefined,
+    );
   });
 
 });

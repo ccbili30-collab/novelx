@@ -89,7 +89,7 @@ export async function handleAgentWorkerCommand(
         if (projected.type === "text.delta") return;
         if ([
           "retrieve_graph_evidence", "inspect_project_files", "list_project_directory", "stat_project_file",
-          "glob_project_files", "search_project_files", "read_project_file", "propose_change_set",
+          "glob_project_files", "search_project_files", "read_project_file", "save_task_note", "list_task_notes", "propose_change_set",
         ].includes(projected.tool)) return;
         emit({
           type: "run.activity",
@@ -134,6 +134,8 @@ export function projectPublicArtifacts(
     glob_project_files: "匹配项目文件",
     search_project_files: "搜索项目内容",
     read_project_file: "读取项目文件",
+    save_task_note: "保存任务笔记",
+    list_task_notes: "读取任务笔记",
     propose_change_set: "生成变更集",
     writer: "写手处理",
     checker: "一致性检查",
@@ -218,7 +220,7 @@ function projectFailureArtifacts(cause: unknown, message: string): AgentArtifact
     if (!value || typeof value !== "object" || !("tool" in value) || !("status" in value)) return [];
     const tool = value.tool;
     const status = value.status;
-    if (!(["retrieve_graph_evidence", "inspect_project_files", "list_project_directory", "stat_project_file", "glob_project_files", "search_project_files", "read_project_file", "propose_change_set", "writer", "checker"] as const).includes(tool as never)) return [];
+    if (!(["retrieve_graph_evidence", "inspect_project_files", "list_project_directory", "stat_project_file", "glob_project_files", "search_project_files", "read_project_file", "save_task_note", "list_task_notes", "propose_change_set", "writer", "checker"] as const).includes(tool as never)) return [];
     if (status !== "succeeded" && status !== "failed") return [];
     const labels = {
       retrieve_graph_evidence: "检索项目资料",
@@ -228,6 +230,8 @@ function projectFailureArtifacts(cause: unknown, message: string): AgentArtifact
       glob_project_files: "匹配项目文件",
       search_project_files: "搜索项目内容",
       read_project_file: "读取项目文件",
+      save_task_note: "保存任务笔记",
+      list_task_notes: "读取任务笔记",
       propose_change_set: "生成候选变更",
       writer: "写手处理",
       checker: "一致性检查",

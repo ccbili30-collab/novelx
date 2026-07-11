@@ -12,8 +12,8 @@ export interface AgentRuntimeProfileIdentity {
 
 export const STRUCTURED_SUBMISSION_CORRECTION = {
   id: "novax.structured-submission-correction",
-  version: "2.2.0",
-  maxAttempts: 3,
+  version: "2.3.0",
+  maxAttempts: 6,
   template: "你尚未通过规定的结构化结果工具完成本次运行。不要重复调用领域工具，不要输出普通文本。立即且只调用一次 {{toolName}}，依据已有输入和工具结果提交最终结构化结果。",
 } as const;
 
@@ -26,11 +26,11 @@ export const STEWARD_STATE_CORRECTION = {
 const profiles: Record<AgentRuntimeRole, AgentRuntimeProfileIdentity> = {
   steward: {
     id: "novax.steward-runtime",
-    version: "1.16.0",
-    sha256: "a4d067d481aa4727ee48b4a4e5777267dac50437c9fc79d38a1a8ea8bcf76e6f",
+    version: "1.17.0",
+    sha256: "f7ccddd821331d6c8bf64476c48a1f591bbf0c5df5f7f717a2c21baf590f9f98",
     toolPolicyId: "novax.steward-tools",
-    toolPolicyVersion: "2.8.0",
-    toolPolicySha256: "55be19ffa5f3b40a18749a660d1b7e44553df632a94a5eac980ac048406ce055",
+    toolPolicyVersion: "2.9.0",
+    toolPolicySha256: "0cc922da66210d8e1b377274e7f29529cf485ab90730dbe6f983f5463d97d53b",
     authorizedTools: [
       "checker",
       "glob_project_files",
@@ -38,6 +38,8 @@ const profiles: Record<AgentRuntimeRole, AgentRuntimeProfileIdentity> = {
       "list_project_directory",
       "propose_change_set",
       "read_project_file",
+      "save_task_note",
+      "list_task_notes",
       "retrieve_graph_evidence",
       "search_project_files",
       "stat_project_file",

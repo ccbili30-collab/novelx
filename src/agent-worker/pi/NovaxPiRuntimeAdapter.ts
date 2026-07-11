@@ -18,6 +18,7 @@ import {
   assertContextAdmission,
   CONTEXT_ADMISSION_POLICY_VERSION,
   type ContextAdmissionDecision,
+  compactDurablyNotedFileChunks,
 } from "./contextAdmissionPolicy";
 import {
   createStructuredSubmissionCorrection,
@@ -44,6 +45,7 @@ interface PiRunInput {
     isSatisfied(): boolean;
     createCorrection?(): string;
     forceTool?: boolean;
+    requiredToolName?(): string;
   };
 }
 
@@ -96,9 +98,10 @@ export class NovaxPiRuntimeAdapter {
     const historyMessages = createHistoryMessages(input.sessionHistory, this.#model);
     const guardedStreamFn: StreamFn = (model, context, options) => {
       requestNumber += 1;
+      const admittedContext = compactDurablyNotedFileChunks(context);
       try {
         admissionDecisions.push(assertContextAdmission({
-          context,
+          context: admittedContext,
           contextWindow: model.contextWindow,
           maxTokens: this.#configuredMaxTokens,
           requestNumber,
@@ -112,11 +115,16 @@ export class NovaxPiRuntimeAdapter {
         throw error;
       }
       const decision = admissionDecisions.at(-1)!;
-      return this.#streamFn({ ...model, maxTokens: decision.outputReserve }, context, {
+      return this.#streamFn({ ...model, maxTokens: decision.outputReserve }, admittedContext, {
         ...options,
         maxTokens: decision.outputReserve,
+        maxRetries: Math.max(options?.maxRetries ?? 0, 3),
+        maxRetryDelayMs: Math.min(options?.maxRetryDelayMs ?? 10_000, 10_000),
         onPayload: input.completionGuard?.forceTool && !input.completionGuard.isSatisfied()
-          ? (payload) => forceOpenAiToolChoice(payload, input.completionGuard!.toolName)
+          ? (payload) => forceOpenAiToolChoice(
+              payload,
+              input.completionGuard!.requiredToolName?.() ?? input.completionGuard!.toolName,
+            )
           : options?.onPayload,
       });
     };

@@ -268,6 +268,14 @@ function createEvaluationToolExecutor(
     status: "succeeded" | "failed";
   }>,
 ): AgentToolExecutor {
+  const taskNotes: Array<{
+    id: string;
+    title: string;
+    content: string;
+    source: { path: string; sha256: string; startChar: number; endChar: number };
+    createdAt: string;
+    updatedAt: string;
+  }> = [];
   return {
     listProjectDirectory: async () => {
       if (scenario !== "project_overview") throw evaluationFileToolFailure(executions, "list_project_directory");
@@ -299,7 +307,25 @@ function createEvaluationToolExecutor(
       const file = evaluationProjectFiles().find((candidate) => candidate.path === args.path);
       if (!file) throw evalRunnerError("PROJECT_FILE_NOT_FOUND", "The requested evaluation file does not exist.");
       executions.push({ tool: "read_project_file", status: "succeeded" });
-      return file;
+      const startChar = args.offsetChars ?? 0;
+      const maxChars = args.maxChars ?? 4_000;
+      const content = file.content.slice(startChar, startChar + maxChars);
+      const endChar = startChar + content.length;
+      return { ...file, content, returnedChars: content.length, startChar, endChar, hasMore: endChar < file.originalChars, complete: endChar === file.originalChars };
+    },
+    saveTaskNote: async (args) => {
+      executions.push({ tool: "save_task_note", status: "succeeded" });
+      const now = "2026-07-11T00:00:00.000Z";
+      const note = { id: `note-${taskNotes.length + 1}`, ...args, createdAt: now, updatedAt: now };
+      taskNotes.push(note);
+      return note;
+    },
+    listTaskNotes: async (args) => {
+      executions.push({ tool: "list_task_notes", status: "succeeded" });
+      const offset = args.offset ?? 0;
+      const limit = args.limit ?? 100;
+      const notes = taskNotes.slice(offset, offset + limit);
+      return { notes, total: taskNotes.length, nextOffset: offset + notes.length < taskNotes.length ? offset + notes.length : null };
     },
     inspectProjectFiles: async () => {
       if (scenario !== "project_overview") {
@@ -443,6 +469,9 @@ function evaluationFile(path: string, content: string) {
     complete: true,
     originalChars: content.length,
     returnedChars: content.length,
+    startChar: 0,
+    endChar: content.length,
+    hasMore: false,
   };
 }
 

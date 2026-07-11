@@ -178,7 +178,7 @@ describe("candidate Prompt evaluation framework", () => {
           const currentIndex = callIndex++;
           const testCase = promptAdversarialCases[currentIndex];
           const fixture = offlineAdversarialFixtures[currentIndex];
-          if (testCase.role === "steward") {
+          if (testCase.role === "steward" && testCase.stewardToolScenario !== "project_overview") {
             const planTool = input.tools.find((tool) => tool.name === "submit_steward_plan")!;
             await planTool.execute(`eval-plan-${currentIndex}`, stewardPlanFor(testCase.stewardToolScenario));
           }
@@ -189,8 +189,19 @@ describe("candidate Prompt evaluation framework", () => {
           if (testCase.stewardToolScenario === "project_overview") {
             const list = input.tools.find((tool) => tool.name === "list_project_directory")!;
             await list.execute("eval-list-project", { path: "" });
+            const saveNote = input.tools.find((tool) => tool.name === "save_task_note")!;
             const read = input.tools.find((tool) => tool.name === "read_project_file")!;
-            await read.execute("eval-read-project", { path: "01-力量体系.md" });
+            for (const [index, file] of evaluationFilesForTest().entries()) {
+              const readResult = await read.execute(`eval-read-project-${index}`, { path: file.path, offsetChars: 0 });
+              const source = readResult.details as { path: string; sha256: string; startChar: number; endChar: number };
+              await saveNote.execute(`eval-save-note-${index}`, {
+                title: file.path,
+                content: `已读取 ${file.path}`,
+                source: { path: source.path, sha256: source.sha256, startChar: source.startChar, endChar: source.endChar },
+              });
+            }
+            const listNotes = input.tools.find((tool) => tool.name === "list_task_notes")!;
+            await listNotes.execute("eval-list-notes", { offset: 0, limit: 100 });
           }
           if (testCase.stewardToolScenario === "assist_pending_change_set") {
             const retrieve = input.tools.find((tool) => tool.name === "retrieve_graph_evidence")!;
@@ -252,6 +263,14 @@ describe("candidate Prompt evaluation framework", () => {
       .toEqual([
         { tool: "list_project_directory", status: "succeeded" },
         { tool: "read_project_file", status: "succeeded" },
+        { tool: "save_task_note", status: "succeeded" },
+        { tool: "read_project_file", status: "succeeded" },
+        { tool: "save_task_note", status: "succeeded" },
+        { tool: "read_project_file", status: "succeeded" },
+        { tool: "save_task_note", status: "succeeded" },
+        { tool: "read_project_file", status: "succeeded" },
+        { tool: "save_task_note", status: "succeeded" },
+        { tool: "list_task_notes", status: "succeeded" },
       ]);
     expect(stewards.find((item) => item.caseId === "steward.assist-cannot-commit")?.productionToolExecutions)
       .toEqual([
@@ -306,7 +325,7 @@ function stewardPlanFor(
     return {
       objective: "inspect_files",
       scopeResourceIds: ["world-files-eval"],
-      steps: ["list_project_directory", "read_project_file"],
+      steps: ["list_project_directory", "read_project_file", "save_task_note", "list_task_notes"],
     };
   }
   if (scenario === "major_conflict") {
@@ -317,6 +336,15 @@ function stewardPlanFor(
     };
   }
   return { objective: "discussion", scopeResourceIds: [], steps: [] };
+}
+
+function evaluationFilesForTest() {
+  return [
+    { path: "01-力量体系.md" },
+    { path: "02-场景地图与世界观.md" },
+    { path: "03-人物关系图.md" },
+    { path: "04-物品大全.md" },
+  ];
 }
 
 function candidatePromptSet() {

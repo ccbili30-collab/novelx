@@ -43,6 +43,9 @@ const projectFileReadSchema = z.object({
   complete: z.boolean(),
   originalChars: z.number().int().min(0).nullable(),
   returnedChars: z.number().int().min(0).max(120_000),
+  startChar: z.number().int().min(0),
+  endChar: z.number().int().min(0),
+  hasMore: z.boolean(),
 }).strict();
 
 const projectFileListingSchema = z.object({
@@ -92,8 +95,45 @@ export const searchProjectFilesResultSchema = z.object({
   incomplete: z.boolean(),
 }).strict();
 
-export const readProjectFileArgsSchema = statProjectFileArgsSchema;
+export const readProjectFileArgsSchema = z.object({
+  path: z.string().trim().min(1).max(1_000),
+  offsetChars: z.number().int().min(0).optional(),
+  maxChars: z.number().int().min(1).max(120_000).optional(),
+}).strict();
 export const readProjectFileResultSchema = projectFileReadSchema;
+
+const taskNoteSourceSchema = z.object({
+  path: z.string().min(1).max(4_000),
+  sha256: sha256Schema,
+  startChar: z.number().int().min(0),
+  endChar: z.number().int().positive(),
+}).strict().refine((source) => source.endChar > source.startChar, "Task note source range is invalid.");
+
+const taskNoteSchema = z.object({
+  id: identifierSchema,
+  title: z.string().min(1).max(240),
+  content: z.string().min(1).max(1_000),
+  source: taskNoteSourceSchema,
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+}).strict();
+
+export const saveTaskNoteArgsSchema = z.object({
+  title: z.string().trim().min(1).max(240),
+  content: z.string().trim().min(1).max(1_000),
+  source: taskNoteSourceSchema,
+}).strict();
+export const saveTaskNoteResultSchema = taskNoteSchema;
+
+export const listTaskNotesArgsSchema = z.object({
+  offset: z.number().int().min(0).optional().default(0),
+  limit: z.number().int().min(1).max(100).optional().default(100),
+}).strict();
+export const listTaskNotesResultSchema = z.object({
+  notes: z.array(taskNoteSchema).max(100),
+  total: z.number().int().min(0),
+  nextOffset: z.number().int().min(0).nullable(),
+}).strict();
 
 export const inspectProjectFilesResultSchema = z.discriminatedUnion("mode", [
   z.object({
@@ -408,6 +448,8 @@ export const agentToolNameSchema = z.enum([
   "glob_project_files",
   "search_project_files",
   "read_project_file",
+  "save_task_note",
+  "list_task_notes",
   "inspect_project_files",
   "propose_change_set",
 ]);
@@ -487,6 +529,8 @@ export const agentWorkerToolRequestSchema = z.discriminatedUnion("tool", [
   z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("glob_project_files"), args: globProjectFilesArgsSchema }).strict(),
   z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("search_project_files"), args: searchProjectFilesArgsSchema }).strict(),
   z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("read_project_file"), args: readProjectFileArgsSchema }).strict(),
+  z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("save_task_note"), args: saveTaskNoteArgsSchema }).strict(),
+  z.object({ type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema, tool: z.literal("list_task_notes"), args: listTaskNotesArgsSchema }).strict(),
   z.object({
     type: z.literal("tool.request"),
     runId: z.string().min(1).max(120),
@@ -509,6 +553,7 @@ export const agentToolInternalErrorCodeSchema = z.enum([
   "PROJECT_FILE_NOT_A_FILE",
   "PROJECT_FILE_GLOB_INVALID",
   "PROJECT_FILE_QUERY_INVALID",
+  "PROJECT_FILE_RANGE_INVALID",
   "PROJECT_FILE_OPERATION_FAILED",
 ]);
 
@@ -534,6 +579,8 @@ const agentWorkerToolSuccessResponseSchema = z.discriminatedUnion("tool", [
   z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("glob_project_files"), result: globProjectFilesResultSchema }).strict(),
   z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("search_project_files"), result: searchProjectFilesResultSchema }).strict(),
   z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("read_project_file"), result: readProjectFileResultSchema }).strict(),
+  z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("save_task_note"), result: saveTaskNoteResultSchema }).strict(),
+  z.object({ type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema, ok: z.literal(true), tool: z.literal("list_task_notes"), result: listTaskNotesResultSchema }).strict(),
   z.object({
     type: z.literal("tool.response"),
     runId: z.string().min(1).max(120),
@@ -703,6 +750,10 @@ export type SearchProjectFilesArgs = z.infer<typeof searchProjectFilesArgsSchema
 export type SearchProjectFilesResult = z.infer<typeof searchProjectFilesResultSchema>;
 export type ReadProjectFileArgs = z.infer<typeof readProjectFileArgsSchema>;
 export type ReadProjectFileResult = z.infer<typeof readProjectFileResultSchema>;
+export type SaveTaskNoteArgs = z.infer<typeof saveTaskNoteArgsSchema>;
+export type SaveTaskNoteResult = z.infer<typeof saveTaskNoteResultSchema>;
+export type ListTaskNotesArgs = z.input<typeof listTaskNotesArgsSchema>;
+export type ListTaskNotesResult = z.infer<typeof listTaskNotesResultSchema>;
 export type ProposeChangeSetArgs = z.infer<typeof proposeChangeSetArgsSchema>;
 export type ProposeChangeSetResult = z.infer<typeof proposeChangeSetResultSchema>;
 export type AgentToolName = z.infer<typeof agentToolNameSchema>;

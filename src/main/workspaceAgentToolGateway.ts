@@ -7,6 +7,8 @@ import {
   retrieveGraphEvidenceResultSchema,
   searchProjectFilesResultSchema,
   statProjectFileResultSchema,
+  saveTaskNoteResultSchema,
+  listTaskNotesResultSchema,
   type ProposeChangeSetArgs,
 } from "../shared/agentWorkerProtocol";
 import { ChangeSetService, type ChangeSetItem, type ChangeSetPolicyEvaluator } from "../domain/changeSet/changeSetService";
@@ -16,6 +18,7 @@ import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import type { WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import type { AgentToolGateway } from "./agentProcessSupervisor";
 import { ProjectFileService } from "../domain/workspace/projectFileService";
+import { AgentTaskNoteRepository } from "../domain/agent/agentTaskNoteRepository";
 
 export function createWorkspaceAgentToolGateway(
   workspace: WorkspaceDatabase,
@@ -63,7 +66,35 @@ export function createWorkspaceAgentToolGateway(
     },
     readProjectFile: async (args, context) => {
       assertAvailable(context.signal);
-      return readProjectFileResultSchema.parse(new ProjectFileService(workspace.rootPath).read(args.path));
+      return readProjectFileResultSchema.parse(new ProjectFileService(workspace.rootPath).read(args.path, args));
+    },
+    saveTaskNote: async (args, context) => {
+      assertAvailable(context.signal);
+      const stat = new ProjectFileService(workspace.rootPath).stat(args.source.path);
+      if (stat.kind !== "file" || stat.sha256 !== args.source.sha256) {
+        throw gatewayError("PROJECT_FILE_OPERATION_FAILED", "The task note source is stale or missing.");
+      }
+      const note = new AgentTaskNoteRepository(workspace).save({
+        runId: context.runId,
+        title: args.title,
+        content: args.content,
+        source: args.source,
+      });
+      assertAvailable(context.signal);
+      const { runId: _runId, ...publicNote } = note;
+      return saveTaskNoteResultSchema.parse(publicNote);
+    },
+    listTaskNotes: async (args, context) => {
+      assertAvailable(context.signal);
+      const notes = new AgentTaskNoteRepository(workspace).list(context.runId);
+      const offset = args.offset ?? 0;
+      const limit = args.limit ?? 100;
+      const page = notes.slice(offset, offset + limit);
+      return listTaskNotesResultSchema.parse({
+        notes: page.map(({ runId: _runId, ...note }) => note),
+        total: notes.length,
+        nextOffset: offset + page.length < notes.length ? offset + page.length : null,
+      });
     },
     proposeChangeSet: async (args, context) => {
       assertAvailable(context.signal);

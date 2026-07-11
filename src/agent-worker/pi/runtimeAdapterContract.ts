@@ -16,6 +16,7 @@ export interface RuntimeAdapter {
       isSatisfied(): boolean;
       createCorrection?(): string;
       forceTool?: boolean;
+      requiredToolName?(): string;
     };
   }): Promise<{
     text: string;

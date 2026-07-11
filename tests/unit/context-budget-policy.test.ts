@@ -7,6 +7,7 @@ import {
   estimateTextTokens,
   evaluateContextAdmission,
   resolveOutputReserve,
+  compactDurablyNotedFileChunks,
 } from "../../src/agent-worker/pi/contextAdmissionPolicy";
 
 describe("token-estimated context admission policy", () => {
@@ -58,7 +59,7 @@ describe("token-estimated context admission policy", () => {
     expect(breakdown.runtimeConversationTokens).toBeGreaterThan(0);
   });
 
-  it("rejects impossible reserves and a ninth Provider request", () => {
+  it("rejects impossible reserves and requests beyond the long-task ceiling", () => {
     expect(() => assertContextAdmission({
       context: contextWithText("x"),
       contextWindow: 4_096,
@@ -69,7 +70,7 @@ describe("token-estimated context admission policy", () => {
       context: contextWithText("x"),
       contextWindow: 64_000,
       maxTokens: 8_000,
-      requestNumber: 9,
+      requestNumber: 129,
     })).toThrow(expect.objectContaining({ code: "PROVIDER_PROTOCOL_FAILED" }));
   });
 
@@ -87,6 +88,104 @@ describe("token-estimated context admission policy", () => {
       tools: [],
     })).rejects.toMatchObject({ code: "AGENT_CONTEXT_BUDGET_EXCEEDED" });
     expect(streamFn).not.toHaveBeenCalled();
+  });
+
+  it("compacts only file chunks covered by a later durable task-note receipt", () => {
+    const source = { path: "世界.md", sha256: "a".repeat(64), startChar: 0, endChar: 24_000 };
+    const uncovered = { path: "人物.md", sha256: "b".repeat(64), startChar: 0, endChar: 24_000 };
+    const context = {
+      systemPrompt: "",
+      tools: [],
+      messages: [
+        toolResult("read-1", "read_project_file", { result: { ...source, content: "甲".repeat(24_000) } }, 1),
+        toolResult("note-1", "save_task_note", { result: { id: "note-1", title: "世界", content: "海岸设定", source } }, 2),
+        toolResult("read-2", "read_project_file", { result: { ...uncovered, content: "乙".repeat(24_000) } }, 3),
+      ],
+    };
+
+    const compacted = compactDurablyNotedFileChunks(context);
+    const serialized = JSON.stringify(compacted);
+
+    expect(serialized).not.toContain("甲".repeat(1_000));
+    expect(serialized).toContain("乙".repeat(1_000));
+    expect(serialized).toContain("durable_file_receipts");
+    expect(serialized).toContain("note-1");
+  });
+
+  it("removes both sides of completed tool calls and replaces them with a durable receipt", () => {
+    const source = { path: "世界.md", sha256: "a".repeat(64), startChar: 0, endChar: 4_000 };
+    const context = {
+      systemPrompt: "",
+      tools: [],
+      messages: [
+        {
+          role: "assistant" as const,
+          content: [{
+            type: "toolCall" as const,
+            id: "note-call-1",
+            name: "save_task_note",
+            arguments: { title: "世界", content: "海岸设定", source },
+          }],
+          api: "openai-completions" as const,
+          provider: "fixture",
+          model: "fixture",
+          usage: emptyUsage(),
+          stopReason: "toolUse" as const,
+          timestamp: 1,
+        },
+        toolResult("note-call-1", "save_task_note", {
+          result: { id: "note-1", title: "世界", content: "海岸设定", source },
+        }, 2),
+      ],
+    };
+
+    const compacted = compactDurablyNotedFileChunks(context);
+    expect(compacted.messages).toHaveLength(1);
+    expect(compacted.messages[0]?.role).toBe("user");
+    expect(JSON.stringify(compacted)).not.toContain("海岸设定");
+    expect(JSON.stringify(compacted)).not.toContain("note-call-1");
+    expect(JSON.stringify(compacted)).toContain("note-1");
+    expect(JSON.stringify(compacted)).toContain("durable_file_receipts");
+  });
+
+  it("compacts note arguments by tool-call id when the model supplied stale source coordinates", () => {
+    const actualSource = { path: "地理.md", sha256: "b".repeat(64), startChar: 4_000, endChar: 8_000 };
+    const context = {
+      systemPrompt: "",
+      tools: [],
+      messages: [
+        {
+          role: "assistant" as const,
+          content: [{
+            type: "toolCall" as const,
+            id: "note-call-stale",
+            name: "save_task_note",
+            arguments: {
+              title: "错误标题",
+              content: "应从活动上下文移除的长笔记正文",
+              source: { ...actualSource, path: "错误.md", startChar: 0, endChar: 1 },
+            },
+          }],
+          api: "openai-completions" as const,
+          provider: "fixture",
+          model: "fixture",
+          usage: emptyUsage(),
+          stopReason: "toolUse" as const,
+          timestamp: 1,
+        },
+        toolResult("note-call-stale", "save_task_note", {
+          result: { id: "note-stale", title: "已校正", content: "正式笔记", source: actualSource },
+        }, 2),
+      ],
+    };
+
+    const compacted = compactDurablyNotedFileChunks(context);
+    const serialized = JSON.stringify(compacted);
+
+    expect(serialized).not.toContain("应从活动上下文移除的长笔记正文");
+    expect(serialized).not.toContain("错误.md");
+    expect(serialized).toContain("地理.md");
+    expect(serialized).toContain("note-stale");
   });
 });
 
@@ -115,5 +214,16 @@ function emptyUsage() {
     cacheWrite: 0,
     totalTokens: 0,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function toolResult(toolCallId: string, toolName: string, payload: unknown, timestamp: number) {
+  return {
+    role: "toolResult" as const,
+    toolCallId,
+    toolName,
+    content: [{ type: "text" as const, text: JSON.stringify(payload) }],
+    isError: false,
+    timestamp,
   };
 }

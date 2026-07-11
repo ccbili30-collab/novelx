@@ -39,6 +39,14 @@ export const offlineAdversarialFixtures: readonly OfflineFixturePair[] = [
       toolOutcomes: [
         { tool: "list_project_directory", status: "succeeded" },
         { tool: "read_project_file", status: "succeeded" },
+        { tool: "save_task_note", status: "succeeded" },
+        { tool: "read_project_file", status: "succeeded" },
+        { tool: "save_task_note", status: "succeeded" },
+        { tool: "read_project_file", status: "succeeded" },
+        { tool: "save_task_note", status: "succeeded" },
+        { tool: "read_project_file", status: "succeeded" },
+        { tool: "save_task_note", status: "succeeded" },
+        { tool: "list_task_notes", status: "succeeded" },
       ],
     },
     violating: {

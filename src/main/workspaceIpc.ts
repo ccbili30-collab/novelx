@@ -453,6 +453,11 @@ export class WorkspaceSession {
       globProjectFiles: (args, context) => gateway.globProjectFiles(args, context),
       searchProjectFiles: (args, context) => gateway.searchProjectFiles(args, context),
       readProjectFile: (args, context) => gateway.readProjectFile(args, context),
+      saveTaskNote: (args, context) => this.#writeQueue.run(
+        context.signal,
+        () => gateway.saveTaskNote(args, context),
+      ),
+      listTaskNotes: (args, context) => gateway.listTaskNotes(args, context),
       proposeChangeSet: (args, context) => this.#writeQueue.run(
         context.signal,
         () => gateway.proposeChangeSet(args, context),

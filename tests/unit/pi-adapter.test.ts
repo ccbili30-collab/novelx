@@ -230,4 +230,58 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
       signal: controller.signal,
     })).rejects.toMatchObject({ code: "AGENT_RUN_CANCELLED" });
   });
+
+  it("removes an old raw file chunk from the actual Pi context after its durable note succeeds", async () => {
+    const faux = fauxProvider({ provider: "novax-long-context-fixture" });
+    const sha256 = "a".repeat(64);
+    const source = { path: "world.md", sha256, startChar: 0, endChar: 24_000 };
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read_project_file", { path: "world.md", offsetChars: 0, maxChars: 24_000 })),
+      fauxAssistantMessage(fauxToolCall("save_task_note", { title: "world", content: "海岸设定", source })),
+      fauxAssistantMessage("完成"),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const contexts: string[] = [];
+    const adapter = new NovaxPiRuntimeAdapter({
+      model: faux.getModel(),
+      streamFn: (model, context, options) => {
+        contexts.push(JSON.stringify(context));
+        return models.streamSimple(model, context, options);
+      },
+    });
+
+    await adapter.run({
+      systemPrompt: "Long context fixture.",
+      userInput: "read",
+      tools: [
+        {
+          name: "read_project_file",
+          label: "read",
+          description: "read",
+          parameters: Type.Object({ path: Type.String(), offsetChars: Type.Integer(), maxChars: Type.Integer() }),
+          execute: async () => ({
+            content: [{ type: "text", text: JSON.stringify({ result: { ...source, content: "甲".repeat(24_000) } }) }],
+            details: { ...source },
+          }),
+        },
+        {
+          name: "save_task_note",
+          label: "save",
+          description: "save",
+          parameters: Type.Object({ title: Type.String(), content: Type.String(), source: Type.Object({}) }, { additionalProperties: true }),
+          execute: async () => ({
+            content: [{ type: "text", text: JSON.stringify({ result: { id: "note-1", title: "world", content: "海岸设定", source } }) }],
+            details: { id: "note-1", source },
+          }),
+        },
+      ],
+    });
+
+    expect(contexts).toHaveLength(3);
+    expect(contexts[1]).toContain("甲".repeat(1_000));
+    expect(contexts[2]).not.toContain("甲".repeat(1_000));
+    expect(contexts[2]).not.toContain("海岸设定");
+    expect(contexts[2]).toContain("durable_file_receipts");
+  });
 });

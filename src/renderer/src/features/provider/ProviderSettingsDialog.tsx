@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -6,6 +6,7 @@ import {
   EyeOff,
   KeyRound,
   LoaderCircle,
+  ImagePlus,
   PlugZap,
   Save,
   ShieldAlert,
@@ -23,17 +24,22 @@ import {
   type ProviderSettingsForm,
 } from "../../../../shared/providerSettingsModel";
 import type { NovaxTheme } from "../../../../shared/themePreference";
+import type { NovaxBackgroundPreference } from "../../../../shared/backgroundPreference";
 import { DesktopUpdatePanel } from "../update/DesktopUpdatePanel";
 
 interface ProviderSettingsDialogProps {
   theme: NovaxTheme;
+  background: NovaxBackgroundPreference;
   onThemeChange(theme: NovaxTheme): void;
+  onBackgroundChange(preference: NovaxBackgroundPreference): boolean;
   onClose(): void;
 }
 
 type FieldErrors = Partial<Record<keyof ProviderSettingsForm | "apiKey", string>>;
 
-export function ProviderSettingsDialog({ theme, onThemeChange, onClose }: ProviderSettingsDialogProps) {
+const MAX_CUSTOM_BACKGROUND_BYTES = 2 * 1024 * 1024;
+
+export function ProviderSettingsDialog({ theme, background, onThemeChange, onBackgroundChange, onClose }: ProviderSettingsDialogProps) {
   const [statusResult, setStatusResult] = useState<ProviderStatusResult | null>(null);
   const [form, setForm] = useState(() => createProviderSettingsForm(null));
   const [apiKey, setApiKey] = useState("");
@@ -47,6 +53,7 @@ export function ProviderSettingsDialog({ theme, onThemeChange, onClose }: Provid
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null);
   const [runtimeBudget, setRuntimeBudget] = useState<ContextBudgetAudit | null>(null);
+  const backgroundInputRef = useRef<HTMLInputElement | null>(null);
   const status = useMemo(() => describeProviderStatus(statusResult), [statusResult]);
 
   useEffect(() => {
@@ -177,6 +184,35 @@ export function ProviderSettingsDialog({ theme, onThemeChange, onClose }: Provid
   const unavailable = status.kind === "unavailable";
   const busy = saving || clearing || testing;
 
+  function selectBackground(preference: NovaxBackgroundPreference) {
+    setOperationError(null);
+    if (!onBackgroundChange(preference)) setOperationError("背景图无法保存到本机。请使用更小的图片或清理应用存储后重试。");
+  }
+
+  function uploadBackground(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setOperationError("请选择 PNG、JPEG、WebP、GIF 或 SVG 图片。");
+      return;
+    }
+    if (file.size > MAX_CUSTOM_BACKGROUND_BYTES) {
+      setOperationError("自定义背景不能超过 2 MB。");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => setOperationError("背景图读取失败，请重新选择。");
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        setOperationError("背景图读取失败，请重新选择。");
+        return;
+      }
+      selectBackground({ mode: "custom", customDataUrl: reader.result });
+    };
+    reader.readAsDataURL(file);
+  }
+
   return (
     <div className="settings-backdrop" data-testid="provider-settings-backdrop">
       <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-settings-title">
@@ -209,6 +245,24 @@ export function ProviderSettingsDialog({ theme, onThemeChange, onClose }: Provid
                   {label}
                 </button>
               ))}
+            </div>
+            <div className="background-settings-heading">
+              <strong>工作区背景</strong>
+              <span>图片居中显示，不平铺。自定义图片最大 2 MB。</span>
+            </div>
+            <div className="background-options" role="radiogroup" aria-label="工作区背景">
+              <button data-testid="background-snow" type="button" role="radio" aria-checked={background.mode === "snow"} onClick={() => selectBackground({ mode: "snow", customDataUrl: null })}>
+                <span className="background-preview background-preview--snow" aria-hidden="true" />
+                Snow
+              </button>
+              <button data-testid="background-custom" type="button" role="radio" aria-checked={background.mode === "custom"} onClick={() => backgroundInputRef.current?.click()}>
+                <ImagePlus size={14} aria-hidden="true" />
+                自定义
+              </button>
+              <button data-testid="background-none" type="button" role="radio" aria-checked={background.mode === "none"} onClick={() => selectBackground({ mode: "none", customDataUrl: null })}>
+                无
+              </button>
+              <input ref={backgroundInputRef} className="sr-only" data-testid="background-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" onChange={uploadBackground} />
             </div>
           </section>
 

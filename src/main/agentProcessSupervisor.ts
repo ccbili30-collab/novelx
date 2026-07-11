@@ -18,6 +18,8 @@ import {
   retrieveGraphEvidenceResultSchema,
   searchProjectFilesResultSchema,
   statProjectFileResultSchema,
+  saveTaskNoteResultSchema,
+  listTaskNotesResultSchema,
   agentToolInternalErrorCodeSchema,
   type AgentWorkerToolRequest,
   type AgentToolName,
@@ -37,6 +39,10 @@ import {
   type SearchProjectFilesResult,
   type StatProjectFileArgs,
   type StatProjectFileResult,
+  type SaveTaskNoteArgs,
+  type SaveTaskNoteResult,
+  type ListTaskNotesArgs,
+  type ListTaskNotesResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
 } from "../shared/agentWorkerProtocol";
@@ -72,6 +78,8 @@ export interface AgentToolGateway {
   globProjectFiles(args: GlobProjectFilesArgs, context: AgentToolInvocationContext): Promise<GlobProjectFilesResult>;
   searchProjectFiles(args: SearchProjectFilesArgs, context: AgentToolInvocationContext): Promise<SearchProjectFilesResult>;
   readProjectFile(args: ReadProjectFileArgs, context: AgentToolInvocationContext): Promise<ReadProjectFileResult>;
+  saveTaskNote(args: SaveTaskNoteArgs, context: AgentToolInvocationContext): Promise<SaveTaskNoteResult>;
+  listTaskNotes(args: ListTaskNotesArgs, context: AgentToolInvocationContext): Promise<ListTaskNotesResult>;
   proposeChangeSet(
     args: ProposeChangeSetArgs,
     context: AgentToolInvocationContext,
@@ -405,6 +413,8 @@ export class AgentProcessSupervisor {
         case "glob_project_files": return await run.gateway!.globProjectFiles(request.args, context);
         case "search_project_files": return await run.gateway!.searchProjectFiles(request.args, context);
         case "read_project_file": return await run.gateway!.readProjectFile(request.args, context);
+        case "save_task_note": return await run.gateway!.saveTaskNote(request.args, context);
+        case "list_task_notes": return await run.gateway!.listTaskNotes(request.args, context);
         case "propose_change_set": return await run.gateway!.proposeChangeSet(request.args, context);
       }
     })();
@@ -905,8 +915,8 @@ function readToolFailureCode(error: unknown): ReturnType<typeof agentToolInterna
   return "AGENT_TOOL_FAILED";
 }
 
-function isProjectFileTool(tool: AgentToolName): tool is "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" {
-  return ["list_project_directory", "stat_project_file", "glob_project_files", "search_project_files", "read_project_file"].includes(tool);
+function isProjectFileTool(tool: AgentToolName): tool is "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "save_task_note" | "list_task_notes" {
+  return ["list_project_directory", "stat_project_file", "glob_project_files", "search_project_files", "read_project_file", "save_task_note", "list_task_notes"].includes(tool);
 }
 
 function projectFileResultSchema(tool: AgentToolName) {
@@ -917,6 +927,8 @@ function projectFileResultSchema(tool: AgentToolName) {
     case "glob_project_files": return globProjectFilesResultSchema;
     case "search_project_files": return searchProjectFilesResultSchema;
     case "read_project_file": return readProjectFileResultSchema;
+    case "save_task_note": return saveTaskNoteResultSchema;
+    case "list_task_notes": return listTaskNotesResultSchema;
     default: throw new Error("Not a project file tool.");
   }
 }
@@ -981,5 +993,6 @@ const TOOL_ERROR_MESSAGES = {
   PROJECT_FILE_NOT_A_FILE: "Project file path is not a file.",
   PROJECT_FILE_GLOB_INVALID: "Project file glob pattern is invalid.",
   PROJECT_FILE_QUERY_INVALID: "Project file search query is invalid.",
+  PROJECT_FILE_RANGE_INVALID: "Project file read range is invalid.",
   PROJECT_FILE_OPERATION_FAILED: "Project file operation failed.",
 } as const;

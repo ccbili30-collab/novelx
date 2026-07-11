@@ -48,6 +48,14 @@ export interface ProjectFileReadResult {
   complete: boolean;
   originalChars: number | null;
   returnedChars: number;
+  startChar: number;
+  endChar: number;
+  hasMore: boolean;
+}
+
+export interface ProjectFileReadRange {
+  offsetChars?: number;
+  maxChars?: number;
 }
 
 export interface ProjectFileSearchMatch {
@@ -124,7 +132,8 @@ export class ProjectFileService {
     };
   }
 
-  read(relativePath: string): ProjectFileReadResult {
+  read(relativePath: string, range?: ProjectFileReadRange): ProjectFileReadResult {
+    const { offsetChars, maxChars } = normalizeReadRange(range);
     const target = this.resolveExisting(relativePath, false);
     const stats = fs.statSync(target);
     if (!stats.isFile()) throw fileError("PROJECT_FILE_NOT_A_FILE");
@@ -138,6 +147,9 @@ export class ProjectFileService {
         complete: false,
         originalChars: null,
         returnedChars: 0,
+        startChar: 0,
+        endChar: 0,
+        hasMore: false,
       };
     }
     const buffer = fs.readFileSync(target);
@@ -152,18 +164,26 @@ export class ProjectFileService {
         complete: true,
         originalChars: null,
         returnedChars: 0,
+        startChar: 0,
+        endChar: 0,
+        hasMore: false,
       };
     }
-    const content = extracted.slice(0, MAX_READ_CHARS);
+    const startChar = Math.min(offsetChars, extracted.length);
+    const endChar = Math.min(extracted.length, startChar + maxChars);
+    const content = extracted.slice(startChar, endChar);
     return {
       path: this.toRelative(target),
       kind: "text",
       size: stats.size,
       sha256: sha256(buffer),
       content,
-      complete: content.length === extracted.length,
+      complete: endChar === extracted.length,
       originalChars: extracted.length,
       returnedChars: content.length,
+      startChar,
+      endChar,
+      hasMore: endChar < extracted.length,
     };
   }
 
@@ -269,6 +289,16 @@ export class ProjectFileService {
   private toRelative(absolutePath: string): string {
     return path.relative(this.#rootPath, absolutePath).split(path.sep).join("/");
   }
+}
+
+function normalizeReadRange(range: ProjectFileReadRange | undefined): { offsetChars: number; maxChars: number } {
+  const offsetChars = range?.offsetChars ?? 0;
+  const maxChars = range?.maxChars ?? MAX_READ_CHARS;
+  if (!Number.isSafeInteger(offsetChars) || offsetChars < 0
+    || !Number.isSafeInteger(maxChars) || maxChars < 1 || maxChars > MAX_READ_CHARS) {
+    throw fileError("PROJECT_FILE_RANGE_INVALID");
+  }
+  return { offsetChars, maxChars: range ? maxChars : MAX_READ_CHARS };
 }
 
 function globToRegExp(pattern: string): RegExp {

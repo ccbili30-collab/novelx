@@ -18,14 +18,14 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates schema 19 project-file, projection, playthrough, import, player, and Decomposer audit storage", () => {
+  it("creates schema 20 project-file, task-note, projection, playthrough, import, player, and Decomposer audit storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 19 });
+      .toEqual({ version: 20 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
