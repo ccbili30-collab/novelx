@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +10,8 @@ const packageVersion = JSON.parse(fs.readFileSync(path.join(appRoot, "package.js
 const oldVersion = process.env.NOVAX_UPDATE_FROM_VERSION ?? "0.1.0";
 const expectedVersion = process.env.NOVAX_UPDATE_EXPECTED_VERSION ?? packageVersion;
 const installerPath = path.join(appRoot, "release", `novelx-Setup-${oldVersion}-x64.exe`);
+assertFile(installerPath, "OLD_INSTALLER_MISSING");
+assertNoProductionInstall();
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "novax-old-client-update-"));
 const installRoot = path.join(testRoot, "novelx");
 const userDataRoot = path.join(testRoot, "UserData");
@@ -20,7 +22,6 @@ const environment = cleanProviderEnvironment({
 });
 const evidencePath = path.join(appRoot, "test-results", `novax-update-${oldVersion}-to-${expectedVersion}.json`);
 
-assertFile(installerPath, "OLD_INSTALLER_MISSING");
 fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
 
 try {
@@ -128,6 +129,19 @@ function run(executable, args, env, timeoutMs) {
 function cleanProviderEnvironment(env) {
   return Object.fromEntries(Object.entries(env).filter(([key, value]) =>
     typeof value === "string" && !key.startsWith("NOVAX_PROVIDER_")));
+}
+
+function assertNoProductionInstall() {
+  const script = [
+    "$items = Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue",
+    "$match = $items | Where-Object { $_.DisplayName -match '^novelx(?:\\s|$)' } | Select-Object -First 1",
+    "if ($match) { Write-Output $match.UninstallString }",
+  ].join("; ");
+  const installed = execFileSync("powershell.exe", ["-NoProfile", "-Command", script], {
+    encoding: "utf8",
+    windowsHide: true,
+  }).trim();
+  assert(!installed, `PRODUCTION_INSTALL_DETECTED:${installed}`);
 }
 
 function assertFile(target, code) {

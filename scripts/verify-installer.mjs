@@ -9,6 +9,8 @@ const appRoot = path.resolve(import.meta.dirname, "..");
 const packageJson = JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8"));
 assert(typeof packageJson.version === "string" && /^\d+\.\d+\.\d+$/.test(packageJson.version), "PACKAGE_VERSION_INVALID");
 const installerPath = path.join(appRoot, "release", `novelx-Setup-${packageJson.version}-x64.exe`);
+assertFile(installerPath, "INSTALLER_MISSING");
+assertNoProductionInstall();
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "novax-installer-"));
 const installRoot = path.join(testRoot, "novelx");
 const roamingRoot = path.join(testRoot, "AppData", "Roaming");
@@ -22,7 +24,6 @@ const environment = cleanProviderEnvironment({
   LOCALAPPDATA: localRoot,
 });
 
-assertFile(installerPath, "INSTALLER_MISSING");
 fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
 
 let completed = false;
@@ -138,6 +139,19 @@ function getSignatureStatus(target) {
     env: { ...process.env, NOVAX_SIGNATURE_TARGET: target },
     windowsHide: true,
   }).trim();
+}
+
+function assertNoProductionInstall() {
+  const script = [
+    "$items = Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue",
+    "$match = $items | Where-Object { $_.DisplayName -match '^novelx(?:\\s|$)' } | Select-Object -First 1",
+    "if ($match) { Write-Output $match.UninstallString }",
+  ].join("; ");
+  const installed = execFileSync("powershell.exe", ["-NoProfile", "-Command", script], {
+    encoding: "utf8",
+    windowsHide: true,
+  }).trim();
+  assert(!installed, `PRODUCTION_INSTALL_DETECTED:${installed}`);
 }
 
 function cleanProviderEnvironment(env) {
