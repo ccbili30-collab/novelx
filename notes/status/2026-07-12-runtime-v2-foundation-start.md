@@ -14,11 +14,13 @@
 - Added an isolated Electron Main process supervisor with strict handshake identity checks, bounded stderr, startup/stop timeouts and owned-PID-tree cleanup.
 - Bound the Run state machine to the immutable journal through a recoverable Run Aggregate with optimistic sequence checks.
 - Added a real TypeScript-to-Rust integration test that builds, launches, handshakes with and stops the exact Runtime V2 binary.
+- Accepted the dual-order event addressing model: one global Run order plus aggregate type/id and local aggregate order.
+- Added the pure ToolCall authorization/execution/terminal state machine with conservative retry and parallelism rules.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 18 tests.
+- Rust workspace tests pass: 23 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
 - Runtime V2 protocol, process-supervisor and real cross-language integration tests pass: 24 tests.
@@ -29,7 +31,7 @@
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor exists only as an independently tested module.
 - The runtime still accepts only the initialization handshake and does not process Run commands after readiness.
-- No tool ledger, Provider call, context compiler, full recovery controller or domain tool is implemented.
+- The ToolCall state machine exists, but its event-backed ledger, Provider call, context compiler, full recovery controller and domain tools are not implemented.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.
 
