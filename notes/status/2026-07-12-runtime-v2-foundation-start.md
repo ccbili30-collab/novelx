@@ -16,6 +16,7 @@
 - Added a real TypeScript-to-Rust integration test that builds, launches, handshakes with and stops the exact Runtime V2 binary.
 - Accepted the dual-order event addressing model: one global Run order plus aggregate type/id and local aggregate order.
 - Added the pure ToolCall authorization/execution/terminal state machine with conservative retry and parallelism rules.
+- Added a strict TypeScript protocol contract for typed Runtime errors instead of collapsing every failure into a planning error.
 
 ## Verification
 
@@ -23,7 +24,7 @@
 - Rust workspace tests pass: 23 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass: 24 tests.
+- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass: 28 tests.
 - `git diff --check` passes.
 - Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and the `handshake` capability.
 

@@ -6,6 +6,7 @@ import {
   parseRuntimeV2HelloEnvelope,
   parseRuntimeV2InitializeEnvelope,
   parseRuntimeV2ReadyEnvelope,
+  parseRuntimeV2ErrorEnvelope,
   runtimeV2EnvelopeSchema,
 } from "../../src/shared/runtimeV2Protocol";
 
@@ -86,6 +87,29 @@ function readyEnvelope(overrides: Record<string, unknown> = {}) {
         },
       },
       recoveredRunCount: 0,
+    },
+    ...overrides,
+  };
+}
+
+function errorEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1,
+    messageId: "82c0bfc5-d1a1-4e9b-9851-356b232316d7",
+    messageType: "event",
+    name: "runtime.error",
+    sentAt: "2026-07-12T00:00:03Z",
+    correlationId: INITIALIZE_MESSAGE_ID,
+    runId: "b12921df-c6bb-47d6-90d5-148c264624f6",
+    sequence: 3,
+    payload: {
+      code: "TOOL_RESULT_MISSING",
+      class: "protocol",
+      retryable: false,
+      publicMessage: "工具执行记录不完整，任务已停止。",
+      stage: "context.compile",
+      attempt: 1,
+      diagnosticId: "1ad046e3-e048-4f33-aa77-85ae75b28fb7",
     },
     ...overrides,
   };
@@ -216,5 +240,42 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
         selectedProtocolVersion: 2,
       },
     }))).toThrow();
+  });
+
+  it("accepts structured runtime.error events with nullable run and correlation identities", () => {
+    expect(parseRuntimeV2ErrorEnvelope(errorEnvelope())).toEqual(errorEnvelope());
+    expect(parseRuntimeV2ErrorEnvelope(errorEnvelope({
+      correlationId: null,
+      runId: null,
+    }))).toMatchObject({ correlationId: null, runId: null });
+  });
+
+  it("rejects unknown runtime error classes and empty or unstable codes", () => {
+    expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({
+      payload: { ...errorEnvelope().payload, class: "network" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({
+      payload: { ...errorEnvelope().payload, code: "" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({
+      payload: { ...errorEnvelope().payload, code: "tool result missing" },
+    }))).toThrow();
+  });
+
+  it("rejects malformed diagnostic identity and negative attempts", () => {
+    expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({
+      payload: { ...errorEnvelope().payload, diagnosticId: "diagnostic-1" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({
+      payload: { ...errorEnvelope().payload, attempt: -1 },
+    }))).toThrow();
+  });
+
+  it("rejects extra runtime error fields and the wrong envelope projection", () => {
+    expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({
+      payload: { ...errorEnvelope().payload, internalStack: "secret" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({ messageType: "control" }))).toThrow();
+    expect(() => parseRuntimeV2ErrorEnvelope(errorEnvelope({ name: "run.failed" }))).toThrow();
   });
 });
