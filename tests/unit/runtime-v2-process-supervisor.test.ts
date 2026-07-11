@@ -104,6 +104,52 @@ describe("RuntimeV2ProcessSupervisor", () => {
     await expect(supervisor.start()).rejects.toMatchObject({ code: "RUNTIME_V2_ALREADY_STARTED" });
   });
 
+  it("keeps the protocol connection open for correlated status and graceful shutdown", async () => {
+    const supervisor = createSupervisor(createFixture("success"));
+    await supervisor.start();
+
+    await expect(supervisor.status()).resolves.toEqual({
+      initialized: true,
+      workspaceDatabaseConfigured: false,
+      recoveredRunCount: 0,
+      protocolVersion: 1,
+      runtimeVersion: "0.1.0",
+    });
+
+    const pid = supervisor.pid!;
+    await supervisor.stop();
+    expect(supervisor.pid).toBeNull();
+    expect(isAlive(pid)).toBe(false);
+  });
+
+  it("reports an unexpected post-ready crash and rejects an in-flight command", async () => {
+    const failures: RuntimeV2SupervisorError[] = [];
+    const supervisor = createSupervisor(createFixture("exit-on-status"), {
+      onRuntimeFailure: (error) => failures.push(error),
+    });
+    await supervisor.start();
+
+    await expect(supervisor.status()).rejects.toMatchObject({ code: "RUNTIME_V2_EXITED_AFTER_READY" });
+    expect(failures).toHaveLength(1);
+    expect(failures[0].code).toBe("RUNTIME_V2_EXITED_AFTER_READY");
+  });
+
+  it("treats a command timeout as an unknown connection state and tears down the runtime", async () => {
+    const failures: RuntimeV2SupervisorError[] = [];
+    const supervisor = createSupervisor(createFixture("ignore-status"), {
+      commandTimeoutMs: 50,
+      stopTimeoutMs: 100,
+      onRuntimeFailure: (error) => failures.push(error),
+    });
+    await supervisor.start();
+    const pid = supervisor.pid!;
+
+    await expect(supervisor.status()).rejects.toMatchObject({ code: "RUNTIME_V2_COMMAND_TIMEOUT" });
+    await waitUntil(() => supervisor.pid === null && !isAlive(pid));
+    expect(failures.map((error) => error.code)).toEqual(["RUNTIME_V2_COMMAND_TIMEOUT"]);
+    expect(isAlive(pid)).toBe(false);
+  });
+
   it("stops by stdin EOF and force-terminates only its recorded child tree after timeout", async () => {
     const normal = createSupervisor(createFixture("success"));
     await normal.start();
@@ -153,6 +199,14 @@ function isAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition was not reached before timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 const FIXTURE_SOURCE = String.raw`
 const fs = require("node:fs");
 const readline = require("node:readline");
@@ -160,8 +214,8 @@ const { randomUUID } = require("node:crypto");
 const scenario = process.argv[2];
 const capturePath = process.argv[3];
 const now = new Date().toISOString();
-const envelope = (version, name, payload, correlationId = null, sequence = 1) => ({
-  protocolVersion: version, messageId: randomUUID(), messageType: "control", name, sentAt: now,
+const envelope = (version, name, payload, correlationId = null, sequence = 1, messageType = "control") => ({
+  protocolVersion: version, messageId: randomUUID(), messageType, name, sentAt: now,
   correlationId, runId: null, sequence, payload,
 });
 if (scenario === "invalid-json") { process.stdout.write("not-json\n"); return; }
@@ -174,13 +228,34 @@ process.stdout.write(JSON.stringify(envelope(version, "runtime.hello", {
   build: { commit: "fixture", target: "win32-x64" },
 })) + "\n");
 const input = readline.createInterface({ input: process.stdin });
-input.once("line", (line) => {
-  const initialize = JSON.parse(line);
-  fs.writeFileSync(capturePath, JSON.stringify(initialize), "utf8");
-  const correlationId = scenario === "bad-ready-correlation" ? randomUUID() : initialize.messageId;
+let initialized = false;
+let runtimeSequence = 2;
+input.on("line", (line) => {
+  const command = JSON.parse(line);
+  if (initialized) {
+    runtimeSequence += 1;
+    if (scenario === "exit-on-status" && command.name === "runtime.status.get") process.exit(9);
+    if (scenario === "ignore-status" && command.name === "runtime.status.get") return;
+    if (command.name === "runtime.status.get") {
+      process.stdout.write(JSON.stringify(envelope(1, "runtime.status", {
+        initialized: true, workspaceDatabaseConfigured: false, recoveredRunCount: 0,
+        protocolVersion: 1, runtimeVersion: "0.1.0",
+      }, command.messageId, runtimeSequence, "response")) + "\n");
+      return;
+    }
+    if (command.name === "runtime.shutdown") {
+      process.stdout.write(JSON.stringify(envelope(
+        1, "runtime.stopped", { reason: "requested" }, command.messageId, runtimeSequence, "response",
+      )) + "\n", () => process.exit(0));
+    }
+    return;
+  }
+  initialized = true;
+  fs.writeFileSync(capturePath, JSON.stringify(command), "utf8");
+  const correlationId = scenario === "bad-ready-correlation" ? randomUUID() : command.messageId;
   if (scenario.startsWith("initialization-failed")) {
     process.stderr.write("internal fixture stderr\n");
-    const failureCorrelation = scenario === "initialization-failed-bad-correlation" ? randomUUID() : initialize.messageId;
+    const failureCorrelation = scenario === "initialization-failed-bad-correlation" ? randomUUID() : command.messageId;
     const payload = {
       code: "RUNTIME_JOURNAL_INTEGRITY_FAILED", class: "storage", retryable: false,
       publicMessage: "Runtime storage integrity check failed.", stage: "runtime.initialize", attempt: 1,
@@ -193,7 +268,7 @@ input.once("line", (line) => {
     return;
   }
   if (scenario === "unknown-second-message") {
-    process.stdout.write(JSON.stringify(envelope(1, "runtime.future", {}, initialize.messageId, 2)) + "\n");
+    process.stdout.write(JSON.stringify(envelope(1, "runtime.future", {}, command.messageId, 2)) + "\n");
     return;
   }
   const runtimeVersion = scenario === "ready-identity-mismatch" ? "0.2.0" : "0.1.0";

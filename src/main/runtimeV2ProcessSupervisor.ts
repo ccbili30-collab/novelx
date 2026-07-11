@@ -6,13 +6,19 @@ import {
   RUNTIME_V2_PROTOCOL_VERSION,
   RuntimeV2ProtocolVersionError,
   parseRuntimeV2HelloEnvelope,
+  parseRuntimeV2ErrorEnvelope,
   parseRuntimeV2InitializationFailedEnvelope,
   parseRuntimeV2ReadyEnvelope,
+  parseRuntimeV2StatusEnvelope,
+  parseRuntimeV2StoppedEnvelope,
   runtimeV2InitializeEnvelopeSchema,
+  runtimeV2ShutdownEnvelopeSchema,
+  runtimeV2StatusGetEnvelopeSchema,
   type RuntimeV2HelloEnvelope,
   type RuntimeV2Error,
   type RuntimeV2InitializeEnvelope,
   type RuntimeV2ReadyEnvelope,
+  type RuntimeV2StatusPayload,
 } from "../shared/runtimeV2Protocol";
 
 const MAX_STDERR_CHARS = 16_000;
@@ -31,8 +37,10 @@ export interface RuntimeV2ProcessSupervisorOptions {
   featureFlags: Record<string, boolean>;
   hostCapabilityVersions: Record<string, string>;
   startupTimeoutMs?: number;
+  commandTimeoutMs?: number;
   stopTimeoutMs?: number;
   onStderr?(text: string): void;
+  onRuntimeFailure?(error: RuntimeV2SupervisorError): void;
 }
 
 export interface RuntimeV2Handshake {
@@ -49,6 +57,9 @@ export type RuntimeV2SupervisorErrorCode =
   | "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED"
   | "RUNTIME_V2_INITIALIZATION_FAILED"
   | "RUNTIME_V2_EXITED_BEFORE_READY"
+  | "RUNTIME_V2_NOT_READY"
+  | "RUNTIME_V2_COMMAND_TIMEOUT"
+  | "RUNTIME_V2_EXITED_AFTER_READY"
   | "RUNTIME_V2_WRITE_FAILED";
 
 export class RuntimeV2SupervisorError extends Error {
@@ -68,15 +79,22 @@ export class RuntimeV2SupervisorError extends Error {
 }
 
 export class RuntimeV2ProcessSupervisor {
-  readonly #options: Required<Pick<RuntimeV2ProcessSupervisorOptions, "startupTimeoutMs" | "stopTimeoutMs">>
-    & Omit<RuntimeV2ProcessSupervisorOptions, "startupTimeoutMs" | "stopTimeoutMs">;
+  readonly #options: Required<Pick<RuntimeV2ProcessSupervisorOptions, "startupTimeoutMs" | "commandTimeoutMs" | "stopTimeoutMs">>
+    & Omit<RuntimeV2ProcessSupervisorOptions, "startupTimeoutMs" | "commandTimeoutMs" | "stopTimeoutMs">;
   #child: ChildProcessWithoutNullStreams | null = null;
+  #lines: readline.Interface | null = null;
   #stderr = "";
+  #ready = false;
+  #stopping = false;
+  #nextHostSequence = 2;
+  #expectedRuntimeSequence = 3;
+  #pending = new Map<string, PendingCommand>();
 
   constructor(options: RuntimeV2ProcessSupervisorOptions) {
     this.#options = {
       ...options,
       startupTimeoutMs: options.startupTimeoutMs ?? 5_000,
+      commandTimeoutMs: options.commandTimeoutMs ?? 5_000,
       stopTimeoutMs: options.stopTimeoutMs ?? 2_000,
     };
   }
@@ -105,6 +123,9 @@ export class RuntimeV2ProcessSupervisor {
     }
     this.#child = child;
     this.#stderr = "";
+    this.#stopping = false;
+    this.#nextHostSequence = 2;
+    this.#expectedRuntimeSequence = 3;
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       this.#stderr = `${this.#stderr}${chunk}`.slice(-MAX_STDERR_CHARS);
@@ -112,38 +133,54 @@ export class RuntimeV2ProcessSupervisor {
     });
 
     try {
-      return await this.#completeHandshake(child);
+      const handshake = await this.#completeHandshake(child);
+      this.#ready = true;
+      this.#attachPostReadyListeners(child);
+      return handshake;
     } catch (error) {
-      await this.stop();
+      await this.#terminateChild(child);
       throw error;
     }
+  }
+
+  async status(): Promise<RuntimeV2StatusPayload> {
+    const response = await this.#sendCommand("runtime.status.get", "runtime.status");
+    return parseRuntimeV2StatusEnvelope(response).payload;
   }
 
   async stop(): Promise<void> {
     const child = this.#child;
     if (!child) return;
-    this.#child = null;
-    const pid = child.pid;
-    const exited = waitForExit(child);
-    if (!child.stdin.destroyed) child.stdin.end();
-    if (await resolvesWithin(exited, this.#options.stopTimeoutMs)) return;
-    if (pid) terminateOwnedProcessTree(pid);
-    if (!child.killed) child.kill();
-    await resolvesWithin(exited, this.#options.stopTimeoutMs);
+    this.#stopping = true;
+    if (this.#ready) {
+      try {
+        const response = await this.#sendCommand("runtime.shutdown", "runtime.stopped", this.#options.stopTimeoutMs);
+        parseRuntimeV2StoppedEnvelope(response);
+      } catch {
+        // Cleanup must continue even when the runtime cannot complete protocol shutdown.
+      }
+    }
+    await this.#terminateChild(child);
   }
 
   async #completeHandshake(child: ChildProcessWithoutNullStreams): Promise<RuntimeV2Handshake> {
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+    this.#lines = lines;
     let hello: RuntimeV2HelloEnvelope | null = null;
     let initialize: RuntimeV2InitializeEnvelope | null = null;
 
-    try {
-      return await new Promise<RuntimeV2Handshake>((resolve, reject) => {
+    return new Promise<RuntimeV2Handshake>((resolve, reject) => {
         let settled = false;
+        const cleanup = (): void => {
+          clearTimeout(timer);
+          child.off("error", onError);
+          child.off("exit", onExit);
+          lines.off("line", onLine);
+        };
         const finish = (operation: () => void): void => {
           if (settled) return;
           settled = true;
-          clearTimeout(timer);
+          cleanup();
           operation();
         };
         const fail = (error: RuntimeV2SupervisorError): void => finish(() => reject(error));
@@ -152,16 +189,16 @@ export class RuntimeV2ProcessSupervisor {
           `Runtime V2 did not become ready within ${this.#options.startupTimeoutMs}ms.${stderrSuffix(this.#stderr)}`,
         )), this.#options.startupTimeoutMs);
 
-        child.once("error", (error) => fail(new RuntimeV2SupervisorError(
+        const onError = (error: Error): void => fail(new RuntimeV2SupervisorError(
           "RUNTIME_V2_SPAWN_FAILED",
           `Runtime V2 process failed to start.${stderrSuffix(this.#stderr)}`,
           { cause: error },
-        )));
-        child.once("exit", (code, signal) => fail(new RuntimeV2SupervisorError(
+        ));
+        const onExit = (code: number | null, signal: NodeJS.Signals | null): void => fail(new RuntimeV2SupervisorError(
           "RUNTIME_V2_EXITED_BEFORE_READY",
           `Runtime V2 exited before ready (code=${String(code)}, signal=${String(signal)}).${stderrSuffix(this.#stderr)}`,
-        )));
-        lines.on("line", (line) => {
+        ));
+        const onLine = (line: string): void => {
           if (settled || !line.trim()) return;
           let value: unknown;
           try {
@@ -214,12 +251,156 @@ export class RuntimeV2ProcessSupervisor {
           } catch (error) {
             fail(toProtocolError(error));
           }
-        });
+        };
+        child.once("error", onError);
+        child.once("exit", onExit);
+        lines.on("line", onLine);
       });
-    } finally {
-      lines.close();
+  }
+
+  #attachPostReadyListeners(child: ChildProcessWithoutNullStreams): void {
+    const lines = this.#lines;
+    if (!lines) throw new RuntimeV2SupervisorError("RUNTIME_V2_PROTOCOL_INVALID", "Runtime V2 output reader is unavailable.");
+    lines.on("line", (line) => this.#handlePostReadyLine(line));
+    child.once("error", (error) => this.#failRuntime(new RuntimeV2SupervisorError(
+      "RUNTIME_V2_EXITED_AFTER_READY",
+      `Runtime V2 process failed after ready.${stderrSuffix(this.#stderr)}`,
+      { cause: error, stderr: this.#stderr },
+    )));
+    child.once("exit", (code, signal) => {
+      if (!this.#ready || this.#stopping) return;
+      this.#failRuntime(new RuntimeV2SupervisorError(
+        "RUNTIME_V2_EXITED_AFTER_READY",
+        `Runtime V2 exited after ready (code=${String(code)}, signal=${String(signal)}).${stderrSuffix(this.#stderr)}`,
+        { stderr: this.#stderr },
+      ));
+    });
+  }
+
+  #handlePostReadyLine(line: string): void {
+    if (!line.trim()) return;
+    try {
+      const value: unknown = JSON.parse(line);
+      const name = readMessageName(value);
+      const response = name === "runtime.status"
+        ? parseRuntimeV2StatusEnvelope(value)
+        : name === "runtime.stopped"
+          ? parseRuntimeV2StoppedEnvelope(value)
+          : name === "runtime.error"
+            ? parseRuntimeV2ErrorEnvelope(value)
+            : null;
+      if (!response) throw new Error(`unexpected Runtime V2 message after ready: ${String(name)}.`);
+      if (response.sequence !== this.#expectedRuntimeSequence) {
+        throw new Error(`runtime sequence must be ${this.#expectedRuntimeSequence}, received ${response.sequence}.`);
+      }
+      this.#expectedRuntimeSequence += 1;
+      const correlationId = response.correlationId;
+      if (!correlationId) throw new Error("Runtime V2 response is missing correlationId.");
+      const pending = this.#pending.get(correlationId);
+      if (!pending) throw new Error(`Runtime V2 response has no pending command: ${String(correlationId)}.`);
+      this.#pending.delete(correlationId);
+      clearTimeout(pending.timer);
+      if (response.name === "runtime.error") {
+        pending.reject(new RuntimeV2SupervisorError(
+          "RUNTIME_V2_PROTOCOL_INVALID",
+          response.payload.publicMessage,
+          { publicPayload: response.payload, stderr: this.#stderr },
+        ));
+        return;
+      }
+      if (response.name !== pending.expectedName) {
+        throw new Error(`expected ${pending.expectedName}, received ${response.name}.`);
+      }
+      pending.resolve(response);
+    } catch (error) {
+      this.#failRuntime(toProtocolError(error));
     }
   }
+
+  #sendCommand(
+    name: "runtime.status.get" | "runtime.shutdown",
+    expectedName: "runtime.status" | "runtime.stopped",
+    timeoutMs = this.#options.commandTimeoutMs,
+  ): Promise<unknown> {
+    const child = this.#child;
+    if (!child || !this.#ready || child.stdin.destroyed) {
+      return Promise.reject(new RuntimeV2SupervisorError("RUNTIME_V2_NOT_READY", "Runtime V2 is not ready."));
+    }
+    const sequence = this.#nextHostSequence;
+    this.#nextHostSequence += 1;
+    const base = {
+      protocolVersion: RUNTIME_V2_PROTOCOL_VERSION,
+      messageId: randomUUID(),
+      messageType: "command" as const,
+      name,
+      sentAt: new Date().toISOString(),
+      correlationId: null,
+      runId: null,
+      sequence,
+      payload: {},
+    };
+    const command = name === "runtime.status.get"
+      ? runtimeV2StatusGetEnvelopeSchema.parse(base)
+      : runtimeV2ShutdownEnvelopeSchema.parse(base);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(command.messageId);
+        const error = new RuntimeV2SupervisorError(
+          "RUNTIME_V2_COMMAND_TIMEOUT",
+          `${name} did not complete within ${timeoutMs}ms.${stderrSuffix(this.#stderr)}`,
+          { stderr: this.#stderr },
+        );
+        reject(error);
+        this.#failRuntime(error);
+      }, timeoutMs);
+      this.#pending.set(command.messageId, { expectedName, resolve, reject, timer });
+      child.stdin.write(`${JSON.stringify(command)}\n`, "utf8", (error) => {
+        if (!error) return;
+        const pending = this.#pending.get(command.messageId);
+        if (!pending) return;
+        this.#pending.delete(command.messageId);
+        clearTimeout(pending.timer);
+        const failure = new RuntimeV2SupervisorError("RUNTIME_V2_WRITE_FAILED", `${name} could not be written.`, { cause: error });
+        reject(failure);
+        this.#failRuntime(failure);
+      });
+    });
+  }
+
+  #failRuntime(error: RuntimeV2SupervisorError): void {
+    if (!this.#ready) return;
+    const child = this.#child;
+    this.#ready = false;
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.#pending.clear();
+    this.#options.onRuntimeFailure?.(error);
+    if (child) void this.#terminateChild(child);
+  }
+
+  async #terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (this.#child === child) this.#child = null;
+    this.#ready = false;
+    this.#stopping = false;
+    this.#lines?.close();
+    this.#lines = null;
+    const pid = child.pid;
+    const exited = waitForExit(child);
+    if (!child.stdin.destroyed) child.stdin.end();
+    if (await resolvesWithin(exited, this.#options.stopTimeoutMs)) return;
+    if (pid) terminateOwnedProcessTree(pid);
+    if (!child.killed) child.kill();
+    await resolvesWithin(exited, this.#options.stopTimeoutMs);
+  }
+}
+
+interface PendingCommand {
+  expectedName: "runtime.status" | "runtime.stopped";
+  resolve(value: unknown): void;
+  reject(error: RuntimeV2SupervisorError): void;
+  timer: NodeJS.Timeout;
 }
 
 function createInitializeEnvelope(

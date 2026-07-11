@@ -27,6 +27,8 @@
 - Added fail-closed structured initialization errors for migration, schema-integrity and replay failures, with internal diagnostics separated from public text.
 - Added the post-ready continuous control loop for `runtime.status.get` and `runtime.shutdown`, with independently monotonic Host/Runtime connection sequences, correlated responses and fail-closed protocol errors.
 - Added graceful `runtime.stopped` shutdown and strict Rust/TypeScript schemas for status and shutdown messages.
+- Extended the Electron Main process supervisor to retain the post-ready NDJSON connection, allocate Host sequences, correlate status/shutdown responses, reject in-flight commands on a runtime crash and terminate only the owned process tree.
+- Extended the real TypeScript-to-Rust integration test through `runtime.status.get` and graceful `runtime.shutdown`, rather than stopping at handshake readiness.
 
 ## Verification
 
@@ -34,13 +36,13 @@
 - Rust workspace tests pass: 43 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol tests pass: 23 tests. The previously verified process-supervisor and real cross-language tests remain outside this batch and will be rerun after the supervisor adopts the continuous loop.
+- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 42 tests, including fatal timeout cleanup and post-ready crash rejection.
 - `git diff --check` passes.
 - Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and the `handshake` capability.
 
 ## Not Completed
 
-- The Electron application entry point does not launch the supervisor yet; the supervisor exists only as an independently tested module.
+- The Electron application entry point does not launch the supervisor yet; the supervisor is a continuously connected, independently tested module but is not part of production startup.
 - The runtime opens and recovers the supplied workspace database and processes status/shutdown control commands after readiness, but it still does not process durable Run commands.
 - The ToolCall state machine and event-backed aggregate exist, but the real tool executor, Provider call, context compiler, recovery execution policy and domain tools are not implemented.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.

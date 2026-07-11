@@ -72,6 +72,14 @@ describe("Runtime V2 real Rust handshake", () => {
       build: handshake.hello.payload.build,
     });
 
+    await expect(supervisor.status()).resolves.toEqual({
+      initialized: true,
+      workspaceDatabaseConfigured: false,
+      recoveredRunCount: 0,
+      protocolVersion: RUNTIME_V2_PROTOCOL_VERSION,
+      runtimeVersion: handshake.hello.payload.runtimeVersion,
+    });
+
     await supervisor.stop();
 
     expect(supervisor.pid).toBeNull();
