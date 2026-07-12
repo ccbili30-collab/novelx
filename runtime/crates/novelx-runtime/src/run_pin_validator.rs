@@ -154,18 +154,34 @@ impl RunPinValidator {
         }
         let assignments = AgentAssignmentRepository::open(&self.database_path)
             .map_err(RunPinValidationError::AssignmentIntegrity)?;
-        let assignment = assignments
+        let allocation = assignments
             .load_revision(&identity.workspace_id, &reference.id, reference.revision)
             .map_err(map_assignment_error)?;
         let reference_sha256 = reference
             .sha256
             .as_deref()
             .ok_or(RunPinValidationError::AssignmentReferenceInvalid)?;
-        if assignment.last_event_hash != reference_sha256 {
+        if allocation.last_event_hash != reference_sha256 {
             return Err(RunPinValidationError::AssignmentHashMismatch);
         }
+        if allocation.status != AgentAssignmentStatus::Allocated || allocation.revision != 1 {
+            return Err(RunPinValidationError::AssignmentReferenceInvalid);
+        }
+        let assignment = assignments
+            .load(&identity.workspace_id, &reference.id)
+            .map_err(map_assignment_error)?;
+        let spec = assignment
+            .child_run_spec
+            .as_ref()
+            .ok_or(RunPinValidationError::AssignmentChildRunMismatch)?;
         if assignment.status != AgentAssignmentStatus::Running
             || assignment.child_run_id.as_deref() != Some(run_id)
+            || spec.child_run_id != run_id
+            || spec.pinned_identity != *identity
+            || novelx_protocol::child_run_pinned_identity_sha256(identity)
+                .ok()
+                .as_deref()
+                != Some(spec.pinned_identity_sha256.as_str())
         {
             return Err(RunPinValidationError::AssignmentChildRunMismatch);
         }
@@ -202,7 +218,7 @@ impl RunPinValidator {
         {
             return Err(RunPinValidationError::ParentRunBindingConflict);
         }
-        Ok(Some(assignment.last_event_hash))
+        Ok(Some(allocation.last_event_hash))
     }
 }
 

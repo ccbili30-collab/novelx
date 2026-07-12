@@ -8,12 +8,15 @@ use novelx_protocol::{
     RuntimeStopped,
 };
 use novelx_runtime::agent_assignment_aggregate::{
-    AgentAssignmentIdentity, AgentAssignmentRepository, AssignmentDefinition,
-    AssignmentEventMetadata, AssignmentScope, ChildAgentPermission, RevisionBinding,
+    AgentAssignmentAggregate, AgentAssignmentIdentity, AgentAssignmentRepository,
+    AssignmentDefinition, AssignmentEventMetadata, AssignmentScope, ChildAgentPermission,
+    RevisionBinding,
 };
 use novelx_runtime::event_journal::EventJournal;
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
+use novelx_runtime::workspace_event_journal::{NewWorkspaceEvent, WorkspaceEventJournal};
 use rusqlite::Connection;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
@@ -495,15 +498,8 @@ fn quarantined_assignment_is_readable_but_mutations_are_blocked_after_real_resta
             assignment_metadata("assignment-created"),
         )
         .unwrap();
-    assignments
-        .start(
-            "workspace-1",
-            "quarantined-assignment",
-            allocated.revision,
-            "missing-child-run".into(),
-            assignment_metadata("assignment-started"),
-        )
-        .unwrap();
+    drop(assignments);
+    append_legacy_assignment_started(&fixture.database_path, &allocated, "missing-child-run");
 
     let (mut child, _hello) = spawn_and_read_hello();
     let initialize = initialize_envelope_with_path(
@@ -682,6 +678,67 @@ fn assignment_metadata(id: &str) -> AssignmentEventMetadata {
         idempotency_key: format!("{id}-key"),
         created_at: "2026-07-12T00:00:01Z".into(),
     }
+}
+
+fn append_legacy_assignment_started(
+    path: &std::path::Path,
+    allocation: &AgentAssignmentAggregate,
+    child_run_id: &str,
+) {
+    #[derive(Serialize)]
+    #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+    enum LegacyData<'a> {
+        Started { child_run_id: &'a str },
+    }
+    #[derive(Serialize)]
+    struct HashMaterial<'a> {
+        aggregate_revision: u64,
+        previous_hash: &'a str,
+        data: &'a LegacyData<'a>,
+    }
+    #[derive(Serialize)]
+    struct Stored<'a> {
+        aggregate_revision: u64,
+        previous_hash: &'a str,
+        data: &'a LegacyData<'a>,
+        event_hash: &'a str,
+    }
+    let data = LegacyData::Started { child_run_id };
+    let material = HashMaterial {
+        aggregate_revision: 2,
+        previous_hash: &allocation.last_event_hash,
+        data: &data,
+    };
+    let event_hash = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&material).unwrap())
+    );
+    let payload = serde_json::to_value(Stored {
+        aggregate_revision: 2,
+        previous_hash: &allocation.last_event_hash,
+        data: &data,
+        event_hash: &event_hash,
+    })
+    .unwrap();
+    let mut journal = WorkspaceEventJournal::open(path).unwrap();
+    let workspace_sequence = journal.current_workspace_sequence("workspace-1").unwrap();
+    journal
+        .append(
+            NewWorkspaceEvent {
+                workspace_id: "workspace-1".into(),
+                stream_type: "agent_assignment".into(),
+                stream_id: allocation.identity.assignment_id.clone(),
+                message_id: "legacy-start-message".into(),
+                idempotency_key: "legacy-start-key".into(),
+                event_type: "agent_assignment.started".into(),
+                event_version: 1,
+                payload,
+                created_at: "2026-07-12T00:00:01Z".into(),
+            },
+            workspace_sequence,
+            1,
+        )
+        .unwrap();
 }
 
 fn assert_response(

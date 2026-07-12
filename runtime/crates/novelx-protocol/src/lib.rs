@@ -449,6 +449,15 @@ pub struct AssignmentCompletionEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChildRunSpec {
+    pub child_run_id: String,
+    pub run_start_idempotency_key: String,
+    pub pinned_identity: RunPinnedIdentity,
+    pub pinned_identity_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentAssignmentSnapshot {
     pub assignment_id: String,
     pub workspace_id: String,
@@ -464,6 +473,8 @@ pub struct AgentAssignmentSnapshot {
     pub permission: ChildAgentPermission,
     pub status: AgentAssignmentStatus,
     pub child_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_run_spec: Option<ChildRunSpec>,
     pub completion_evidence: Vec<AssignmentCompletionEvidence>,
     pub failure_code: Option<String>,
     pub revision: u64,
@@ -498,7 +509,7 @@ pub struct AgentAssignmentStart {
     pub start_idempotency_key: String,
     pub assignment_id: String,
     pub expected_revision: u64,
-    pub child_run_id: String,
+    pub child_run_spec: ChildRunSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -610,6 +621,12 @@ impl AgentAssignmentSnapshot {
         if let Some(child_run_id) = &self.child_run_id {
             assignment_require_text("childRunId", child_run_id)?;
         }
+        if let Some(spec) = &self.child_run_spec {
+            spec.validate()?;
+            if self.child_run_id.as_deref() != Some(spec.child_run_id.as_str()) {
+                return Err(AgentAssignmentValidationError::InvalidState);
+            }
+        }
         for evidence in &self.completion_evidence {
             evidence.validate()?;
         }
@@ -675,7 +692,51 @@ impl AgentAssignmentStart {
         assignment_require_text("startIdempotencyKey", &self.start_idempotency_key)?;
         assignment_require_text("assignmentId", &self.assignment_id)?;
         assignment_require_positive("expectedRevision", self.expected_revision)?;
-        assignment_require_text("childRunId", &self.child_run_id)
+        self.child_run_spec.validate()
+    }
+}
+
+impl ChildRunSpec {
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("childRunSpec.childRunId", &self.child_run_id)?;
+        assignment_require_text(
+            "childRunSpec.runStartIdempotencyKey",
+            &self.run_start_idempotency_key,
+        )?;
+        assignment_require_sha256(
+            "childRunSpec.pinnedIdentitySha256",
+            &self.pinned_identity_sha256,
+        )?;
+        let actual = child_run_pinned_identity_sha256(&self.pinned_identity)
+            .map_err(|_| AgentAssignmentValidationError::InvalidState)?;
+        if actual != self.pinned_identity_sha256 {
+            return Err(AgentAssignmentValidationError::InvalidState);
+        }
+        Ok(())
+    }
+}
+
+pub fn child_run_pinned_identity_sha256(
+    identity: &RunPinnedIdentity,
+) -> Result<String, serde_json::Error> {
+    let value = serde_json::to_value(identity)?;
+    let canonical = serde_json::to_vec(&canonicalize_json(value))?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
+}
+
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
+        Value::Object(values) => {
+            let mut entries = values.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key, canonicalize_json(value));
+            }
+            Value::Object(canonical)
+        }
+        scalar => scalar,
     }
 }
 
@@ -2174,6 +2235,32 @@ fn lowercase_sha256(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_run_identity_hash_has_a_cross_language_canonical_vector() {
+        let identity: RunPinnedIdentity = serde_json::from_value(serde_json::json!({
+            "projectId": "project-1", "workspaceId": "workspace-1",
+            "sessionId": "session-1", "sessionBranchId": "branch-1",
+            "userMessageId": "message-1", "projectBranchId": "project-branch-1",
+            "goal": { "id": "goal-1", "revision": 1, "sha256": "a".repeat(64) },
+            "plan": { "id": "plan-1", "revision": 2, "sha256": "b".repeat(64) },
+            "assignment": { "id": "assignment-1", "revision": 1, "sha256": "c".repeat(64) },
+            "parentRunId": "parent-1", "delegationDepth": 1,
+            "provider": { "profileId": "provider-profile", "providerId": "deepseek", "modelId": "deepseek-chat", "configSha256": "d".repeat(64) },
+            "promptBundle": { "id": "prompt", "version": "1", "sha256": "e".repeat(64) },
+            "agentProfile": { "id": "checker", "version": "1", "sha256": "f".repeat(64) },
+            "toolPolicy": { "id": "tools", "version": "1", "sha256": "1".repeat(64) },
+            "contextPolicy": { "id": "context", "version": "1", "sha256": "2".repeat(64) },
+            "runtimePolicy": { "id": "runtime", "version": "1", "sha256": "3".repeat(64) },
+            "runtimeContractVersion": "2", "mode": "assist",
+            "sourceCheckpointId": "checkpoint-1", "scopeResourceIds": ["chapter-1", "world"],
+            "resourceScopeSha256": "4".repeat(64), "userInputSha256": "5".repeat(64)
+        })).unwrap();
+        assert_eq!(
+            child_run_pinned_identity_sha256(&identity).unwrap(),
+            "569c60cbd64889175a0c84a7fa5d19233e7f49d7a359ba930d67365250a4227e"
+        );
+    }
 
     #[test]
     fn envelope_round_trips_with_camel_case_fields() {

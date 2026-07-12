@@ -279,15 +279,17 @@ export const runtimeV2RunPinnedIdentitySchema = z.object({
   }
 });
 
+const strictRuntimeV2RunPinnedIdentitySchema = runtimeV2RunPinnedIdentitySchema.safeExtend({
+  goal: strictRevisionReferenceSchema.nullable(),
+  plan: strictRevisionReferenceSchema.nullable(),
+  assignment: strictRevisionReferenceSchema.nullable(),
+  parentRunId: identityStringSchema.nullable(),
+  delegationDepth: z.number().int().min(0).max(1).safe(),
+}).strict();
+
 export const runtimeV2RunStartPayloadSchema = z.object({
   startIdempotencyKey: identityStringSchema,
-  pinnedIdentity: runtimeV2RunPinnedIdentitySchema.safeExtend({
-    goal: strictRevisionReferenceSchema.nullable(),
-    plan: strictRevisionReferenceSchema.nullable(),
-    assignment: strictRevisionReferenceSchema.nullable(),
-    parentRunId: identityStringSchema.nullable(),
-    delegationDepth: z.number().int().min(0).max(1).safe(),
-  }).strict(),
+  pinnedIdentity: strictRuntimeV2RunPinnedIdentitySchema,
 }).strict();
 
 export const runtimeV2RunStartEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
@@ -565,7 +567,28 @@ export const runtimeV2AgentAssignmentCreatePayloadSchema = z.object({
   permission: z.enum(["read_only", "propose_change_set"]),
 }).strict();
 export const runtimeV2AgentAssignmentGetPayloadSchema = z.object({ assignmentId: identityStringSchema }).strict();
-export const runtimeV2AgentAssignmentStartPayloadSchema = z.object({ startIdempotencyKey: identityStringSchema, assignmentId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), childRunId: identityStringSchema }).strict();
+export const runtimeV2ChildRunSpecSchema = z.object({
+  childRunId: identityStringSchema,
+  runStartIdempotencyKey: identityStringSchema,
+  pinnedIdentity: strictRuntimeV2RunPinnedIdentitySchema,
+  pinnedIdentitySha256: sha256Schema,
+}).strict().superRefine((spec, context) => {
+  const canonical = canonicalProtocolJson(spec.pinnedIdentity);
+  const actualHash = bytesToHex(sha256(new TextEncoder().encode(canonical)));
+  if (actualHash !== spec.pinnedIdentitySha256) {
+    context.addIssue({
+      code: "custom",
+      path: ["pinnedIdentitySha256"],
+      message: "Child Run pinned identity hash must match canonical JSON.",
+    });
+  }
+});
+export const runtimeV2AgentAssignmentStartPayloadSchema = z.object({
+  startIdempotencyKey: identityStringSchema,
+  assignmentId: identityStringSchema,
+  expectedRevision: z.number().int().positive().safe(),
+  childRunSpec: runtimeV2ChildRunSpecSchema,
+}).strict();
 export const runtimeV2AgentAssignmentRequestCancelPayloadSchema = z.object({ cancelIdempotencyKey: identityStringSchema, assignmentId: identityStringSchema, expectedRevision: z.number().int().positive().safe() }).strict();
 export const runtimeV2AgentAssignmentConfirmCancelledPayloadSchema = z.object({ confirmIdempotencyKey: identityStringSchema, assignmentId: identityStringSchema, expectedRevision: z.number().int().positive().safe() }).strict();
 export const runtimeV2AgentAssignmentCompletePayloadSchema = z.object({ completeIdempotencyKey: identityStringSchema, assignmentId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), evidence: z.array(runtimeV2AgentAssignmentCompletionEvidenceSchema).min(1).max(10_000) }).strict();
@@ -592,11 +615,15 @@ export const runtimeV2AgentAssignmentSnapshotPayloadSchema = z.object({
   permission: z.enum(["read_only", "propose_change_set"]),
   status: z.enum(["allocated", "running", "cancel_requested", "cancelled", "completed", "failed"]),
   childRunId: identityStringSchema.nullable(),
+  childRunSpec: runtimeV2ChildRunSpecSchema.nullable().optional(),
   completionEvidence: z.array(runtimeV2AgentAssignmentCompletionEvidenceSchema).max(10_000),
   failureCode: identityStringSchema.nullable(),
   revision: z.number().int().positive().safe(),
   lastEventHash: sha256Schema,
 }).strict().superRefine((snapshot, context) => {
+  if (snapshot.childRunSpec && snapshot.childRunSpec.childRunId !== snapshot.childRunId) {
+    context.addIssue({ code: "custom", path: ["childRunSpec", "childRunId"], message: "Child Run specification must match childRunId." });
+  }
   const evidence = snapshot.completionEvidence.length;
   const valid = snapshot.status === "allocated"
     ? snapshot.childRunId === null && evidence === 0 && snapshot.failureCode === null
@@ -1162,6 +1189,7 @@ export type RuntimeV2PlanSnapshotEnvelope = z.infer<typeof runtimeV2PlanSnapshot
 export type RuntimeV2PlanRejectedEnvelope = z.infer<typeof runtimeV2PlanRejectedEnvelopeSchema>;
 export type RuntimeV2AgentAssignmentCreatePayload = z.infer<typeof runtimeV2AgentAssignmentCreatePayloadSchema>;
 export type RuntimeV2AgentAssignmentGetPayload = z.infer<typeof runtimeV2AgentAssignmentGetPayloadSchema>;
+export type RuntimeV2ChildRunSpec = z.infer<typeof runtimeV2ChildRunSpecSchema>;
 export type RuntimeV2AgentAssignmentStartPayload = z.infer<typeof runtimeV2AgentAssignmentStartPayloadSchema>;
 export type RuntimeV2AgentAssignmentRequestCancelPayload = z.infer<typeof runtimeV2AgentAssignmentRequestCancelPayloadSchema>;
 export type RuntimeV2AgentAssignmentConfirmCancelledPayload = z.infer<typeof runtimeV2AgentAssignmentConfirmCancelledPayloadSchema>;

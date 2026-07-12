@@ -1,5 +1,8 @@
+mod support;
+
 use std::sync::{Arc, Barrier};
 
+use novelx_protocol::{ChildRunSpec, RevisionReference, child_run_pinned_identity_sha256};
 use novelx_runtime::{
     agent_assignment_aggregate::{
         AgentAssignmentAggregate, AgentAssignmentError, AgentAssignmentIdentity,
@@ -42,7 +45,7 @@ fn immutable_assignment_round_trips_after_restart() {
             "workspace",
             "assignment-1",
             1,
-            "child-run-1".into(),
+            child_spec(&allocated, "child-run-1"),
             metadata("m2", "k2"),
         )
         .unwrap();
@@ -60,6 +63,48 @@ fn immutable_assignment_round_trips_after_restart() {
         fixture.open().load_revision("workspace", "assignment-1", 3),
         Err(AgentAssignmentError::RevisionNotFound(3))
     ));
+}
+
+fn child_spec(allocated: &AgentAssignmentAggregate, child_run_id: &str) -> ChildRunSpec {
+    let mut pinned_identity = support::pinned_identity();
+    pinned_identity.workspace_id = allocated.identity.workspace_id.clone();
+    pinned_identity.project_id = allocated.identity.project_id.clone();
+    pinned_identity.goal = Some(RevisionReference {
+        id: allocated.identity.goal.id.clone(),
+        revision: allocated.identity.goal.revision,
+        sha256: Some(allocated.identity.goal.sha256.clone()),
+    });
+    pinned_identity.plan = Some(RevisionReference {
+        id: allocated.identity.plan.id.clone(),
+        revision: allocated.identity.plan.revision,
+        sha256: Some(allocated.identity.plan.sha256.clone()),
+    });
+    pinned_identity.assignment = Some(RevisionReference {
+        id: allocated.identity.assignment_id.clone(),
+        revision: allocated.revision,
+        sha256: Some(allocated.last_event_hash.clone()),
+    });
+    pinned_identity.parent_run_id = Some(allocated.identity.parent_run_id.clone());
+    pinned_identity.delegation_depth = 1;
+    pinned_identity.agent_profile.id = allocated.identity.child_profile_id.clone();
+    pinned_identity.scope_resource_ids = allocated.scope.resource_ids.clone();
+    pinned_identity.resource_scope_sha256 = allocated.scope.scope_sha256.clone();
+    pinned_identity.source_checkpoint_id = allocated.definition.source_checkpoint_id.clone();
+    let pinned_identity_sha256 = child_run_pinned_identity_sha256(&pinned_identity).unwrap();
+    ChildRunSpec {
+        child_run_id: child_run_id.into(),
+        run_start_idempotency_key: format!("start-{child_run_id}"),
+        pinned_identity,
+        pinned_identity_sha256,
+    }
+}
+
+fn spec_from(fixture: &Fixture, child_run_id: &str) -> ChildRunSpec {
+    let allocation = fixture
+        .open()
+        .load_revision("workspace", "assignment-1", 1)
+        .unwrap();
+    child_spec(&allocation, child_run_id)
 }
 
 #[test]
@@ -163,7 +208,7 @@ fn completion_evidence_wins_a_cancel_race_without_fabricating_cancellation() {
             "workspace",
             "assignment-1",
             1,
-            "child-run-1".into(),
+            spec_from(&fixture, "child-run-1"),
             metadata("m2", "k2"),
         )
         .unwrap();
@@ -192,7 +237,7 @@ fn start_is_single_use_and_terminal_states_are_immutable() {
             "workspace",
             "assignment-1",
             1,
-            "child-run-1".into(),
+            spec_from(&fixture, "child-run-1"),
             metadata("m2", "k2"),
         )
         .unwrap();
@@ -201,7 +246,7 @@ fn start_is_single_use_and_terminal_states_are_immutable() {
             "workspace",
             "assignment-1",
             2,
-            "child-run-2".into(),
+            spec_from(&fixture, "child-run-2"),
             metadata("m3", "k3")
         ),
         Err(AgentAssignmentError::InvalidTransition)
@@ -261,7 +306,7 @@ fn completion_requires_hashed_evidence_and_does_not_write_parent_goal() {
             "workspace",
             "assignment-1",
             1,
-            "child-run-1".into(),
+            spec_from(&fixture, "child-run-1"),
             metadata("m2", "k2"),
         )
         .unwrap();
@@ -310,12 +355,15 @@ fn stale_concurrent_writers_fail_closed() {
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 let mut repository = AgentAssignmentRepository::open(database).unwrap();
+                let allocation = repository
+                    .load_revision("workspace", "assignment-1", 1)
+                    .unwrap();
                 barrier.wait();
                 repository.start(
                     "workspace",
                     "assignment-1",
                     1,
-                    format!("child-run-{index}"),
+                    child_spec(&allocation, &format!("child-run-{index}")),
                     metadata(&format!("m-{index}"), &format!("k-{index}")),
                 )
             })
@@ -384,7 +432,7 @@ fn replay_requires_event_type_to_match_payload_kind() {
             "workspace",
             "assignment-1",
             1,
-            "child-run-1".into(),
+            spec_from(&fixture, "child-run-1"),
             metadata("m2", "k2"),
         )
         .unwrap();

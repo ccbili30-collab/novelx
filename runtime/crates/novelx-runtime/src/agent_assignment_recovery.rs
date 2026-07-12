@@ -19,6 +19,7 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssignmentRecoveryClassification {
     AwaitingDispatch,
+    ProvisionChildRun,
     RunningChild(RunState),
     ReadyToConfirmCancellation,
     CancellationPending,
@@ -194,10 +195,18 @@ fn classify(
             }
             AssignmentRecoveryClassification::AwaitingDispatch
         }
-        AgentAssignmentStatus::Running => {
-            let child = require_bound_child(&assignment, child)?;
-            AssignmentRecoveryClassification::RunningChild(child.state())
-        }
+        AgentAssignmentStatus::Running => match child {
+            Some(child) => {
+                let child = require_bound_child(&assignment, Some(child))?;
+                AssignmentRecoveryClassification::RunningChild(child.state())
+            }
+            None if assignment.child_run_spec.is_some() => {
+                AssignmentRecoveryClassification::ProvisionChildRun
+            }
+            None => {
+                return Err(inconsistent(&assignment, None, "child_spec_missing"));
+            }
+        },
         AgentAssignmentStatus::CancelRequested => match child {
             None => {
                 if assignment.child_run_id.is_some() {
@@ -319,8 +328,17 @@ fn validate_child_pin(
         .ok_or_else(|| pin_mismatch(assignment, child, "assignment hash is absent"))?;
     if reference.id != assignment.identity.assignment_id
         || assignment_revision.last_event_hash != reference_hash
-        || assignment_revision.status != AgentAssignmentStatus::Running
-        || assignment_revision.child_run_id.as_deref() != Some(child.run_id())
+        || assignment_revision.status != AgentAssignmentStatus::Allocated
+        || assignment_revision.revision != 1
+        || assignment.child_run_id.as_deref() != Some(child.run_id())
+        || assignment.child_run_spec.as_ref().is_none_or(|spec| {
+            spec.child_run_id != child.run_id()
+                || spec.pinned_identity != *identity
+                || novelx_protocol::child_run_pinned_identity_sha256(identity)
+                    .ok()
+                    .as_deref()
+                    != Some(spec.pinned_identity_sha256.as_str())
+        })
         || identity.delegation_depth != 1
         || identity.parent_run_id.as_deref() != Some(assignment.identity.parent_run_id.as_str())
         || identity

@@ -1,6 +1,6 @@
 mod support;
 
-use novelx_protocol::RevisionReference;
+use novelx_protocol::{ChildRunSpec, RevisionReference, child_run_pinned_identity_sha256};
 use novelx_runtime::{
     agent_assignment_aggregate::{
         AgentAssignmentAggregate, AgentAssignmentIdentity, AgentAssignmentRepository,
@@ -119,15 +119,15 @@ fn preserves_every_running_child_run_state_in_the_classification() {
 }
 
 #[test]
-fn fails_closed_for_missing_child_and_terminal_mismatch() {
+fn provisions_a_missing_child_from_spec_and_quarantines_terminal_mismatch() {
     let fixture = Fixture::new();
     fixture.start("missing", "parent-1", "missing-child");
     let report = recover_agent_assignments(&fixture.database, "workspace-1", "project-1").unwrap();
     assert_eq!(
         report.assignments[0].classification,
-        AssignmentRecoveryClassification::Quarantined
+        AssignmentRecoveryClassification::ProvisionChildRun
     );
-    assert_eq!(report.quarantined.len(), 1);
+    assert!(report.quarantined.is_empty());
 
     let fixture = Fixture::new();
     let running = fixture.start("terminal", "parent-2", "child-terminal");
@@ -209,13 +209,14 @@ impl Fixture {
 
     fn start(&self, assignment_id: &str, parent: &str, child: &str) -> AgentAssignmentAggregate {
         let allocated = self.allocate(assignment_id, parent);
+        let spec = self.child_spec(&allocated, child);
         AgentAssignmentRepository::open(&self.database)
             .unwrap()
             .start(
                 "workspace-1",
                 assignment_id,
                 allocated.revision,
-                child.into(),
+                spec,
                 assignment_metadata(&format!("{assignment_id}-start")),
             )
             .unwrap()
@@ -273,19 +274,15 @@ impl Fixture {
         hash_override: Option<String>,
     ) {
         let child_id = assignment.child_run_id.as_deref().unwrap();
-        let mut identity = support::pinned_identity();
-        identity.goal = Some(reference("goal-1", 1, 'a'));
-        identity.plan = Some(reference("plan-1", 1, 'b'));
-        identity.assignment = Some(RevisionReference {
-            id: assignment.identity.assignment_id.clone(),
-            revision: assignment.revision,
-            sha256: Some(hash_override.unwrap_or_else(|| assignment.last_event_hash.clone())),
-        });
-        identity.parent_run_id = Some(assignment.identity.parent_run_id.clone());
-        identity.delegation_depth = 1;
-        identity.agent_profile.id = "checker".into();
-        identity.scope_resource_ids = assignment.scope.resource_ids.clone();
-        identity.resource_scope_sha256 = assignment.scope.scope_sha256.clone();
+        let mut identity = assignment
+            .child_run_spec
+            .as_ref()
+            .unwrap()
+            .pinned_identity
+            .clone();
+        if let Some(hash) = hash_override {
+            identity.assignment.as_mut().unwrap().sha256 = Some(hash);
+        }
         let mut journal = EventJournal::open(&self.database).unwrap();
         let mut child = RunAggregate::create(
             &mut journal,
@@ -295,6 +292,33 @@ impl Fixture {
         )
         .unwrap();
         advance(&mut child, &mut journal, state, child_id);
+    }
+
+    fn child_spec(
+        &self,
+        allocation: &AgentAssignmentAggregate,
+        child_run_id: &str,
+    ) -> ChildRunSpec {
+        let mut pinned_identity = support::pinned_identity();
+        pinned_identity.goal = Some(reference("goal-1", 1, 'a'));
+        pinned_identity.plan = Some(reference("plan-1", 1, 'b'));
+        pinned_identity.assignment = Some(RevisionReference {
+            id: allocation.identity.assignment_id.clone(),
+            revision: allocation.revision,
+            sha256: Some(allocation.last_event_hash.clone()),
+        });
+        pinned_identity.parent_run_id = Some(allocation.identity.parent_run_id.clone());
+        pinned_identity.delegation_depth = 1;
+        pinned_identity.agent_profile.id = "checker".into();
+        pinned_identity.scope_resource_ids = allocation.scope.resource_ids.clone();
+        pinned_identity.resource_scope_sha256 = allocation.scope.scope_sha256.clone();
+        pinned_identity.source_checkpoint_id = allocation.definition.source_checkpoint_id.clone();
+        ChildRunSpec {
+            child_run_id: child_run_id.into(),
+            run_start_idempotency_key: format!("{child_run_id}-create"),
+            pinned_identity_sha256: child_run_pinned_identity_sha256(&pinned_identity).unwrap(),
+            pinned_identity,
+        }
     }
 
     fn create_orphan(&self, run_id: &str, assignment_id: &str, depth: u32) {

@@ -65,6 +65,12 @@ cancel_requested -> cancelled | completed | failed
 - 多 Agent 的成本、取消、来源和父子责任可审计。
 - 仍需后续实现命令服务、Runtime 协调器、恢复驱动、并发预算、project write lease、Handoff（任务交接）、Shared Memory（共享记忆）和桌面投影。
 
+## 2026-07-12 Recovery Amendment
+
+The Started event persists an immutable ChildRunSpec（子运行规格） containing the fixed child Run ID, stable Run-start idempotency key, complete RunPinnedIdentity（运行固定身份） and its canonical SHA-256. The child identity references Assignment allocation revision 1 and its event hash, not the Started event, avoiding a self-referential hash cycle.
+
+Legacy Started events without ChildRunSpec remain readable for audit but cannot be used to provision a missing child Run. Structural recovery classifies a missing child with a valid specification as ProvisionChildRun（可补建子运行） only; it does not create the Run or call a Provider（模型服务）.
+
 ## Rejected alternatives
 
 ### 仅依赖 Prompt（提示词）让 Steward 记住子任务

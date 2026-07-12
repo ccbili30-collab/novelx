@@ -114,6 +114,16 @@ impl<'a> AgentAssignmentCommandService<'a> {
         command
             .validate()
             .map_err(|error| validation_failure("agent_assignment.start.validate", error))?;
+        let allocation = self
+            .open_repository("agent_assignment.start.storage")?
+            .load_revision(
+                &self.binding.workspace_id,
+                &command.assignment_id,
+                command.expected_revision,
+            )
+            .map_err(|error| assignment_failure("agent_assignment.start.load", error))?;
+        self.require_assignment_binding(&allocation, "agent_assignment.start.binding")?;
+        self.validate_child_run_spec(&allocation, &command.child_run_spec)?;
         self.mutate(
             &command.assignment_id,
             "agent_assignment.start",
@@ -123,7 +133,7 @@ impl<'a> AgentAssignmentCommandService<'a> {
                         &self.binding.workspace_id,
                         &command.assignment_id,
                         command.expected_revision,
-                        command.child_run_id,
+                        command.child_run_spec,
                         metadata(
                             message_id,
                             command.start_idempotency_key,
@@ -133,6 +143,51 @@ impl<'a> AgentAssignmentCommandService<'a> {
                     .map_err(|error| assignment_failure("agent_assignment.start.persist", error))
             },
         )
+    }
+
+    fn validate_child_run_spec(
+        &self,
+        allocation: &assignment::AgentAssignmentAggregate,
+        spec: &protocol::ChildRunSpec,
+    ) -> Result<(), AgentAssignmentCommandFailure> {
+        let identity = &spec.pinned_identity;
+        let allocation_reference_matches = identity.assignment.as_ref().is_some_and(|reference| {
+            reference.id == allocation.identity.assignment_id
+                && reference.revision == allocation.revision
+                && reference.sha256.as_deref() == Some(allocation.last_event_hash.as_str())
+        });
+        if allocation.status != assignment::AgentAssignmentStatus::Allocated
+            || allocation.revision != 1
+            || spec.child_run_id == allocation.identity.parent_run_id
+            || !allocation_reference_matches
+            || identity.workspace_id != allocation.identity.workspace_id
+            || identity.project_id != allocation.identity.project_id
+            || identity.goal.as_ref()
+                != Some(&protocol::RevisionReference {
+                    id: allocation.identity.goal.id.clone(),
+                    revision: allocation.identity.goal.revision,
+                    sha256: Some(allocation.identity.goal.sha256.clone()),
+                })
+            || identity.plan.as_ref()
+                != Some(&protocol::RevisionReference {
+                    id: allocation.identity.plan.id.clone(),
+                    revision: allocation.identity.plan.revision,
+                    sha256: Some(allocation.identity.plan.sha256.clone()),
+                })
+            || identity.parent_run_id.as_deref() != Some(allocation.identity.parent_run_id.as_str())
+            || identity.delegation_depth != 1
+            || identity.scope_resource_ids != allocation.scope.resource_ids
+            || identity.resource_scope_sha256 != allocation.scope.scope_sha256
+            || identity.agent_profile.id != allocation.identity.child_profile_id
+            || identity.source_checkpoint_id != allocation.definition.source_checkpoint_id
+        {
+            return Err(binding_failure(
+                "ASSIGNMENT_CHILD_RUN_SPEC_MISMATCH",
+                "agent_assignment.start.child_run_spec",
+                "child run specification does not exactly bind the allocation revision",
+            ));
+        }
+        Ok(())
     }
 
     pub fn request_cancel(
@@ -494,37 +549,50 @@ impl<'a> AgentAssignmentCommandService<'a> {
             EventJournal::open(&self.database_path).map_err(|error| run_failure(stage, error))?;
         let child = RunAggregate::recover(&runtime, child_run_id)
             .map_err(|error| child_run_failure(stage, error))?;
-        let started = repository
-            .load_revision(&self.binding.workspace_id, assignment_id, 2)
+        let allocation = repository
+            .load_revision(&self.binding.workspace_id, assignment_id, 1)
             .map_err(|error| assignment_failure(stage, error))?;
+        let spec = value.child_run_spec.as_ref().ok_or_else(|| {
+            binding_failure(
+                "ASSIGNMENT_CHILD_RUN_SPEC_REQUIRED",
+                stage,
+                "legacy assignment does not contain a recoverable child run specification",
+            )
+        })?;
         let child_identity = child.pinned_identity();
         let assignment_pin_matches = child_identity.assignment.as_ref().is_some_and(|reference| {
-            reference.id == started.identity.assignment_id
-                && reference.revision == started.revision
-                && reference.sha256.as_deref() == Some(started.last_event_hash.as_str())
+            reference.id == allocation.identity.assignment_id
+                && reference.revision == allocation.revision
+                && reference.sha256.as_deref() == Some(allocation.last_event_hash.as_str())
         });
-        if started.status != assignment::AgentAssignmentStatus::Running
-            || started.child_run_id.as_deref() != Some(child_run_id)
+        if allocation.status != assignment::AgentAssignmentStatus::Allocated
+            || value.child_run_id.as_deref() != Some(child_run_id)
+            || spec.child_run_id != child_run_id
+            || spec.pinned_identity != *child_identity
+            || protocol::child_run_pinned_identity_sha256(child_identity)
+                .ok()
+                .as_deref()
+                != Some(spec.pinned_identity_sha256.as_str())
             || !assignment_pin_matches
             || child_identity.goal.as_ref()
                 != Some(&protocol::RevisionReference {
-                    id: started.identity.goal.id.clone(),
-                    revision: started.identity.goal.revision,
-                    sha256: Some(started.identity.goal.sha256.clone()),
+                    id: allocation.identity.goal.id.clone(),
+                    revision: allocation.identity.goal.revision,
+                    sha256: Some(allocation.identity.goal.sha256.clone()),
                 })
             || child_identity.plan.as_ref()
                 != Some(&protocol::RevisionReference {
-                    id: started.identity.plan.id.clone(),
-                    revision: started.identity.plan.revision,
-                    sha256: Some(started.identity.plan.sha256.clone()),
+                    id: allocation.identity.plan.id.clone(),
+                    revision: allocation.identity.plan.revision,
+                    sha256: Some(allocation.identity.plan.sha256.clone()),
                 })
             || child_identity.parent_run_id.as_deref()
-                != Some(started.identity.parent_run_id.as_str())
+                != Some(allocation.identity.parent_run_id.as_str())
             || child_identity.delegation_depth != 1
-            || child_identity.scope_resource_ids != started.scope.resource_ids
-            || child_identity.resource_scope_sha256 != started.scope.scope_sha256
-            || child_identity.agent_profile.id != started.identity.child_profile_id
-            || child_identity.source_checkpoint_id != started.definition.source_checkpoint_id
+            || child_identity.scope_resource_ids != allocation.scope.resource_ids
+            || child_identity.resource_scope_sha256 != allocation.scope.scope_sha256
+            || child_identity.agent_profile.id != allocation.identity.child_profile_id
+            || child_identity.source_checkpoint_id != allocation.definition.source_checkpoint_id
         {
             return Err(binding_failure(
                 "ASSIGNMENT_CHILD_RUN_PIN_MISMATCH",
@@ -669,6 +737,7 @@ fn snapshot(value: assignment::AgentAssignmentAggregate) -> protocol::AgentAssig
             assignment::AgentAssignmentStatus::Failed => protocol::AgentAssignmentStatus::Failed,
         },
         child_run_id: value.child_run_id,
+        child_run_spec: value.child_run_spec,
         completion_evidence: value
             .completion_evidence
             .into_iter()

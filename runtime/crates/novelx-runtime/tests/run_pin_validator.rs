@@ -1,6 +1,8 @@
 mod support;
 
-use novelx_protocol::{RevisionReference, RunStart};
+use novelx_protocol::{
+    ChildRunSpec, RevisionReference, RunStart, child_run_pinned_identity_sha256,
+};
 use novelx_runtime::{
     agent_assignment_aggregate::{
         AgentAssignmentIdentity, AgentAssignmentRepository, AssignmentDefinition,
@@ -84,30 +86,36 @@ fn validates_exact_assignment_child_run_parent_scope_profile_and_depth() {
             assignment_metadata("assignment-created"),
         )
         .unwrap();
-    let running = assignments
-        .start(
-            "workspace-1",
-            "assignment-1",
-            allocated.revision,
-            child_run_id.clone(),
-            assignment_metadata("assignment-started"),
-        )
-        .unwrap();
     let mut child_identity = pinned_identity();
     child_identity.goal = Some(goal_ref);
     child_identity.plan = Some(plan_ref);
     child_identity.assignment = Some(RevisionReference {
         id: "assignment-1".into(),
-        revision: running.revision,
-        sha256: Some(running.last_event_hash.clone()),
+        revision: allocated.revision,
+        sha256: Some(allocated.last_event_hash.clone()),
     });
     child_identity.parent_run_id = Some(parent_run_id);
     child_identity.delegation_depth = 1;
+    let child_spec = ChildRunSpec {
+        child_run_id: child_run_id.clone(),
+        run_start_idempotency_key: "child-run-start".into(),
+        pinned_identity_sha256: child_run_pinned_identity_sha256(&child_identity).unwrap(),
+        pinned_identity: child_identity.clone(),
+    };
+    let _running = assignments
+        .start(
+            "workspace-1",
+            "assignment-1",
+            allocated.revision,
+            child_spec,
+            assignment_metadata("assignment-started"),
+        )
+        .unwrap();
 
     let receipt = RunPinValidator::new(&fixture.database)
         .validate(&child_run_id, &child_identity)
         .unwrap();
-    assert_eq!(receipt.assignment_sha256, Some(running.last_event_hash));
+    assert_eq!(receipt.assignment_sha256, Some(allocated.last_event_hash));
 
     child_identity.delegation_depth = 2;
     assert!(matches!(

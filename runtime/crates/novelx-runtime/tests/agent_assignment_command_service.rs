@@ -4,8 +4,8 @@ use novelx_protocol::{
     AgentAssignmentComplete, AgentAssignmentConfirmCancelled, AgentAssignmentCreate,
     AgentAssignmentFail, AgentAssignmentGet, AgentAssignmentRequestCancel, AgentAssignmentStart,
     AgentAssignmentStatus, AssignmentCompletionEvidence, AssignmentDefinition, AssignmentScope,
-    ChildAgentPermission, RevisionReference, RunPermissionMode, ToolPermissionPolicy,
-    ToolSourceScope,
+    ChildAgentPermission, ChildRunSpec, RevisionReference, RunPermissionMode, ToolPermissionPolicy,
+    ToolSourceScope, child_run_pinned_identity_sha256,
 };
 use novelx_runtime::{
     agent_assignment_aggregate::AgentAssignmentRepository,
@@ -106,7 +106,7 @@ fn lifecycle_commands_are_typed_and_start_only_records_child_run_identity() {
                 start_idempotency_key: "assignment-start".into(),
                 assignment_id: "assignment-lifecycle".into(),
                 expected_revision: 1,
-                child_run_id: child_run_id.clone(),
+                child_run_spec: fixture.child_spec("assignment-lifecycle", &child_run_id),
             },
         )
         .unwrap();
@@ -211,7 +211,7 @@ fn cancellation_and_failure_paths_persist_typed_terminal_state() {
                 start_idempotency_key: "cancel-start".into(),
                 assignment_id: "assignment-cancel".into(),
                 expected_revision: 1,
-                child_run_id: cancelled_child_run_id.clone(),
+                child_run_spec: fixture.child_spec("assignment-cancel", &cancelled_child_run_id),
             },
         )
         .unwrap();
@@ -257,7 +257,7 @@ fn cancellation_and_failure_paths_persist_typed_terminal_state() {
                 start_idempotency_key: "fail-start".into(),
                 assignment_id: "assignment-fail".into(),
                 expected_revision: 1,
-                child_run_id: failed_child_run_id.clone(),
+                child_run_spec: fixture.child_spec("assignment-fail", &failed_child_run_id),
             },
         )
         .unwrap();
@@ -304,6 +304,42 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn child_spec(&self, assignment_id: &str, child_run_id: &str) -> ChildRunSpec {
+        let allocation = AgentAssignmentRepository::open(&self.database)
+            .unwrap()
+            .load_revision("workspace-1", assignment_id, 1)
+            .unwrap();
+        let mut pinned_identity = support::pinned_identity();
+        pinned_identity.goal = Some(RevisionReference {
+            id: allocation.identity.goal.id.clone(),
+            revision: allocation.identity.goal.revision,
+            sha256: Some(allocation.identity.goal.sha256.clone()),
+        });
+        pinned_identity.plan = Some(RevisionReference {
+            id: allocation.identity.plan.id.clone(),
+            revision: allocation.identity.plan.revision,
+            sha256: Some(allocation.identity.plan.sha256.clone()),
+        });
+        pinned_identity.assignment = Some(RevisionReference {
+            id: allocation.identity.assignment_id.clone(),
+            revision: allocation.revision,
+            sha256: Some(allocation.last_event_hash.clone()),
+        });
+        pinned_identity.parent_run_id = Some(allocation.identity.parent_run_id.clone());
+        pinned_identity.delegation_depth = 1;
+        pinned_identity.agent_profile.id = allocation.identity.child_profile_id.clone();
+        pinned_identity.scope_resource_ids = allocation.scope.resource_ids.clone();
+        pinned_identity.resource_scope_sha256 = allocation.scope.scope_sha256.clone();
+        pinned_identity.source_checkpoint_id = allocation.definition.source_checkpoint_id.clone();
+        let pinned_identity_sha256 = child_run_pinned_identity_sha256(&pinned_identity).unwrap();
+        ChildRunSpec {
+            child_run_id: child_run_id.into(),
+            run_start_idempotency_key: format!("child-start-{assignment_id}"),
+            pinned_identity,
+            pinned_identity_sha256,
+        }
+    }
+
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         Self {
@@ -491,30 +527,9 @@ impl Fixture {
     fn seed_terminal_child_run(&self, assignment_id: &str, run_id: &str, terminal: RunState) {
         let assignment = AgentAssignmentRepository::open(&self.database)
             .unwrap()
-            .load_revision("workspace-1", assignment_id, 2)
+            .load("workspace-1", assignment_id)
             .unwrap();
-        let mut pinned = support::pinned_identity();
-        pinned.goal = Some(RevisionReference {
-            id: assignment.identity.goal.id.clone(),
-            revision: assignment.identity.goal.revision,
-            sha256: Some(assignment.identity.goal.sha256.clone()),
-        });
-        pinned.plan = Some(RevisionReference {
-            id: assignment.identity.plan.id.clone(),
-            revision: assignment.identity.plan.revision,
-            sha256: Some(assignment.identity.plan.sha256.clone()),
-        });
-        pinned.assignment = Some(RevisionReference {
-            id: assignment.identity.assignment_id.clone(),
-            revision: assignment.revision,
-            sha256: Some(assignment.last_event_hash.clone()),
-        });
-        pinned.parent_run_id = Some(assignment.identity.parent_run_id.clone());
-        pinned.delegation_depth = 1;
-        pinned.agent_profile.id = assignment.identity.child_profile_id.clone();
-        pinned.scope_resource_ids = assignment.scope.resource_ids.clone();
-        pinned.resource_scope_sha256 = assignment.scope.scope_sha256.clone();
-        pinned.source_checkpoint_id = assignment.definition.source_checkpoint_id.clone();
+        let pinned = assignment.child_run_spec.unwrap().pinned_identity;
         let mut runtime = EventJournal::open(&self.database).unwrap();
         let create_key = format!("{run_id}-create");
         let mut child = RunAggregate::create(

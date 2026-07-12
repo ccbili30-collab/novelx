@@ -178,6 +178,23 @@ describe("RuntimeV2ProcessSupervisor", () => {
       assignmentId: "assignment-1", status: "allocated", revision: 1,
     });
 
+    const childPinnedIdentity = assignmentChildPinnedIdentity();
+    const childRunSpec = {
+      childRunId: "f25772f3-b0aa-4449-92eb-8ddf611a810d",
+      runStartIdempotencyKey: "assignment-1-child-run-start",
+      pinnedIdentity: childPinnedIdentity,
+      pinnedIdentitySha256: createHash("sha256").update(canonicalJson(childPinnedIdentity), "utf8").digest("hex"),
+    };
+    await expect(accepted.startAgentAssignment({
+      startIdempotencyKey: "assignment-start-1",
+      assignmentId: "assignment-1",
+      expectedRevision: 1,
+      childRunSpec,
+    })).resolves.toMatchObject({
+      assignmentId: "assignment-1", status: "running", revision: 2, childRunId: childRunSpec.childRunId,
+      childRunSpec,
+    });
+
     const rejected = createSupervisor(createFixture("assignment-rejected"));
     await rejected.start();
     await expect(rejected.getAgentAssignment({ assignmentId: "assignment-1" })).rejects.toMatchObject({
@@ -416,6 +433,32 @@ function inferenceStartPayload() {
   };
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function assignmentChildPinnedIdentity() {
+  const policy = (id: string, digit: string) => ({ id, version: "1.0.0", sha256: digit.repeat(64) });
+  return {
+    projectId: "project-1", workspaceId: "workspace-1", sessionId: "session-1", sessionBranchId: "branch-1",
+    userMessageId: "message-1", projectBranchId: "project-branch-1",
+    goal: { id: "goal-1", revision: 1, sha256: "a".repeat(64) },
+    plan: { id: "plan-1", revision: 1, sha256: "b".repeat(64) },
+    assignment: { id: "assignment-1", revision: 1, sha256: "d".repeat(64) },
+    parentRunId: "parent-1", delegationDepth: 1,
+    provider: { profileId: "profile-1", providerId: "deepseek", modelId: "deepseek-chat", configSha256: "a".repeat(64) },
+    promptBundle: policy("prompt", "b"), agentProfile: policy("checker-v1", "c"), toolPolicy: policy("tool", "d"),
+    contextPolicy: policy("context", "e"), runtimePolicy: policy("runtime", "f"), runtimeContractVersion: "1.0.0",
+    mode: "assist" as const, sourceCheckpointId: "checkpoint-1", scopeResourceIds: ["resource-1"],
+    resourceScopeSha256: "c".repeat(64), userInputSha256: "2".repeat(64),
+  };
+}
+
 async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -597,6 +640,7 @@ input.on("line", (line) => {
         }, command.messageId, runtimeSequence, "response")) + "\n");
         return;
       }
+      const started = command.name === "agent.assignment.start";
       const response = envelope(1, "agent.assignment.snapshot", {
         assignmentId: "assignment-1", workspaceId: "workspace-1", projectId: "project-1",
         goal: { id: "goal-1", revision: 1, sha256: "a".repeat(64) },
@@ -604,8 +648,11 @@ input.on("line", (line) => {
         planStepId: "step-1", parentRunId: "parent-1", parentInvocationId: "invocation-1",
         childProfileId: "checker-v1", scope: { resourceIds: ["resource-1"], scopeSha256: "c".repeat(64) },
         definition: { boundedObjective: "Audit", sourceCheckpointId: "checkpoint-1", expectedArtifact: "report", capabilities: ["project.read"] },
-        permission: "read_only", status: "allocated", childRunId: null, completionEvidence: [], failureCode: null,
-        revision: 1, lastEventHash: "d".repeat(64),
+        permission: "read_only", status: started ? "running" : "allocated",
+        childRunId: started ? command.payload.childRunSpec.childRunId : null,
+        ...(started ? { childRunSpec: command.payload.childRunSpec } : {}),
+        completionEvidence: [], failureCode: null,
+        revision: started ? 2 : 1, lastEventHash: "d".repeat(64),
       }, command.messageId, runtimeSequence, "response");
       process.stdout.write(JSON.stringify(response) + "\n");
       return;

@@ -38,6 +38,7 @@ import {
   runtimeV2EnvelopeSchema,
   runtimeV2GoalCompletePayloadSchema,
   runtimeV2AgentAssignmentCreateEnvelopeSchema,
+  runtimeV2AgentAssignmentStartEnvelopeSchema,
   runtimeV2AgentAssignmentCompleteEnvelopeSchema,
 } from "../../src/shared/runtimeV2Protocol";
 
@@ -262,6 +263,15 @@ function runStartEnvelope(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function runGetEnvelope(overrides: Record<string, unknown> = {}) {
   return {
     ...runStartEnvelope(), messageId: "68af36c1-b51d-4e18-80ac-a20bcc7d2b37", name: "run.get", sequence: 6,
@@ -482,6 +492,71 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(snapshot.payload.status).toBe("allocated");
     expect(runtimeV2AgentAssignmentCreateEnvelopeSchema.safeParse({ ...base, name: "agent.assignment.create", payload: { ...payload, scope: { ...scope, resourceIds: ["world-1", "chapter-1"] } } }).success).toBe(false);
     expect(runtimeV2AgentAssignmentCompleteEnvelopeSchema.safeParse({ ...base, name: "agent.assignment.complete", payload: { completeIdempotencyKey: "complete-1", assignmentId: "assignment-1", expectedRevision: 1, evidence: [] } }).success).toBe(false);
+  });
+
+  it("requires a canonical immutable Child Run specification for Assignment start", () => {
+    const reference = (id: string, digit: string) => ({ id, revision: 1, sha256: digit.repeat(64) });
+    const pinnedIdentity = {
+      ...runPinnedIdentity(),
+      goal: reference("goal-1", "a"),
+      plan: reference("plan-1", "b"),
+      assignment: reference("assignment-1", "d"),
+      parentRunId: "parent-run-1",
+      delegationDepth: 1,
+    };
+    const pinnedIdentitySha256 = createHash("sha256").update(canonicalJson(pinnedIdentity), "utf8").digest("hex");
+    const base = {
+      protocolVersion: 1, messageId: MESSAGE_ID, messageType: "command", name: "agent.assignment.start",
+      sentAt: "2026-07-12T00:00:00Z", correlationId: null, runId: null, sequence: 2,
+    } as const;
+    const childRunSpec = {
+      childRunId: "f25772f3-b0aa-4449-92eb-8ddf611a810d",
+      runStartIdempotencyKey: "assignment-1-child-run-start",
+      pinnedIdentity,
+      pinnedIdentitySha256,
+    };
+    const payload = { startIdempotencyKey: "assignment-start-1", assignmentId: "assignment-1", expectedRevision: 1, childRunSpec };
+
+    expect(runtimeV2AgentAssignmentStartEnvelopeSchema.safeParse({ ...base, payload }).success).toBe(true);
+    expect(runtimeV2AgentAssignmentStartEnvelopeSchema.safeParse({ ...base, payload: { ...payload, childRunSpec: { ...childRunSpec, pinnedIdentitySha256: "0".repeat(64) } } }).success).toBe(false);
+    expect(runtimeV2AgentAssignmentStartEnvelopeSchema.safeParse({ ...base, payload: { ...payload, childRunSpec: { ...childRunSpec, pinnedIdentity: { ...pinnedIdentity, assignment: null } } } }).success).toBe(false);
+    expect(runtimeV2AgentAssignmentStartEnvelopeSchema.safeParse({ ...base, payload: { startIdempotencyKey: "assignment-start-1", assignmentId: "assignment-1", expectedRevision: 1, childRunId: childRunSpec.childRunId } }).success).toBe(false);
+
+    const snapshotPayload = {
+      assignmentId: "assignment-1", workspaceId: "workspace-1", projectId: "project-1",
+      goal: pinnedIdentity.goal, plan: pinnedIdentity.plan, planStepId: "step-1", parentRunId: "parent-run-1",
+      parentInvocationId: "invocation-1", childProfileId: "novelx.agent.steward",
+      scope: { resourceIds: ["resource-1", "resource-2"], scopeSha256: pinnedIdentity.resourceScopeSha256 },
+      definition: { boundedObjective: "Audit", sourceCheckpointId: "checkpoint-1", expectedArtifact: "report", capabilities: ["project.read"] },
+      permission: "read_only", status: "running", childRunId: childRunSpec.childRunId,
+      completionEvidence: [], failureCode: null, revision: 2, lastEventHash: "e".repeat(64),
+    };
+    const responseBase = { ...base, messageType: "response", name: "agent.assignment.snapshot", correlationId: MESSAGE_ID } as const;
+    expect(parseRuntimeV2AgentAssignmentSnapshotEnvelope({ ...responseBase, payload: snapshotPayload }).payload.childRunSpec).toBeUndefined();
+    expect(() => parseRuntimeV2AgentAssignmentSnapshotEnvelope({
+      ...responseBase,
+      payload: { ...snapshotPayload, childRunSpec: { ...childRunSpec, childRunId: "another-child-run" } },
+    })).toThrow();
+  });
+
+  it("shares the Child Run pinned identity golden hash with Rust", () => {
+    const policy = (id: string, digit: string) => ({ id, version: "1", sha256: digit.repeat(64) });
+    const identity = {
+      projectId: "project-1", workspaceId: "workspace-1", sessionId: "session-1", sessionBranchId: "branch-1",
+      userMessageId: "message-1", projectBranchId: "project-branch-1",
+      goal: { id: "goal-1", revision: 1, sha256: "a".repeat(64) },
+      plan: { id: "plan-1", revision: 2, sha256: "b".repeat(64) },
+      assignment: { id: "assignment-1", revision: 1, sha256: "c".repeat(64) },
+      parentRunId: "parent-1", delegationDepth: 1,
+      provider: { profileId: "provider-profile", providerId: "deepseek", modelId: "deepseek-chat", configSha256: "d".repeat(64) },
+      promptBundle: policy("prompt", "e"), agentProfile: policy("checker", "f"), toolPolicy: policy("tools", "1"),
+      contextPolicy: policy("context", "2"), runtimePolicy: policy("runtime", "3"), runtimeContractVersion: "2",
+      mode: "assist", sourceCheckpointId: "checkpoint-1", scopeResourceIds: ["chapter-1", "world"],
+      resourceScopeSha256: "4".repeat(64), userInputSha256: "5".repeat(64),
+    };
+    expect(createHash("sha256").update(canonicalJson(identity), "utf8").digest("hex")).toBe(
+      "569c60cbd64889175a0c84a7fa5d19233e7f49d7a359ba930d67365250a4227e",
+    );
   });
 
   it("rejects caller-supplied Goal completion actor identity", () => {

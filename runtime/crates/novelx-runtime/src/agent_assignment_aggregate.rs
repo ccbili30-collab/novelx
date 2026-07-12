@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use novelx_protocol::ChildRunSpec;
+
 use crate::workspace_event_journal::{
     NewWorkspaceEvent, WorkspaceEvent, WorkspaceEventJournal, WorkspaceEventJournalError,
 };
@@ -79,6 +81,7 @@ pub struct AgentAssignmentAggregate {
     pub permission: ChildAgentPermission,
     pub status: AgentAssignmentStatus,
     pub child_run_id: Option<String>,
+    pub child_run_spec: Option<ChildRunSpec>,
     pub completion_evidence: Vec<CompletionEvidence>,
     pub failure_code: Option<String>,
     pub revision: u64,
@@ -103,6 +106,8 @@ enum AssignmentEventData {
     },
     Started {
         child_run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_run_spec: Option<Box<ChildRunSpec>>,
     },
     CancellationRequested,
     Cancelled,
@@ -225,17 +230,20 @@ impl AgentAssignmentRepository {
         workspace_id: &str,
         assignment_id: &str,
         expected_revision: u64,
-        child_run_id: String,
+        child_run_spec: ChildRunSpec,
         metadata: AssignmentEventMetadata,
     ) -> Result<AgentAssignmentAggregate, AgentAssignmentError> {
-        require_text("child_run_id", &child_run_id)?;
+        validate_child_run_spec(&child_run_spec)?;
         let current = self.require_expected(workspace_id, assignment_id, expected_revision)?;
         if current.status != AgentAssignmentStatus::Allocated {
             return Err(AgentAssignmentError::InvalidTransition);
         }
         self.append_from(
             &current,
-            AssignmentEventData::Started { child_run_id },
+            AssignmentEventData::Started {
+                child_run_id: child_run_spec.child_run_id.clone(),
+                child_run_spec: Some(Box::new(child_run_spec)),
+            },
             metadata,
         )
     }
@@ -493,6 +501,7 @@ fn apply_event(
                 permission,
                 status: AgentAssignmentStatus::Allocated,
                 child_run_id: None,
+                child_run_spec: None,
                 completion_evidence: vec![],
                 failure_code: None,
                 revision: event.aggregate_revision,
@@ -512,13 +521,26 @@ fn apply_event(
         return Err(AgentAssignmentError::EventEnvelopeMismatch);
     }
     match event.data {
-        AssignmentEventData::Started { child_run_id } => {
+        AssignmentEventData::Started {
+            child_run_id,
+            child_run_spec,
+        } => {
             require_text("child_run_id", &child_run_id)?;
-            if value.status != AgentAssignmentStatus::Allocated || value.child_run_id.is_some() {
+            if let Some(spec) = child_run_spec.as_deref() {
+                validate_child_run_spec(spec)?;
+                if spec.child_run_id != child_run_id {
+                    return Err(AgentAssignmentError::ChildRunSpecInvalid);
+                }
+            }
+            if value.status != AgentAssignmentStatus::Allocated
+                || value.child_run_id.is_some()
+                || value.child_run_spec.is_some()
+            {
                 return Err(AgentAssignmentError::InvalidTransition);
             }
             value.status = AgentAssignmentStatus::Running;
             value.child_run_id = Some(child_run_id);
+            value.child_run_spec = child_run_spec.map(|spec| *spec);
         }
         AssignmentEventData::CancellationRequested => {
             if !matches!(
@@ -564,6 +586,11 @@ fn apply_event(
     value.revision = event.aggregate_revision;
     value.last_event_hash = event.event_hash;
     Ok(())
+}
+
+fn validate_child_run_spec(spec: &ChildRunSpec) -> Result<(), AgentAssignmentError> {
+    spec.validate()
+        .map_err(|_| AgentAssignmentError::ChildRunSpecInvalid)
 }
 
 fn validate_identity(identity: &AgentAssignmentIdentity) -> Result<(), AgentAssignmentError> {
@@ -738,6 +765,8 @@ pub enum AgentAssignmentError {
     RevisionOutOfRange,
     #[error("agent assignment transition is invalid")]
     InvalidTransition,
+    #[error("agent assignment child run specification is invalid")]
+    ChildRunSpecInvalid,
     #[error("agent assignment is terminal")]
     TerminalAssignment,
     #[error("agent assignment event sequence contains a gap")]
