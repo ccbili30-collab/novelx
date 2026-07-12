@@ -37,7 +37,7 @@ async fn posts_a_real_loopback_request_bound_to_the_compiled_context_receipt() {
         .await
         .unwrap();
 
-    assert_eq!(outcome.text, "银湾仍在潮声中。");
+    assert_eq!(outcome.text.as_deref(), Some("银湾仍在潮声中。"));
     assert_eq!(
         outcome.receipt.context_compilation_id,
         compilation_receipt().compilation_id
@@ -220,6 +220,70 @@ async fn treats_length_finish_reason_as_incomplete_output() {
 
     assert!(matches!(error, ProviderGatewayError::OutputIncomplete));
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn parses_pure_and_mixed_structured_tool_calls_without_executing_them() {
+    for (content, expected_text) in [
+        ("null", None),
+        (r#""I will inspect it.""#, Some("I will inspect it.")),
+    ] {
+        let body = format!(
+            r#"{{"id":"response-tools","model":"deepseek-chat","choices":[{{"finish_reason":"tool_calls","message":{{"role":"assistant","content":{content},"tool_calls":[{{"id":"call-1","type":"function","function":{{"name":"read_project","arguments":"{{\"path\":\"README.md\",\"depth\":2}}"}}}}]}}}}],"usage":{{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}}}"#
+        );
+        let (base_url, _, server) =
+            spawn_http_server(vec![ServerReply::Immediate(json_response(200, &body))]).await;
+        let (registry, identity) = bound_registry(base_url, 2_000);
+        let outcome = ProviderGateway::new()
+            .unwrap()
+            .infer(
+                registry.resolve(&identity).unwrap(),
+                inference_request(compilation_receipt()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.text.as_deref(), expected_text);
+        assert_eq!(outcome.tool_calls.len(), 1);
+        assert_eq!(outcome.tool_calls[0].id, "call-1");
+        assert_eq!(outcome.tool_calls[0].name, "read_project");
+        assert_eq!(
+            outcome.tool_calls[0].arguments,
+            serde_json::json!({"depth": 2, "path": "README.md"})
+        );
+        assert_eq!(outcome.tool_calls[0].arguments_sha256.len(), 64);
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rejects_malformed_or_inconsistent_tool_call_responses() {
+    let cases = [
+        r#"{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[]}}"#,
+        r#"{"finish_reason":"stop","message":{"role":"assistant","content":"done","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_project","arguments":"{}"}}]}}"#,
+        r#"{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_project","arguments":"{}"}},{"id":"call-1","type":"function","function":{"name":"search_project","arguments":"{}"}}]}}"#,
+        r#"{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"","arguments":"{}"}}]}}"#,
+        r#"{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_project","arguments":"not-json"}}]}}"#,
+        r#"{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_project","arguments":"[]"}}]}}"#,
+    ];
+    for choice in cases {
+        let body = format!(
+            r#"{{"id":"response-tools","model":"deepseek-chat","choices":[{choice}],"usage":{{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}}}"#
+        );
+        let (base_url, _, server) =
+            spawn_http_server(vec![ServerReply::Immediate(json_response(200, &body))]).await;
+        let (registry, identity) = bound_registry(base_url, 2_000);
+        let error = ProviderGateway::new()
+            .unwrap()
+            .infer(
+                registry.resolve(&identity).unwrap(),
+                inference_request(compilation_receipt()),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProviderGatewayError::ResponseMalformed));
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]

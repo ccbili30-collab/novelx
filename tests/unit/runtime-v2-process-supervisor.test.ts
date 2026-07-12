@@ -433,6 +433,7 @@ input.on("line", (line) => {
         stopReason: "stop",
         usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
         output: { text: "done", textSha256: createHash("sha256").update("done", "utf8").digest("hex"), utf8Bytes: 4 },
+        toolCalls: [],
       };
       const completedEnvelope = envelope(
         1, "provider.inference.completed", completed, command.messageId, runtimeSequence, "event",

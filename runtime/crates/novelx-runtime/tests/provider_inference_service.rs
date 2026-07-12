@@ -86,7 +86,7 @@ async fn dispatch_runs_with_the_journal_closed_and_finalize_writes_the_terminal_
     };
 
     server.await.unwrap();
-    assert_eq!(outcome.text, "分段完成");
+    assert_eq!(outcome.text.as_deref(), Some("分段完成"));
     let journal = fixture.open();
     assert_eq!(
         attempt_events(&journal).last().unwrap().event_type,
@@ -163,7 +163,7 @@ async fn persists_requested_sent_responded_and_recovers_the_response_text_after_
             .await
             .unwrap()
     };
-    assert_eq!(outcome.text, "银湾仍在潮声中。");
+    assert_eq!(outcome.text.as_deref(), Some("银湾仍在潮声中。"));
     server.await.unwrap();
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
@@ -187,6 +187,40 @@ async fn persists_requested_sent_responded_and_recovers_the_response_text_after_
             .unwrap()
     };
     assert_eq!(recovered, outcome);
+}
+
+#[tokio::test]
+async fn persists_and_recovers_tool_calls_without_a_second_provider_request() {
+    let fixture = Fixture::new();
+    let body = r#"{"id":"response-tools","model":"deepseek-chat","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_project","arguments":"{\"path\":\"README.md\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+    let (base_url, request_count, _, server) =
+        spawn_server(ServerReply::Immediate(json_response(200, body))).await;
+    let (providers, identity) = bound_registry(base_url, 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+    let execution = execution(identity);
+
+    let outcome = {
+        let mut journal = fixture.open();
+        ProviderInferenceService::new(&mut journal, &providers, &gateway)
+            .execute(execution.clone())
+            .await
+            .unwrap()
+    };
+    assert_eq!(outcome.text, None);
+    assert_eq!(outcome.tool_calls.len(), 1);
+    assert_eq!(outcome.tool_calls[0].name, "read_project");
+    server.await.unwrap();
+
+    let recovered = {
+        let mut journal = fixture.open();
+        ProviderInferenceService::new(&mut journal, &providers, &gateway)
+            .execute(execution)
+            .await
+            .unwrap()
+    };
+    assert_eq!(recovered, outcome);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

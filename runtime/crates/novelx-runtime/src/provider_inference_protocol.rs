@@ -1,7 +1,7 @@
 use novelx_protocol::{
     MessageType, ProviderInferenceAccepted, ProviderInferenceCompleted, ProviderInferenceFailed,
     ProviderInferenceIdentity, ProviderInferenceOutput, ProviderInferenceReconciliationReason,
-    ProviderInferenceReconciliationRequired, ProviderInferenceUsage,
+    ProviderInferenceReconciliationRequired, ProviderInferenceToolCall, ProviderInferenceUsage,
     ProviderInferenceValidationError, RuntimeError, RuntimeErrorClass,
 };
 use serde::Serialize;
@@ -95,11 +95,21 @@ impl ProviderInferenceProtocolMapper {
                 output_tokens: outcome.receipt.usage.output_tokens,
                 total_tokens: outcome.receipt.usage.total_tokens,
             },
-            output: ProviderInferenceOutput {
-                text: outcome.text.clone(),
-                text_sha256: lowercase_sha256(outcome.text.as_bytes()),
-                utf8_bytes: outcome.text.len() as u64,
-            },
+            output: outcome.text.as_ref().map(|text| ProviderInferenceOutput {
+                text: text.clone(),
+                text_sha256: lowercase_sha256(text.as_bytes()),
+                utf8_bytes: text.len() as u64,
+            }),
+            tool_calls: outcome
+                .tool_calls
+                .iter()
+                .map(|call| ProviderInferenceToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    arguments_sha256: call.arguments_sha256.clone(),
+                })
+                .collect(),
         };
         payload.validate()?;
         self.draft(MessageType::Event, "provider.inference.completed", payload)

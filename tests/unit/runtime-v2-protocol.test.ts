@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   RUNTIME_V2_PROTOCOL_VERSION,
@@ -24,6 +25,9 @@ import {
   parseRuntimeV2ContextRejectedEnvelope,
   parseRuntimeV2SensitiveProviderBindEnvelope,
   parseRuntimeV2ProviderBoundEnvelope,
+  parseRuntimeV2ToolRequestEnvelope,
+  parseRuntimeV2ToolRequestedEnvelope,
+  parseRuntimeV2ToolOutcomeUnknownEnvelope,
   parseRuntimeV2ProviderInferenceAcceptedEnvelope,
   parseRuntimeV2ProviderInferenceCompletedEnvelope,
   parseRuntimeV2ProviderInferenceFailedEnvelope,
@@ -441,6 +445,7 @@ function inferenceCompletedEnvelope(overrides: Record<string, unknown> = {}) {
     stopReason: "stop",
     usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
     output: { text: "done", textSha256: "a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211", utf8Bytes: 4 },
+    toolCalls: [],
   }, overrides);
 }
 
@@ -868,6 +873,14 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope(inferenceReconciliationEnvelope())).toEqual(inferenceReconciliationEnvelope());
   });
 
+  it("keeps Provider inference v1 completion compatibility when toolCalls is absent", () => {
+    const legacy = inferenceCompletedEnvelope();
+    const { toolCalls: _toolCalls, ...legacyPayload } = legacy.payload;
+    const parsed = parseRuntimeV2ProviderInferenceCompletedEnvelope({ ...legacy, payload: legacyPayload });
+    expect(parsed.payload.toolCalls).toEqual([]);
+    expect(parsed.payload.output).toEqual(legacy.payload.output);
+  });
+
   it("rejects malformed Provider inference identities, envelope roles and unknown fields", () => {
     expect(() => parseRuntimeV2ProviderInferenceStartEnvelope(inferenceStartEnvelope({ correlationId: MESSAGE_ID }))).toThrow();
     expect(() => parseRuntimeV2ProviderInferenceStartEnvelope(inferenceStartEnvelope({ runId: null }))).toThrow();
@@ -891,10 +904,47 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(() => parseRuntimeV2ProviderInferenceCompletedEnvelope(inferenceCompletedEnvelope({ payload: { ...payload, output: { ...output, text: oversized, utf8Bytes: oversized.length } } }))).toThrow();
   });
 
+  it("accepts structured tool calls and rejects unauditable tool receipts", () => {
+    const payload = inferenceCompletedEnvelope().payload;
+    const argumentsValue = { path: "README.md" };
+    const argumentsSha256 = createHash("sha256").update(JSON.stringify(argumentsValue), "utf8").digest("hex");
+    const toolCall = { id: "call-1", name: "read_project", arguments: argumentsValue, argumentsSha256 };
+    const pureTool = inferenceCompletedEnvelope({ payload: { ...payload, stopReason: "tool_calls", output: null, toolCalls: [toolCall] } });
+    expect(parseRuntimeV2ProviderInferenceCompletedEnvelope(pureTool)).toEqual(pureTool);
+    expect(() => parseRuntimeV2ProviderInferenceCompletedEnvelope(inferenceCompletedEnvelope({ payload: { ...payload, output: null, toolCalls: [] } }))).toThrow();
+    expect(() => parseRuntimeV2ProviderInferenceCompletedEnvelope(inferenceCompletedEnvelope({ payload: { ...payload, output: null, toolCalls: [toolCall, toolCall] } }))).toThrow();
+    expect(() => parseRuntimeV2ProviderInferenceCompletedEnvelope(inferenceCompletedEnvelope({ payload: { ...payload, output: null, toolCalls: [{ ...toolCall, argumentsSha256: "0".repeat(64) }] } }))).toThrow();
+  });
+
   it("requires explicit non-retryable reconciliation for unknown Provider outcomes", () => {
     const payload = inferenceReconciliationEnvelope().payload;
     const error = payload.error as Record<string, unknown>;
     expect(() => parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope(inferenceReconciliationEnvelope({ payload: { ...payload, reason: "timeout" } }))).toThrow();
     expect(() => parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope(inferenceReconciliationEnvelope({ payload: { ...payload, error: { ...error, retryable: true } } }))).toThrow();
+  });
+
+  it("accepts strict ToolCall request and public lifecycle events", () => {
+    const runId = INFERENCE_RUN_ID;
+    const toolCallId = "84bd8b4b-6ca3-4ac2-ad3d-12780d816c11";
+    const request = {
+      protocolVersion: 1, messageId: MESSAGE_ID, messageType: "command", name: "tool.request",
+      sentAt: "2026-07-12T00:00:00Z", correlationId: null, runId, sequence: 1,
+      payload: { requestIdempotencyKey: "tool-request-1", toolCallId, invocationId: "invocation-1", toolName: "project.read",
+        schemaVersion: 1, attempt: 1, sideEffect: "none", parallel: false,
+        arguments: { artifactId: "5280c959-1f02-4c20-ae9f-851878d4e050", mediaType: "application/json", sha256: "a".repeat(64), utf8Bytes: 2 },
+        sourceScope: { sourceCheckpointId: "checkpoint-1", resourceIds: ["resource-1"], scopeSha256: "b".repeat(64) },
+        permission: { mode: "assist", policyId: "tools", policyVersion: "1.0.0", policySha256: "c".repeat(64) } },
+    };
+    expect(parseRuntimeV2ToolRequestEnvelope(request)).toEqual(request);
+    const identity = { runId, toolCallId, invocationId: "invocation-1", toolName: "project.read", schemaVersion: 1,
+      attempt: 1, sideEffect: "none", parallel: false, argumentsSha256: "a".repeat(64), sourceScopeSha256: "b".repeat(64) };
+    const requested = { ...request, messageType: "event", name: "tool.requested", correlationId: MESSAGE_ID,
+      payload: { ...identity, permission: request.payload.permission, authorization: "approval_required" } };
+    expect(parseRuntimeV2ToolRequestedEnvelope(requested)).toEqual(requested);
+    const unknown = { ...requested, name: "tool.outcome_unknown",
+      payload: { ...identity, leaseId: "24897032-f6f8-4b22-bc17-141987f5807c", error: { ...errorEnvelope().payload, retryable: false } } };
+    expect(parseRuntimeV2ToolOutcomeUnknownEnvelope(unknown)).toEqual(unknown);
+    expect(() => parseRuntimeV2ToolOutcomeUnknownEnvelope({ ...unknown, payload: { ...unknown.payload, error: { ...unknown.payload.error, retryable: true } } })).toThrow();
+    expect(() => parseRuntimeV2ToolRequestedEnvelope({ ...requested, payload: { ...requested.payload, authorization: "allowed" } })).toThrow();
   });
 });

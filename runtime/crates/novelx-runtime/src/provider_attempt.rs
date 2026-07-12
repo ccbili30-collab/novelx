@@ -1,4 +1,4 @@
-use novelx_protocol::ProviderRunIdentity;
+use novelx_protocol::{ProviderInferenceToolCall, ProviderRunIdentity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -100,6 +100,7 @@ pub struct ProviderAttemptAggregate {
     response: Option<ProviderResponseReceipt>,
     response_text: Option<String>,
     response_text_sha256: Option<String>,
+    tool_calls: Vec<ProviderInferenceToolCall>,
     failure: Option<ProviderAttemptFailure>,
 }
 
@@ -212,15 +213,15 @@ impl ProviderAttemptAggregate {
         journal: &mut EventJournal,
         expected_run_sequence: u64,
         response: ProviderResponseReceipt,
-        response_text: String,
+        response_text: Option<String>,
+        tool_calls: Vec<ProviderInferenceToolCall>,
         metadata: ProviderAttemptMetadata<'_>,
     ) -> Result<(), ProviderAttemptError> {
         if self.state != ProviderAttemptState::Sent {
             return Err(self.transition_error());
         }
         validate_response(&self.definition, &response)?;
-        validate_response_text(&response_text)?;
-        let response_text_sha256 = sha256(response_text.as_bytes());
+        let response_text_sha256 = validate_response_output(response_text.as_deref(), &tool_calls)?;
         let stored = journal.append(
             event(
                 &self.run_id,
@@ -232,6 +233,7 @@ impl ProviderAttemptAggregate {
                     response: response.clone(),
                     response_text: response_text.clone(),
                     response_text_sha256: response_text_sha256.clone(),
+                    tool_calls: tool_calls.clone(),
                 },
             )?,
             expected_run_sequence,
@@ -240,8 +242,9 @@ impl ProviderAttemptAggregate {
         self.state = ProviderAttemptState::Responded;
         self.aggregate_sequence = stored.aggregate_sequence;
         self.response = Some(response);
-        self.response_text = Some(response_text);
-        self.response_text_sha256 = Some(response_text_sha256);
+        self.response_text = response_text;
+        self.response_text_sha256 = response_text_sha256;
+        self.tool_calls = tool_calls;
         Ok(())
     }
 
@@ -255,6 +258,10 @@ impl ProviderAttemptAggregate {
 
     pub const fn response_receipt(&self) -> Option<&ProviderResponseReceipt> {
         self.response.as_ref()
+    }
+
+    pub fn tool_calls(&self) -> &[ProviderInferenceToolCall] {
+        &self.tool_calls
     }
 
     pub fn fail(
@@ -381,8 +388,10 @@ enum EventPayload {
     Responded {
         definition: ProviderAttemptDefinition,
         response: ProviderResponseReceipt,
-        response_text: String,
-        response_text_sha256: String,
+        response_text: Option<String>,
+        response_text_sha256: Option<String>,
+        #[serde(default)]
+        tool_calls: Vec<ProviderInferenceToolCall>,
     },
     Failed {
         definition: ProviderAttemptDefinition,
@@ -436,6 +445,7 @@ fn replay(
         response: None,
         response_text: None,
         response_text_sha256: None,
+        tool_calls: Vec::new(),
         failure: None,
     };
     for event in &events[1..] {
@@ -474,20 +484,21 @@ fn replay(
                     response,
                     response_text,
                     response_text_sha256,
+                    tool_calls,
                     ..
                 },
             ) => {
                 validate_response(&aggregate.definition, &response)?;
-                validate_response_text(&response_text)?;
-                if !is_sha256(&response_text_sha256)
-                    || sha256(response_text.as_bytes()) != response_text_sha256
-                {
+                let expected_hash =
+                    validate_response_output(response_text.as_deref(), &tool_calls)?;
+                if expected_hash != response_text_sha256 {
                     return Err(ProviderAttemptError::ResponseInvalid);
                 }
                 aggregate.state = ProviderAttemptState::Responded;
                 aggregate.response = Some(response);
-                aggregate.response_text = Some(response_text);
-                aggregate.response_text_sha256 = Some(response_text_sha256);
+                aggregate.response_text = response_text;
+                aggregate.response_text_sha256 = response_text_sha256;
+                aggregate.tool_calls = tool_calls;
             }
             (
                 ProviderAttemptState::Sent,
@@ -554,11 +565,33 @@ fn validate_response(
     Ok(())
 }
 
-fn validate_response_text(response_text: &str) -> Result<(), ProviderAttemptError> {
-    if response_text.trim().is_empty() || response_text.len() > MAX_INLINE_RESPONSE_TEXT_BYTES {
+fn validate_response_output(
+    response_text: Option<&str>,
+    tool_calls: &[ProviderInferenceToolCall],
+) -> Result<Option<String>, ProviderAttemptError> {
+    if response_text.is_none() && tool_calls.is_empty() {
         return Err(ProviderAttemptError::ResponseInvalid);
     }
-    Ok(())
+    let text_hash = match response_text {
+        Some(text) if !text.trim().is_empty() && text.len() <= MAX_INLINE_RESPONSE_TEXT_BYTES => {
+            Some(sha256(text.as_bytes()))
+        }
+        Some(_) => return Err(ProviderAttemptError::ResponseInvalid),
+        None => None,
+    };
+    let mut ids = std::collections::BTreeSet::new();
+    for call in tool_calls {
+        if call.id.trim().is_empty()
+            || call.name.trim().is_empty()
+            || !call.arguments.is_object()
+            || !is_sha256(&call.arguments_sha256)
+            || sha256(&serde_json::to_vec(&call.arguments)?) != call.arguments_sha256
+            || !ids.insert(call.id.as_str())
+        {
+            return Err(ProviderAttemptError::ResponseInvalid);
+        }
+    }
+    Ok(text_hash)
 }
 
 fn validate_failure(failure: &ProviderAttemptFailure) -> Result<(), ProviderAttemptError> {

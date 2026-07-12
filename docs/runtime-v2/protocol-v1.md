@@ -254,6 +254,12 @@ Every accepted `tool.requested` event creates one ledger entry:
 
 Exactly one terminal ledger result is permitted: completed, failed, denied, cancelled or timed out. A Provider continuation cannot be compiled while an earlier tool call lacks a valid terminal result unless the runtime inserts a protocol-defined interruption result. Model-authored claims cannot close ledger entries.
 
+The public ToolCall protocol uses two commands: `tool.request` submits the immutable argument artifact, source scope and pinned permission policy; `tool.authorization.resolve` records an Assist-mode approve/deny decision. The Runtime, not the caller or model, issues the permission lease. Free mode may receive an immediate policy lease; Assist mode first projects `approval_required`.
+
+Public events are `tool.requested`, `tool.authorized`, `tool.running`, `tool.succeeded`, `tool.failed` and `tool.outcome_unknown`. They repeat the Run/tool/invocation identity plus argument and source-scope hashes. Authorized/running events carry the lease; success carries a result artifact receipt; known failure carries a Runtime error; unknown outcome is non-retryable. Internal aggregate `tool.started` maps to public `tool.running`, and `tool.completed` maps to `tool.succeeded`, without changing the existing state machine.
+
+This version defines strict schemas and ADR-0009 only. It does not execute tools, persist public leases, dispatch these commands in `main.rs`, or expose approval UI.
+
 ## 7. Context And Source Receipts
 
 Rust Runtime V2 is authoritative for the final normalized Provider input. Electron and domain modules may submit typed source candidates, but they do not independently trim, reorder or serialize the final request.

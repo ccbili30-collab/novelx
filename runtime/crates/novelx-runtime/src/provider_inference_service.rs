@@ -262,6 +262,16 @@ impl<'a> ProviderInferenceService<'a> {
                     current_run_sequence(journal, &execution.run_id)?,
                     response,
                     outcome.text.clone(),
+                    outcome
+                        .tool_calls
+                        .iter()
+                        .map(|call| novelx_protocol::ProviderInferenceToolCall {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            arguments: call.arguments.clone(),
+                            arguments_sha256: call.arguments_sha256.clone(),
+                        })
+                        .collect(),
                     metadata(&responded_message_id, &responded_key, &responded_at),
                 )?;
                 Ok(outcome)
@@ -389,17 +399,24 @@ fn recovered_outcome(
     let receipt = attempt
         .response_receipt()
         .ok_or(ProviderInferenceServiceError::InvalidExecution)?;
-    let text = attempt
-        .response_text()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(ProviderInferenceServiceError::InvalidExecution)?;
+    let text = attempt.response_text().map(str::to_owned);
     let response_id_sha256 = receipt
         .response_id_sha256
         .as_ref()
         .filter(|value| !value.is_empty())
         .ok_or(ProviderInferenceServiceError::InvalidExecution)?;
     Ok(ProviderInferenceOutcome {
-        text: text.to_owned(),
+        text,
+        tool_calls: attempt
+            .tool_calls()
+            .iter()
+            .map(|call| crate::provider_gateway::ProviderToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                arguments_sha256: call.arguments_sha256.clone(),
+            })
+            .collect(),
         receipt: ProviderInferenceReceipt {
             context_compilation_id: attempt.definition().context_compilation_id,
             canonical_context_sha256: attempt.definition().canonical_context_sha256.clone(),

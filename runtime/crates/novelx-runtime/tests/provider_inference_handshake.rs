@@ -101,7 +101,10 @@ fn real_provider_inference_accepts_before_completion_and_does_not_block_status()
     let completed_payload: ProviderInferenceCompleted =
         serde_json::from_value(completed.payload).unwrap();
     completed_payload.validate().unwrap();
-    assert_eq!(completed_payload.output.text, "银湾继续向前。");
+    assert_eq!(
+        completed_payload.output.as_ref().unwrap().text,
+        "银湾继续向前。"
+    );
 
     let shutdown = command("runtime.shutdown", 5, &serde_json::json!({}));
     write_envelope(&mut child, &shutdown);

@@ -1,4 +1,4 @@
-use novelx_protocol::ProviderRunIdentity;
+use novelx_protocol::{ProviderInferenceToolCall, ProviderRunIdentity};
 use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
 use novelx_runtime::provider_attempt::{
     ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptError,
@@ -6,6 +6,7 @@ use novelx_runtime::provider_attempt::{
     ProviderDeliveryCertainty, ProviderResponseReceipt,
 };
 use rusqlite::{Connection, params};
+use sha2::Digest;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -40,7 +41,8 @@ fn requested_sent_responded_persists_and_recovers() {
                 &mut journal,
                 2,
                 response_receipt(),
-                "provider output".to_owned(),
+                Some("provider output".to_owned()),
+                vec![],
                 metadata("message-3", "response-key-1"),
             )
             .unwrap();
@@ -204,7 +206,8 @@ fn unknown_version_duplicate_terminal_and_sequence_gap_are_rejected() {
                             &mut journal,
                             2,
                             response_receipt(),
-                            "provider output".to_owned(),
+                            Some("provider output".to_owned()),
+                            vec![],
                             metadata("message-3", "response-key-1"),
                         )
                         .unwrap();
@@ -294,7 +297,8 @@ fn successful_response_requires_recoverable_bounded_output_and_response_identity
                 &mut journal,
                 2,
                 receipt,
-                output,
+                Some(output),
+                vec![],
                 metadata("message-3", "response-key-1"),
             ),
             Err(ProviderAttemptError::ResponseInvalid)
@@ -337,6 +341,7 @@ fn recovery_rejects_response_text_whose_independent_hash_does_not_match() {
                         "response": response_receipt(),
                         "response_text": "provider output",
                         "response_text_sha256": "0".repeat(64),
+                        "tool_calls": [],
                     }),
                     "message-3",
                     "response-key-1",
@@ -352,6 +357,142 @@ fn recovery_rejects_response_text_whose_independent_hash_does_not_match() {
         matches!(result, Err(ProviderAttemptError::ResponseInvalid)),
         "unexpected recovery result: {result:?}"
     );
+}
+
+#[test]
+fn legacy_v1_responded_event_without_tool_calls_still_recovers() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    let mut attempt = ProviderAttemptAggregate::create(
+        &mut journal,
+        "run-1",
+        "attempt-1",
+        definition("run-1", CONTEXT_HASH),
+        0,
+        metadata("message-1", "request-key-1"),
+    )
+    .unwrap();
+    attempt
+        .mark_sent(
+            &mut journal,
+            1,
+            "dispatch-1",
+            metadata("message-2", "sent-key-1"),
+        )
+        .unwrap();
+    let text = "legacy provider output";
+    journal
+        .append(
+            raw_event(
+                "provider.responded",
+                1,
+                serde_json::json!({
+                    "kind": "responded",
+                    "definition": definition("run-1", CONTEXT_HASH),
+                    "response": response_receipt(),
+                    "response_text": text,
+                    "response_text_sha256": format!("{:x}", sha2::Sha256::digest(text.as_bytes())),
+                }),
+                "message-3",
+                "response-key-1",
+            ),
+            2,
+            2,
+        )
+        .unwrap();
+    drop(journal);
+
+    let journal = fixture.open();
+    let recovered = ProviderAttemptAggregate::recover(&journal, "run-1", "attempt-1").unwrap();
+    assert_eq!(recovered.response_text(), Some(text));
+    assert!(recovered.tool_calls().is_empty());
+}
+
+#[test]
+fn pure_tool_call_output_persists_and_recovers_with_verified_arguments() {
+    let fixture = Fixture::new();
+    {
+        let mut journal = fixture.open();
+        let mut attempt = ProviderAttemptAggregate::create(
+            &mut journal,
+            "run-1",
+            "attempt-1",
+            definition("run-1", CONTEXT_HASH),
+            0,
+            metadata("message-1", "request-key-1"),
+        )
+        .unwrap();
+        attempt
+            .mark_sent(
+                &mut journal,
+                1,
+                "dispatch-1",
+                metadata("message-2", "sent-key-1"),
+            )
+            .unwrap();
+        attempt
+            .respond_with_output(
+                &mut journal,
+                2,
+                response_receipt(),
+                None,
+                vec![tool_call()],
+                metadata("message-3", "response-key-1"),
+            )
+            .unwrap();
+    }
+    let journal = fixture.open();
+    let recovered = ProviderAttemptAggregate::recover(&journal, "run-1", "attempt-1").unwrap();
+    assert_eq!(recovered.response_text(), None);
+    assert_eq!(recovered.response_text_sha256(), None);
+    assert_eq!(recovered.tool_calls(), [tool_call()]);
+}
+
+#[test]
+fn recovery_rejects_tampered_duplicate_or_empty_tool_call_outputs() {
+    for case in ["tampered_hash", "duplicate_id", "empty_output"] {
+        let fixture = Fixture::new();
+        let mut journal = fixture.open();
+        let mut attempt = ProviderAttemptAggregate::create(
+            &mut journal,
+            "run-1",
+            "attempt-1",
+            definition("run-1", CONTEXT_HASH),
+            0,
+            metadata("message-1", "request-key-1"),
+        )
+        .unwrap();
+        attempt
+            .mark_sent(
+                &mut journal,
+                1,
+                "dispatch-1",
+                metadata("message-2", "sent-key-1"),
+            )
+            .unwrap();
+        let mut calls = if case == "empty_output" {
+            vec![]
+        } else {
+            vec![tool_call()]
+        };
+        if case == "tampered_hash" {
+            calls[0].arguments_sha256 = "0".repeat(64);
+        }
+        if case == "duplicate_id" {
+            calls.push(tool_call());
+        }
+        assert!(matches!(
+            attempt.respond_with_output(
+                &mut journal,
+                2,
+                response_receipt(),
+                None,
+                calls,
+                metadata("message-3", "response-key-1"),
+            ),
+            Err(ProviderAttemptError::ResponseInvalid)
+        ));
+    }
 }
 
 #[test]
@@ -440,6 +581,19 @@ fn response_receipt() -> ProviderResponseReceipt {
         input_tokens: 100,
         output_tokens: 20,
         total_tokens: 120,
+    }
+}
+
+fn tool_call() -> ProviderInferenceToolCall {
+    let arguments = serde_json::json!({"depth": 2, "path": "README.md"});
+    ProviderInferenceToolCall {
+        id: "call-1".to_owned(),
+        name: "read_project".to_owned(),
+        arguments_sha256: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&arguments).unwrap())
+        ),
+        arguments,
     }
 }
 

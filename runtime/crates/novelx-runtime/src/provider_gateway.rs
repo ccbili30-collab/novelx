@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use novelx_protocol::{ContextCompilationReceipt, ProviderRunIdentity};
@@ -181,8 +181,17 @@ pub struct ProviderInferenceReceipt {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+    pub arguments_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderInferenceOutcome {
-    pub text: String,
+    pub text: Option<String>,
+    pub tool_calls: Vec<ProviderToolCall>,
     pub receipt: ProviderInferenceReceipt,
 }
 
@@ -569,17 +578,24 @@ fn parse_inference_response(
     if finish_reason == "length" {
         return Err(ProviderGatewayError::OutputIncomplete);
     }
-    if finish_reason != "stop" {
+    if finish_reason != "stop" && finish_reason != "tool_calls" {
         return Err(ProviderGatewayError::ResponseMalformed);
     }
-    let text = choice
+    let message = choice
         .get("message")
         .and_then(Value::as_object)
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
         .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    let text = match message.get("content") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        _ => return Err(ProviderGatewayError::ResponseMalformed),
+    };
+    let tool_calls = parse_tool_calls(message.get("tool_calls"))?;
+    match finish_reason {
+        "stop" if text.is_some() && tool_calls.is_empty() => {}
+        "tool_calls" if !tool_calls.is_empty() => {}
+        _ => return Err(ProviderGatewayError::ResponseMalformed),
+    }
     let usage = payload
         .get("usage")
         .and_then(Value::as_object)
@@ -601,6 +617,7 @@ fn parse_inference_response(
     }
     Ok(ProviderInferenceOutcome {
         text,
+        tool_calls,
         receipt: ProviderInferenceReceipt {
             context_compilation_id: compilation.compilation_id,
             canonical_context_sha256: compilation.canonical_context_sha256.clone(),
@@ -617,6 +634,62 @@ fn parse_inference_response(
             provider_request_count: 1,
         },
     })
+}
+
+fn parse_tool_calls(value: Option<&Value>) -> Result<Vec<ProviderToolCall>, ProviderGatewayError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let calls = value
+        .as_array()
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    let mut ids = BTreeSet::new();
+    let mut parsed = Vec::with_capacity(calls.len());
+    for call in calls {
+        let call = call
+            .as_object()
+            .ok_or(ProviderGatewayError::ResponseMalformed)?;
+        if call.get("type").and_then(Value::as_str) != Some("function") {
+            return Err(ProviderGatewayError::ResponseMalformed);
+        }
+        let id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ProviderGatewayError::ResponseMalformed)?
+            .to_owned();
+        if !ids.insert(id.clone()) {
+            return Err(ProviderGatewayError::ResponseMalformed);
+        }
+        let function = call
+            .get("function")
+            .and_then(Value::as_object)
+            .ok_or(ProviderGatewayError::ResponseMalformed)?;
+        let name = function
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ProviderGatewayError::ResponseMalformed)?
+            .to_owned();
+        let arguments_text = function
+            .get("arguments")
+            .and_then(Value::as_str)
+            .ok_or(ProviderGatewayError::ResponseMalformed)?;
+        let arguments: Value = serde_json::from_str(arguments_text)
+            .map_err(|_| ProviderGatewayError::ResponseMalformed)?;
+        if !arguments.is_object() {
+            return Err(ProviderGatewayError::ResponseMalformed);
+        }
+        let canonical_arguments =
+            serde_json::to_vec(&arguments).map_err(ProviderGatewayError::Serialize)?;
+        parsed.push(ProviderToolCall {
+            id,
+            name,
+            arguments,
+            arguments_sha256: format!("{:x}", Sha256::digest(canonical_arguments)),
+        });
+    }
+    Ok(parsed)
 }
 
 fn is_sha256(value: &str) -> bool {

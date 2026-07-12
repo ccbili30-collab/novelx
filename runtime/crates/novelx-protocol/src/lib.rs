@@ -598,6 +598,15 @@ pub struct ProviderInferenceOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub arguments_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderInferenceCompleted {
     #[serde(flatten)]
     pub identity: ProviderInferenceIdentity,
@@ -607,7 +616,9 @@ pub struct ProviderInferenceCompleted {
     pub response_body_sha256: String,
     pub stop_reason: String,
     pub usage: ProviderInferenceUsage,
-    pub output: ProviderInferenceOutput,
+    pub output: Option<ProviderInferenceOutput>,
+    #[serde(default)]
+    pub tool_calls: Vec<ProviderInferenceToolCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -633,6 +644,304 @@ pub struct ProviderInferenceReconciliationRequired {
     pub error: RuntimeError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProtocolSideEffect {
+    None,
+    StagedWrite,
+    ExternalEffect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPermissionDecision {
+    Allowed,
+    ApprovalRequired,
+    Denied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolArtifactReceipt {
+    pub artifact_id: Uuid,
+    pub media_type: String,
+    pub sha256: String,
+    pub utf8_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolSourceScope {
+    pub source_checkpoint_id: String,
+    pub resource_ids: Vec<String>,
+    pub scope_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolPermissionPolicy {
+    pub mode: RunPermissionMode,
+    pub policy_id: String,
+    pub policy_version: String,
+    pub policy_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolPermissionLease {
+    pub lease_id: Uuid,
+    pub tool_call_id: Uuid,
+    pub mode: RunPermissionMode,
+    pub decision: ToolPermissionDecision,
+    pub policy_id: String,
+    pub policy_version: String,
+    pub policy_sha256: String,
+    pub source_scope_sha256: String,
+    pub granted_at: String,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolRequest {
+    pub request_idempotency_key: String,
+    pub tool_call_id: Uuid,
+    pub invocation_id: String,
+    pub tool_name: String,
+    pub schema_version: u32,
+    pub attempt: u32,
+    pub side_effect: ToolProtocolSideEffect,
+    pub parallel: bool,
+    pub arguments: ToolArtifactReceipt,
+    pub source_scope: ToolSourceScope,
+    pub permission: ToolPermissionPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAuthorizationResolutionDecision {
+    Approve,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolAuthorizationResolve {
+    pub authorization_idempotency_key: String,
+    pub tool_call_id: Uuid,
+    pub decision: ToolAuthorizationResolutionDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolEventIdentity {
+    pub run_id: Uuid,
+    pub tool_call_id: Uuid,
+    pub invocation_id: String,
+    pub tool_name: String,
+    pub schema_version: u32,
+    pub attempt: u32,
+    pub side_effect: ToolProtocolSideEffect,
+    pub parallel: bool,
+    pub arguments_sha256: String,
+    pub source_scope_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolRequested {
+    #[serde(flatten)]
+    pub identity: ToolEventIdentity,
+    pub permission: ToolPermissionPolicy,
+    pub authorization: ToolPermissionDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolAuthorized {
+    #[serde(flatten)]
+    pub identity: ToolEventIdentity,
+    pub lease: ToolPermissionLease,
+}
+
+pub type ToolRunning = ToolAuthorized;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolSucceeded {
+    #[serde(flatten)]
+    pub identity: ToolEventIdentity,
+    pub lease_id: Uuid,
+    pub result: ToolArtifactReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolFailed {
+    #[serde(flatten)]
+    pub identity: ToolEventIdentity,
+    pub lease_id: Option<Uuid>,
+    pub error: RuntimeError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolOutcomeUnknown {
+    #[serde(flatten)]
+    pub identity: ToolEventIdentity,
+    pub lease_id: Uuid,
+    pub error: RuntimeError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolProtocolValidationError {
+    InvalidField(&'static str),
+    SourceScopeNotCanonical,
+    PermissionModeMismatch,
+    LeaseIdentityMismatch,
+    OutcomeUnknownCannotRetry,
+}
+
+impl std::fmt::Display for ToolProtocolValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invalid ToolCall protocol payload: {self:?}")
+    }
+}
+impl std::error::Error for ToolProtocolValidationError {}
+
+impl ToolRequest {
+    pub fn validate(&self) -> Result<(), ToolProtocolValidationError> {
+        for (field, value) in [
+            (
+                "requestIdempotencyKey",
+                self.request_idempotency_key.as_str(),
+            ),
+            ("invocationId", self.invocation_id.as_str()),
+            ("toolName", self.tool_name.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(ToolProtocolValidationError::InvalidField(field));
+            }
+        }
+        if self.schema_version == 0 || self.attempt == 0 {
+            return Err(ToolProtocolValidationError::InvalidField(
+                "schemaVersion/attempt",
+            ));
+        }
+        validate_tool_artifact(&self.arguments)?;
+        validate_tool_scope(&self.source_scope)?;
+        validate_tool_policy(&self.permission)
+    }
+}
+
+impl ToolPermissionLease {
+    pub fn validate_for(
+        &self,
+        identity: &ToolEventIdentity,
+    ) -> Result<(), ToolProtocolValidationError> {
+        if self.tool_call_id != identity.tool_call_id
+            || self.source_scope_sha256 != identity.source_scope_sha256
+        {
+            return Err(ToolProtocolValidationError::LeaseIdentityMismatch);
+        }
+        if self.decision != ToolPermissionDecision::Allowed {
+            return Err(ToolProtocolValidationError::InvalidField("decision"));
+        }
+        require_sha256("policySha256", &self.policy_sha256)
+            .map_err(|_| ToolProtocolValidationError::InvalidField("policySha256"))?;
+        Ok(())
+    }
+}
+
+impl ToolRequested {
+    pub fn validate(&self) -> Result<(), ToolProtocolValidationError> {
+        validate_tool_event_identity(&self.identity)?;
+        validate_tool_policy(&self.permission)?;
+        let expected = match self.permission.mode {
+            RunPermissionMode::Free => ToolPermissionDecision::Allowed,
+            RunPermissionMode::Assist => ToolPermissionDecision::ApprovalRequired,
+        };
+        if self.authorization != expected {
+            return Err(ToolProtocolValidationError::PermissionModeMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl ToolAuthorized {
+    pub fn validate(&self) -> Result<(), ToolProtocolValidationError> {
+        validate_tool_event_identity(&self.identity)?;
+        self.lease.validate_for(&self.identity)
+    }
+}
+
+impl ToolSucceeded {
+    pub fn validate(&self) -> Result<(), ToolProtocolValidationError> {
+        validate_tool_event_identity(&self.identity)?;
+        validate_tool_artifact(&self.result)
+    }
+}
+
+impl ToolFailed {
+    pub fn validate(&self) -> Result<(), ToolProtocolValidationError> {
+        validate_tool_event_identity(&self.identity)
+    }
+}
+
+impl ToolOutcomeUnknown {
+    pub fn validate(&self) -> Result<(), ToolProtocolValidationError> {
+        validate_tool_event_identity(&self.identity)?;
+        if self.error.retryable {
+            return Err(ToolProtocolValidationError::OutcomeUnknownCannotRetry);
+        }
+        Ok(())
+    }
+}
+
+fn validate_tool_artifact(value: &ToolArtifactReceipt) -> Result<(), ToolProtocolValidationError> {
+    if value.media_type.trim().is_empty() || require_sha256("sha256", &value.sha256).is_err() {
+        return Err(ToolProtocolValidationError::InvalidField("artifact"));
+    }
+    Ok(())
+}
+
+fn validate_tool_scope(value: &ToolSourceScope) -> Result<(), ToolProtocolValidationError> {
+    if value.source_checkpoint_id.trim().is_empty()
+        || value.resource_ids.is_empty()
+        || value.resource_ids.iter().any(|item| item.trim().is_empty())
+        || value.resource_ids.windows(2).any(|pair| pair[0] >= pair[1])
+        || require_sha256("scopeSha256", &value.scope_sha256).is_err()
+    {
+        return Err(ToolProtocolValidationError::SourceScopeNotCanonical);
+    }
+    Ok(())
+}
+
+fn validate_tool_policy(value: &ToolPermissionPolicy) -> Result<(), ToolProtocolValidationError> {
+    if value.policy_id.trim().is_empty()
+        || value.policy_version.trim().is_empty()
+        || require_sha256("policySha256", &value.policy_sha256).is_err()
+    {
+        return Err(ToolProtocolValidationError::InvalidField("permission"));
+    }
+    Ok(())
+}
+
+fn validate_tool_event_identity(
+    value: &ToolEventIdentity,
+) -> Result<(), ToolProtocolValidationError> {
+    if value.invocation_id.trim().is_empty()
+        || value.tool_name.trim().is_empty()
+        || value.schema_version == 0
+        || value.attempt == 0
+        || require_sha256("argumentsSha256", &value.arguments_sha256).is_err()
+        || require_sha256("sourceScopeSha256", &value.source_scope_sha256).is_err()
+    {
+        return Err(ToolProtocolValidationError::InvalidField("identity"));
+    }
+    Ok(())
+}
+
 pub const MAX_PROVIDER_INFERENCE_OUTPUT_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,6 +954,8 @@ pub enum ProviderInferenceValidationError {
     OutputTooLarge { actual: usize, maximum: usize },
     OutputByteLengthMismatch { declared: u64, actual: usize },
     OutputHashMismatch,
+    ToolCallInvalid,
+    ToolCallDuplicateId,
     ReconciliationCannotBeRetryable,
 }
 
@@ -671,6 +982,8 @@ impl std::fmt::Display for ProviderInferenceValidationError {
                 formatter,
                 "textSha256 does not match Provider inference output"
             ),
+            Self::ToolCallInvalid => write!(formatter, "Provider tool call is invalid"),
+            Self::ToolCallDuplicateId => write!(formatter, "Provider tool call ids must be unique"),
             Self::ReconciliationCannotBeRetryable => write!(
                 formatter,
                 "unknown Provider outcomes cannot be automatically retryable"
@@ -705,7 +1018,6 @@ impl ProviderInferenceCompleted {
         require_identity("stopReason", &self.stop_reason)?;
         require_sha256("responseIdSha256", &self.response_id_sha256)?;
         require_sha256("responseBodySha256", &self.response_body_sha256)?;
-        require_sha256("textSha256", &self.output.text_sha256)?;
         if self
             .usage
             .input_tokens
@@ -714,24 +1026,55 @@ impl ProviderInferenceCompleted {
         {
             return Err(ProviderInferenceValidationError::UsageTotalMismatch);
         }
-        if self.output.text.is_empty() {
+        if self.output.is_none() && self.tool_calls.is_empty() {
             return Err(ProviderInferenceValidationError::OutputEmpty);
         }
-        let actual_bytes = self.output.text.len();
-        if actual_bytes > MAX_PROVIDER_INFERENCE_OUTPUT_BYTES {
-            return Err(ProviderInferenceValidationError::OutputTooLarge {
-                actual: actual_bytes,
-                maximum: MAX_PROVIDER_INFERENCE_OUTPUT_BYTES,
-            });
+        match self.stop_reason.as_str() {
+            "stop" if self.output.is_some() && self.tool_calls.is_empty() => {}
+            "tool_calls" if !self.tool_calls.is_empty() => {}
+            _ => return Err(ProviderInferenceValidationError::ToolCallInvalid),
         }
-        if self.output.utf8_bytes != actual_bytes as u64 {
-            return Err(ProviderInferenceValidationError::OutputByteLengthMismatch {
-                declared: self.output.utf8_bytes,
-                actual: actual_bytes,
-            });
+        if let Some(output) = &self.output {
+            require_sha256("textSha256", &output.text_sha256)?;
+            if output.text.is_empty() {
+                return Err(ProviderInferenceValidationError::OutputEmpty);
+            }
+            let actual_bytes = output.text.len();
+            if actual_bytes > MAX_PROVIDER_INFERENCE_OUTPUT_BYTES {
+                return Err(ProviderInferenceValidationError::OutputTooLarge {
+                    actual: actual_bytes,
+                    maximum: MAX_PROVIDER_INFERENCE_OUTPUT_BYTES,
+                });
+            }
+            if output.utf8_bytes != actual_bytes as u64 {
+                return Err(ProviderInferenceValidationError::OutputByteLengthMismatch {
+                    declared: output.utf8_bytes,
+                    actual: actual_bytes,
+                });
+            }
+            if lowercase_sha256(output.text.as_bytes()) != output.text_sha256 {
+                return Err(ProviderInferenceValidationError::OutputHashMismatch);
+            }
         }
-        if lowercase_sha256(self.output.text.as_bytes()) != self.output.text_sha256 {
-            return Err(ProviderInferenceValidationError::OutputHashMismatch);
+        let mut ids = std::collections::BTreeSet::new();
+        for call in &self.tool_calls {
+            if call.id.trim().is_empty()
+                || call.name.trim().is_empty()
+                || !call.arguments.is_object()
+            {
+                return Err(ProviderInferenceValidationError::ToolCallInvalid);
+            }
+            require_sha256("argumentsSha256", &call.arguments_sha256)?;
+            if lowercase_sha256(
+                &serde_json::to_vec(&call.arguments)
+                    .map_err(|_| ProviderInferenceValidationError::ToolCallInvalid)?,
+            ) != call.arguments_sha256
+            {
+                return Err(ProviderInferenceValidationError::ToolCallInvalid);
+            }
+            if !ids.insert(call.id.as_str()) {
+                return Err(ProviderInferenceValidationError::ToolCallDuplicateId);
+            }
         }
         Ok(())
     }
@@ -1102,11 +1445,12 @@ mod tests {
                 output_tokens: 2,
                 total_tokens: 12,
             },
-            output: ProviderInferenceOutput {
+            output: Some(ProviderInferenceOutput {
                 text: "done".to_owned(),
                 text_sha256: lowercase_sha256(b"done"),
                 utf8_bytes: 4,
-            },
+            }),
+            tool_calls: vec![],
         };
         let failed = ProviderInferenceFailed {
             identity: identity.clone(),
@@ -1234,11 +1578,12 @@ mod tests {
                 output_tokens: 2,
                 total_tokens: 12,
             },
-            output: ProviderInferenceOutput {
+            output: Some(ProviderInferenceOutput {
                 text: "done".to_owned(),
                 text_sha256: lowercase_sha256(b"done"),
                 utf8_bytes: 4,
-            },
+            }),
+            tool_calls: vec![],
         };
 
         let mut start = ProviderInferenceStart {
@@ -1288,27 +1633,28 @@ mod tests {
             Err(ProviderInferenceValidationError::UsageTotalMismatch)
         );
         completed = valid_completed.clone();
-        completed.output.text.clear();
+        completed.output.as_mut().unwrap().text.clear();
         assert_eq!(
             completed.validate(),
             Err(ProviderInferenceValidationError::OutputEmpty)
         );
         completed = valid_completed.clone();
-        completed.output.utf8_bytes = 3;
+        completed.output.as_mut().unwrap().utf8_bytes = 3;
         assert!(matches!(
             completed.validate(),
             Err(ProviderInferenceValidationError::OutputByteLengthMismatch { .. })
         ));
         completed = valid_completed.clone();
-        completed.output.text_sha256 = "c".repeat(64);
+        completed.output.as_mut().unwrap().text_sha256 = "c".repeat(64);
         assert_eq!(
             completed.validate(),
             Err(ProviderInferenceValidationError::OutputHashMismatch)
         );
         completed = valid_completed;
-        completed.output.text = "a".repeat(MAX_PROVIDER_INFERENCE_OUTPUT_BYTES + 1);
-        completed.output.text_sha256 = lowercase_sha256(completed.output.text.as_bytes());
-        completed.output.utf8_bytes = completed.output.text.len() as u64;
+        let output = completed.output.as_mut().unwrap();
+        output.text = "a".repeat(MAX_PROVIDER_INFERENCE_OUTPUT_BYTES + 1);
+        output.text_sha256 = lowercase_sha256(output.text.as_bytes());
+        output.utf8_bytes = output.text.len() as u64;
         assert!(matches!(
             completed.validate(),
             Err(ProviderInferenceValidationError::OutputTooLarge { .. })
@@ -1349,6 +1695,48 @@ mod tests {
         assert_eq!(
             invalid.validate(),
             Err(RunReconcileValidationError::DuplicateAcknowledgementMismatch)
+        );
+    }
+
+    #[test]
+    fn tool_request_and_unknown_outcome_are_strict_and_nonretryable() {
+        let request = ToolRequest {
+            request_idempotency_key: "tool-1".to_owned(),
+            tool_call_id: Uuid::new_v4(),
+            invocation_id: "invocation-1".to_owned(),
+            tool_name: "project.read".to_owned(),
+            schema_version: 1,
+            attempt: 1,
+            side_effect: ToolProtocolSideEffect::None,
+            parallel: false,
+            arguments: ToolArtifactReceipt {
+                artifact_id: Uuid::new_v4(),
+                media_type: "application/json".to_owned(),
+                sha256: "a".repeat(64),
+                utf8_bytes: 2,
+            },
+            source_scope: ToolSourceScope {
+                source_checkpoint_id: "checkpoint-1".to_owned(),
+                resource_ids: vec!["resource-1".to_owned()],
+                scope_sha256: "b".repeat(64),
+            },
+            permission: ToolPermissionPolicy {
+                mode: RunPermissionMode::Assist,
+                policy_id: "tools".to_owned(),
+                policy_version: "1.0.0".to_owned(),
+                policy_sha256: "c".repeat(64),
+            },
+        };
+        assert_eq!(request.validate(), Ok(()));
+        assert_eq!(
+            serde_json::from_value::<ToolRequest>(serde_json::to_value(&request).unwrap()).unwrap(),
+            request
+        );
+        let mut bad = request;
+        bad.source_scope.resource_ids = vec!["resource-2".to_owned(), "resource-1".to_owned()];
+        assert_eq!(
+            bad.validate(),
+            Err(ToolProtocolValidationError::SourceScopeNotCanonical)
         );
     }
 }

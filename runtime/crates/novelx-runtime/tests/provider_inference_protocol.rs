@@ -34,7 +34,7 @@ fn maps_acceptance_and_completion_with_identical_protocol_identity() {
     assert_eq!(accepted.correlation_id, Some(command_id));
     assert_eq!(completed.correlation_id, Some(command_id));
     assert_eq!(accepted_payload, completed_payload.identity);
-    assert_eq!(completed_payload.output.utf8_bytes, 4);
+    assert_eq!(completed_payload.output.as_ref().unwrap().utf8_bytes, 4);
     assert_eq!(completed_payload.usage.total_tokens, 12);
     completed_payload.validate().unwrap();
 }
@@ -159,7 +159,8 @@ fn execution() -> ProviderInferenceExecution {
 
 fn outcome(execution: &ProviderInferenceExecution) -> ProviderInferenceOutcome {
     ProviderInferenceOutcome {
-        text: "done".to_owned(),
+        text: Some("done".to_owned()),
+        tool_calls: vec![],
         receipt: ProviderInferenceReceipt {
             context_compilation_id: execution.request.compilation.compilation_id,
             canonical_context_sha256: execution

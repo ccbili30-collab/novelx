@@ -712,23 +712,57 @@ export const runtimeV2ProviderInferenceCompletedPayloadSchema = runtimeV2Provide
     text: z.string().min(1),
     textSha256: sha256Schema,
     utf8Bytes: z.number().int().positive().max(1_048_576).safe(),
-  }).strict(),
+  }).strict().nullable(),
+  toolCalls: z.array(z.object({
+    id: identityStringSchema,
+    name: identityStringSchema,
+    arguments: z.record(z.string(), z.unknown()),
+    argumentsSha256: sha256Schema,
+  }).strict()).default([]),
 }).strict().superRefine((payload, context) => {
   if (payload.usage.inputTokens + payload.usage.outputTokens !== payload.usage.totalTokens) {
     context.addIssue({ code: "custom", path: ["usage", "totalTokens"], message: "Provider usage total must equal input plus output tokens." });
   }
-  const actualBytes = new TextEncoder().encode(payload.output.text).byteLength;
-  if (actualBytes !== payload.output.utf8Bytes) {
-    context.addIssue({ code: "custom", path: ["output", "utf8Bytes"], message: "Provider output utf8Bytes must match the encoded text length." });
+  if (payload.output === null && payload.toolCalls.length === 0) {
+    context.addIssue({ code: "custom", path: ["output"], message: "Provider completion must contain text or tool calls." });
   }
-  if (actualBytes > 1_048_576) {
-    context.addIssue({ code: "custom", path: ["output", "text"], message: "Provider output exceeds the 1 MiB protocol limit." });
+  if ((payload.stopReason === "stop" && (payload.output === null || payload.toolCalls.length > 0))
+    || (payload.stopReason === "tool_calls" && payload.toolCalls.length === 0)
+    || (payload.stopReason !== "stop" && payload.stopReason !== "tool_calls")) {
+    context.addIssue({ code: "custom", path: ["stopReason"], message: "Provider stopReason must match its text/tool-call output shape." });
   }
-  const actualHash = bytesToHex(sha256(new TextEncoder().encode(payload.output.text)));
-  if (actualHash !== payload.output.textSha256) {
-    context.addIssue({ code: "custom", path: ["output", "textSha256"], message: "Provider output textSha256 must match the output text." });
+  if (payload.output !== null) {
+    const actualBytes = new TextEncoder().encode(payload.output.text).byteLength;
+    if (actualBytes !== payload.output.utf8Bytes) {
+      context.addIssue({ code: "custom", path: ["output", "utf8Bytes"], message: "Provider output utf8Bytes must match the encoded text length." });
+    }
+    const actualHash = bytesToHex(sha256(new TextEncoder().encode(payload.output.text)));
+    if (actualHash !== payload.output.textSha256) {
+      context.addIssue({ code: "custom", path: ["output", "textSha256"], message: "Provider output textSha256 must match the output text." });
+    }
+  }
+  const ids = new Set<string>();
+  for (const [index, call] of payload.toolCalls.entries()) {
+    if (ids.has(call.id)) {
+      context.addIssue({ code: "custom", path: ["toolCalls", index, "id"], message: "Provider tool call ids must be unique." });
+    }
+    ids.add(call.id);
+    const canonical = canonicalProtocolJson(call.arguments);
+    const actualHash = bytesToHex(sha256(new TextEncoder().encode(canonical)));
+    if (actualHash !== call.argumentsSha256) {
+      context.addIssue({ code: "custom", path: ["toolCalls", index, "argumentsSha256"], message: "Provider tool arguments hash must match canonical JSON." });
+    }
   }
 });
+
+function canonicalProtocolJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalProtocolJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalProtocolJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
 
 export const runtimeV2ProviderInferenceCompletedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   messageType: z.literal("event"),
@@ -765,6 +799,87 @@ export const runtimeV2ProviderInferenceReconciliationRequiredEnvelopeSchema = ru
   runId: z.uuid(),
   payload: runtimeV2ProviderInferenceReconciliationRequiredPayloadSchema,
 }).strict().superRefine(requireMatchingInferenceRun);
+
+export const runtimeV2ToolSideEffectSchema = z.enum(["none", "staged_write", "external_effect"]);
+export const runtimeV2ToolPermissionDecisionSchema = z.enum(["allowed", "approval_required", "denied"]);
+export const runtimeV2ToolArtifactReceiptSchema = z.object({
+  artifactId: z.uuid(), mediaType: identityStringSchema, sha256: sha256Schema,
+  utf8Bytes: z.number().int().min(0).safe(),
+}).strict();
+export const runtimeV2ToolSourceScopeSchema = z.object({
+  sourceCheckpointId: identityStringSchema,
+  resourceIds: z.array(identityStringSchema).min(1).max(10_000),
+  scopeSha256: sha256Schema,
+}).strict().superRefine((scope, context) => {
+  if (new Set(scope.resourceIds).size !== scope.resourceIds.length
+    || scope.resourceIds.some((value, index) => index > 0 && scope.resourceIds[index - 1] >= value)) {
+    context.addIssue({ code: "custom", path: ["resourceIds"], message: "Tool source resource IDs must be sorted and unique." });
+  }
+});
+export const runtimeV2ToolPermissionPolicySchema = z.object({
+  mode: z.enum(["free", "assist"]), policyId: identityStringSchema,
+  policyVersion: identityStringSchema, policySha256: sha256Schema,
+}).strict();
+export const runtimeV2ToolPermissionLeaseSchema = z.object({
+  leaseId: z.uuid(), toolCallId: z.uuid(), mode: z.enum(["free", "assist"]),
+  decision: z.literal("allowed"), policyId: identityStringSchema, policyVersion: identityStringSchema,
+  policySha256: sha256Schema, sourceScopeSha256: sha256Schema,
+  grantedAt: z.iso.datetime({ offset: true }), expiresAt: z.iso.datetime({ offset: true }).nullable(),
+}).strict().superRefine((lease, context) => {
+  if (lease.expiresAt !== null && Date.parse(lease.expiresAt) <= Date.parse(lease.grantedAt)) {
+    context.addIssue({ code: "custom", path: ["expiresAt"], message: "Tool permission lease expiry must follow grant time." });
+  }
+});
+export const runtimeV2ToolRequestPayloadSchema = z.object({
+  requestIdempotencyKey: identityStringSchema, toolCallId: z.uuid(), invocationId: identityStringSchema,
+  toolName: identityStringSchema, schemaVersion: z.number().int().positive().max(65_535),
+  attempt: z.number().int().positive().safe(), sideEffect: runtimeV2ToolSideEffectSchema,
+  parallel: z.boolean(), arguments: runtimeV2ToolArtifactReceiptSchema,
+  sourceScope: runtimeV2ToolSourceScopeSchema, permission: runtimeV2ToolPermissionPolicySchema,
+}).strict();
+export const runtimeV2ToolRequestEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"), name: z.literal("tool.request"), correlationId: z.null(),
+  runId: z.uuid(), payload: runtimeV2ToolRequestPayloadSchema,
+}).strict();
+export const runtimeV2ToolAuthorizationResolvePayloadSchema = z.object({
+  authorizationIdempotencyKey: identityStringSchema, toolCallId: z.uuid(), decision: z.enum(["approve", "deny"]),
+}).strict();
+export const runtimeV2ToolAuthorizationResolveEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"), name: z.literal("tool.authorization.resolve"), correlationId: z.null(),
+  runId: z.uuid(), payload: runtimeV2ToolAuthorizationResolvePayloadSchema,
+}).strict();
+const runtimeV2ToolEventIdentitySchema = z.object({
+  runId: z.uuid(), toolCallId: z.uuid(), invocationId: identityStringSchema, toolName: identityStringSchema,
+  schemaVersion: z.number().int().positive().max(65_535), attempt: z.number().int().positive().safe(),
+  sideEffect: runtimeV2ToolSideEffectSchema, parallel: z.boolean(), argumentsSha256: sha256Schema,
+  sourceScopeSha256: sha256Schema,
+}).strict();
+const toolEventEnvelope = <T extends z.ZodRawShape>(name: string, payload: z.ZodObject<T>) => runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("event"), name: z.literal(name), correlationId: z.uuid(), runId: z.uuid(), payload,
+}).strict().superRefine((envelope, context) => {
+  const payloadRunId = (envelope.payload as { runId?: unknown }).runId;
+  if (payloadRunId !== envelope.runId) {
+    context.addIssue({ code: "custom", path: ["payload", "runId"], message: "Tool event payload runId must match the envelope runId." });
+  }
+});
+export const runtimeV2ToolRequestedPayloadSchema = runtimeV2ToolEventIdentitySchema.extend({
+  permission: runtimeV2ToolPermissionPolicySchema, authorization: runtimeV2ToolPermissionDecisionSchema,
+}).strict().superRefine((payload, context) => {
+  const expected = payload.permission.mode === "free" ? "allowed" : "approval_required";
+  if (payload.authorization !== expected) context.addIssue({ code: "custom", path: ["authorization"], message: "Tool authorization must match Free/Assist mode." });
+});
+export const runtimeV2ToolAuthorizedPayloadSchema = runtimeV2ToolEventIdentitySchema.extend({ lease: runtimeV2ToolPermissionLeaseSchema }).strict();
+export const runtimeV2ToolSucceededPayloadSchema = runtimeV2ToolEventIdentitySchema.extend({ leaseId: z.uuid(), result: runtimeV2ToolArtifactReceiptSchema }).strict();
+export const runtimeV2ToolFailedPayloadSchema = runtimeV2ToolEventIdentitySchema.extend({ leaseId: z.uuid().nullable(), error: runtimeV2ErrorSchema }).strict();
+export const runtimeV2ToolOutcomeUnknownPayloadSchema = runtimeV2ToolEventIdentitySchema.extend({
+  leaseId: z.uuid(), error: runtimeV2ErrorSchema.refine((error) => !error.retryable, { path: ["retryable"], message: "Unknown tool outcomes cannot be automatically retryable." }),
+}).strict();
+export const runtimeV2ToolRequestedEnvelopeSchema = toolEventEnvelope("tool.requested", runtimeV2ToolRequestedPayloadSchema);
+export const runtimeV2ToolAuthorizedEnvelopeSchema = toolEventEnvelope("tool.authorized", runtimeV2ToolAuthorizedPayloadSchema);
+export const runtimeV2ToolRunningEnvelopeSchema = toolEventEnvelope("tool.running", runtimeV2ToolAuthorizedPayloadSchema);
+export const runtimeV2ToolSucceededEnvelopeSchema = toolEventEnvelope("tool.succeeded", runtimeV2ToolSucceededPayloadSchema);
+export const runtimeV2ToolFailedEnvelopeSchema = toolEventEnvelope("tool.failed", runtimeV2ToolFailedPayloadSchema);
+export const runtimeV2ToolOutcomeUnknownEnvelopeSchema = toolEventEnvelope("tool.outcome_unknown", runtimeV2ToolOutcomeUnknownPayloadSchema);
 
 export type RuntimeV2MessageType = z.infer<typeof runtimeV2MessageTypeSchema>;
 export type RuntimeV2Envelope = z.infer<typeof runtimeV2EnvelopeSchema>;
@@ -822,6 +937,16 @@ export type RuntimeV2ProviderInferenceFailedPayload = z.infer<typeof runtimeV2Pr
 export type RuntimeV2ProviderInferenceFailedEnvelope = z.infer<typeof runtimeV2ProviderInferenceFailedEnvelopeSchema>;
 export type RuntimeV2ProviderInferenceReconciliationRequiredPayload = z.infer<typeof runtimeV2ProviderInferenceReconciliationRequiredPayloadSchema>;
 export type RuntimeV2ProviderInferenceReconciliationRequiredEnvelope = z.infer<typeof runtimeV2ProviderInferenceReconciliationRequiredEnvelopeSchema>;
+export type RuntimeV2ToolRequestPayload = z.infer<typeof runtimeV2ToolRequestPayloadSchema>;
+export type RuntimeV2ToolRequestEnvelope = z.infer<typeof runtimeV2ToolRequestEnvelopeSchema>;
+export type RuntimeV2ToolAuthorizationResolvePayload = z.infer<typeof runtimeV2ToolAuthorizationResolvePayloadSchema>;
+export type RuntimeV2ToolAuthorizationResolveEnvelope = z.infer<typeof runtimeV2ToolAuthorizationResolveEnvelopeSchema>;
+export type RuntimeV2ToolRequestedEnvelope = z.infer<typeof runtimeV2ToolRequestedEnvelopeSchema>;
+export type RuntimeV2ToolAuthorizedEnvelope = z.infer<typeof runtimeV2ToolAuthorizedEnvelopeSchema>;
+export type RuntimeV2ToolRunningEnvelope = z.infer<typeof runtimeV2ToolRunningEnvelopeSchema>;
+export type RuntimeV2ToolSucceededEnvelope = z.infer<typeof runtimeV2ToolSucceededEnvelopeSchema>;
+export type RuntimeV2ToolFailedEnvelope = z.infer<typeof runtimeV2ToolFailedEnvelopeSchema>;
+export type RuntimeV2ToolOutcomeUnknownEnvelope = z.infer<typeof runtimeV2ToolOutcomeUnknownEnvelopeSchema>;
 
 export class RuntimeV2ProtocolVersionError extends Error {
   readonly code = "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED";
@@ -961,6 +1086,31 @@ export function parseRuntimeV2ProviderInferenceFailedEnvelope(value: unknown): R
 
 export function parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope(value: unknown): RuntimeV2ProviderInferenceReconciliationRequiredEnvelope {
   return parseVersionedEnvelope(value, runtimeV2ProviderInferenceReconciliationRequiredEnvelopeSchema);
+}
+
+export function parseRuntimeV2ToolRequestEnvelope(value: unknown): RuntimeV2ToolRequestEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ToolRequestEnvelopeSchema);
+}
+export function parseRuntimeV2ToolAuthorizationResolveEnvelope(value: unknown): RuntimeV2ToolAuthorizationResolveEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ToolAuthorizationResolveEnvelopeSchema);
+}
+export function parseRuntimeV2ToolRequestedEnvelope(value: unknown): RuntimeV2ToolRequestedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ToolRequestedEnvelopeSchema);
+}
+export function parseRuntimeV2ToolAuthorizedEnvelope(value: unknown): RuntimeV2ToolAuthorizedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ToolAuthorizedEnvelopeSchema);
+}
+export function parseRuntimeV2ToolRunningEnvelope(value: unknown): RuntimeV2ToolRunningEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ToolRunningEnvelopeSchema);
+}
+export function parseRuntimeV2ToolSucceededEnvelope(value: unknown): RuntimeV2ToolSucceededEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ToolSucceededEnvelopeSchema);
+}
+export function parseRuntimeV2ToolFailedEnvelope(value: unknown): RuntimeV2ToolFailedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ToolFailedEnvelopeSchema);
+}
+export function parseRuntimeV2ToolOutcomeUnknownEnvelope(value: unknown): RuntimeV2ToolOutcomeUnknownEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ToolOutcomeUnknownEnvelopeSchema);
 }
 
 function parseVersionedEnvelope<T>(value: unknown, schema: z.ZodType<T>): T {
