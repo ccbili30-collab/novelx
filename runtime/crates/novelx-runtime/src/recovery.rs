@@ -1,12 +1,16 @@
 use thiserror::Error;
 
 use crate::event_journal::{EventJournal, EventJournalError};
+use crate::provider_attempt::{
+    ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptRecovery, ProviderAttemptState,
+};
 use crate::run_aggregate::{RunAggregate, RunAggregateError};
 use crate::run_state::RunState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryClassification {
     Resumable(RunState),
+    ReconciliationRequired,
     WaitingForApproval,
     CommitUncertain,
     Terminal(RunState),
@@ -24,7 +28,17 @@ pub struct RecoveredRun {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryReport {
     pub runs: Vec<RecoveredRun>,
+    pub provider_attempts: Vec<RecoveredProviderAttempt>,
     pub recovered_nonterminal_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveredProviderAttempt {
+    pub run_id: String,
+    pub attempt_id: String,
+    pub state: ProviderAttemptState,
+    pub recovery: ProviderAttemptRecovery,
+    pub aggregate_sequence: u64,
 }
 
 pub struct RecoveryCoordinator;
@@ -56,6 +70,48 @@ impl RecoveryCoordinator {
                 last_aggregate_sequence: aggregate.last_sequence(),
             });
         }
+        let mut provider_attempts = Vec::new();
+        for address in journal.list_aggregates("provider_attempt")? {
+            let attempt =
+                ProviderAttemptAggregate::recover(journal, &address.run_id, &address.aggregate_id)
+                    .map_err(|source| RecoveryError::ProviderAttemptRecoveryFailed {
+                        run_id: address.run_id.clone(),
+                        attempt_id: address.aggregate_id.clone(),
+                        source,
+                    })?;
+            provider_attempts.push(RecoveredProviderAttempt {
+                run_id: address.run_id,
+                attempt_id: address.aggregate_id,
+                state: attempt.state(),
+                recovery: attempt.recovery(),
+                aggregate_sequence: attempt.aggregate_sequence(),
+            });
+        }
+        provider_attempts.sort_by(|left, right| {
+            left.run_id
+                .cmp(&right.run_id)
+                .then(left.attempt_id.cmp(&right.attempt_id))
+        });
+        for attempt in provider_attempts
+            .iter()
+            .filter(|attempt| matches!(attempt.recovery, ProviderAttemptRecovery::OutcomeUnknown))
+        {
+            let run = runs
+                .iter_mut()
+                .find(|run| run.run_id == attempt.run_id)
+                .ok_or_else(|| RecoveryError::ProviderAttemptRunMissing {
+                    run_id: attempt.run_id.clone(),
+                    attempt_id: attempt.attempt_id.clone(),
+                })?;
+            if run.state.is_terminal() {
+                return Err(RecoveryError::TerminalRunHasUnknownProviderOutcome {
+                    run_id: run.run_id.clone(),
+                    attempt_id: attempt.attempt_id.clone(),
+                    state: run.state,
+                });
+            }
+            run.classification = RecoveryClassification::ReconciliationRequired;
+        }
         runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
         let recovered_nonterminal_count = runs
             .iter()
@@ -63,6 +119,7 @@ impl RecoveryCoordinator {
             .count() as u64;
         Ok(RecoveryReport {
             runs,
+            provider_attempts,
             recovered_nonterminal_count,
         })
     }
@@ -80,6 +137,23 @@ pub enum RecoveryError {
         run_id: String,
         #[source]
         source: RunAggregateError,
+    },
+    #[error("provider attempt `{attempt_id}` in run `{run_id}` recovery failed: {source}")]
+    ProviderAttemptRecoveryFailed {
+        run_id: String,
+        attempt_id: String,
+        #[source]
+        source: ProviderAttemptError,
+    },
+    #[error("provider attempt `{attempt_id}` references missing run `{run_id}`")]
+    ProviderAttemptRunMissing { run_id: String, attempt_id: String },
+    #[error(
+        "terminal run `{run_id}` in state {state:?} has provider attempt `{attempt_id}` with an unknown outcome"
+    )]
+    TerminalRunHasUnknownProviderOutcome {
+        run_id: String,
+        attempt_id: String,
+        state: RunState,
     },
     #[error(transparent)]
     Journal(#[from] EventJournalError),

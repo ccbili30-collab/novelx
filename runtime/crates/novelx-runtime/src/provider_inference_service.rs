@@ -1,0 +1,363 @@
+use novelx_protocol::{ContextCompilationReceipt, ProviderRunIdentity};
+use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use uuid::Uuid;
+
+use crate::context_compile_service::{ContextCompiledRecord, normalized_provider_input_sha256};
+use crate::event_journal::{EventJournal, EventJournalError};
+use crate::provider_attempt::{
+    ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptError,
+    ProviderAttemptFailure, ProviderAttemptMetadata, ProviderAttemptRecovery, ProviderAttemptState,
+    ProviderDeliveryCertainty, ProviderResponseReceipt,
+};
+use crate::provider_gateway::{
+    ProviderGateway, ProviderGatewayError, ProviderInferenceOutcome, ProviderInferenceReceipt,
+    ProviderInferenceRequest, ProviderRegistry,
+};
+use crate::run_aggregate::{RunAggregate, RunAggregateError};
+
+pub struct ProviderInferenceService<'a> {
+    journal: &'a mut EventJournal,
+    providers: &'a ProviderRegistry,
+    gateway: &'a ProviderGateway,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderInferenceExecution {
+    pub run_id: String,
+    pub attempt_id: String,
+    pub inference_id: String,
+    pub invocation_id: String,
+    pub attempt_number: u16,
+    pub provider: ProviderRunIdentity,
+    pub request: ProviderInferenceRequest,
+}
+
+impl<'a> ProviderInferenceService<'a> {
+    pub const fn new(
+        journal: &'a mut EventJournal,
+        providers: &'a ProviderRegistry,
+        gateway: &'a ProviderGateway,
+    ) -> Self {
+        Self {
+            journal,
+            providers,
+            gateway,
+        }
+    }
+
+    pub async fn execute(
+        &mut self,
+        execution: ProviderInferenceExecution,
+    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
+        validate_execution(&execution)?;
+        let run = RunAggregate::recover(self.journal, &execution.run_id)?;
+        if run.pinned_identity().provider != execution.provider {
+            return Err(ProviderInferenceServiceError::PinnedProviderMismatch);
+        }
+        let persisted = load_persisted_context(
+            self.journal,
+            &execution.run_id,
+            &execution.request.compilation,
+        )?;
+        let actual_hash = normalized_provider_input_sha256(&persisted.normalized_input)
+            .map_err(|_| ProviderInferenceServiceError::ContextNormalizedInputInvalid)?;
+        if actual_hash != persisted.normalized_input_sha256 {
+            return Err(ProviderInferenceServiceError::ContextNormalizedInputHashMismatch);
+        }
+        let authoritative_request = ProviderInferenceRequest {
+            compilation: persisted.receipt,
+            messages: persisted.normalized_input.messages,
+            tools: persisted.normalized_input.tools,
+        };
+        let provider = self.providers.resolve(&execution.provider)?;
+        let prepared = self
+            .gateway
+            .prepare_inference(provider, authoritative_request)?;
+        let definition = ProviderAttemptDefinition {
+            run_id: execution.run_id.clone(),
+            inference_id: execution.inference_id.clone(),
+            invocation_id: execution.invocation_id.clone(),
+            context_compilation_id: prepared.compilation().compilation_id,
+            canonical_context_sha256: prepared.compilation().canonical_context_sha256.clone(),
+            transport_payload_sha256: prepared.transport_payload_sha256().to_owned(),
+            provider: execution.provider.clone(),
+            request_number: prepared.compilation().request_number,
+            attempt_number: execution.attempt_number,
+            output_reserve_tokens: prepared.compilation().output_reserve_tokens,
+            request_timeout_ms: provider.config().request_timeout_ms,
+            total_deadline_ms: provider.config().total_deadline_ms,
+            max_attempts: provider.config().retry_policy.max_attempts,
+            max_total_delay_ms: provider.config().retry_policy.max_total_delay_ms,
+        };
+        let requested_message_id = Uuid::new_v4().to_string();
+        let requested_key = format!("{}:requested", execution.attempt_id);
+        let requested_at = timestamp()?;
+        let mut attempt = ProviderAttemptAggregate::create(
+            self.journal,
+            &execution.run_id,
+            &execution.attempt_id,
+            definition,
+            current_run_sequence(self.journal, &execution.run_id)?,
+            metadata(&requested_message_id, &requested_key, &requested_at),
+        )?;
+        match attempt.state() {
+            ProviderAttemptState::Responded => {
+                return recovered_outcome(&attempt);
+            }
+            ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
+                return Err(ProviderInferenceServiceError::OutcomeUnknown);
+            }
+            ProviderAttemptState::Failed => {
+                return Err(ProviderInferenceServiceError::ExistingTerminal(
+                    attempt.recovery(),
+                ));
+            }
+            ProviderAttemptState::Requested => {}
+        }
+
+        let dispatch_id = Uuid::new_v4().to_string();
+        let sent_message_id = Uuid::new_v4().to_string();
+        let sent_key = format!("{}:sent", execution.attempt_id);
+        let sent_at = timestamp()?;
+        attempt.mark_sent(
+            self.journal,
+            current_run_sequence(self.journal, &execution.run_id)?,
+            &dispatch_id,
+            metadata(&sent_message_id, &sent_key, &sent_at),
+        )?;
+
+        match self.gateway.infer_prepared(provider, prepared).await {
+            Ok(outcome) => {
+                let response = response_receipt(&execution.provider, &outcome.receipt);
+                let responded_message_id = Uuid::new_v4().to_string();
+                let responded_key = format!("{}:responded", execution.attempt_id);
+                let responded_at = timestamp()?;
+                attempt.respond_with_output(
+                    self.journal,
+                    current_run_sequence(self.journal, &execution.run_id)?,
+                    response,
+                    outcome.text.clone(),
+                    metadata(&responded_message_id, &responded_key, &responded_at),
+                )?;
+                Ok(outcome)
+            }
+            Err(error) if response_was_received(&error) => {
+                let failure = definitive_failure(&error);
+                let failed_message_id = Uuid::new_v4().to_string();
+                let failed_key = format!("{}:failed", execution.attempt_id);
+                let failed_at = timestamp()?;
+                attempt.fail(
+                    self.journal,
+                    current_run_sequence(self.journal, &execution.run_id)?,
+                    failure,
+                    metadata(&failed_message_id, &failed_key, &failed_at),
+                )?;
+                Err(error.into())
+            }
+            Err(error) => {
+                let unknown_message_id = Uuid::new_v4().to_string();
+                let unknown_key = format!("{}:outcome-unknown", execution.attempt_id);
+                let unknown_at = timestamp()?;
+                attempt.mark_outcome_unknown(
+                    self.journal,
+                    current_run_sequence(self.journal, &execution.run_id)?,
+                    Uuid::new_v4(),
+                    metadata(&unknown_message_id, &unknown_key, &unknown_at),
+                )?;
+                Err(ProviderInferenceServiceError::DeliveryUnknown(Box::new(
+                    error,
+                )))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ProviderInferenceServiceError {
+    #[error("Provider inference execution is invalid")]
+    InvalidExecution,
+    #[error("Provider inference Context Compilation receipt is not persisted for this Run")]
+    ContextReceiptNotPersisted,
+    #[error("Provider inference identity does not match the provider pinned to this Run")]
+    PinnedProviderMismatch,
+    #[error("Persisted normalized Provider input is invalid")]
+    ContextNormalizedInputInvalid,
+    #[error("Persisted normalized Provider input hash does not match its content")]
+    ContextNormalizedInputHashMismatch,
+    #[error("Provider inference outcome is unknown and cannot be auto-retried")]
+    OutcomeUnknown,
+    #[error("Provider attempt already ended with {0:?}")]
+    ExistingTerminal(ProviderAttemptRecovery),
+    #[error("Provider delivery became uncertain: {0}")]
+    DeliveryUnknown(Box<ProviderGatewayError>),
+    #[error(transparent)]
+    Gateway(#[from] ProviderGatewayError),
+    #[error(transparent)]
+    Attempt(#[from] ProviderAttemptError),
+    #[error(transparent)]
+    Journal(#[from] EventJournalError),
+    #[error(transparent)]
+    Run(#[from] RunAggregateError),
+    #[error(transparent)]
+    Time(#[from] time::error::Format),
+}
+
+fn validate_execution(
+    execution: &ProviderInferenceExecution,
+) -> Result<(), ProviderInferenceServiceError> {
+    if execution.run_id.trim().is_empty()
+        || execution.attempt_id.trim().is_empty()
+        || execution.inference_id.trim().is_empty()
+        || execution.invocation_id.trim().is_empty()
+        || execution.attempt_number == 0
+    {
+        return Err(ProviderInferenceServiceError::InvalidExecution);
+    }
+    Ok(())
+}
+
+fn load_persisted_context(
+    journal: &EventJournal,
+    run_id: &str,
+    expected: &ContextCompilationReceipt,
+) -> Result<ContextCompiledRecord, ProviderInferenceServiceError> {
+    let found = journal.read_run(run_id, 0)?.into_iter().find_map(|event| {
+        if event.event_type != "context.compiled" || event.event_version != 1 {
+            return None;
+        }
+        serde_json::from_value::<ContextCompiledRecord>(event.payload)
+            .ok()
+            .filter(|record| record.receipt == *expected)
+    });
+    found.ok_or(ProviderInferenceServiceError::ContextReceiptNotPersisted)
+}
+
+fn recovered_outcome(
+    attempt: &ProviderAttemptAggregate,
+) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
+    let receipt = attempt
+        .response_receipt()
+        .ok_or(ProviderInferenceServiceError::InvalidExecution)?;
+    let text = attempt
+        .response_text()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ProviderInferenceServiceError::InvalidExecution)?;
+    let response_id_sha256 = receipt
+        .response_id_sha256
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .ok_or(ProviderInferenceServiceError::InvalidExecution)?;
+    Ok(ProviderInferenceOutcome {
+        text: text.to_owned(),
+        receipt: ProviderInferenceReceipt {
+            context_compilation_id: attempt.definition().context_compilation_id,
+            canonical_context_sha256: attempt.definition().canonical_context_sha256.clone(),
+            requested_model_id: attempt.definition().provider.model_id.clone(),
+            actual_model_id: receipt.actual_model_id.clone(),
+            response_id_sha256: response_id_sha256.clone(),
+            response_body_sha256: receipt.response_body_sha256.clone(),
+            finish_reason: receipt.stop_reason.clone(),
+            usage: crate::provider_gateway::ProviderUsageReceipt {
+                input_tokens: receipt.input_tokens,
+                output_tokens: receipt.output_tokens,
+                total_tokens: receipt.total_tokens,
+            },
+            provider_request_count: 1,
+        },
+    })
+}
+
+fn response_receipt(
+    provider: &ProviderRunIdentity,
+    receipt: &ProviderInferenceReceipt,
+) -> ProviderResponseReceipt {
+    ProviderResponseReceipt {
+        http_status: 200,
+        actual_provider_id: provider.provider_id.clone(),
+        actual_model_id: receipt.actual_model_id.clone(),
+        response_id_sha256: Some(receipt.response_id_sha256.clone()),
+        response_body_sha256: receipt.response_body_sha256.clone(),
+        stop_reason: receipt.finish_reason.clone(),
+        input_tokens: receipt.usage.input_tokens,
+        output_tokens: receipt.usage.output_tokens,
+        total_tokens: receipt.usage.total_tokens,
+    }
+}
+
+fn response_was_received(error: &ProviderGatewayError) -> bool {
+    matches!(
+        error,
+        ProviderGatewayError::AuthenticationRejected
+            | ProviderGatewayError::RateLimited
+            | ProviderGatewayError::RedirectRejected
+            | ProviderGatewayError::HttpRejected(_)
+            | ProviderGatewayError::ResponseMalformed
+            | ProviderGatewayError::ResponseTooLarge
+            | ProviderGatewayError::ResponseModelMismatch
+            | ProviderGatewayError::OutputIncomplete
+    )
+}
+
+fn definitive_failure(error: &ProviderGatewayError) -> ProviderAttemptFailure {
+    let (code, retryable, retry_after_ms, http_status) = match error {
+        ProviderGatewayError::AuthenticationRejected => {
+            ("PROVIDER_AUTH_REJECTED", false, None, Some(401))
+        }
+        ProviderGatewayError::RateLimited => ("PROVIDER_RATE_LIMITED", true, None, Some(429)),
+        ProviderGatewayError::RedirectRejected => {
+            ("PROVIDER_REDIRECT_REJECTED", false, None, Some(302))
+        }
+        ProviderGatewayError::HttpRejected(status) => (
+            "PROVIDER_HTTP_REJECTED",
+            *status >= 500,
+            None,
+            Some(*status),
+        ),
+        ProviderGatewayError::ResponseMalformed => {
+            ("PROVIDER_RESPONSE_MALFORMED", true, None, Some(200))
+        }
+        ProviderGatewayError::ResponseTooLarge => {
+            ("PROVIDER_RESPONSE_TOO_LARGE", false, None, Some(200))
+        }
+        ProviderGatewayError::ResponseModelMismatch => {
+            ("PROVIDER_MODEL_MISMATCH", false, None, Some(200))
+        }
+        ProviderGatewayError::OutputIncomplete => {
+            ("PROVIDER_OUTPUT_INCOMPLETE", false, None, Some(200))
+        }
+        _ => unreachable!("only definitive response failures are converted"),
+    };
+    ProviderAttemptFailure {
+        code: code.to_owned(),
+        retryable,
+        retry_after_ms,
+        http_status,
+        delivery_certainty: ProviderDeliveryCertainty::ResponseReceived,
+        diagnostic_id: Uuid::new_v4(),
+    }
+}
+
+fn current_run_sequence(journal: &EventJournal, run_id: &str) -> Result<u64, EventJournalError> {
+    Ok(journal
+        .read_run(run_id, 0)?
+        .last()
+        .map_or(0, |event| event.run_sequence))
+}
+
+fn metadata<'a>(
+    message_id: &'a str,
+    idempotency_key: &'a str,
+    created_at: &'a str,
+) -> ProviderAttemptMetadata<'a> {
+    ProviderAttemptMetadata {
+        message_id,
+        idempotency_key,
+        created_at,
+        reason: None,
+    }
+}
+
+fn timestamp() -> Result<String, time::error::Format> {
+    OffsetDateTime::now_utc().format(&Rfc3339)
+}

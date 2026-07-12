@@ -1,4 +1,8 @@
 use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
+use novelx_runtime::provider_attempt::{
+    ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptMetadata,
+    ProviderAttemptRecovery, ProviderAttemptState,
+};
 use novelx_runtime::recovery::{RecoveryClassification, RecoveryCoordinator, RecoveryError};
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::run_state::RunState;
@@ -161,6 +165,123 @@ fn tool_only_aggregates_are_not_reported_as_runs() {
     assert_eq!(report.runs.len(), 1);
     assert_eq!(report.runs[0].run_id, "real-run");
     assert_eq!(report.recovered_nonterminal_count, 1);
+}
+
+#[test]
+fn sent_provider_attempt_is_reported_as_outcome_unknown_without_writing() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    create_run(&mut journal, "provider-run", &[]);
+    let mut attempt = ProviderAttemptAggregate::create(
+        &mut journal,
+        "provider-run",
+        "attempt-1",
+        ProviderAttemptDefinition {
+            run_id: "provider-run".to_owned(),
+            inference_id: "inference-1".to_owned(),
+            invocation_id: "invocation-1".to_owned(),
+            context_compilation_id: uuid::Uuid::new_v4(),
+            canonical_context_sha256: "a".repeat(64),
+            transport_payload_sha256: "b".repeat(64),
+            provider: pinned_identity().provider,
+            request_number: 1,
+            attempt_number: 1,
+            output_reserve_tokens: 1_024,
+            request_timeout_ms: 30_000,
+            total_deadline_ms: 120_000,
+            max_attempts: 3,
+            max_total_delay_ms: 30_000,
+        },
+        1,
+        provider_metadata("provider-requested", "provider-requested-key"),
+    )
+    .unwrap();
+    attempt
+        .mark_sent(
+            &mut journal,
+            2,
+            "dispatch-1",
+            provider_metadata("provider-sent", "provider-sent-key"),
+        )
+        .unwrap();
+    let count_before = journal.read_run("provider-run", 0).unwrap().len();
+
+    let report = RecoveryCoordinator::recover(&journal).unwrap();
+
+    assert_eq!(report.provider_attempts.len(), 1);
+    assert_eq!(
+        report.provider_attempts[0].state,
+        ProviderAttemptState::Sent
+    );
+    assert_eq!(
+        report.provider_attempts[0].recovery,
+        ProviderAttemptRecovery::OutcomeUnknown
+    );
+    assert_eq!(
+        report.runs[0].classification,
+        RecoveryClassification::ReconciliationRequired
+    );
+    assert_eq!(
+        journal.read_run("provider-run", 0).unwrap().len(),
+        count_before
+    );
+}
+
+#[test]
+fn terminal_run_with_unknown_provider_outcome_rejects_recovery() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    create_run(&mut journal, "terminal-provider-run", &[Step::Cancel]);
+    let mut attempt = ProviderAttemptAggregate::create(
+        &mut journal,
+        "terminal-provider-run",
+        "attempt-terminal",
+        ProviderAttemptDefinition {
+            run_id: "terminal-provider-run".to_owned(),
+            inference_id: "inference-terminal".to_owned(),
+            invocation_id: "invocation-terminal".to_owned(),
+            context_compilation_id: uuid::Uuid::new_v4(),
+            canonical_context_sha256: "a".repeat(64),
+            transport_payload_sha256: "b".repeat(64),
+            provider: pinned_identity().provider,
+            request_number: 1,
+            attempt_number: 1,
+            output_reserve_tokens: 1_024,
+            request_timeout_ms: 30_000,
+            total_deadline_ms: 120_000,
+            max_attempts: 3,
+            max_total_delay_ms: 30_000,
+        },
+        2,
+        provider_metadata("terminal-requested", "terminal-requested-key"),
+    )
+    .unwrap();
+    attempt
+        .mark_sent(
+            &mut journal,
+            3,
+            "terminal-dispatch",
+            provider_metadata("terminal-sent", "terminal-sent-key"),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        RecoveryCoordinator::recover(&journal),
+        Err(RecoveryError::TerminalRunHasUnknownProviderOutcome {
+            run_id,
+            attempt_id,
+            state: RunState::Cancelled,
+        }) if run_id == "terminal-provider-run" && attempt_id == "attempt-terminal"
+    ));
+}
+
+fn provider_metadata<'a>(message_id: &'a str, key: &'a str) -> ProviderAttemptMetadata<'a> {
+    ProviderAttemptMetadata {
+        message_id,
+        idempotency_key: key,
+        created_at: "2026-07-12T00:00:00Z",
+        reason: None,
+    }
 }
 
 #[derive(Clone, Copy)]

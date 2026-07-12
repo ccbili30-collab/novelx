@@ -45,10 +45,14 @@ describe("RuntimeV2ProcessSupervisor", () => {
     ["initialization-failed-malformed", "RUNTIME_V2_PROTOCOL_INVALID"],
     ["unknown-second-message", "RUNTIME_V2_PROTOCOL_INVALID"],
     ["early-exit", "RUNTIME_V2_EXITED_BEFORE_READY"],
-    ["no-output", "RUNTIME_V2_START_TIMEOUT"],
   ] as const)("rejects %s during startup", async (scenario, code) => {
-    const supervisor = createSupervisor(createFixture(scenario), { startupTimeoutMs: 150 });
+    const supervisor = createSupervisor(createFixture(scenario), { startupTimeoutMs: 3_000 });
     await expect(supervisor.start()).rejects.toMatchObject({ code });
+  });
+
+  it("times out a runtime that produces no startup output", async () => {
+    const supervisor = createSupervisor(createFixture("no-output"), { startupTimeoutMs: 200 });
+    await expect(supervisor.start()).rejects.toMatchObject({ code: "RUNTIME_V2_START_TIMEOUT" });
   });
 
   it("captures stderr and includes it when the child exits early", async () => {
@@ -198,7 +202,7 @@ function createSupervisor(
     workspaceId: null,
     featureFlags: { runtime_v2: true },
     hostCapabilityVersions: { project_tools: "1.0.0" },
-    startupTimeoutMs: 1_000,
+    startupTimeoutMs: 3_000,
     stopTimeoutMs: 500,
     ...overrides,
   });

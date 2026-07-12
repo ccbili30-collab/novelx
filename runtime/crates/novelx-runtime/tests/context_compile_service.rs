@@ -49,6 +49,21 @@ fn exact_provider_and_pinned_policy_compile_persists_context_event() {
         events[0].payload["receipt"]["compilationId"],
         receipt.compilation_id.to_string()
     );
+    assert_eq!(
+        events[0].payload["normalizedInput"]["messages"][0]["role"],
+        "system"
+    );
+    assert_eq!(
+        events[0].payload["normalizedInput"]["messages"][1]["content"],
+        "Continue the coastline discussion."
+    );
+    assert_eq!(
+        events[0].payload["normalizedInputSha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
     assert_eq!(journal.read_run(&run_id.to_string(), 0).unwrap().len(), 3);
 }
 

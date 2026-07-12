@@ -15,7 +15,9 @@ use crate::context_compiler::{
     ContextItemClass, ContextPolicy, OutputReservePolicy, ToolTranscriptEntry,
 };
 use crate::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent};
-use crate::provider_gateway::{ProviderGatewayError, ProviderRegistry};
+use crate::provider_gateway::{
+    ProviderGatewayError, ProviderInferenceMessage, ProviderInferenceRole, ProviderRegistry,
+};
 use crate::run_aggregate::{RunAggregate, RunAggregateError};
 use crate::run_state::RunState;
 
@@ -82,6 +84,8 @@ impl<'a> ContextCompileService<'a> {
 
         let (compile_request, disclosure, source_incomplete) = to_compile_request(&command)?;
         let compiled = ContextCompiler::compile(compile_request)?;
+        let normalized_input = normalized_provider_input(&command, &compiled.included_item_ids)?;
+        let normalized_input_sha256 = hash_json(&normalized_input)?;
         let receipt = receipt(&command, compiled, disclosure, source_incomplete)?;
         let created_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
         self.journal.append(
@@ -96,6 +100,8 @@ impl<'a> ContextCompileService<'a> {
                 payload: serde_json::to_value(ContextCompiledRecord {
                     request_sha256,
                     receipt: receipt.clone(),
+                    normalized_input,
+                    normalized_input_sha256,
                 })?,
                 created_at,
             },
@@ -136,9 +142,24 @@ pub enum ContextCompileServiceError {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ContextCompiledRecord {
-    request_sha256: String,
-    receipt: ContextCompilationReceipt,
+pub(crate) struct ContextCompiledRecord {
+    pub(crate) request_sha256: String,
+    pub(crate) receipt: ContextCompilationReceipt,
+    pub(crate) normalized_input: PersistedNormalizedProviderInput,
+    pub(crate) normalized_input_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PersistedNormalizedProviderInput {
+    pub(crate) messages: Vec<ProviderInferenceMessage>,
+    pub(crate) tools: Vec<Value>,
+}
+
+pub(crate) fn normalized_provider_input_sha256(
+    input: &PersistedNormalizedProviderInput,
+) -> Result<String, serde_json::Error> {
+    hash_json(input)
 }
 
 fn validate_command(command: &ContextCompile) -> Result<(), ContextCompileServiceError> {
@@ -303,6 +324,76 @@ fn context_item(
     } else {
         ContextItem::optional(item_id, class, content, priority)
     }
+}
+
+fn normalized_provider_input(
+    command: &ContextCompile,
+    included_item_ids: &[String],
+) -> Result<PersistedNormalizedProviderInput, ContextCompileServiceError> {
+    let mut messages = Vec::new();
+    let mut tools = Vec::new();
+    for item in &command.items {
+        let item_id = protocol_item_id(item);
+        if !included_item_ids.iter().any(|included| included == item_id) {
+            continue;
+        }
+        match item {
+            ProtocolContextItem::SystemPrompt { content, .. } => {
+                messages.push(provider_message(
+                    ProviderInferenceRole::System,
+                    content.clone(),
+                ));
+            }
+            ProtocolContextItem::ToolProtocol { protocol, .. } => tools.push(protocol.clone()),
+            ProtocolContextItem::SessionMessage { role, content, .. } => {
+                let role = match role {
+                    ContextMessageRole::User => ProviderInferenceRole::User,
+                    ContextMessageRole::Assistant => ProviderInferenceRole::Assistant,
+                };
+                messages.push(provider_message(role, content.clone()));
+            }
+            ProtocolContextItem::RetrievalSource { content, .. } => {
+                messages.push(provider_message(
+                    ProviderInferenceRole::User,
+                    content.clone(),
+                ));
+            }
+            ProtocolContextItem::RuntimeExchange { kind, content, .. } => {
+                let role = match kind {
+                    ContextRuntimeExchangeKind::UserMessage
+                    | ContextRuntimeExchangeKind::Correction => ProviderInferenceRole::User,
+                    ContextRuntimeExchangeKind::AssistantMessage => {
+                        ProviderInferenceRole::Assistant
+                    }
+                    ContextRuntimeExchangeKind::ToolCall
+                    | ContextRuntimeExchangeKind::ToolResult => ProviderInferenceRole::Tool,
+                };
+                messages.push(provider_message(role, serde_json::to_string(content)?));
+            }
+            ProtocolContextItem::OutputReserve { .. } => {}
+        }
+    }
+    if messages.is_empty() {
+        return Err(ContextCompileServiceError::InvalidInput(
+            "normalized provider messages",
+        ));
+    }
+    Ok(PersistedNormalizedProviderInput { messages, tools })
+}
+
+fn protocol_item_id(item: &ProtocolContextItem) -> &str {
+    match item {
+        ProtocolContextItem::SystemPrompt { item_id, .. }
+        | ProtocolContextItem::ToolProtocol { item_id, .. }
+        | ProtocolContextItem::SessionMessage { item_id, .. }
+        | ProtocolContextItem::RetrievalSource { item_id, .. }
+        | ProtocolContextItem::RuntimeExchange { item_id, .. }
+        | ProtocolContextItem::OutputReserve { item_id, .. } => item_id,
+    }
+}
+
+fn provider_message(role: ProviderInferenceRole, content: String) -> ProviderInferenceMessage {
+    ProviderInferenceMessage { role, content }
 }
 
 fn parse_tool_entry(

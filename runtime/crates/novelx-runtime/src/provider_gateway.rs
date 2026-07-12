@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use novelx_protocol::ProviderRunIdentity;
+use novelx_protocol::{ContextCompilationReceipt, ProviderRunIdentity};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -132,6 +132,78 @@ pub struct ProviderConnectionReceipt {
     pub latency_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderInferenceRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceMessage {
+    pub role: ProviderInferenceRole,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceRequest {
+    pub compilation: ContextCompilationReceipt,
+    pub messages: Vec<ProviderInferenceMessage>,
+    pub tools: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderUsageReceipt {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceReceipt {
+    pub context_compilation_id: Uuid,
+    pub canonical_context_sha256: String,
+    pub requested_model_id: String,
+    pub actual_model_id: String,
+    pub response_id_sha256: String,
+    pub response_body_sha256: String,
+    pub finish_reason: String,
+    pub usage: ProviderUsageReceipt,
+    pub provider_request_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderInferenceOutcome {
+    pub text: String,
+    pub receipt: ProviderInferenceReceipt,
+}
+
+pub struct PreparedProviderInference {
+    request: ProviderInferenceRequest,
+    transport_payload: Vec<u8>,
+    transport_payload_sha256: String,
+}
+
+impl PreparedProviderInference {
+    pub fn transport_payload_sha256(&self) -> &str {
+        &self.transport_payload_sha256
+    }
+
+    pub fn transport_payload_bytes(&self) -> u64 {
+        u64::try_from(self.transport_payload.len()).unwrap_or(u64::MAX)
+    }
+
+    pub const fn compilation(&self) -> &ContextCompilationReceipt {
+        &self.request.compilation
+    }
+}
+
 pub struct BoundProvider {
     config: ProviderConfig,
     config_sha256: String,
@@ -245,6 +317,65 @@ impl ProviderGateway {
             })
     }
 
+    pub async fn infer(
+        &self,
+        provider: &BoundProvider,
+        request: ProviderInferenceRequest,
+    ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
+        let prepared = self.prepare_inference(provider, request)?;
+        self.infer_prepared(provider, prepared).await
+    }
+
+    pub fn prepare_inference(
+        &self,
+        provider: &BoundProvider,
+        request: ProviderInferenceRequest,
+    ) -> Result<PreparedProviderInference, ProviderGatewayError> {
+        validate_inference_request(provider, &request)?;
+        let transport_payload = serde_json::to_vec(&inference_body(provider, &request)?)
+            .map_err(ProviderGatewayError::Serialize)?;
+        let transport_payload_sha256 = format!("{:x}", Sha256::digest(&transport_payload));
+        Ok(PreparedProviderInference {
+            request,
+            transport_payload,
+            transport_payload_sha256,
+        })
+    }
+
+    pub async fn infer_prepared(
+        &self,
+        provider: &BoundProvider,
+        prepared: PreparedProviderInference,
+    ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
+        validate_inference_request(provider, &prepared.request)?;
+        let deadline = std::time::Duration::from_millis(provider.config.total_deadline_ms);
+        tokio::time::timeout(deadline, self.infer_within_deadline(provider, prepared))
+            .await
+            .map_err(|_| ProviderGatewayError::Timeout)?
+    }
+
+    async fn infer_within_deadline(
+        &self,
+        provider: &BoundProvider,
+        prepared: PreparedProviderInference,
+    ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
+        let timeout = std::time::Duration::from_millis(provider.config.request_timeout_ms);
+        let url = endpoint_url(&provider.config.base_url, "chat/completions")?;
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(provider.credential.expose_secret())
+            .timeout(timeout)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(prepared.transport_payload)
+            .send()
+            .await
+            .map_err(classify_transport_error)?;
+        classify_status(response.status())?;
+        let payload = read_json_response(response).await?;
+        parse_inference_response(provider, &prepared.request.compilation, &payload)
+    }
+
     async fn test_connection_within_deadline(
         &self,
         provider: &BoundProvider,
@@ -310,6 +441,149 @@ impl ProviderGateway {
             latency_ms: 0,
         })
     }
+}
+
+fn inference_body(
+    provider: &BoundProvider,
+    request: &ProviderInferenceRequest,
+) -> Result<Value, ProviderGatewayError> {
+    let mut body = serde_json::Map::from_iter([
+        (
+            "model".to_owned(),
+            Value::String(provider.config.model_id.clone()),
+        ),
+        (
+            "messages".to_owned(),
+            serde_json::to_value(&request.messages).map_err(ProviderGatewayError::Serialize)?,
+        ),
+        ("stream".to_owned(), Value::Bool(false)),
+        (
+            "max_tokens".to_owned(),
+            Value::from(request.compilation.output_reserve_tokens),
+        ),
+    ]);
+    if !request.tools.is_empty() {
+        body.insert("tools".to_owned(), Value::Array(request.tools.clone()));
+    }
+    Ok(Value::Object(body))
+}
+
+fn validate_inference_request(
+    provider: &BoundProvider,
+    request: &ProviderInferenceRequest,
+) -> Result<(), ProviderGatewayError> {
+    let receipt = &request.compilation;
+    if !receipt.accepted
+        || request.messages.is_empty()
+        || receipt.context_window != provider.config.context_window
+        || receipt.output_reserve_tokens == 0
+        || receipt.output_reserve_tokens > provider.config.context_window
+        || receipt.tokenizer.provider_id.as_deref() != Some(provider.config.provider_id.as_str())
+        || receipt.tokenizer.model_id.as_deref() != Some(provider.config.model_id.as_str())
+        || !is_sha256(&receipt.canonical_context_sha256)
+    {
+        return Err(ProviderGatewayError::ContextReceiptMismatch);
+    }
+    if provider
+        .config
+        .max_tokens
+        .is_some_and(|maximum| receipt.output_reserve_tokens > maximum)
+    {
+        return Err(ProviderGatewayError::ContextReceiptMismatch);
+    }
+    Ok(())
+}
+
+fn parse_inference_response(
+    provider: &BoundProvider,
+    compilation: &ContextCompilationReceipt,
+    payload: &Value,
+) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
+    let response_body_sha256 = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(payload).map_err(ProviderGatewayError::Serialize)?)
+    );
+    let response_id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    let actual_model_id = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    if actual_model_id != provider.config.model_id {
+        return Err(ProviderGatewayError::ResponseModelMismatch);
+    }
+    let choice = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    if finish_reason == "length" {
+        return Err(ProviderGatewayError::OutputIncomplete);
+    }
+    if finish_reason != "stop" {
+        return Err(ProviderGatewayError::ResponseMalformed);
+    }
+    let text = choice
+        .get("message")
+        .and_then(Value::as_object)
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    let usage = payload
+        .get("usage")
+        .and_then(Value::as_object)
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .ok_or(ProviderGatewayError::ResponseMalformed)?;
+    if input_tokens.saturating_add(output_tokens) != total_tokens {
+        return Err(ProviderGatewayError::ResponseMalformed);
+    }
+    Ok(ProviderInferenceOutcome {
+        text,
+        receipt: ProviderInferenceReceipt {
+            context_compilation_id: compilation.compilation_id,
+            canonical_context_sha256: compilation.canonical_context_sha256.clone(),
+            requested_model_id: provider.config.model_id.clone(),
+            actual_model_id: actual_model_id.to_owned(),
+            response_id_sha256: format!("{:x}", Sha256::digest(response_id.as_bytes())),
+            response_body_sha256,
+            finish_reason: finish_reason.to_owned(),
+            usage: ProviderUsageReceipt {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+            },
+            provider_request_count: 1,
+        },
+    })
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub fn provider_config_sha256(config: &ProviderConfig) -> Result<String, ProviderGatewayError> {
@@ -514,6 +788,8 @@ pub enum ProviderGatewayError {
     ConfigHashMismatch,
     #[error("Provider profile does not match the Run pinned identity")]
     ProfileMismatch,
+    #[error("Provider inference request does not match its Context Compilation receipt")]
+    ContextReceiptMismatch,
     #[error("Provider configuration serialization failed: {0}")]
     Serialize(serde_json::Error),
     #[error("Provider HTTP client could not be created: {0}")]
@@ -536,6 +812,10 @@ pub enum ProviderGatewayError {
     ModelNotFound,
     #[error("Provider response was malformed")]
     ResponseMalformed,
+    #[error("Provider response model does not match the requested model")]
+    ResponseModelMismatch,
+    #[error("Provider output ended because the output token limit was reached")]
+    OutputIncomplete,
     #[error("Provider response exceeded the size limit")]
     ResponseTooLarge,
 }

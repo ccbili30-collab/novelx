@@ -56,11 +56,18 @@
 - Added a journal-backed Context Compile Service that validates pinned Run/Provider/context-policy identities, preserves business idempotency and persists `context.compiled` before returning its receipt.
 - Added per-request context compilation receipts with deterministic input hash, category budgets, included/omitted item identities, output/safety reserves and explicit tokenizer identity.
 - Added the versioned conservative `novelx.unicode-mixed-v1` fallback estimator. Receipts explicitly report `fallback_estimate`; they do not claim exact token counts.
+- Accepted ADR-0008 and added a dedicated append-only Provider Attempt aggregate with `requested`, `sent`, `responded`, `failed` and `outcome_unknown` states.
+- Added a real Rust OpenAI-compatible inference path that sends exact pre-serialized transport bytes, validates Context receipt/model/finish reason/usage and returns secret-free response receipts.
+- Added a Provider Inference Service that proves the Context receipt exists in the same Run journal, persists request and send boundaries before network dispatch, persists recoverable assistant output on success, and never automatically replays an uncertain sent attempt.
+- Extended startup recovery to scan Provider attempts and report sent-without-terminal attempts as `OutcomeUnknown` without writing or retrying during recovery.
+- Bound Provider inference to the exact Provider identity pinned by the recovered Run before any network or Provider-attempt write.
+- Persisted the final normalized Provider `messages` and `tools` plus an independent SHA-256 in `context.compiled`; inference now rebuilds the outbound request from this authoritative record instead of trusting caller-supplied body content.
+- Added fail-closed coverage for pinned Provider mismatch, persisted normalized-input hash tampering and caller attempts to replace a valid compiled context with different text.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 76 tests, including 8 pure Context Compiler contract tests and 7 SQLite Context Compile Service persistence/lifecycle/completeness tests.
+- Rust workspace tests pass: 102 tests, including Context Compiler, real loopback Provider inference, Provider Attempt replay, inference-service idempotency/uncertainty, authoritative persisted-input enforcement and Provider-aware startup recovery.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
 - Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 54 tests, including strict typed context schemas and a real Electron-to-Rust `context.compile` restart/idempotency path.
@@ -71,12 +78,15 @@
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor is a continuously connected, independently tested module but is not part of production startup.
 - The runtime opens and recovers the supplied workspace database and processes durable Run acceptance/query plus status/shutdown controls, but it does not yet schedule Provider or tool execution.
-- `run.start` durably creates a Run, `run.prepare` verifies its pinned Provider prerequisite, and `context.compile` can persist a typed receipt. No full inference request, tool scheduling or Provider attempt journal exists yet. Cancellation is connected only at the Run state level because no Provider/tool work exists yet to interrupt.
+- `run.start` durably creates a Run, `run.prepare` verifies its pinned Provider prerequisite, and `context.compile` persists a typed receipt plus authoritative normalized Provider input. The internal Rust inference and Provider Attempt journal exist, but no public inference command or production scheduler invokes them. Cancellation is connected only at the Run state level because active Provider/tool work is not yet exposed through the Runtime command loop.
 - The ToolCall state machine, event-backed aggregate and first Context Compiler service exist, but the real tool executor, full Provider inference pipeline, recovery execution policy and domain tools are not implemented.
-- The Provider Gateway can bind/validate a profile, perform a real minimal connection ping and gate `run.prepare`; durable Provider attempt events, full inference requests and post-prepare Run scheduling are not connected.
+- The Provider Gateway and internal inference coordinator can perform and persist a real non-streaming request, but no public `provider.infer` Runtime command, Electron Supervisor method or production Agent scheduler invokes it yet.
+- `waiting_for_reconciliation` is the accepted nonterminal Run state for `outcome_unknown`, but the Run state machine, protocol projection and recovery UI do not implement it yet. Current attempt recovery reports uncertainty without mutating the Run.
+- Automatic retry scheduling, `Retry-After` parsing, cumulative delay/deadline enforcement, cancellation propagation, streaming responses and tool-call responses are not implemented.
+- Persisted tool definitions are now authoritative inputs, but the Provider message contract still lacks full OpenAI-compatible `tool_calls` and `tool_call_id` fields; real model-directed file-tool execution remains incomplete and must not be presented as live.
 - Exact Provider/model tokenizer integrations are not implemented; the compiler currently uses only the disclosed conservative fallback estimator.
 - Context compaction, durable task-note replacement, source locator/range receipts and full truncation disclosure are not implemented. Current item inclusion/omission metadata is not a substitute for those capabilities.
-- Electron production startup and the live Agent workflow do not route through `context.compile`; the compiler is protocol/service foundation only and has not sent a real Provider inference request.
+- Electron production startup and the live Agent workflow do not route through `context.compile`; real loopback HTTP inference is proven inside Rust tests, but no desktop production Agent request uses that path yet.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.

@@ -300,6 +300,22 @@ The current implementation uses the versioned conservative `novelx.unicode-mixed
 
 A future source receipt must identify the project resource, stable version, character or logical locator, content hash and durable task-memory note that covers it. Source content cannot be compacted until the covering task-memory record and receipt are committed. The initial compiler records item inclusion/omission and source identities, but full compaction, source locator/range coverage and durable-note replacement are not implemented yet.
 
+### Provider inference attempt ledger
+
+The Rust Provider Gateway now supports one strict OpenAI-compatible inference request bound to an accepted persisted Context Compilation Receipt. The request is serialized once into exact UTF-8 transport bytes; its SHA-256 identity is persisted in a separate `provider_attempt` aggregate before those bytes are sent.
+
+Provider attempt events are:
+
+- `provider.requested`: durable secret-free intent, Context receipt identity and exact transport-payload hash;
+- `provider.sent`: conservative dispatch boundary persisted before the HTTP client may touch the socket;
+- `provider.responded`: validated model/finish reason/usage, response hashes and recoverable assistant text;
+- `provider.failed`: a definitive known failure with `not_sent` or `response_received` delivery certainty;
+- `provider.outcome_unknown`: the request may have reached the Provider, so automatic replay is forbidden.
+
+On restart, `requested` is safe to send, `responded` is returned from the journal without another HTTP request, and `sent` without a terminal event is classified as `outcome_unknown`. Provider credentials and Authorization headers are not stored in these events. The accepted normalized Provider input is stored once in the authoritative `context.compiled` record, while attempt events retain only its receipt and transport hashes.
+
+No public `provider.infer` Runtime command is defined yet. The attempt ledger and inference coordinator are internal Rust services pending the `waiting_for_reconciliation` Run state, production scheduling, cancellation and desktop protocol integration.
+
 ## 8. Error Contract
 
 Errors contain a stable code, class, retryability, public summary and internal diagnostic reference:
