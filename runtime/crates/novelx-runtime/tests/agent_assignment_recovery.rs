@@ -127,6 +127,32 @@ fn provisions_a_missing_child_from_spec_and_quarantines_terminal_mismatch() {
         report.assignments[0].classification,
         AssignmentRecoveryClassification::ProvisionChildRun
     );
+    let intent = report.assignments[0].provision_intent.as_ref().unwrap();
+    assert_eq!(intent.saga.workspace_id, "workspace-1");
+    assert_eq!(intent.saga.assignment_id, "missing");
+    assert_eq!(intent.saga.allocation_revision, 1);
+    assert_eq!(intent.saga.child_run_id, "missing-child");
+    assert_eq!(
+        intent.create_idempotency_key,
+        format!(
+            "assignment:missing:{}:child-run:create",
+            intent.saga.allocation_sha256
+        )
+    );
+    assert_eq!(
+        intent.prepare_idempotency_key,
+        format!(
+            "assignment:missing:{}:child-run:prepare",
+            intent.saga.allocation_sha256
+        )
+    );
+    assert_eq!(
+        intent.cancel_idempotency_key,
+        format!(
+            "assignment:missing:{}:cancel",
+            intent.saga.allocation_sha256
+        )
+    );
     assert!(report.quarantined.is_empty());
 
     let fixture = Fixture::new();
@@ -138,6 +164,29 @@ fn provisions_a_missing_child_from_spec_and_quarantines_terminal_mismatch() {
         report.assignments[0].classification,
         AssignmentRecoveryClassification::Quarantined
     );
+    assert_eq!(report.quarantined.len(), 1);
+
+    let fixture = Fixture::new();
+    let allocated = fixture.allocate("tampered-spec", "parent-3");
+    let mut spec = fixture.child_spec(&allocated, "child-tampered");
+    spec.pinned_identity.assignment.as_mut().unwrap().sha256 = Some("9".repeat(64));
+    spec.pinned_identity_sha256 = child_run_pinned_identity_sha256(&spec.pinned_identity).unwrap();
+    AgentAssignmentRepository::open(&fixture.database)
+        .unwrap()
+        .start(
+            "workspace-1",
+            "tampered-spec",
+            allocated.revision,
+            spec,
+            assignment_metadata("tampered-spec-start"),
+        )
+        .unwrap();
+    let report = recover_agent_assignments(&fixture.database, "workspace-1", "project-1").unwrap();
+    assert_eq!(
+        report.assignments[0].classification,
+        AssignmentRecoveryClassification::Quarantined
+    );
+    assert!(report.assignments[0].provision_intent.is_none());
     assert_eq!(report.quarantined.len(), 1);
 }
 

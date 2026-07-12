@@ -456,6 +456,30 @@ pub struct ChildRunSpec {
     pub pinned_identity_sha256: String,
 }
 
+pub const ASSIGNMENT_CHILD_PROVISION_OPERATION_VERSION: &str = "assignment-child-provision-v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentChildProvisionSagaIdentity {
+    pub workspace_id: String,
+    pub assignment_id: String,
+    pub allocation_revision: u64,
+    pub allocation_sha256: String,
+    pub child_run_id: String,
+    pub child_run_spec_sha256: String,
+    pub operation_version: String,
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentChildProvisionIntent {
+    pub saga: AssignmentChildProvisionSagaIdentity,
+    pub create_idempotency_key: String,
+    pub prepare_idempotency_key: String,
+    pub cancel_idempotency_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentAssignmentSnapshot {
@@ -714,6 +738,137 @@ impl ChildRunSpec {
         }
         Ok(())
     }
+}
+
+impl AssignmentChildProvisionSagaIdentity {
+    pub fn derive(
+        workspace_id: &str,
+        assignment_id: &str,
+        allocation_revision: u64,
+        allocation_sha256: &str,
+        child_run_spec: &ChildRunSpec,
+    ) -> Result<Self, AgentAssignmentValidationError> {
+        assignment_require_text("workspaceId", workspace_id)?;
+        assignment_require_text("assignmentId", assignment_id)?;
+        assignment_require_positive("allocationRevision", allocation_revision)?;
+        assignment_require_sha256("allocationSha256", allocation_sha256)?;
+        child_run_spec.validate()?;
+        let child_run_spec_sha256 = child_run_spec_sha256(child_run_spec)
+            .map_err(|_| AgentAssignmentValidationError::InvalidState)?;
+        let operation_version = ASSIGNMENT_CHILD_PROVISION_OPERATION_VERSION.to_owned();
+        let mut value = Self {
+            workspace_id: workspace_id.to_owned(),
+            assignment_id: assignment_id.to_owned(),
+            allocation_revision,
+            allocation_sha256: allocation_sha256.to_owned(),
+            child_run_id: child_run_spec.child_run_id.clone(),
+            child_run_spec_sha256,
+            operation_version,
+            operation_id: String::new(),
+        };
+        value.operation_id = value.expected_operation_id()?;
+        Ok(value)
+    }
+
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("workspaceId", &self.workspace_id)?;
+        assignment_require_text("assignmentId", &self.assignment_id)?;
+        assignment_require_positive("allocationRevision", self.allocation_revision)?;
+        assignment_require_sha256("allocationSha256", &self.allocation_sha256)?;
+        assignment_require_text("childRunId", &self.child_run_id)?;
+        assignment_require_sha256("childRunSpecSha256", &self.child_run_spec_sha256)?;
+        if self.operation_version != ASSIGNMENT_CHILD_PROVISION_OPERATION_VERSION {
+            return Err(AgentAssignmentValidationError::InvalidState);
+        }
+        assignment_require_sha256("operationId", &self.operation_id)?;
+        if self.operation_id != self.expected_operation_id()? {
+            return Err(AgentAssignmentValidationError::InvalidState);
+        }
+        Ok(())
+    }
+
+    pub fn create_idempotency_key(&self) -> String {
+        self.idempotency_key("child-run:create")
+    }
+
+    pub fn prepare_idempotency_key(&self) -> String {
+        self.idempotency_key("child-run:prepare")
+    }
+
+    pub fn cancel_idempotency_key(&self) -> String {
+        self.idempotency_key("cancel")
+    }
+
+    pub fn terminal_idempotency_key(
+        &self,
+        child_terminal_event_sha256: &str,
+    ) -> Result<String, AgentAssignmentValidationError> {
+        assignment_require_sha256("childTerminalEventSha256", child_terminal_event_sha256)?;
+        Ok(self.idempotency_key(&format!("terminal:{child_terminal_event_sha256}")))
+    }
+
+    fn idempotency_key(&self, suffix: &str) -> String {
+        format!(
+            "assignment:{}:{}:{suffix}",
+            self.assignment_id, self.allocation_sha256
+        )
+    }
+
+    fn expected_operation_id(&self) -> Result<String, AgentAssignmentValidationError> {
+        let operation_material = serde_json::json!({
+            "workspaceId": self.workspace_id,
+            "assignmentId": self.assignment_id,
+            "allocationRevision": self.allocation_revision,
+            "allocationSha256": self.allocation_sha256,
+            "childRunId": self.child_run_id,
+            "childRunSpecSha256": self.child_run_spec_sha256,
+            "operationVersion": self.operation_version,
+        });
+        let canonical = serde_json::to_vec(&canonicalize_json(operation_material))
+            .map_err(|_| AgentAssignmentValidationError::InvalidState)?;
+        Ok(format!("{:x}", Sha256::digest(canonical)))
+    }
+}
+
+impl AssignmentChildProvisionIntent {
+    pub fn derive(
+        workspace_id: &str,
+        assignment_id: &str,
+        allocation_revision: u64,
+        allocation_sha256: &str,
+        child_run_spec: &ChildRunSpec,
+    ) -> Result<Self, AgentAssignmentValidationError> {
+        let saga = AssignmentChildProvisionSagaIdentity::derive(
+            workspace_id,
+            assignment_id,
+            allocation_revision,
+            allocation_sha256,
+            child_run_spec,
+        )?;
+        Ok(Self {
+            create_idempotency_key: saga.create_idempotency_key(),
+            prepare_idempotency_key: saga.prepare_idempotency_key(),
+            cancel_idempotency_key: saga.cancel_idempotency_key(),
+            saga,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        self.saga.validate()?;
+        if self.create_idempotency_key != self.saga.create_idempotency_key()
+            || self.prepare_idempotency_key != self.saga.prepare_idempotency_key()
+            || self.cancel_idempotency_key != self.saga.cancel_idempotency_key()
+        {
+            return Err(AgentAssignmentValidationError::InvalidState);
+        }
+        Ok(())
+    }
+}
+
+pub fn child_run_spec_sha256(spec: &ChildRunSpec) -> Result<String, serde_json::Error> {
+    let value = serde_json::to_value(spec)?;
+    let canonical = serde_json::to_vec(&canonicalize_json(value))?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
 }
 
 pub fn child_run_pinned_identity_sha256(
@@ -2259,6 +2414,119 @@ mod tests {
         assert_eq!(
             child_run_pinned_identity_sha256(&identity).unwrap(),
             "569c60cbd64889175a0c84a7fa5d19233e7f49d7a359ba930d67365250a4227e"
+        );
+    }
+
+    #[test]
+    fn assignment_child_provision_saga_is_stable_typed_and_sensitive_to_every_pin() {
+        let pinned_identity: RunPinnedIdentity = serde_json::from_value(serde_json::json!({
+            "projectId": "project-1", "workspaceId": "workspace-1",
+            "sessionId": "session-1", "sessionBranchId": "branch-1",
+            "userMessageId": "message-1", "projectBranchId": "project-branch-1",
+            "goal": { "id": "goal-1", "revision": 1, "sha256": "a".repeat(64) },
+            "plan": { "id": "plan-1", "revision": 2, "sha256": "b".repeat(64) },
+            "assignment": { "id": "assignment-1", "revision": 1, "sha256": "c".repeat(64) },
+            "parentRunId": "parent-1", "delegationDepth": 1,
+            "provider": { "profileId": "provider-profile", "providerId": "deepseek", "modelId": "deepseek-chat", "configSha256": "d".repeat(64) },
+            "promptBundle": { "id": "prompt", "version": "1", "sha256": "e".repeat(64) },
+            "agentProfile": { "id": "checker", "version": "1", "sha256": "f".repeat(64) },
+            "toolPolicy": { "id": "tools", "version": "1", "sha256": "1".repeat(64) },
+            "contextPolicy": { "id": "context", "version": "1", "sha256": "2".repeat(64) },
+            "runtimePolicy": { "id": "runtime", "version": "1", "sha256": "3".repeat(64) },
+            "runtimeContractVersion": "2", "mode": "assist",
+            "sourceCheckpointId": "checkpoint-1", "scopeResourceIds": ["chapter-1", "world"],
+            "resourceScopeSha256": "4".repeat(64), "userInputSha256": "5".repeat(64)
+        })).unwrap();
+        let mut spec = ChildRunSpec {
+            child_run_id: "child-1".to_owned(),
+            run_start_idempotency_key: "child-start-1".to_owned(),
+            pinned_identity_sha256: child_run_pinned_identity_sha256(&pinned_identity).unwrap(),
+            pinned_identity,
+        };
+        let first = AssignmentChildProvisionIntent::derive(
+            "workspace-1",
+            "assignment-1",
+            1,
+            &"c".repeat(64),
+            &spec,
+        )
+        .unwrap();
+        let second = AssignmentChildProvisionIntent::derive(
+            "workspace-1",
+            "assignment-1",
+            1,
+            &"c".repeat(64),
+            &spec,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            first.saga.operation_version,
+            ASSIGNMENT_CHILD_PROVISION_OPERATION_VERSION
+        );
+        assert_eq!(
+            first.saga.operation_id,
+            "7a12516041e7c7e5f9aafd2baa22dbbac2d5b3a962c01943dd8756da0178ed95"
+        );
+        assert_eq!(
+            first.saga.child_run_spec_sha256,
+            "0e9e4a5c392bd7d5dc3519ba97cc3c12bab1db690e14adf99bd7c4e7f2b76bb2"
+        );
+        assert_eq!(
+            first.saga.child_run_spec_sha256,
+            child_run_spec_sha256(&spec).unwrap()
+        );
+        assert_eq!(
+            first.create_idempotency_key,
+            format!(
+                "assignment:assignment-1:{}:child-run:create",
+                "c".repeat(64)
+            )
+        );
+        assert_eq!(
+            first.prepare_idempotency_key,
+            format!(
+                "assignment:assignment-1:{}:child-run:prepare",
+                "c".repeat(64)
+            )
+        );
+        assert_eq!(
+            first.cancel_idempotency_key,
+            format!("assignment:assignment-1:{}:cancel", "c".repeat(64))
+        );
+        assert_eq!(
+            first
+                .saga
+                .terminal_idempotency_key(&"9".repeat(64))
+                .unwrap(),
+            format!(
+                "assignment:assignment-1:{}:terminal:{}",
+                "c".repeat(64),
+                "9".repeat(64)
+            )
+        );
+        assert!(first.saga.terminal_idempotency_key("invalid").is_err());
+
+        spec.run_start_idempotency_key = "child-start-2".to_owned();
+        let changed = AssignmentChildProvisionSagaIdentity::derive(
+            "workspace-1",
+            "assignment-1",
+            1,
+            &"c".repeat(64),
+            &spec,
+        )
+        .unwrap();
+        assert_ne!(
+            changed.child_run_spec_sha256,
+            first.saga.child_run_spec_sha256
+        );
+        assert_ne!(changed.operation_id, first.saga.operation_id);
+
+        let mut forged = first;
+        forged.saga.operation_id = "0".repeat(64);
+        assert_eq!(
+            forged.validate(),
+            Err(AgentAssignmentValidationError::InvalidState)
         );
     }
 

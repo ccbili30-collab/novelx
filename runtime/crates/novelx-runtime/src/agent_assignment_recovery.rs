@@ -5,6 +5,8 @@ use std::{
 
 use thiserror::Error;
 
+use novelx_protocol::AssignmentChildProvisionIntent;
+
 use crate::{
     agent_assignment_aggregate::{
         AgentAssignmentAggregate, AgentAssignmentError, AgentAssignmentRepository,
@@ -36,6 +38,7 @@ pub struct RecoveredAssignment {
     pub child_run_id: Option<String>,
     pub child_run_state: Option<RunState>,
     pub classification: AssignmentRecoveryClassification,
+    pub provision_intent: Option<AssignmentChildProvisionIntent>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -137,10 +140,11 @@ pub fn recover_agent_assignments(
                 child_run_id: assignment.child_run_id,
                 child_run_state: child.as_ref().map(RunAggregate::state),
                 classification: AssignmentRecoveryClassification::Quarantined,
+                provision_intent: None,
             });
             continue;
         }
-        match classify(assignment.clone(), child.as_ref()) {
+        match classify(database_path, assignment.clone(), child.as_ref()) {
             Ok(value) => recovered.push(value),
             Err(error) => {
                 quarantined.push(quarantine(
@@ -155,6 +159,7 @@ pub fn recover_agent_assignments(
                     child_run_id: assignment.child_run_id,
                     child_run_state: child.as_ref().map(RunAggregate::state),
                     classification: AssignmentRecoveryClassification::Quarantined,
+                    provision_intent: None,
                 });
             }
         }
@@ -180,10 +185,12 @@ fn quarantine(
 }
 
 fn classify(
+    database_path: &Path,
     assignment: AgentAssignmentAggregate,
     child: Option<&RunAggregate>,
 ) -> Result<RecoveredAssignment, AgentAssignmentRecoveryError> {
     let child_run_state = child.map(RunAggregate::state);
+    let mut provision_intent = None;
     let classification = match assignment.status {
         AgentAssignmentStatus::Allocated => {
             if child.is_some() || assignment.child_run_id.is_some() {
@@ -201,6 +208,25 @@ fn classify(
                 AssignmentRecoveryClassification::RunningChild(child.state())
             }
             None if assignment.child_run_spec.is_some() => {
+                let spec = assignment.child_run_spec.as_ref().expect("checked above");
+                validate_provision_spec(database_path, &assignment, spec)?;
+                let allocation = spec.pinned_identity.assignment.as_ref().ok_or_else(|| {
+                    inconsistent(
+                        &assignment,
+                        None,
+                        "child spec allocation reference is absent",
+                    )
+                })?;
+                let allocation_hash = allocation.sha256.as_deref().ok_or_else(|| {
+                    inconsistent(&assignment, None, "child spec allocation hash is absent")
+                })?;
+                provision_intent = Some(AssignmentChildProvisionIntent::derive(
+                    &assignment.identity.workspace_id,
+                    &assignment.identity.assignment_id,
+                    allocation.revision,
+                    allocation_hash,
+                    spec,
+                )?);
                 AssignmentRecoveryClassification::ProvisionChildRun
             }
             None => {
@@ -269,7 +295,67 @@ fn classify(
         child_run_id: assignment.child_run_id,
         child_run_state,
         classification,
+        provision_intent,
     })
+}
+
+fn validate_provision_spec(
+    database_path: &Path,
+    assignment: &AgentAssignmentAggregate,
+    spec: &novelx_protocol::ChildRunSpec,
+) -> Result<(), AgentAssignmentRecoveryError> {
+    let identity = &spec.pinned_identity;
+    let reference = identity
+        .assignment
+        .as_ref()
+        .ok_or_else(|| provision_mismatch(assignment, spec, "assignment reference is absent"))?;
+    let allocation = AgentAssignmentRepository::open(database_path)?.load_revision(
+        &assignment.identity.workspace_id,
+        &assignment.identity.assignment_id,
+        reference.revision,
+    )?;
+    if reference.id != assignment.identity.assignment_id
+        || reference.revision != 1
+        || reference.sha256.as_deref() != Some(allocation.last_event_hash.as_str())
+        || allocation.status != AgentAssignmentStatus::Allocated
+        || spec.child_run_id != assignment.child_run_id.as_deref().unwrap_or_default()
+        || spec.child_run_id == assignment.identity.parent_run_id
+        || identity.workspace_id != assignment.identity.workspace_id
+        || identity.project_id != assignment.identity.project_id
+        || identity.delegation_depth != 1
+        || identity.parent_run_id.as_deref() != Some(assignment.identity.parent_run_id.as_str())
+        || identity
+            .goal
+            .as_ref()
+            .is_none_or(|value| !binding_matches(value, &assignment.identity.goal))
+        || identity
+            .plan
+            .as_ref()
+            .is_none_or(|value| !binding_matches(value, &assignment.identity.plan))
+        || identity.scope_resource_ids != assignment.scope.resource_ids
+        || identity.resource_scope_sha256 != assignment.scope.scope_sha256
+        || identity.agent_profile.id != assignment.identity.child_profile_id
+        || identity.source_checkpoint_id != assignment.definition.source_checkpoint_id
+    {
+        return Err(provision_mismatch(
+            assignment,
+            spec,
+            "child specification differs from the allocation",
+        ));
+    }
+    Ok(())
+}
+
+fn provision_mismatch(
+    assignment: &AgentAssignmentAggregate,
+    spec: &novelx_protocol::ChildRunSpec,
+    reason: &'static str,
+) -> AgentAssignmentRecoveryError {
+    AgentAssignmentRecoveryError::ChildPinMismatch {
+        assignment_id: assignment.identity.assignment_id.clone(),
+        run_id: spec.child_run_id.clone(),
+        reason,
+    }
 }
 
 fn require_bound_child<'a>(
@@ -470,6 +556,8 @@ pub enum AgentAssignmentRecoveryError {
     },
     #[error(transparent)]
     Assignment(#[from] AgentAssignmentError),
+    #[error(transparent)]
+    Protocol(#[from] novelx_protocol::AgentAssignmentValidationError),
     #[error(transparent)]
     Run(#[from] RunAggregateError),
     #[error(transparent)]
