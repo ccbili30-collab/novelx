@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -336,9 +336,234 @@ describe("Runtime V2 real Rust handshake", () => {
       },
     });
   }, 45_000);
+
+  it("recovers a killed sent inference as reconciliation-required without automatically resending", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-runtime-v2-inference-kill-"));
+    tempRoots.push(root);
+    const databasePath = path.join(root, "runtime.db");
+    const runId = "32f27af7-a98d-4058-9828-a2878a6a64d6";
+    const providerServer = await ControlledProviderServer.start();
+    providerServers.push(providerServer);
+    const providerConfig = runtimeProviderConfig(providerServer.baseUrl);
+    const configSha256 = canonicalAuditHash(providerConfig);
+    const start = runStartPayload();
+    start.pinnedIdentity.provider.profileId = providerConfig.profileId;
+    start.pinnedIdentity.provider.configSha256 = configSha256;
+    const runtimeFailure = deferred<RuntimeV2SupervisorError>();
+
+    supervisor = createWorkspaceSupervisor(databasePath, (error) => runtimeFailure.resolve(error));
+    await supervisor.start();
+    await supervisor.bindProvider(providerConfig, configSha256, "kill-integration-secret");
+    await supervisor.startRun(runId, start);
+    await supervisor.prepareRun(runId, { prepareIdempotencyKey: "integration-kill-prepare-1" });
+    const compilation = await supervisor.compileContext(runId, contextCompilePayload(start));
+    await supervisor.startProviderInference(runId, inferenceStartPayload(compilation.compilationId));
+    await providerServer.waitForRequest();
+    const ownedPid = supervisor.pid;
+    expect(ownedPid).toEqual(expect.any(Number));
+
+    terminateRecordedProcess(ownedPid!);
+    await expect(runtimeFailure.promise).resolves.toMatchObject({ code: "RUNTIME_V2_EXITED_AFTER_READY" });
+    await providerServer.waitForDisconnect();
+    expect(supervisor.pid).toBeNull();
+    expect(providerServer.requestCount).toBe(1);
+    expect(runtimeEventTypes(databasePath, runId, "provider_attempt")).toEqual([
+      "provider.requested",
+      "provider.sent",
+    ]);
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    const restarted = await supervisor.start();
+    expect(restarted.ready.payload.recoveredRunCount).toBe(1);
+    await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
+    await expect(supervisor.getRun(runId)).resolves.toMatchObject({
+      state: "waiting_for_reconciliation",
+      recoveryClassification: "waiting_for_reconciliation",
+    });
+    expect(providerServer.requestCount).toBe(1);
+  }, 45_000);
+
+  it("cancels a held inference by closing the Provider connection and never emits completed", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-runtime-v2-inference-cancel-"));
+    tempRoots.push(root);
+    const databasePath = path.join(root, "runtime.db");
+    const runId = "bff23b24-f19b-4dda-acf1-faa2e3050bba";
+    const providerServer = await ControlledProviderServer.start();
+    providerServers.push(providerServer);
+    const providerConfig = runtimeProviderConfig(providerServer.baseUrl);
+    const configSha256 = canonicalAuditHash(providerConfig);
+    const start = runStartPayload();
+    start.pinnedIdentity.provider.profileId = providerConfig.profileId;
+    start.pinnedIdentity.provider.configSha256 = configSha256;
+    const terminal = deferred<RuntimeV2RuntimeEvent>();
+    const terminalNames: string[] = [];
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor.subscribeRuntimeEvents((event) => {
+      if (!event.name.startsWith("provider.inference.")) return;
+      terminalNames.push(event.name);
+      terminal.resolve(event);
+    });
+    await supervisor.start();
+    await supervisor.bindProvider(providerConfig, configSha256, "cancel-integration-secret");
+    await supervisor.startRun(runId, start);
+    await supervisor.prepareRun(runId, { prepareIdempotencyKey: "integration-cancel-prepare-1" });
+    const compilation = await supervisor.compileContext(runId, contextCompilePayload(start));
+    await supervisor.startProviderInference(runId, inferenceStartPayload(compilation.compilationId));
+    await providerServer.waitForRequest();
+
+    await expect(supervisor.cancelRun(runId, {
+      cancelIdempotencyKey: "integration-active-inference-cancel-1",
+      reason: "取消挂起的模型请求",
+    })).resolves.toMatchObject({
+      state: "waiting_for_reconciliation",
+      recoveryClassification: "waiting_for_reconciliation",
+    });
+    await providerServer.waitForDisconnect();
+    const terminalEvent = await terminal.promise;
+
+    expect(terminalEvent).toMatchObject({
+      name: "provider.inference.reconciliation_required",
+      payload: {
+        reason: "outcome_unknown",
+        error: { code: "PROVIDER_OUTCOME_UNKNOWN", retryable: false },
+      },
+    });
+    expect(terminalNames).not.toContain("provider.inference.completed");
+    expect(providerServer.requestCount).toBe(1);
+    await expect(supervisor.getRun(runId)).resolves.toMatchObject({
+      state: "waiting_for_reconciliation",
+      recoveryClassification: "waiting_for_reconciliation",
+    });
+    expect(runtimeEventRecords(databasePath, runId, "run")).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: "run.cancellation_requested",
+        payload: expect.objectContaining({
+          cancellationReason: "取消挂起的模型请求",
+          attemptIds: [expect.any(String)],
+        }),
+      }),
+    ]));
+    expect(runtimeEventTypes(databasePath, runId, "run")).not.toContain("run.cancelled");
+  }, 45_000);
+
+  it("reconciles an unknown Provider outcome as cancelled and preserves it across restart", async () => {
+    const runId = "7800e97d-48c7-4517-b17f-6d6dfbd998c2";
+    const { databasePath, providerServer, attemptId } = await createOutcomeUnknownRun(runId);
+
+    await expect(supervisor!.reconcileRun(runId, {
+      reconciliationIdempotencyKey: "integration-reconcile-cancel-1",
+      attemptId,
+      decision: "cancel_run",
+      duplicateExecutionAcknowledged: false,
+    })).resolves.toMatchObject({
+      receipt: {
+        attemptId,
+        decision: "cancel_run",
+        state: "cancelled",
+      },
+      snapshot: {
+        state: "cancelled",
+        recoveryClassification: "terminal",
+      },
+    });
+    expect(providerServer.requestCount).toBe(1);
+
+    await supervisor!.stop();
+    supervisor = createWorkspaceSupervisor(databasePath);
+    await supervisor.start();
+    await expect(supervisor.getRun(runId)).resolves.toMatchObject({
+      state: "cancelled",
+      recoveryClassification: "terminal",
+    });
+    expect(providerServer.requestCount).toBe(1);
+  }, 45_000);
+
+  it("reconciles an unknown Provider outcome as an explicit retry without dispatching it", async () => {
+    const runId = "36d79b24-3378-4b79-9d53-22412b9cfa58";
+    const { databasePath, providerServer, attemptId } = await createOutcomeUnknownRun(runId);
+
+    await expect(supervisor!.reconcileRun(runId, {
+      reconciliationIdempotencyKey: "integration-reconcile-retry-1",
+      attemptId,
+      decision: "retry_as_new_attempt_acknowledging_duplicate",
+      duplicateExecutionAcknowledged: true,
+    })).resolves.toMatchObject({
+      receipt: {
+        attemptId,
+        decision: "retry_as_new_attempt_acknowledging_duplicate",
+        state: "retrying",
+      },
+      snapshot: {
+        state: "retrying",
+        recoveryClassification: "resumable",
+      },
+    });
+    expect(runtimeEventTypes(databasePath, runId, "provider_attempt")).toEqual([
+      "provider.requested",
+      "provider.sent",
+      "provider.outcome_unknown",
+    ]);
+    expect(providerServer.requestCount).toBe(1);
+  }, 45_000);
 });
 
-function createWorkspaceSupervisor(databasePath: string): RuntimeV2ProcessSupervisor {
+async function createOutcomeUnknownRun(runId: string): Promise<{
+  databasePath: string;
+  providerServer: ControlledProviderServer;
+  attemptId: string;
+}> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-runtime-v2-reconcile-"));
+  tempRoots.push(root);
+  const databasePath = path.join(root, "runtime.db");
+  const providerServer = await ControlledProviderServer.start();
+  providerServers.push(providerServer);
+  const providerConfig = runtimeProviderConfig(providerServer.baseUrl);
+  const configSha256 = canonicalAuditHash(providerConfig);
+  const start = runStartPayload();
+  start.startIdempotencyKey = `integration-reconcile-start-${runId}`;
+  start.pinnedIdentity.provider.profileId = providerConfig.profileId;
+  start.pinnedIdentity.provider.configSha256 = configSha256;
+  supervisor = createWorkspaceSupervisor(databasePath);
+  await supervisor.start();
+  await supervisor.bindProvider(providerConfig, configSha256, "reconcile-integration-secret");
+  await supervisor.startRun(runId, start);
+  await supervisor.prepareRun(runId, { prepareIdempotencyKey: `integration-reconcile-prepare-${runId}` });
+  const compilation = await supervisor.compileContext(runId, {
+    ...contextCompilePayload(start),
+    compileIdempotencyKey: `integration-reconcile-compile-${runId}`,
+  });
+  const inference = inferenceStartPayload(compilation.compilationId);
+  inference.inferenceId = randomUUID();
+  inference.attemptId = randomUUID();
+  inference.inferenceIdempotencyKey = `integration-reconcile-inference-${runId}`;
+  await supervisor.startProviderInference(runId, inference);
+  await providerServer.waitForRequest();
+  await expect(supervisor.cancelRun(runId, {
+    cancelIdempotencyKey: `integration-reconcile-cancel-request-${runId}`,
+    reason: "等待人工对账后处理模型请求",
+  })).resolves.toMatchObject({
+    state: "waiting_for_reconciliation",
+    recoveryClassification: "waiting_for_reconciliation",
+  });
+  await providerServer.waitForDisconnect();
+  expect(providerServer.requestCount).toBe(1);
+
+  await supervisor.stop();
+  supervisor = createWorkspaceSupervisor(databasePath);
+  await supervisor.start();
+  await expect(supervisor.getRun(runId)).resolves.toMatchObject({
+    state: "waiting_for_reconciliation",
+    recoveryClassification: "waiting_for_reconciliation",
+  });
+  expect(providerServer.requestCount).toBe(1);
+  return { databasePath, providerServer, attemptId: inference.attemptId };
+}
+
+function createWorkspaceSupervisor(
+  databasePath: string,
+  onRuntimeFailure?: (error: RuntimeV2SupervisorError) => void,
+): RuntimeV2ProcessSupervisor {
   return new RuntimeV2ProcessSupervisor({
     executablePath: runtimeExecutable,
     application: {
@@ -354,6 +579,7 @@ function createWorkspaceSupervisor(databasePath: string): RuntimeV2ProcessSuperv
     startupTimeoutMs: 10_000,
     commandTimeoutMs: 10_000,
     stopTimeoutMs: 2_000,
+    onRuntimeFailure,
   });
 }
 
@@ -494,6 +720,8 @@ interface CapturedProviderRequest {
 class ControlledProviderServer {
   readonly #request = deferred<CapturedProviderRequest>();
   readonly #release = deferred<{ status: number; body: string }>();
+  readonly #disconnect = deferred<void>();
+  #requestCount = 0;
   #closed = false;
 
   private constructor(
@@ -504,6 +732,8 @@ class ControlledProviderServer {
   static async start(): Promise<ControlledProviderServer> {
     let fixture: ControlledProviderServer;
     const server = http.createServer((request, response) => {
+      fixture.#requestCount += 1;
+      response.once("close", () => fixture.#disconnect.resolve());
       const chunks: Buffer[] = [];
       request.on("data", (chunk: Buffer) => chunks.push(chunk));
       request.on("end", () => {
@@ -534,6 +764,14 @@ class ControlledProviderServer {
 
   waitForRequest(): Promise<CapturedProviderRequest> {
     return this.#request.promise;
+  }
+
+  waitForDisconnect(): Promise<void> {
+    return this.#disconnect.promise;
+  }
+
+  get requestCount(): number {
+    return this.#requestCount;
   }
 
   releaseSuccess(text: string): void {
@@ -570,4 +808,38 @@ function deferred<T>() {
     resolve: resolvePromise,
     settled: () => resolved,
   };
+}
+
+function runtimeEventTypes(databasePath: string, runId: string, aggregateType: string): string[] {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return (database.prepare(
+      "SELECT event_type FROM runtime_events WHERE run_id = ? AND aggregate_type = ? ORDER BY run_sequence",
+    ).all(runId, aggregateType) as Array<{ event_type: string }>).map((row) => row.event_type);
+  } finally {
+    database.close();
+  }
+}
+
+function runtimeEventRecords(
+  databasePath: string,
+  runId: string,
+  aggregateType: string,
+): Array<{ eventType: string; payload: Record<string, unknown> }> {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return (database.prepare(
+      "SELECT event_type, payload_json FROM runtime_events WHERE run_id = ? AND aggregate_type = ? ORDER BY run_sequence",
+    ).all(runId, aggregateType) as Array<{ event_type: string; payload_json: string }>).map((row) => ({
+      eventType: row.event_type,
+      payload: JSON.parse(row.payload_json) as Record<string, unknown>,
+    }));
+  } finally {
+    database.close();
+  }
+}
+
+function terminateRecordedProcess(pid: number): void {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Recorded Runtime PID is invalid.");
+  process.kill(pid, "SIGKILL");
 }

@@ -289,6 +289,12 @@ fn classify_error(
             false,
             "Provider inference outcome is unknown and requires reconciliation.",
         ),
+        ProviderInferenceServiceError::CancelledAfterDispatch => (
+            "RUN_CANCELLED",
+            RuntimeErrorClass::Cancelled,
+            false,
+            "Provider inference was cancelled after dispatch.",
+        ),
     }
 }
 
@@ -342,6 +348,7 @@ fn is_unknown_outcome(error: &ProviderInferenceServiceError) -> bool {
         error,
         ProviderInferenceServiceError::OutcomeUnknown
             | ProviderInferenceServiceError::FinalizationOutcomeUnknown
+            | ProviderInferenceServiceError::CancelledAfterDispatch
             | ProviderInferenceServiceError::DeliveryUnknown(_)
             | ProviderInferenceServiceError::ExistingTerminal(
                 ProviderAttemptRecovery::OutcomeUnknown

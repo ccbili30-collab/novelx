@@ -74,6 +74,11 @@
 - Background jobs carry only an owned in-memory Provider binding, Gateway handle, prepared dispatch, protocol identity and workspace path. Pre-accept failures return correlated `runtime.error`; post-dispatch finalization uncertainty returns reconciliation-required rather than a false failure.
 - Authentication, rate-limit and redirect failures now retain their actual HTTP status in the Provider error and attempt receipt; the audit path no longer rewrites 403 as 401 or 307 as 302.
 - Added real child-process loopback coverage for accepted-before-completed ordering, status during suspended HTTP, missing compilation/provider rejection, credential non-persistence and cancellation suppression of misleading completed output.
+- Runtime Actor jobs are now indexed by Run and attempt identity. Active inference cancellation persists `run.cancellation_requested` with the user reason and attempt IDs before signalling the cancellable Provider dispatch.
+- Provider HTTP dispatch selects against the cancellation signal. A cancelled sent request closes the client connection, persists `provider.outcome_unknown`, leaves the Run in `waiting_for_reconciliation` without violating terminal-state invariants and emits no completed event.
+- Startup recovery now persistently moves nonterminal Runs with recovered sent/unknown Provider attempts into `waiting_for_reconciliation`; it does not merely annotate an in-memory report.
+- Connected strict `run.reconcile` dispatch through the existing reconciliation service. Cancel decisions persist terminal Cancelled; duplicate-acknowledged retry decisions persist Retrying without automatically creating or dispatching another Provider attempt.
+- Recovery now recognizes `run.reconciled` by attempt identity, so a deliberately resolved historical OutcomeUnknown attempt cannot reopen reconciliation or invalidate a terminal Run after restart.
 - Added the nonterminal `waiting_for_reconciliation` Run state across the Rust protocol, persisted `run.waiting_for_reconciliation` aggregate event, Run snapshots, startup recovery classification and strict TypeScript protocol mirror.
 - Direct transition from `waiting_for_reconciliation` to committing or completed is rejected; the state survives restart and remains compatible with a later asynchronous reconciliation terminal event.
 - Provider inference now requires the Run to be `running`; a transport-uncertain finalization persists both `provider.outcome_unknown` and `run.waiting_for_reconciliation`, while restart recovery still conservatively identifies the gap if the process dies between those writes.
@@ -81,10 +86,10 @@
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 128 tests, including Context Compiler, real child-process loopback Provider inference, Provider Attempt replay, inference-service idempotency/uncertainty, authoritative persisted-input enforcement, exact Provider HTTP status auditing, strict asynchronous inference payload validation, nonblocking Runtime Actor scheduling and Provider-aware startup recovery.
+- Rust workspace tests pass: 132 tests, including Context Compiler, real child-process loopback Provider inference, Provider Attempt replay, inference-service idempotency/uncertainty, authoritative persisted-input enforcement, exact Provider HTTP status auditing, strict asynchronous inference and reconciliation validation, cancellable Runtime Actor scheduling and Provider-aware startup recovery.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 67 tests, including strict inference schemas, accepted/terminal correlation barriers and the real Electron-to-Rust workflow.
+- The full TypeScript/Vitest suite passes: 391 tests in 84 files, including strict inference/reconciliation schemas, Supervisor correlation state machines, kill/restart recovery barriers and the real Electron-to-Rust workflow.
 - `git diff --check` passes.
 - Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and explicit `handshake`, `runtime_control`, `runs_v1`, `contexts_v1` and `provider_inference_v1` capabilities.
 
@@ -95,9 +100,9 @@
 - `run.start`, `run.prepare`, `context.compile` and `provider.inference.start` are connected through the Rust command loop. No higher-level production Agent scheduler invokes the inference command yet.
 - The ToolCall state machine, event-backed aggregate and first Context Compiler service exist, but the real tool executor, full Provider inference pipeline, recovery execution policy and domain tools are not implemented.
 - The Provider Gateway, three-stage inference service, Runtime Actor command router and Electron Supervisor now support accepted plus terminal behavior. Progress events and process-restart handoff remain unimplemented.
-- Run cancellation suppresses completed output after HTTP returns, but does not yet cancel the in-flight HTTP request itself. The real response is finalized before the current Run state is checked.
-- `waiting_for_reconciliation` is now a durable nonterminal Run state and snapshot/recovery projection, but no `run.reconcile` command, decision service, Electron API or UI recovery action exists yet. Provider-attempt recovery can identify uncertainty, but resolution remains unimplemented.
-- Automatic retry scheduling, `Retry-After` parsing, cumulative delay/deadline enforcement, cancellation propagation, streaming responses and tool-call responses are not implemented.
+- Active Provider inference cancellation is connected through the Actor and closes the in-flight HTTP request. Cancellation of other future long-running job types is not yet implemented.
+- `run.reconcile` is available through Rust and the Electron Supervisor, but no end-user UI recovery action exists yet. `accept_verified_response` is not implemented, and a retry decision does not itself create or dispatch a new Provider attempt.
+- Automatic retry scheduling, `Retry-After` parsing, cumulative delay/deadline enforcement, streaming responses and tool-call responses are not implemented.
 - Persisted tool definitions are now authoritative inputs, but the Provider message contract still lacks full OpenAI-compatible `tool_calls` and `tool_call_id` fields; real model-directed file-tool execution remains incomplete and must not be presented as live.
 - Exact Provider/model tokenizer integrations are not implemented; the compiler currently uses only the disclosed conservative fallback estimator.
 - Context compaction, durable task-note replacement, source locator/range receipts and full truncation disclosure are not implemented. Current item inclusion/omission metadata is not a substitute for those capabilities.

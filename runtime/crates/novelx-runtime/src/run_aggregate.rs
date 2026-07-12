@@ -1,4 +1,4 @@
-use novelx_protocol::{RunPinnedIdentity, RuntimeError};
+use novelx_protocol::{RunPinnedIdentity, RunReconciliationDecision, RuntimeError};
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -120,6 +120,54 @@ impl RunAggregate {
         self.apply(journal, metadata, RunState::WaitingForReconciliation)
     }
 
+    pub fn request_cancellation_reconciliation(
+        &mut self,
+        journal: &mut EventJournal,
+        attempt_ids: &[String],
+        cancellation_reason: &str,
+        metadata: EventMetadata<'_>,
+    ) -> Result<(), RunAggregateError> {
+        if attempt_ids.is_empty() || cancellation_reason.trim().is_empty() {
+            return Err(RunAggregateError::InvalidPayload);
+        }
+        let events = journal.read_aggregate(&self.run_id, "run", &self.run_id, 0)?;
+        if let Some(existing) = events
+            .iter()
+            .find(|event| event.idempotency_key == metadata.idempotency_key)
+        {
+            if existing.event_type == "run.cancellation_requested"
+                && existing.payload.get("cancellationReason")
+                    == Some(&Value::String(cancellation_reason.to_owned()))
+                && existing.payload.get("attemptIds") == Some(&json!(attempt_ids))
+            {
+                return Ok(());
+            }
+            return Err(EventJournalError::IdempotencyConflict {
+                idempotency_key: metadata.idempotency_key.to_owned(),
+            }
+            .into());
+        }
+        let previous = self.machine.state();
+        let mut candidate = self.machine;
+        transition_machine(&mut candidate, RunState::WaitingForReconciliation)?;
+        let stored = journal.append(
+            cancellation_requested_event(
+                &self.run_id,
+                attempt_ids,
+                cancellation_reason,
+                metadata,
+                previous,
+            ),
+            self.last_run_sequence,
+            self.last_aggregate_sequence,
+        )?;
+        self.machine = candidate;
+        self.last_run_sequence = stored.run_sequence;
+        self.last_aggregate_sequence = stored.aggregate_sequence;
+        self.updated_at = stored.created_at;
+        Ok(())
+    }
+
     pub fn begin_commit(
         &mut self,
         journal: &mut EventJournal,
@@ -134,6 +182,76 @@ impl RunAggregate {
         metadata: EventMetadata<'_>,
     ) -> Result<(), RunAggregateError> {
         self.apply(journal, metadata, RunState::Retrying)
+    }
+
+    pub fn reconcile(
+        &mut self,
+        journal: &mut EventJournal,
+        attempt_id: &str,
+        decision: RunReconciliationDecision,
+        duplicate_execution_acknowledged: bool,
+        metadata: EventMetadata<'_>,
+    ) -> Result<(), RunAggregateError> {
+        if attempt_id.trim().is_empty() {
+            return Err(RunAggregateError::InvalidPayload);
+        }
+        let target = match decision {
+            RunReconciliationDecision::CancelRun => RunState::Cancelled,
+            RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate => {
+                RunState::Retrying
+            }
+        };
+        let existing = journal
+            .read_aggregate(&self.run_id, "run", &self.run_id, 0)?
+            .into_iter()
+            .find(|event| event.idempotency_key == metadata.idempotency_key);
+        if let Some(existing) = existing {
+            let payload = parse_reconciliation_payload(&existing.payload)?;
+            if existing.event_type == "run.reconciled"
+                && existing.event_version == 1
+                && payload.transition.current == target
+                && payload.attempt_id == attempt_id
+                && payload.decision == decision
+                && payload.duplicate_execution_acknowledged == duplicate_execution_acknowledged
+            {
+                return Ok(());
+            }
+            return Err(EventJournalError::IdempotencyConflict {
+                idempotency_key: metadata.idempotency_key.to_owned(),
+            }
+            .into());
+        }
+        if self.machine.state() != RunState::WaitingForReconciliation {
+            return Err(RunAggregateError::ReconciliationStateRequired);
+        }
+        let required_ack = matches!(
+            decision,
+            RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate
+        );
+        if duplicate_execution_acknowledged != required_ack {
+            return Err(RunAggregateError::InvalidPayload);
+        }
+        let previous = self.machine.state();
+        let mut candidate = self.machine;
+        transition_machine(&mut candidate, target)?;
+        let stored = journal.append(
+            reconciliation_event(
+                &self.run_id,
+                attempt_id,
+                decision,
+                duplicate_execution_acknowledged,
+                metadata,
+                previous,
+                target,
+            ),
+            self.last_run_sequence,
+            self.last_aggregate_sequence,
+        )?;
+        self.machine = candidate;
+        self.last_run_sequence = stored.run_sequence;
+        self.last_aggregate_sequence = stored.aggregate_sequence;
+        self.updated_at = stored.created_at;
+        Ok(())
     }
 
     pub fn block(
@@ -291,6 +409,8 @@ pub enum RunAggregateError {
     InvalidPinnedIdentity(&'static str),
     #[error("run event state does not match aggregate state")]
     StateMismatch,
+    #[error("run reconciliation requires waiting_for_reconciliation")]
+    ReconciliationStateRequired,
     #[error(transparent)]
     Transition(#[from] TransitionError),
     #[error(transparent)]
@@ -356,6 +476,30 @@ fn replay(
             aggregate.updated_at = event.created_at.clone();
             continue;
         }
+        if event.event_type == "run.reconciled" && event.event_version == 1 {
+            let payload = parse_reconciliation_payload(&event.payload)?;
+            if payload.transition.previous != Some(aggregate.machine.state())
+                || aggregate.machine.state() != RunState::WaitingForReconciliation
+            {
+                return Err(RunAggregateError::StateMismatch);
+            }
+            transition_machine(&mut aggregate.machine, payload.transition.current)?;
+            aggregate.last_aggregate_sequence = event.aggregate_sequence;
+            aggregate.updated_at = event.created_at.clone();
+            continue;
+        }
+        if event.event_type == "run.cancellation_requested" && event.event_version == 1 {
+            let payload = parse_cancellation_requested_payload(&event.payload)?;
+            if payload.transition.previous != Some(aggregate.machine.state())
+                || payload.transition.current != RunState::WaitingForReconciliation
+            {
+                return Err(RunAggregateError::StateMismatch);
+            }
+            transition_machine(&mut aggregate.machine, RunState::WaitingForReconciliation)?;
+            aggregate.last_aggregate_sequence = event.aggregate_sequence;
+            aggregate.updated_at = event.created_at.clone();
+            continue;
+        }
         if event.event_version != 1 {
             return Err(RunAggregateError::UnknownEventVersion {
                 event_type: event.event_type.clone(),
@@ -387,6 +531,92 @@ struct CreationPayload {
 struct FailurePayload {
     transition: TransitionPayload,
     terminal_error: RuntimeError,
+}
+
+struct ReconciliationPayload {
+    transition: TransitionPayload,
+    attempt_id: String,
+    decision: RunReconciliationDecision,
+    duplicate_execution_acknowledged: bool,
+}
+
+struct CancellationRequestedPayload {
+    transition: TransitionPayload,
+}
+
+fn parse_cancellation_requested_payload(
+    value: &Value,
+) -> Result<CancellationRequestedPayload, RunAggregateError> {
+    let object = value.as_object().ok_or(RunAggregateError::InvalidPayload)?;
+    if object.len() != 5 {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    let transition = parse_transition_fields(object)?;
+    if transition.current != RunState::WaitingForReconciliation {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    object
+        .get("cancellationReason")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(RunAggregateError::InvalidPayload)?;
+    let attempt_ids = object
+        .get("attemptIds")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or(RunAggregateError::InvalidPayload)?;
+    if attempt_ids
+        .iter()
+        .any(|value| value.as_str().is_none_or(|value| value.trim().is_empty()))
+    {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    Ok(CancellationRequestedPayload { transition })
+}
+
+fn parse_reconciliation_payload(value: &Value) -> Result<ReconciliationPayload, RunAggregateError> {
+    let object = value.as_object().ok_or(RunAggregateError::InvalidPayload)?;
+    if object.len() != 6 {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    let transition = parse_transition_fields(object)?;
+    let attempt_id = object
+        .get("attemptId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(RunAggregateError::InvalidPayload)?
+        .to_owned();
+    let decision = serde_json::from_value(
+        object
+            .get("decision")
+            .cloned()
+            .ok_or(RunAggregateError::InvalidPayload)?,
+    )
+    .map_err(|_| RunAggregateError::InvalidPayload)?;
+    let duplicate_execution_acknowledged = object
+        .get("duplicateExecutionAcknowledged")
+        .and_then(Value::as_bool)
+        .ok_or(RunAggregateError::InvalidPayload)?;
+    let expected = match decision {
+        RunReconciliationDecision::CancelRun if !duplicate_execution_acknowledged => {
+            RunState::Cancelled
+        }
+        RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate
+            if duplicate_execution_acknowledged =>
+        {
+            RunState::Retrying
+        }
+        _ => return Err(RunAggregateError::InvalidPayload),
+    };
+    if transition.current != expected {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    Ok(ReconciliationPayload {
+        transition,
+        attempt_id,
+        decision,
+        duplicate_execution_acknowledged,
+    })
 }
 
 fn parse_creation_payload(value: &Value) -> Result<CreationPayload, RunAggregateError> {
@@ -498,6 +728,55 @@ fn transition_event(
             "currentState": state_name(current),
             "reason": metadata.reason,
         }),
+        created_at: metadata.created_at.to_owned(),
+    }
+}
+
+fn cancellation_requested_event(
+    run_id: &str,
+    attempt_ids: &[String],
+    cancellation_reason: &str,
+    metadata: EventMetadata<'_>,
+    previous: RunState,
+) -> NewRuntimeEvent {
+    NewRuntimeEvent {
+        run_id: run_id.to_owned(),
+        aggregate_type: "run".to_owned(),
+        aggregate_id: run_id.to_owned(),
+        message_id: metadata.message_id.to_owned(),
+        idempotency_key: metadata.idempotency_key.to_owned(),
+        event_type: "run.cancellation_requested".to_owned(),
+        event_version: 1,
+        payload: json!({
+            "previousState": state_name(previous),
+            "currentState": "waiting_for_reconciliation",
+            "reason": metadata.reason,
+            "cancellationReason": cancellation_reason,
+            "attemptIds": attempt_ids,
+        }),
+        created_at: metadata.created_at.to_owned(),
+    }
+}
+
+fn reconciliation_event(
+    run_id: &str,
+    attempt_id: &str,
+    decision: RunReconciliationDecision,
+    duplicate_execution_acknowledged: bool,
+    metadata: EventMetadata<'_>,
+    previous: RunState,
+    current: RunState,
+) -> NewRuntimeEvent {
+    NewRuntimeEvent {
+        run_id: run_id.to_owned(),
+        aggregate_type: "run".to_owned(),
+        aggregate_id: run_id.to_owned(),
+        message_id: metadata.message_id.to_owned(),
+        idempotency_key: metadata.idempotency_key.to_owned(),
+        event_type: "run.reconciled".to_owned(),
+        event_version: 1,
+        payload: json!({ "previousState": state_name(previous), "currentState": state_name(current), "reason": metadata.reason,
+            "attemptId": attempt_id, "decision": decision, "duplicateExecutionAcknowledged": duplicate_execution_acknowledged }),
         created_at: metadata.created_at.to_owned(),
     }
 }
@@ -685,6 +964,7 @@ fn state_for_event(value: &str) -> Result<RunState, RunAggregateError> {
         "run.running" => Ok(RunState::Running),
         "run.waiting_for_approval" => Ok(RunState::WaitingForApproval),
         "run.waiting_for_reconciliation" => Ok(RunState::WaitingForReconciliation),
+        "run.cancellation_requested" => Ok(RunState::WaitingForReconciliation),
         "run.committing" => Ok(RunState::Committing),
         "run.retrying" => Ok(RunState::Retrying),
         "run.blocked" => Ok(RunState::Blocked),

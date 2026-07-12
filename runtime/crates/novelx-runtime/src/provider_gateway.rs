@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::sync::watch;
 use url::Url;
 use uuid::Uuid;
 
@@ -364,6 +365,29 @@ impl ProviderGateway {
         tokio::time::timeout(deadline, self.infer_within_deadline(provider, prepared))
             .await
             .map_err(|_| ProviderGatewayError::Timeout)?
+    }
+
+    pub async fn infer_prepared_cancellable(
+        &self,
+        provider: &BoundProvider,
+        prepared: PreparedProviderInference,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
+        if *cancellation.borrow() {
+            return Err(ProviderGatewayError::Cancelled);
+        }
+        let inference = self.infer_prepared(provider, prepared);
+        tokio::pin!(inference);
+        tokio::select! {
+            result = &mut inference => result,
+            changed = cancellation.changed() => {
+                if changed.is_ok() && *cancellation.borrow() {
+                    Err(ProviderGatewayError::Cancelled)
+                } else {
+                    inference.await
+                }
+            }
+        }
     }
 
     async fn infer_within_deadline(
@@ -820,6 +844,8 @@ pub enum ProviderGatewayError {
     RateLimited(u16),
     #[error("Provider request timed out")]
     Timeout,
+    #[error("Provider request was cancelled after dispatch")]
+    Cancelled,
     #[error("Provider connection failed")]
     ConnectionFailed,
     #[error("Provider request failed")]

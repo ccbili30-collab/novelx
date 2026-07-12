@@ -240,6 +240,68 @@ pub struct RunPrepare {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RunReconciliationDecision {
+    CancelRun,
+    RetryAsNewAttemptAcknowledgingDuplicate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunReconcile {
+    pub reconciliation_idempotency_key: String,
+    pub attempt_id: Uuid,
+    pub decision: RunReconciliationDecision,
+    pub duplicate_execution_acknowledged: bool,
+}
+
+impl RunReconcile {
+    pub fn validate(&self) -> Result<(), RunReconcileValidationError> {
+        if self.reconciliation_idempotency_key.trim().is_empty() {
+            return Err(RunReconcileValidationError::EmptyIdempotencyKey);
+        }
+        let required = matches!(
+            self.decision,
+            RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate
+        );
+        if self.duplicate_execution_acknowledged != required {
+            return Err(RunReconcileValidationError::DuplicateAcknowledgementMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunReconcileValidationError {
+    EmptyIdempotencyKey,
+    DuplicateAcknowledgementMismatch,
+}
+
+impl std::fmt::Display for RunReconcileValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyIdempotencyKey => {
+                write!(formatter, "reconciliationIdempotencyKey must not be empty")
+            }
+            Self::DuplicateAcknowledgementMismatch => write!(
+                formatter,
+                "duplicateExecutionAcknowledged must be true only for retry_as_new_attempt_acknowledging_duplicate"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RunReconcileValidationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunReconciliationReceipt {
+    pub attempt_id: Uuid,
+    pub decision: RunReconciliationDecision,
+    pub state: RunLifecycleState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunLifecycleState {
     Created,
     Preparing,
@@ -1263,6 +1325,30 @@ mod tests {
         assert_eq!(
             reconciliation.validate(),
             Err(ProviderInferenceValidationError::ReconciliationCannotBeRetryable)
+        );
+    }
+
+    #[test]
+    fn run_reconciliation_requires_explicit_duplicate_acknowledgement() {
+        let retry = RunReconcile {
+            reconciliation_idempotency_key: "reconcile-1".to_owned(),
+            attempt_id: Uuid::new_v4(),
+            decision: RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate,
+            duplicate_execution_acknowledged: true,
+        };
+        assert_eq!(retry.validate(), Ok(()));
+        let encoded = serde_json::to_value(&retry).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RunReconcile>(encoded).unwrap(),
+            retry
+        );
+        let invalid = RunReconcile {
+            duplicate_execution_acknowledged: false,
+            ..retry
+        };
+        assert_eq!(
+            invalid.validate(),
+            Err(RunReconcileValidationError::DuplicateAcknowledgementMismatch)
         );
     }
 }

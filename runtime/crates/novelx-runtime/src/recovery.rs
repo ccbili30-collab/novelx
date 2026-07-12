@@ -1,10 +1,12 @@
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use uuid::Uuid;
 
 use crate::event_journal::{EventJournal, EventJournalError};
 use crate::provider_attempt::{
     ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptRecovery, ProviderAttemptState,
 };
-use crate::run_aggregate::{RunAggregate, RunAggregateError};
+use crate::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use crate::run_state::RunState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +46,56 @@ pub struct RecoveredProviderAttempt {
 pub struct RecoveryCoordinator;
 
 impl RecoveryCoordinator {
+    pub fn recover_and_reconcile(
+        journal: &mut EventJournal,
+    ) -> Result<RecoveryReport, RecoveryError> {
+        let attempts = journal.list_aggregates("provider_attempt")?;
+        for address in attempts {
+            let attempt =
+                ProviderAttemptAggregate::recover(journal, &address.run_id, &address.aggregate_id)
+                    .map_err(|source| RecoveryError::ProviderAttemptRecoveryFailed {
+                        run_id: address.run_id.clone(),
+                        attempt_id: address.aggregate_id.clone(),
+                        source,
+                    })?;
+            if !matches!(attempt.recovery(), ProviderAttemptRecovery::OutcomeUnknown) {
+                continue;
+            }
+            if attempt_was_reconciled(journal, &address.run_id, &address.aggregate_id)? {
+                continue;
+            }
+            let mut run = RunAggregate::recover(journal, &address.run_id).map_err(|source| {
+                RecoveryError::RunRecoveryFailed {
+                    run_id: address.run_id.clone(),
+                    source,
+                }
+            })?;
+            if run.state() == RunState::WaitingForReconciliation {
+                continue;
+            }
+            if !matches!(run.state(), RunState::Running | RunState::Retrying) {
+                return Err(RecoveryError::TerminalRunHasUnknownProviderOutcome {
+                    run_id: address.run_id,
+                    attempt_id: address.aggregate_id,
+                    state: run.state(),
+                });
+            }
+            let message_id = Uuid::new_v4().to_string();
+            let idempotency_key = format!("recovery:{}:run-reconciliation", address.aggregate_id);
+            let created_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+            run.wait_for_reconciliation(
+                journal,
+                EventMetadata {
+                    message_id: &message_id,
+                    idempotency_key: &idempotency_key,
+                    created_at: &created_at,
+                    reason: Some("recovered_provider_outcome_unknown"),
+                },
+            )?;
+        }
+        Self::recover(journal)
+    }
+
     pub fn recover(journal: &EventJournal) -> Result<RecoveryReport, RecoveryError> {
         let addresses = journal.list_aggregates("run")?;
         let mut runs = Vec::with_capacity(addresses.len());
@@ -96,6 +148,9 @@ impl RecoveryCoordinator {
             .iter()
             .filter(|attempt| matches!(attempt.recovery, ProviderAttemptRecovery::OutcomeUnknown))
         {
+            if attempt_was_reconciled(journal, &attempt.run_id, &attempt.attempt_id)? {
+                continue;
+            }
             let run = runs
                 .iter_mut()
                 .find(|run| run.run_id == attempt.run_id)
@@ -123,6 +178,25 @@ impl RecoveryCoordinator {
             recovered_nonterminal_count,
         })
     }
+}
+
+fn attempt_was_reconciled(
+    journal: &EventJournal,
+    run_id: &str,
+    attempt_id: &str,
+) -> Result<bool, EventJournalError> {
+    Ok(journal
+        .read_aggregate(run_id, "run", run_id, 0)?
+        .into_iter()
+        .any(|event| {
+            event.event_type == "run.reconciled"
+                && event.event_version == 1
+                && event
+                    .payload
+                    .get("attemptId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(attempt_id)
+        }))
 }
 
 #[derive(Debug, Error)]
@@ -157,6 +231,10 @@ pub enum RecoveryError {
     },
     #[error(transparent)]
     Journal(#[from] EventJournalError),
+    #[error(transparent)]
+    Run(#[from] RunAggregateError),
+    #[error(transparent)]
+    Time(#[from] time::error::Format),
 }
 
 const fn classify(state: RunState) -> RecoveryClassification {

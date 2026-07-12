@@ -177,6 +177,35 @@ describe("RuntimeV2ProcessSupervisor", () => {
     expect(events).toEqual(["provider.inference.completed"]);
   });
 
+  it("reconciles a Run through a strict receipt and refreshed snapshot", async () => {
+    const supervisor = createSupervisor(createFixture("reconcile-success"));
+    await supervisor.start();
+    const result = await supervisor.reconcileRun(INFERENCE_RUN_ID, {
+      reconciliationIdempotencyKey: "reconcile-1",
+      attemptId: INFERENCE_ATTEMPT_ID,
+      decision: "retry_as_new_attempt_acknowledging_duplicate",
+      duplicateExecutionAcknowledged: true,
+    });
+    expect(result.receipt).toEqual({
+      attemptId: INFERENCE_ATTEMPT_ID,
+      decision: "retry_as_new_attempt_acknowledging_duplicate",
+      state: "retrying",
+    });
+    expect(result.snapshot).toMatchObject({ runId: INFERENCE_RUN_ID, state: "retrying" });
+  });
+
+  it.each([
+    ["reconcile-rejected", "RUNTIME_V2_RUN_REJECTED"],
+    ["reconcile-identity-mismatch", "RUNTIME_V2_PROTOCOL_INVALID"],
+  ] as const)("fails closed for %s", async (scenario, code) => {
+    const supervisor = createSupervisor(createFixture(scenario));
+    await supervisor.start();
+    await expect(supervisor.reconcileRun(INFERENCE_RUN_ID, {
+      reconciliationIdempotencyKey: "reconcile-1", attemptId: INFERENCE_ATTEMPT_ID,
+      decision: "retry_as_new_attempt_acknowledging_duplicate", duplicateExecutionAcknowledged: true,
+    })).rejects.toMatchObject({ code });
+  });
+
   it.each(["inference-terminal-identity-mismatch", "inference-terminal-duplicate"] as const)(
     "fails closed for %s",
     async (scenario) => {
@@ -347,6 +376,18 @@ const envelope = (version, name, payload, correlationId = null, sequence = 1, me
   protocolVersion: version, messageId: randomUUID(), messageType, name, sentAt: now,
   correlationId, runId: null, sequence, payload,
 });
+const pinnedIdentity = () => {
+  const policy = (id, digit) => ({ id, version: "1.0.0", sha256: digit.repeat(64) });
+  return {
+    projectId: "project-1", workspaceId: "workspace-1", sessionId: "session-1", sessionBranchId: "branch-1",
+    userMessageId: "message-1", projectBranchId: "project-branch-1", goal: null, plan: null,
+    provider: { profileId: "profile-1", providerId: "deepseek", modelId: "deepseek-chat", configSha256: "a".repeat(64) },
+    promptBundle: policy("prompt", "b"), agentProfile: policy("agent", "c"), toolPolicy: policy("tool", "d"),
+    contextPolicy: policy("context", "e"), runtimePolicy: policy("runtime", "f"), runtimeContractVersion: "1.0.0",
+    mode: "assist", sourceCheckpointId: "checkpoint-1", scopeResourceIds: ["resource-1"],
+    resourceScopeSha256: "1".repeat(64), userInputSha256: "2".repeat(64),
+  };
+};
 if (scenario === "invalid-json") { process.stdout.write("not-json\n"); return; }
 if (scenario === "stderr-exit") { process.stderr.write("controlled stderr\n"); process.exit(7); }
 if (scenario === "early-exit") process.exit(6);
@@ -406,6 +447,35 @@ input.on("line", (line) => {
         duplicateEnvelope.runId = command.runId;
         process.stdout.write(JSON.stringify(duplicateEnvelope) + "\n");
       }
+      return;
+    }
+    if (command.name === "run.reconcile" && scenario.startsWith("reconcile-")) {
+      if (scenario === "reconcile-rejected") {
+        const rejected = envelope(1, "run.rejected", {
+          code: "RUN_RECONCILIATION_REJECTED", class: "validation", retryable: false,
+          publicMessage: "Run reconciliation was rejected.", stage: "run.reconcile", attempt: 0, diagnosticId: randomUUID(),
+        }, command.messageId, runtimeSequence, "response");
+        rejected.runId = command.runId;
+        process.stdout.write(JSON.stringify(rejected) + "\n");
+        return;
+      }
+      const receipt = {
+        attemptId: scenario === "reconcile-identity-mismatch" ? randomUUID() : command.payload.attemptId,
+        decision: command.payload.decision, state: "retrying",
+      };
+      const response = envelope(1, "run.reconciled", receipt, command.messageId, runtimeSequence, "response");
+      response.runId = command.runId;
+      process.stdout.write(JSON.stringify(response) + "\n");
+      return;
+    }
+    if (command.name === "run.get" && scenario === "reconcile-success") {
+      const snapshot = {
+        runId: command.runId, pinnedIdentity: pinnedIdentity(), state: "retrying", recoveryClassification: "resumable",
+        runSequence: 5, aggregateSequence: 4, createdAt: now, updatedAt: now, terminalError: null,
+      };
+      const response = envelope(1, "run.snapshot", snapshot, command.messageId, runtimeSequence, "response");
+      response.runId = command.runId;
+      process.stdout.write(JSON.stringify(response) + "\n");
       return;
     }
     if (command.name === "runtime.status.get" && scenario === "unknown-event-on-status") {

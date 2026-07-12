@@ -18,6 +18,7 @@ import {
   parseRuntimeV2ContextRejectedEnvelope,
   parseRuntimeV2ReadyEnvelope,
   parseRuntimeV2RunRejectedEnvelope,
+  parseRuntimeV2RunReconciledEnvelope,
   parseRuntimeV2RunSnapshotEnvelope,
   parseRuntimeV2StatusEnvelope,
   parseRuntimeV2StoppedEnvelope,
@@ -27,6 +28,7 @@ import {
   runtimeV2ProviderInferenceStartEnvelopeSchema,
   runtimeV2RunGetEnvelopeSchema,
   runtimeV2RunCancelEnvelopeSchema,
+  runtimeV2RunReconcileEnvelopeSchema,
   runtimeV2RunPrepareEnvelopeSchema,
   runtimeV2RunStartEnvelopeSchema,
   runtimeV2ShutdownEnvelopeSchema,
@@ -47,6 +49,8 @@ import {
   type RuntimeV2ContextCompilationReceipt,
   type RuntimeV2RunSnapshotPayload,
   type RuntimeV2RunCancelPayload,
+  type RuntimeV2RunReconcilePayload,
+  type RuntimeV2RunReconciliationReceipt,
   type RuntimeV2RunPreparePayload,
   type RuntimeV2RunStartPayload,
   type RuntimeV2StatusPayload,
@@ -225,6 +229,23 @@ export class RuntimeV2ProcessSupervisor {
     return parseRuntimeV2RunSnapshotEnvelope(response).payload;
   }
 
+  async reconcileRun(
+    runId: string,
+    payload: RuntimeV2RunReconcilePayload,
+  ): Promise<{ receipt: RuntimeV2RunReconciliationReceipt; snapshot: RuntimeV2RunSnapshotPayload }> {
+    const response = await this.#sendCommand(
+      "run.reconcile",
+      "run.reconciled",
+      runId,
+      payload,
+      this.#options.commandTimeoutMs,
+      undefined,
+      { runId, payload },
+    );
+    const receipt = parseRuntimeV2RunReconciledEnvelope(response).payload;
+    return { receipt, snapshot: await this.getRun(runId) };
+  }
+
   async bindProvider(
     config: RuntimeV2ProviderConfig,
     configSha256: string,
@@ -391,6 +412,8 @@ export class RuntimeV2ProcessSupervisor {
             ? parseRuntimeV2ErrorEnvelope(value)
             : name === "run.snapshot"
               ? parseRuntimeV2RunSnapshotEnvelope(value)
+              : name === "run.reconciled"
+                ? parseRuntimeV2RunReconciledEnvelope(value)
               : name === "run.rejected"
                 ? parseRuntimeV2RunRejectedEnvelope(value)
                 : name === "context.compilation"
@@ -460,6 +483,14 @@ export class RuntimeV2ProcessSupervisor {
         if (!pending.inference) throw new Error("Provider inference acceptance has no pending inference identity.");
         assertInferenceIdentity(response.payload, pending.inference);
         this.#activeInferences.set(correlationId, response.payload);
+      }
+      if (response.name === "run.reconciled") {
+        if (!pending.reconciliation) throw new Error("Run reconciliation response has no pending decision identity.");
+        if (response.runId !== pending.reconciliation.runId
+          || response.payload.attemptId !== pending.reconciliation.payload.attemptId
+          || response.payload.decision !== pending.reconciliation.payload.decision) {
+          throw new Error("Run reconciliation receipt does not match the pending decision.");
+        }
       }
       this.#pending.delete(correlationId);
       clearTimeout(pending.timer);
@@ -533,12 +564,13 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   #sendCommand(
-    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "context.compile" | "provider.inference.start",
-    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "context.compilation" | "provider.inference.accepted",
+    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "run.reconcile" | "context.compile" | "provider.inference.start",
+    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "context.compilation" | "provider.inference.accepted",
     runId: string | null,
     payload: object,
     timeoutMs = this.#options.commandTimeoutMs,
     inference?: PendingProviderInference,
+    reconciliation?: PendingRunReconciliation,
   ): Promise<unknown> {
     const child = this.#child;
     if (!child || !this.#ready || child.stdin.destroyed) {
@@ -567,8 +599,10 @@ export class RuntimeV2ProcessSupervisor {
             ? runtimeV2RunGetEnvelopeSchema.parse(base)
             : name === "run.prepare"
               ? runtimeV2RunPrepareEnvelopeSchema.parse(base)
-              : name === "run.cancel"
+            : name === "run.cancel"
               ? runtimeV2RunCancelEnvelopeSchema.parse(base)
+              : name === "run.reconcile"
+                ? runtimeV2RunReconcileEnvelopeSchema.parse(base)
                 : name === "context.compile"
                   ? runtimeV2ContextCompileEnvelopeSchema.parse(base)
                   : runtimeV2ProviderInferenceStartEnvelopeSchema.parse(base);
@@ -583,7 +617,7 @@ export class RuntimeV2ProcessSupervisor {
         reject(error);
         this.#failRuntime(error);
       }, timeoutMs);
-      this.#pending.set(command.messageId, { expectedName, resolve, reject, timer, inference });
+      this.#pending.set(command.messageId, { expectedName, resolve, reject, timer, inference, reconciliation });
       child.stdin.write(`${JSON.stringify(command)}\n`, "utf8", (error) => {
         if (!error) return;
         const pending = this.#pending.get(command.messageId);
@@ -629,16 +663,22 @@ export class RuntimeV2ProcessSupervisor {
 }
 
 interface PendingCommand {
-  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "context.compilation" | "provider.bound" | "provider.inference.accepted";
+  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "context.compilation" | "provider.bound" | "provider.inference.accepted";
   resolve(value: unknown): void;
   reject(error: RuntimeV2SupervisorError): void;
   timer: NodeJS.Timeout;
   inference?: PendingProviderInference;
+  reconciliation?: PendingRunReconciliation;
 }
 
 interface PendingProviderInference {
   runId: string;
   payload: RuntimeV2ProviderInferenceStartPayload;
+}
+
+interface PendingRunReconciliation {
+  runId: string;
+  payload: RuntimeV2RunReconcilePayload;
 }
 
 type ActiveProviderInference = RuntimeV2ProviderInferenceAcceptedEnvelope["payload"];

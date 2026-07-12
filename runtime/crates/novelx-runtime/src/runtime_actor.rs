@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -5,7 +6,7 @@ use novelx_protocol::{Envelope, MAX_SAFE_SEQUENCE, MessageType, PROTOCOL_VERSION
 use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -13,8 +14,15 @@ pub type RuntimeTask =
     Pin<Box<dyn Future<Output = Result<RuntimeOutputDraft, String>> + Send + 'static>>;
 
 struct RuntimeTaskCompletion {
+    key: RuntimeTaskKey,
     result: Result<RuntimeOutputDraft, String>,
     failure: RuntimeOutputDraft,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RuntimeTaskKey {
+    pub run_id: Uuid,
+    pub attempt_id: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +40,7 @@ pub struct RuntimeActor<W> {
     next_sequence: u64,
     commands: mpsc::Receiver<RuntimeActorCommand>,
     tasks: JoinSet<RuntimeTaskCompletion>,
+    cancellations: HashMap<RuntimeTaskKey, watch::Sender<bool>>,
 }
 
 #[derive(Clone)]
@@ -42,9 +51,16 @@ pub struct RuntimeActorHandle {
 enum RuntimeActorCommand {
     Emit(RuntimeOutputDraft),
     StartTask {
+        key: RuntimeTaskKey,
         accepted: RuntimeOutputDraft,
         failure: RuntimeOutputDraft,
+        cancellation: watch::Sender<bool>,
         task: RuntimeTask,
+    },
+    CancelRun(Uuid),
+    ActiveRunTasks {
+        run_id: Uuid,
+        reply: oneshot::Sender<Vec<RuntimeTaskKey>>,
     },
     Shutdown(RuntimeOutputDraft),
 }
@@ -65,6 +81,7 @@ where
                 next_sequence: last_sequence.checked_add(1).unwrap_or(0),
                 commands,
                 tasks: JoinSet::new(),
+                cancellations: HashMap::new(),
             },
             RuntimeActorHandle { commands: sender },
         )
@@ -77,14 +94,31 @@ where
                 command = self.commands.recv() => {
                     match command {
                         Some(RuntimeActorCommand::Emit(output)) => self.write(output).await?,
-                        Some(RuntimeActorCommand::StartTask { accepted, failure, task }) => {
+                        Some(RuntimeActorCommand::StartTask { key, accepted, failure, cancellation, task }) => {
                             self.write(accepted).await?;
+                            self.cancellations.insert(key, cancellation);
                             self.tasks.spawn(async move {
                                 RuntimeTaskCompletion {
+                                    key,
                                     result: task.await,
                                     failure,
                                 }
                             });
+                        }
+                        Some(RuntimeActorCommand::CancelRun(run_id)) => {
+                            for (key, cancellation) in &self.cancellations {
+                                if key.run_id == run_id {
+                                    let _ = cancellation.send(true);
+                                }
+                            }
+                        }
+                        Some(RuntimeActorCommand::ActiveRunTasks { run_id, reply }) => {
+                            let tasks = self.cancellations
+                                .keys()
+                                .filter(|key| key.run_id == run_id)
+                                .copied()
+                                .collect();
+                            let _ = reply.send(tasks);
                         }
                         Some(RuntimeActorCommand::Shutdown(output)) => {
                             self.write(output).await?;
@@ -101,6 +135,7 @@ where
                     let completion = completed
                         .ok_or(RuntimeActorError::TaskSetEmpty)?
                         .map_err(RuntimeActorError::TaskJoin)?;
+                    self.cancellations.remove(&completion.key);
                     let output = completion.result.unwrap_or(completion.failure);
                     self.write(output).await?;
                 }
@@ -145,18 +180,41 @@ impl RuntimeActorHandle {
 
     pub async fn start_task(
         &self,
+        key: RuntimeTaskKey,
         accepted: RuntimeOutputDraft,
         failure: RuntimeOutputDraft,
-        task: RuntimeTask,
+        task: impl FnOnce(watch::Receiver<bool>) -> RuntimeTask,
     ) -> Result<(), RuntimeActorError> {
+        let (cancellation, receiver) = watch::channel(false);
         self.commands
             .send(RuntimeActorCommand::StartTask {
+                key,
                 accepted,
                 failure,
-                task,
+                cancellation,
+                task: task(receiver),
             })
             .await
             .map_err(|_| RuntimeActorError::Closed)
+    }
+
+    pub async fn cancel_run(&self, run_id: Uuid) -> Result<(), RuntimeActorError> {
+        self.commands
+            .send(RuntimeActorCommand::CancelRun(run_id))
+            .await
+            .map_err(|_| RuntimeActorError::Closed)
+    }
+
+    pub async fn active_run_tasks(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<RuntimeTaskKey>, RuntimeActorError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RuntimeActorCommand::ActiveRunTasks { run_id, reply })
+            .await
+            .map_err(|_| RuntimeActorError::Closed)?;
+        response.await.map_err(|_| RuntimeActorError::Closed)
     }
 
     pub async fn shutdown(&self, output: RuntimeOutputDraft) -> Result<(), RuntimeActorError> {

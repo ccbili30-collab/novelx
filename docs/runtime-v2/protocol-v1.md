@@ -330,6 +330,12 @@ Rust consumers must call the payload's public `validate()` after strict deserial
 
 The Rust Runtime provides an independent `ProviderInferenceProtocolMapper` that converts a `ProviderInferenceExecution` plus an accepted outcome or service error into the corresponding payload and `RuntimeOutputDraft`. It preserves the original command correlation and inference identity, recomputes output text hash and UTF-8 byte length, rejects mismatched Context/model identities, and maps service error variants explicitly. Known 429 and 5xx responses carry the same retryable failure declaration as the attempt ledger; this declaration does not bypass retry budget, deadline, cancellation or reconciliation policy.
 
+### Run reconciliation
+
+`run.reconcile` is a strict Run-scoped command for resolving an `outcome_unknown` Provider attempt while the Run is `waiting_for_reconciliation`. The initial contract supports only `cancel_run` and `retry_as_new_attempt_acknowledging_duplicate`. Retry requires `duplicateExecutionAcknowledged: true`; cancellation requires it to be false. `accept_verified_response` is intentionally absent because no trusted external Provider receipt source exists yet.
+
+The referenced attempt must belong to the same Run and recover as `OutcomeUnknown`. A successful decision is stored as one idempotent `run.reconciled` Run-aggregate event and returns the correlated `run.reconciled` receipt. The event transitions to `cancelled` or `retrying` and is replayed during recovery; changing a decision under the same idempotency key is rejected. The Electron Supervisor exposes `reconcileRun`, validates the correlated receipt identity and then fetches the updated Run snapshot. Rust `main.rs` dispatch is connected; retry does not automatically create or send a new attempt.
+
 The Rust Runtime now accepts this exchange after `runtime.ready`. It validates and persists preparation before `provider.inference.accepted`, dispatches through the single Runtime Actor writer, reopens the workspace journal for finalization and emits exactly one mapped terminal event. Electron/UI orchestration remains separate work.
 
 ## 8. Error Contract

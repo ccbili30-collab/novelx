@@ -9,9 +9,9 @@ use std::sync::mpsc;
 use novelx_protocol::{
     ContextBudgetAllocation, ContextBudgetCategory, ContextCompilationReceipt, ContextDisclosure,
     ContextRepresentation, Envelope, MessageType, PROTOCOL_VERSION, ProviderInferenceAccepted,
-    ProviderInferenceCompleted, ProviderInferenceFailed, ProviderInferenceStart, RunCancel,
-    RunLifecycleState, RunSnapshot, RuntimeApplicationIdentity, RuntimeError, RuntimeInitialize,
-    RuntimeStatus, TokenizerIdentity, TokenizerKind,
+    ProviderInferenceCompleted, ProviderInferenceStart, RunCancel, RunLifecycleState, RunReconcile,
+    RunReconciliationDecision, RunReconciliationReceipt, RunSnapshot, RuntimeApplicationIdentity,
+    RuntimeError, RuntimeInitialize, RuntimeStatus, TokenizerIdentity, TokenizerKind,
 };
 use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
 use novelx_runtime::provider_gateway::{
@@ -30,7 +30,7 @@ const SECRET: &str = "runtime-inference-loopback-secret";
 #[test]
 fn real_provider_inference_accepts_before_completion_and_does_not_block_status() {
     let fixture = Fixture::new();
-    let (config, config_hash, release, request_received, server) = loopback_provider();
+    let (config, config_hash, release, request_received, _, server) = loopback_provider();
     let (run_id, receipt) = fixture.seed(&config, &config_hash);
     let (mut child, mut output) = spawn_runtime();
 
@@ -205,7 +205,8 @@ fn missing_in_memory_provider_binding_is_rejected_without_stopping_runtime() {
 #[test]
 fn cancelling_a_run_while_http_is_pending_prevents_completed_output() {
     let fixture = Fixture::new();
-    let (config, config_hash, release, request_received, server) = loopback_provider();
+    let (config, config_hash, release, request_received, connection_closed, server) =
+        loopback_provider();
     let (run_id, receipt) = fixture.seed(&config, &config_hash);
     let (mut child, mut output) = spawn_runtime();
     write_envelope(&mut child, &initialize_envelope(&fixture.path));
@@ -240,17 +241,72 @@ fn cancelling_a_run_while_http_is_pending_prevents_completed_output() {
     write_envelope(&mut child, &cancel);
     let cancelled: RunSnapshot =
         serde_json::from_value(read_envelope(&mut output).payload).unwrap();
-    assert_eq!(cancelled.state, RunLifecycleState::Cancelled);
+    assert_eq!(cancelled.state, RunLifecycleState::WaitingForReconciliation);
     release.send(()).unwrap();
     let terminal = read_envelope(&mut output);
-    assert_eq!(terminal.name, "provider.inference.failed");
-    let failed: ProviderInferenceFailed = serde_json::from_value(terminal.payload).unwrap();
-    assert_eq!(failed.error.code, "RUN_CANCELLED");
-    let shutdown = command("runtime.shutdown", 5, &serde_json::json!({}));
+    assert_eq!(terminal.name, "provider.inference.reconciliation_required");
+    assert!(connection_closed.recv().unwrap());
+    let mut reconcile = command(
+        "run.reconcile",
+        5,
+        &RunReconcile {
+            reconciliation_idempotency_key: "reconcile-cancelled-inference".to_owned(),
+            attempt_id: payload.attempt_id,
+            decision: RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate,
+            duplicate_execution_acknowledged: true,
+        },
+    );
+    reconcile.run_id = Some(run_id);
+    write_envelope(&mut child, &reconcile);
+    let reconciled = read_envelope(&mut output);
+    assert_eq!(reconciled.name, "run.reconciled");
+    let receipt: RunReconciliationReceipt = serde_json::from_value(reconciled.payload).unwrap();
+    assert_eq!(receipt.state, RunLifecycleState::Retrying);
+    let mut get = command("run.get", 6, &serde_json::json!({}));
+    get.run_id = Some(run_id);
+    write_envelope(&mut child, &get);
+    let retried: RunSnapshot = serde_json::from_value(read_envelope(&mut output).payload).unwrap();
+    assert_eq!(retried.state, RunLifecycleState::Retrying);
+    let shutdown = command("runtime.shutdown", 7, &serde_json::json!({}));
     write_envelope(&mut child, &shutdown);
     assert_eq!(read_envelope(&mut output).name, "runtime.stopped");
     assert!(child.wait().unwrap().success());
     server.join().unwrap();
+    let journal = EventJournal::open(&fixture.path).unwrap();
+    assert_eq!(
+        RunAggregate::recover(&journal, &run_id.to_string())
+            .unwrap()
+            .state(),
+        RunState::Retrying
+    );
+    assert_eq!(
+        journal
+            .read_aggregate(
+                &run_id.to_string(),
+                "provider_attempt",
+                &payload.attempt_id.to_string(),
+                0,
+            )
+            .unwrap()
+            .last()
+            .unwrap()
+            .event_type,
+        "provider.outcome_unknown"
+    );
+    let cancellation_event = journal
+        .read_aggregate(&run_id.to_string(), "run", &run_id.to_string(), 0)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == "run.cancellation_requested")
+        .unwrap();
+    assert_eq!(
+        cancellation_event.payload["cancellationReason"],
+        "user requested cancellation"
+    );
+    assert_eq!(
+        cancellation_event.payload["attemptIds"][0],
+        payload.attempt_id.to_string()
+    );
 }
 
 fn bind_provider(
@@ -282,12 +338,14 @@ fn loopback_provider() -> (
     String,
     mpsc::Sender<()>,
     mpsc::Receiver<()>,
+    mpsc::Receiver<bool>,
     std::thread::JoinHandle<()>,
 ) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (release_tx, release_rx) = mpsc::channel();
     let (received_tx, received_rx) = mpsc::channel();
+    let (closed_tx, closed_rx) = mpsc::channel();
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
         let mut request = [0_u8; 65_536];
@@ -297,6 +355,23 @@ fn loopback_provider() -> (
         assert!(request.contains(&format!("Bearer {SECRET}")));
         received_tx.send(()).unwrap();
         release_rx.recv().unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_millis(300)))
+            .unwrap();
+        let mut probe = [0_u8; 1];
+        match socket.read(&mut probe) {
+            Ok(0) => {
+                let _ = closed_tx.send(true);
+                return;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Ok(_) | Err(_) => {}
+        }
+        let _ = closed_tx.send(false);
         let body = r#"{"id":"response-1","model":"deepseek-chat","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"银湾继续向前。"}}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -306,7 +381,7 @@ fn loopback_provider() -> (
     });
     let config = test_provider_config(format!("http://{address}/v1"));
     let hash = provider_config_sha256(&config).unwrap();
-    (config, hash, release_tx, received_rx, server)
+    (config, hash, release_tx, received_rx, closed_rx, server)
 }
 
 fn test_provider_config(base_url: String) -> ProviderConfig {

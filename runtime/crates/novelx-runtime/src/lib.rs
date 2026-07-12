@@ -11,6 +11,7 @@ pub mod provider_inference_service;
 pub mod recovery;
 pub mod run_aggregate;
 pub mod run_command_service;
+pub mod run_reconciliation_service;
 pub mod run_state;
 pub mod runtime_actor;
 pub mod tool_aggregate;

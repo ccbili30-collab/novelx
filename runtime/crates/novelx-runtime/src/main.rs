@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use novelx_protocol::{
     ContextCompilationReceipt, ContextCompile, Envelope, MessageType, PROTOCOL_VERSION,
-    ProviderInferenceStart, RunCancel, RunPrepare, RunSnapshot, RunStart, RuntimeBuild,
-    RuntimeError, RuntimeErrorClass, RuntimeHello, RuntimeIdentity, RuntimeInitialize,
-    RuntimeReady, RuntimeStatus, RuntimeStopped,
+    ProviderInferenceStart, RunCancel, RunPrepare, RunReconcile, RunReconciliationReceipt,
+    RunSnapshot, RunStart, RuntimeBuild, RuntimeError, RuntimeErrorClass, RuntimeHello,
+    RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
 };
 use novelx_runtime::context_compile_service::{
     ContextCompileService, ContextCompileServiceError, recover_compilation_receipt,
@@ -21,10 +21,15 @@ use novelx_runtime::provider_inference_service::{
     ProviderInferenceServiceError,
 };
 use novelx_runtime::recovery::{RecoveryCoordinator, RecoveryError};
-use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
+use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use novelx_runtime::run_command_service::{RunCommandFailure, RunCommandService, WorkspaceBinding};
+use novelx_runtime::run_reconciliation_service::{
+    RunReconciliationService, RunReconciliationServiceError,
+};
 use novelx_runtime::run_state::RunState;
-use novelx_runtime::runtime_actor::{RuntimeActor, RuntimeActorHandle, RuntimeOutputDraft};
+use novelx_runtime::runtime_actor::{
+    RuntimeActor, RuntimeActorHandle, RuntimeOutputDraft, RuntimeTaskKey,
+};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use uuid::Uuid;
@@ -39,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "handshake".to_owned(),
             "runtime_control".to_owned(),
             "runs_v1".to_owned(),
+            "run_reconciliation_v1".to_owned(),
             "contexts_v1".to_owned(),
             "provider_inference_v1".to_owned(),
         ],
@@ -255,10 +261,24 @@ async fn run_command_loop(
             }
             "run.start" => handle_run_start(&command, context.journal, context.workspace_binding)?,
             "run.get" => handle_run_get(&command, context.journal)?,
-            "run.cancel" => handle_run_cancel(&command, context.journal)?,
+            "run.cancel" => {
+                let run_id = command.run_id.expect("validated run.cancel runId");
+                let active_tasks = output.active_run_tasks(run_id).await?;
+                if active_tasks.is_empty() {
+                    handle_run_cancel(&command, context.journal)?
+                } else {
+                    let routed =
+                        handle_active_inference_cancel(&command, context.journal, &active_tasks)?;
+                    output.emit(routed.output).await?;
+                    output.cancel_run(run_id).await?;
+                    expected_host_sequence += 1;
+                    continue;
+                }
+            }
             "run.prepare" => {
                 handle_run_prepare(&command, context.journal, context.provider_registry)?
             }
+            "run.reconcile" => handle_run_reconcile(&command, context.journal)?,
             "context.compile" => {
                 handle_context_compile(&command, context.journal, context.provider_registry)?
             }
@@ -345,6 +365,16 @@ fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), St
             }
             serde_json::from_value::<RunPrepare>(command.payload.clone())
                 .map_err(|error| format!("invalid run.prepare payload: {error}"))?;
+        }
+        "run.reconcile" => {
+            if command.run_id.is_none() {
+                return Err("run.reconcile requires runId".to_owned());
+            }
+            let reconcile = serde_json::from_value::<RunReconcile>(command.payload.clone())
+                .map_err(|error| format!("invalid run.reconcile payload: {error}"))?;
+            reconcile
+                .validate()
+                .map_err(|error| format!("invalid run.reconcile payload: {error}"))?;
         }
         "context.compile" => {
             if command.run_id.is_none() {
@@ -469,6 +499,40 @@ fn handle_run_cancel(
     }
 }
 
+fn handle_active_inference_cancel(
+    command: &Envelope,
+    journal: &mut Option<EventJournal>,
+    active_tasks: &[RuntimeTaskKey],
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
+    let run_id = command.run_id.expect("validated run.cancel runId");
+    let cancel: RunCancel = serde_json::from_value(command.payload.clone())?;
+    let Some(storage) = journal.as_mut() else {
+        return handle_run_cancel(command, journal);
+    };
+    let mut run = RunAggregate::recover(storage, &run_id.to_string())?;
+    let attempt_ids = active_tasks
+        .iter()
+        .map(|task| task.attempt_id.to_string())
+        .collect::<Vec<_>>();
+    let created_at = current_timestamp()?;
+    let message_id = command.message_id.to_string();
+    run.request_cancellation_reconciliation(
+        storage,
+        &attempt_ids,
+        &cancel.reason,
+        EventMetadata {
+            message_id: &message_id,
+            idempotency_key: &cancel.cancel_idempotency_key,
+            created_at: &created_at,
+            reason: Some("active_provider_inference_cancellation_requested"),
+        },
+    )?;
+    match RunCommandService::new(journal, None).get(run_id) {
+        Ok(snapshot) => Ok(RoutedOutput::normal(run_snapshot_draft(command, snapshot)?)),
+        Err(failure) => run_command_failure(command, run_id, failure),
+    }
+}
+
 fn handle_run_prepare(
     command: &Envelope,
     journal: &mut Option<EventJournal>,
@@ -484,6 +548,114 @@ fn handle_run_prepare(
     ) {
         Ok(snapshot) => Ok(RoutedOutput::normal(run_snapshot_draft(command, snapshot)?)),
         Err(failure) => run_command_failure(command, run_id, failure),
+    }
+}
+
+fn handle_run_reconcile(
+    command: &Envelope,
+    journal: &mut Option<EventJournal>,
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
+    let run_id = command.run_id.expect("validated run.reconcile runId");
+    let reconcile: RunReconcile = serde_json::from_value(command.payload.clone())?;
+    let Some(storage) = journal.as_mut() else {
+        return Ok(RoutedOutput::normal(run_rejected_draft(
+            command,
+            run_id,
+            runtime_reconciliation_error(
+                "RUNTIME_STORAGE_REQUIRED",
+                RuntimeErrorClass::Storage,
+                "Runtime storage is required to reconcile a Run.",
+            ),
+        )?));
+    };
+    let created_at = current_timestamp()?;
+    match RunReconciliationService::new(storage).reconcile(
+        &run_id.to_string(),
+        &reconcile,
+        &command.message_id.to_string(),
+        &created_at,
+    ) {
+        Ok(receipt) => Ok(RoutedOutput::normal(run_reconciled_draft(
+            command, run_id, receipt,
+        )?)),
+        Err(error) => {
+            let fatal = matches!(
+                error,
+                RunReconciliationServiceError::Journal(_)
+                    | RunReconciliationServiceError::Attempt(_)
+                    | RunReconciliationServiceError::Run(
+                        RunAggregateError::SequenceGap { .. }
+                            | RunAggregateError::UnknownEvent(_)
+                            | RunAggregateError::UnknownEventVersion { .. }
+                            | RunAggregateError::DuplicateCreated
+                            | RunAggregateError::InvalidPayload
+                            | RunAggregateError::InvalidPinnedIdentity(_)
+                            | RunAggregateError::StateMismatch
+                    )
+            );
+            let output = run_rejected_draft(command, run_id, reconciliation_service_error(&error))?;
+            Ok(if fatal {
+                RoutedOutput::fatal(output, "fatal Run reconciliation failure")
+            } else {
+                RoutedOutput::normal(output)
+            })
+        }
+    }
+}
+
+fn run_reconciled_draft(
+    command: &Envelope,
+    run_id: Uuid,
+    receipt: RunReconciliationReceipt,
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut response = response_draft(command, "run.reconciled", receipt)?;
+    response.run_id = Some(run_id);
+    Ok(response)
+}
+
+fn reconciliation_service_error(error: &RunReconciliationServiceError) -> RuntimeError {
+    match error {
+        RunReconciliationServiceError::AttemptNotFound => runtime_reconciliation_error(
+            "RECONCILIATION_ATTEMPT_NOT_FOUND",
+            RuntimeErrorClass::Validation,
+            "The Provider attempt to reconcile was not found.",
+        ),
+        RunReconciliationServiceError::AttemptRunMismatch
+        | RunReconciliationServiceError::AttemptOutcomeKnown
+        | RunReconciliationServiceError::InvalidIdentity
+        | RunReconciliationServiceError::InvalidCommand(_)
+        | RunReconciliationServiceError::Run(RunAggregateError::NotFound(_))
+        | RunReconciliationServiceError::Run(RunAggregateError::ReconciliationStateRequired)
+        | RunReconciliationServiceError::Run(RunAggregateError::Transition(_)) => {
+            runtime_reconciliation_error(
+                "RUN_RECONCILIATION_INVALID",
+                RuntimeErrorClass::Validation,
+                "The Run reconciliation request is invalid for the current state.",
+            )
+        }
+        RunReconciliationServiceError::Journal(_)
+        | RunReconciliationServiceError::Attempt(_)
+        | RunReconciliationServiceError::Run(_) => runtime_reconciliation_error(
+            "RUN_RECONCILIATION_STORAGE_FAILED",
+            RuntimeErrorClass::Storage,
+            "The Run reconciliation could not be persisted or recovered.",
+        ),
+    }
+}
+
+fn runtime_reconciliation_error(
+    code: &str,
+    class: RuntimeErrorClass,
+    public_message: &str,
+) -> RuntimeError {
+    RuntimeError {
+        code: code.to_owned(),
+        class,
+        retryable: false,
+        public_message: public_message.to_owned(),
+        stage: "run.reconcile".to_owned(),
+        attempt: 0,
+        diagnostic_id: Uuid::new_v4(),
     }
 }
 
@@ -629,6 +801,10 @@ async fn handle_provider_inference_start(
     let database_path = database_path.to_owned();
     let gateway = Arc::clone(gateway);
     let correlation_id = command.message_id;
+    let task_key = RuntimeTaskKey {
+        run_id,
+        attempt_id: start.attempt_id,
+    };
     let task_failure = inference_runtime_error_draft(
         correlation_id,
         run_id,
@@ -641,14 +817,18 @@ async fn handle_provider_inference_start(
     )?;
     output
         .start_task(
+            task_key,
             accepted,
             task_failure,
-            Box::pin(async move {
+            move |mut cancellation| Box::pin(async move {
                 let result = match prepared {
                     PreparedProviderAttempt::Recovered(outcome) => Ok(*outcome),
                     PreparedProviderAttempt::Dispatch(dispatch) => {
-                        let dispatched = ProviderInferenceService::dispatch_attempt(
-                            &gateway, &provider, *dispatch,
+                        let dispatched = ProviderInferenceService::dispatch_attempt_cancellable(
+                            &gateway,
+                            &provider,
+                            *dispatch,
+                            &mut cancellation,
                         )
                         .await;
                         match EventJournal::open(&database_path) {
@@ -662,10 +842,14 @@ async fn handle_provider_inference_start(
                                         &journal,
                                         &execution.run_id,
                                     ) {
-                                        Ok(run) if run.state() == RunState::Cancelled => Err(
-                                            ProviderInferenceServiceError::RunNotRunning(
-                                                RunState::Cancelled,
-                                            ),
+                                        Ok(run)
+                                            if run.state()
+                                                == RunState::WaitingForReconciliation =>
+                                        {
+                                            Err(ProviderInferenceServiceError::CancelledAfterDispatch)
+                                        }
+                                        Ok(run) if run.state() != RunState::Running => Err(
+                                            ProviderInferenceServiceError::RunNotRunning(run.state()),
                                         ),
                                         Ok(_) => Ok(outcome),
                                         Err(_) => Err(
@@ -673,7 +857,8 @@ async fn handle_provider_inference_start(
                                         ),
                                     },
                                     Err(error @ ProviderInferenceServiceError::Gateway(_))
-                                    | Err(error @ ProviderInferenceServiceError::DeliveryUnknown(_)) => {
+                                    | Err(error @ ProviderInferenceServiceError::DeliveryUnknown(_))
+                                    | Err(error @ ProviderInferenceServiceError::CancelledAfterDispatch) => {
                                         Err(error)
                                     }
                                     Err(_) => Err(
@@ -710,6 +895,7 @@ fn inference_outcome_unknown(error: &ProviderInferenceServiceError) -> bool {
         error,
         ProviderInferenceServiceError::OutcomeUnknown
             | ProviderInferenceServiceError::FinalizationOutcomeUnknown
+            | ProviderInferenceServiceError::CancelledAfterDispatch
             | ProviderInferenceServiceError::DeliveryUnknown(_)
             | ProviderInferenceServiceError::ExistingTerminal(
                 novelx_runtime::provider_attempt::ProviderAttemptRecovery::OutcomeUnknown
@@ -1010,8 +1196,9 @@ async fn write_protocol_error(
 }
 
 fn initialize_runtime(path: &str) -> Result<(EventJournal, u64), InitializationError> {
-    let journal = EventJournal::open(path).map_err(InitializationError::Storage)?;
-    let report = RecoveryCoordinator::recover(&journal).map_err(InitializationError::Recovery)?;
+    let mut journal = EventJournal::open(path).map_err(InitializationError::Storage)?;
+    let report = RecoveryCoordinator::recover_and_reconcile(&mut journal)
+        .map_err(InitializationError::Recovery)?;
     let count = report.recovered_nonterminal_count;
     Ok((journal, count))
 }

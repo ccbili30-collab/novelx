@@ -303,6 +303,48 @@ export const runtimeV2RunCancelEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   payload: runtimeV2RunCancelPayloadSchema,
 }).strict();
 
+export const runtimeV2RunReconciliationDecisionSchema = z.enum([
+  "cancel_run",
+  "retry_as_new_attempt_acknowledging_duplicate",
+]);
+
+export const runtimeV2RunReconcilePayloadSchema = z.object({
+  reconciliationIdempotencyKey: identityStringSchema,
+  attemptId: z.uuid(),
+  decision: runtimeV2RunReconciliationDecisionSchema,
+  duplicateExecutionAcknowledged: z.boolean(),
+}).strict().superRefine((payload, context) => {
+  const required = payload.decision === "retry_as_new_attempt_acknowledging_duplicate";
+  if (payload.duplicateExecutionAcknowledged !== required) {
+    context.addIssue({ code: "custom", path: ["duplicateExecutionAcknowledged"], message: "Duplicate execution acknowledgement must exactly match the retry decision." });
+  }
+});
+
+export const runtimeV2RunReconcileEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("run.reconcile"),
+  correlationId: z.null(),
+  runId: z.uuid(),
+  payload: runtimeV2RunReconcilePayloadSchema,
+}).strict();
+
+export const runtimeV2RunReconciliationReceiptSchema = z.object({
+  attemptId: z.uuid(),
+  decision: runtimeV2RunReconciliationDecisionSchema,
+  state: z.enum(["cancelled", "retrying"]),
+}).strict().superRefine((receipt, context) => {
+  const expected = receipt.decision === "cancel_run" ? "cancelled" : "retrying";
+  if (receipt.state !== expected) context.addIssue({ code: "custom", path: ["state"], message: "Reconciliation state does not match its decision." });
+});
+
+export const runtimeV2RunReconciledEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("run.reconciled"),
+  correlationId: z.uuid(),
+  runId: z.uuid(),
+  payload: runtimeV2RunReconciliationReceiptSchema,
+}).strict();
+
 export const runtimeV2RunSnapshotPayloadSchema = z.object({
   runId: z.uuid(),
   pinnedIdentity: runtimeV2RunPinnedIdentitySchema,
@@ -750,6 +792,11 @@ export type RuntimeV2RunPreparePayload = z.infer<typeof runtimeV2RunPreparePaylo
 export type RuntimeV2RunPrepareEnvelope = z.infer<typeof runtimeV2RunPrepareEnvelopeSchema>;
 export type RuntimeV2RunCancelPayload = z.infer<typeof runtimeV2RunCancelPayloadSchema>;
 export type RuntimeV2RunCancelEnvelope = z.infer<typeof runtimeV2RunCancelEnvelopeSchema>;
+export type RuntimeV2RunReconciliationDecision = z.infer<typeof runtimeV2RunReconciliationDecisionSchema>;
+export type RuntimeV2RunReconcilePayload = z.infer<typeof runtimeV2RunReconcilePayloadSchema>;
+export type RuntimeV2RunReconcileEnvelope = z.infer<typeof runtimeV2RunReconcileEnvelopeSchema>;
+export type RuntimeV2RunReconciliationReceipt = z.infer<typeof runtimeV2RunReconciliationReceiptSchema>;
+export type RuntimeV2RunReconciledEnvelope = z.infer<typeof runtimeV2RunReconciledEnvelopeSchema>;
 export type RuntimeV2RunSnapshotPayload = z.infer<typeof runtimeV2RunSnapshotPayloadSchema>;
 export type RuntimeV2RunSnapshotEnvelope = z.infer<typeof runtimeV2RunSnapshotEnvelopeSchema>;
 export type RuntimeV2RunRejectedEnvelope = z.infer<typeof runtimeV2RunRejectedEnvelopeSchema>;
@@ -854,6 +901,14 @@ export function parseRuntimeV2RunPrepareEnvelope(value: unknown): RuntimeV2RunPr
 
 export function parseRuntimeV2RunCancelEnvelope(value: unknown): RuntimeV2RunCancelEnvelope {
   return parseVersionedEnvelope(value, runtimeV2RunCancelEnvelopeSchema);
+}
+
+export function parseRuntimeV2RunReconcileEnvelope(value: unknown): RuntimeV2RunReconcileEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2RunReconcileEnvelopeSchema);
+}
+
+export function parseRuntimeV2RunReconciledEnvelope(value: unknown): RuntimeV2RunReconciledEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2RunReconciledEnvelopeSchema);
 }
 
 export function parseRuntimeV2RunSnapshotEnvelope(value: unknown): RuntimeV2RunSnapshotEnvelope {

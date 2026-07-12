@@ -1,6 +1,7 @@
 use novelx_protocol::{ContextCompilationReceipt, ProviderRunIdentity};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::context_compile_service::{ContextCompiledRecord, normalized_provider_input_sha256};
@@ -218,6 +219,22 @@ impl<'a> ProviderInferenceService<'a> {
         }
     }
 
+    pub async fn dispatch_attempt_cancellable(
+        gateway: &ProviderGateway,
+        provider: &BoundProvider,
+        dispatch: ProviderAttemptDispatch,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> DispatchedProviderAttempt {
+        let result = gateway
+            .infer_prepared_cancellable(provider, dispatch.prepared, cancellation)
+            .await;
+        DispatchedProviderAttempt {
+            execution: dispatch.execution,
+            attempt: dispatch.attempt,
+            result,
+        }
+    }
+
     pub fn finalize_attempt(
         &mut self,
         dispatched: DispatchedProviderAttempt,
@@ -263,6 +280,7 @@ impl<'a> ProviderInferenceService<'a> {
                 Err(error.into())
             }
             Err(error) => {
+                let cancelled = matches!(error, ProviderGatewayError::Cancelled);
                 let unknown_message_id = Uuid::new_v4().to_string();
                 let unknown_key = format!("{}:outcome-unknown", execution.attempt_id);
                 let unknown_at = timestamp()?;
@@ -273,20 +291,26 @@ impl<'a> ProviderInferenceService<'a> {
                     metadata(&unknown_message_id, &unknown_key, &unknown_at),
                 )?;
                 let mut run = RunAggregate::recover(journal, &execution.run_id)?;
-                let reconciliation_message_id = Uuid::new_v4().to_string();
-                let reconciliation_key = format!("{}:run-reconciliation", execution.attempt_id);
-                run.wait_for_reconciliation(
-                    journal,
-                    EventMetadata {
-                        message_id: &reconciliation_message_id,
-                        idempotency_key: &reconciliation_key,
-                        created_at: &unknown_at,
-                        reason: Some("provider_outcome_unknown"),
-                    },
-                )?;
-                Err(ProviderInferenceServiceError::DeliveryUnknown(Box::new(
-                    error,
-                )))
+                if run.state() != RunState::WaitingForReconciliation {
+                    let reconciliation_message_id = Uuid::new_v4().to_string();
+                    let reconciliation_key = format!("{}:run-reconciliation", execution.attempt_id);
+                    run.wait_for_reconciliation(
+                        journal,
+                        EventMetadata {
+                            message_id: &reconciliation_message_id,
+                            idempotency_key: &reconciliation_key,
+                            created_at: &unknown_at,
+                            reason: Some("provider_outcome_unknown"),
+                        },
+                    )?;
+                }
+                if cancelled {
+                    Err(ProviderInferenceServiceError::CancelledAfterDispatch)
+                } else {
+                    Err(ProviderInferenceServiceError::DeliveryUnknown(Box::new(
+                        error,
+                    )))
+                }
             }
         }
     }
@@ -310,6 +334,8 @@ pub enum ProviderInferenceServiceError {
     OutcomeUnknown,
     #[error("Provider inference was dispatched but its terminal journal result is unknown")]
     FinalizationOutcomeUnknown,
+    #[error("Provider inference was cancelled after dispatch")]
+    CancelledAfterDispatch,
     #[error("Provider attempt already ended with {0:?}")]
     ExistingTerminal(ProviderAttemptRecovery),
     #[error("Provider delivery became uncertain: {0}")]

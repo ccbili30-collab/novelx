@@ -15,6 +15,8 @@ import {
   parseRuntimeV2RunGetEnvelope,
   parseRuntimeV2RunPrepareEnvelope,
   parseRuntimeV2RunCancelEnvelope,
+  parseRuntimeV2RunReconcileEnvelope,
+  parseRuntimeV2RunReconciledEnvelope,
   parseRuntimeV2RunSnapshotEnvelope,
   parseRuntimeV2RunStartEnvelope,
   parseRuntimeV2ContextCompileEnvelope,
@@ -383,6 +385,24 @@ function inferenceIdentity() {
   };
 }
 
+function runReconcileEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    ...runStartEnvelope(), messageId: "2e499925-d411-42c1-af2c-199489817906", name: "run.reconcile",
+    payload: { reconciliationIdempotencyKey: "reconcile-key-1", attemptId: ATTEMPT_ID,
+      decision: "retry_as_new_attempt_acknowledging_duplicate", duplicateExecutionAcknowledged: true },
+    ...overrides,
+  };
+}
+
+function runReconciledEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    ...runReconcileEnvelope(), messageId: "427db65f-e72c-4a27-9a63-317542f71e10", messageType: "response",
+    name: "run.reconciled", correlationId: runReconcileEnvelope().messageId,
+    payload: { attemptId: ATTEMPT_ID, decision: "retry_as_new_attempt_acknowledging_duplicate", state: "retrying" },
+    ...overrides,
+  };
+}
+
 function inferenceEnvelope(name: string, messageType: string, payload: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
   return {
     protocolVersion: 1,
@@ -702,6 +722,21 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
         recoveryClassification: "terminal",
       },
     }))).toThrow();
+  });
+
+  it("accepts strict run reconciliation decisions and correlated receipts", () => {
+    expect(parseRuntimeV2RunReconcileEnvelope(runReconcileEnvelope())).toEqual(runReconcileEnvelope());
+    expect(parseRuntimeV2RunReconciledEnvelope(runReconciledEnvelope())).toEqual(runReconciledEnvelope());
+    const cancel = runReconcileEnvelope({ payload: { reconciliationIdempotencyKey: "cancel-key", attemptId: ATTEMPT_ID, decision: "cancel_run", duplicateExecutionAcknowledged: false } });
+    expect(parseRuntimeV2RunReconcileEnvelope(cancel)).toEqual(cancel);
+  });
+
+  it("rejects unsupported or unacknowledged run reconciliation decisions", () => {
+    const payload = runReconcileEnvelope().payload;
+    expect(() => parseRuntimeV2RunReconcileEnvelope(runReconcileEnvelope({ payload: { ...payload, duplicateExecutionAcknowledged: false } }))).toThrow();
+    expect(() => parseRuntimeV2RunReconcileEnvelope(runReconcileEnvelope({ payload: { ...payload, decision: "accept_verified_response" } }))).toThrow();
+    expect(() => parseRuntimeV2RunReconcileEnvelope(runReconcileEnvelope({ correlationId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2RunReconciledEnvelope(runReconciledEnvelope({ payload: { ...runReconciledEnvelope().payload, state: "cancelled" } }))).toThrow();
   });
 
   it("rejects changed, secret-bearing or noncanonical Run identities", () => {
