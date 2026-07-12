@@ -580,7 +580,7 @@ struct RuntimeCommandContext<'a> {
     journal: &'a mut Option<EventJournal>,
     workspace_binding: Option<&'a WorkspaceBinding>,
     assignment_recovery_report: &'a AssignmentRecoveryReport,
-    workspace_runtime_lease: Option<&'a WorkspaceRuntimeLease>,
+    workspace_runtime_lease: Option<&'a Arc<WorkspaceRuntimeLease>>,
     operational_recovery_runs: &'a mut BTreeMap<String, OperationalRecoveryRun>,
     quarantined_assignment_ids: &'a BTreeSet<String>,
     provider_registry: &'a mut ProviderRegistry,
@@ -830,7 +830,7 @@ async fn refresh_operational_recovery(
         &binding.workspace_id,
         &binding.project_id,
         &providers,
-        exclusive_lease,
+        exclusive_lease.as_ref(),
     )?;
     ProviderDispatchRecoverySupervisor::new(database_path)
         .run_provider_dispatch_pass(
@@ -838,14 +838,14 @@ async fn refresh_operational_recovery(
             &binding.project_id,
             context.provider_registry,
             context.provider_gateway.as_ref(),
-            exclusive_lease,
+            exclusive_lease.as_ref(),
         )
         .await?;
     OperationalRecoverySupervisor::new(database_path).run_local_recovery_pass(
         &binding.workspace_id,
         &binding.project_id,
         &providers,
-        exclusive_lease,
+        exclusive_lease.as_ref(),
     )?;
     let journal = context
         .journal
@@ -2368,7 +2368,7 @@ async fn write_protocol_error(
 }
 
 struct InitializedRuntimeState {
-    workspace_runtime_lease: WorkspaceRuntimeLease,
+    workspace_runtime_lease: Arc<WorkspaceRuntimeLease>,
     journal: EventJournal,
     recovered_run_count: u64,
     assignment_report: AssignmentRecoveryReport,
@@ -2380,8 +2380,10 @@ fn initialize_runtime(
     path: &str,
     binding: &WorkspaceBinding,
 ) -> Result<InitializedRuntimeState, InitializationError> {
-    let workspace_runtime_lease = WorkspaceRuntimeLease::acquire(path, Uuid::new_v4().to_string())
-        .map_err(InitializationError::WorkspaceLease)?;
+    let workspace_runtime_lease = Arc::new(
+        WorkspaceRuntimeLease::acquire(path, Uuid::new_v4().to_string())
+            .map_err(InitializationError::WorkspaceLease)?,
+    );
     let mut journal = EventJournal::open(path).map_err(InitializationError::Storage)?;
     let report = RecoveryCoordinator::recover_and_reconcile(&mut journal)
         .map_err(InitializationError::Recovery)?;
@@ -2398,7 +2400,7 @@ fn initialize_runtime(
             &binding.workspace_id,
             &binding.project_id,
             &[],
-            &workspace_runtime_lease,
+            workspace_runtime_lease.as_ref(),
         )
         .map_err(|error| InitializationError::OperationalRecoverySupervisor(Box::new(error)))?;
     let operational_report = OperationalRecoveryScanner::new(&mut journal, &assignment_report, &[])
