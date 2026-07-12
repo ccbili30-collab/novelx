@@ -1,6 +1,6 @@
 use novelx_runtime::operational_recovery_aggregate::{
     OPERATIONAL_RECOVERY_POLICY_VERSION, OperationalRecoveryAggregateError,
-    OperationalRecoveryDisposition, OperationalRecoveryEventMetadata,
+    OperationalRecoveryClaim, OperationalRecoveryDisposition, OperationalRecoveryEventMetadata,
     OperationalRecoveryObservation, OperationalRecoveryObservedGate, OperationalRecoveryRepository,
     OperationalRecoverySubject, OperationalRecoveryWaitingReason,
 };
@@ -226,6 +226,137 @@ fn tampered_payload_breaks_the_hash_chain() {
     ));
 }
 
+#[test]
+fn ready_operation_claim_is_fenced_idempotent_and_snapshot_guarded() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "7",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let clock = novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&fixture.path)
+        .unwrap()
+        .current_global_sequence()
+        .unwrap();
+    let first_claim = claim(&observation, "runtime-instance-1", 1);
+    let claimed = repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            first_claim.clone(),
+            clock,
+            metadata(),
+        )
+        .unwrap();
+    assert_eq!(
+        claimed.operations[&observation.operation_id].claim,
+        Some(first_claim.clone())
+    );
+    let current_clock =
+        novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&fixture.path)
+            .unwrap()
+            .current_global_sequence()
+            .unwrap();
+    assert_eq!(
+        repository
+            .claim(
+                &subject.workspace_id,
+                &subject.run_id,
+                first_claim,
+                current_clock,
+                metadata(),
+            )
+            .unwrap()
+            .revision,
+        claimed.revision
+    );
+    assert!(matches!(
+        repository.claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim(&observation, "runtime-instance-2", 1),
+            current_clock,
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::ClaimConflict)
+    ));
+}
+
+#[test]
+fn claim_rejects_stale_global_snapshot_and_non_ready_operations() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let ready = observation(
+        &subject,
+        "8",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), ready.clone(), metadata())
+        .unwrap();
+    let stale_clock =
+        novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&fixture.path)
+            .unwrap()
+            .current_global_sequence()
+            .unwrap();
+    repository
+        .observe(
+            subject.clone(),
+            observation(
+                &subject,
+                "9",
+                OperationalRecoveryObservedGate::TerminalProjectionOnly,
+                vec![],
+            ),
+            metadata(),
+        )
+        .unwrap();
+    assert!(matches!(
+        repository.claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim(&ready, "runtime-instance-1", 1),
+            stale_clock,
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::Journal(
+            novelx_runtime::workspace_event_journal::WorkspaceEventJournalError::GlobalSequenceConflict { .. }
+        ))
+    ));
+
+    let waiting = observation(
+        &subject,
+        "a",
+        OperationalRecoveryObservedGate::AwaitingProviderBinding,
+        vec![],
+    );
+    repository
+        .observe(subject.clone(), waiting.clone(), metadata())
+        .unwrap();
+    let clock = novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&fixture.path)
+        .unwrap()
+        .current_global_sequence()
+        .unwrap();
+    assert!(matches!(
+        repository.claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim(&waiting, "runtime-instance-1", 1),
+            clock,
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::OperationNotClaimable)
+    ));
+}
+
 fn subject() -> OperationalRecoverySubject {
     OperationalRecoverySubject {
         workspace_id: "workspace-1".to_owned(),
@@ -254,6 +385,24 @@ fn metadata() -> OperationalRecoveryEventMetadata {
     OperationalRecoveryEventMetadata {
         created_at: "2026-07-13T00:00:00Z".to_owned(),
     }
+}
+
+fn claim(
+    observation: &OperationalRecoveryObservation,
+    owner_instance_id: &str,
+    fencing_token: u64,
+) -> OperationalRecoveryClaim {
+    OperationalRecoveryClaim::derive(
+        observation.operation_id.clone(),
+        owner_instance_id.to_owned(),
+        fencing_token,
+        observation.source_fingerprint.clone(),
+        "2026-07-13T00:00:00Z".to_owned(),
+        "2026-07-13T00:05:00Z".to_owned(),
+        "recovery-executor-v1".to_owned(),
+        "b".repeat(64),
+    )
+    .unwrap()
 }
 
 struct Fixture {

@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::workspace_event_journal::{
     NewWorkspaceEvent, WorkspaceEvent, WorkspaceEventJournal, WorkspaceEventJournalError,
@@ -102,6 +103,70 @@ pub enum OperationalRecoveryDisposition {
 pub struct OperationalRecoveryOperation {
     pub observation: OperationalRecoveryObservation,
     pub disposition: Option<OperationalRecoveryDisposition>,
+    pub claim: Option<OperationalRecoveryClaim>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationalRecoveryClaim {
+    pub claim_id: String,
+    pub operation_id: String,
+    pub owner_instance_id: String,
+    pub fencing_token: u64,
+    pub source_fingerprint: String,
+    pub claimed_at: String,
+    pub lease_expires_at: String,
+    pub executor_version: String,
+    pub action_spec_sha256: String,
+}
+
+impl OperationalRecoveryClaim {
+    #[allow(clippy::too_many_arguments)]
+    pub fn derive(
+        operation_id: String,
+        owner_instance_id: String,
+        fencing_token: u64,
+        source_fingerprint: String,
+        claimed_at: String,
+        lease_expires_at: String,
+        executor_version: String,
+        action_spec_sha256: String,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        require_sha256("operation_id", &operation_id)?;
+        require_text("owner_instance_id", &owner_instance_id)?;
+        if fencing_token == 0 {
+            return Err(OperationalRecoveryAggregateError::FencingTokenInvalid);
+        }
+        require_sha256("source_fingerprint", &source_fingerprint)?;
+        require_text("claimed_at", &claimed_at)?;
+        require_text("lease_expires_at", &lease_expires_at)?;
+        let claimed = OffsetDateTime::parse(&claimed_at, &Rfc3339)?;
+        let expires = OffsetDateTime::parse(&lease_expires_at, &Rfc3339)?;
+        if expires <= claimed {
+            return Err(OperationalRecoveryAggregateError::LeaseWindowInvalid);
+        }
+        require_text("executor_version", &executor_version)?;
+        require_sha256("action_spec_sha256", &action_spec_sha256)?;
+        let claim_id = canonical_sha256(&serde_json::json!({
+            "operationId": operation_id,
+            "ownerInstanceId": owner_instance_id,
+            "fencingToken": fencing_token,
+            "sourceFingerprint": source_fingerprint,
+            "executorVersion": executor_version,
+            "actionSpecSha256": action_spec_sha256,
+        }))?;
+        Ok(Self {
+            claim_id,
+            operation_id,
+            owner_instance_id,
+            fencing_token,
+            source_fingerprint,
+            claimed_at,
+            lease_expires_at,
+            executor_version,
+            action_spec_sha256,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -133,6 +198,9 @@ enum RecoveryEventData {
         operation_id: String,
         invariant_codes: Vec<String>,
         evidence_fingerprint: String,
+    },
+    Claimed {
+        claim: OperationalRecoveryClaim,
     },
 }
 
@@ -298,10 +366,68 @@ impl OperationalRecoveryRepository {
         )
     }
 
+    pub fn claim(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        claim: OperationalRecoveryClaim,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        validate_claim(&claim)?;
+        let current = self.load(workspace_id, run_id)?;
+        let operation = current
+            .operations
+            .get(&claim.operation_id)
+            .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+        if operation.observation.gate != OperationalRecoveryObservedGate::RecoveryReady
+            || operation.disposition.is_some()
+            || operation.observation.source_fingerprint != claim.source_fingerprint
+        {
+            return Err(OperationalRecoveryAggregateError::OperationNotClaimable);
+        }
+        if let Some(existing) = &operation.claim {
+            return if existing == &claim {
+                Ok(current)
+            } else {
+                Err(OperationalRecoveryAggregateError::ClaimConflict)
+            };
+        }
+        if claim.fencing_token != 1 {
+            return Err(OperationalRecoveryAggregateError::FencingTokenInvalid);
+        }
+        self.append_at_global_sequence(
+            current,
+            RecoveryEventData::Claimed { claim },
+            expected_global_sequence,
+            metadata,
+        )
+    }
+
     fn append(
         &mut self,
         current: OperationalRecoveryAggregate,
         data: RecoveryEventData,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        self.append_inner(current, data, None, metadata)
+    }
+
+    fn append_at_global_sequence(
+        &mut self,
+        current: OperationalRecoveryAggregate,
+        data: RecoveryEventData,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        self.append_inner(current, data, Some(expected_global_sequence), metadata)
+    }
+
+    fn append_inner(
+        &mut self,
+        current: OperationalRecoveryAggregate,
+        data: RecoveryEventData,
+        expected_global_sequence: Option<u64>,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
         require_text("created_at", &metadata.created_at)?;
@@ -332,8 +458,17 @@ impl OperationalRecoveryRepository {
         let workspace_sequence = self
             .journal
             .current_workspace_sequence(&current.subject.workspace_id)?;
-        self.journal
-            .append(event, workspace_sequence, current.revision)?;
+        if let Some(expected_global_sequence) = expected_global_sequence {
+            self.journal.append_at_global_sequence(
+                event,
+                workspace_sequence,
+                current.revision,
+                expected_global_sequence,
+            )?;
+        } else {
+            self.journal
+                .append(event, workspace_sequence, current.revision)?;
+        }
         self.load(&current.subject.workspace_id, &current.subject.run_id)
     }
 }
@@ -387,6 +522,7 @@ fn apply_event(
                 OperationalRecoveryOperation {
                     observation,
                     disposition: None,
+                    claim: None,
                 },
             );
             aggregate.revision = event.aggregate_revision;
@@ -441,6 +577,27 @@ fn apply_event(
             aggregate.revision = event.aggregate_revision;
             aggregate.last_event_hash = event.event_hash;
         }
+        RecoveryEventData::Claimed { claim } => {
+            validate_claim(&claim)?;
+            let aggregate = value
+                .as_mut()
+                .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            let operation = aggregate
+                .operations
+                .get_mut(&claim.operation_id)
+                .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+            if operation.observation.gate != OperationalRecoveryObservedGate::RecoveryReady
+                || operation.disposition.is_some()
+                || operation.claim.is_some()
+                || operation.observation.source_fingerprint != claim.source_fingerprint
+                || claim.fencing_token != 1
+            {
+                return Err(OperationalRecoveryAggregateError::OperationNotClaimable);
+            }
+            operation.claim = Some(claim);
+            aggregate.revision = event.aggregate_revision;
+            aggregate.last_event_hash = event.event_hash;
+        }
     }
     Ok(())
 }
@@ -482,6 +639,26 @@ fn validate_observation(
         return Err(OperationalRecoveryAggregateError::OperationConflict);
     }
     Ok(())
+}
+
+fn validate_claim(
+    claim: &OperationalRecoveryClaim,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    let derived = OperationalRecoveryClaim::derive(
+        claim.operation_id.clone(),
+        claim.owner_instance_id.clone(),
+        claim.fencing_token,
+        claim.source_fingerprint.clone(),
+        claim.claimed_at.clone(),
+        claim.lease_expires_at.clone(),
+        claim.executor_version.clone(),
+        claim.action_spec_sha256.clone(),
+    )?;
+    if derived == *claim {
+        Ok(())
+    } else {
+        Err(OperationalRecoveryAggregateError::ClaimConflict)
+    }
 }
 
 fn event_hash(
@@ -532,6 +709,7 @@ fn event_operation_id(data: &RecoveryEventData) -> &str {
         RecoveryEventData::Observed { observation, .. } => &observation.operation_id,
         RecoveryEventData::Waiting { operation_id, .. }
         | RecoveryEventData::Quarantined { operation_id, .. } => operation_id,
+        RecoveryEventData::Claimed { claim } => &claim.operation_id,
     }
 }
 
@@ -545,6 +723,7 @@ fn event_suffix(data: &RecoveryEventData) -> Result<String, OperationalRecoveryA
             "quarantined:{}",
             canonical_sha256(&serde_json::to_value(invariant_codes)?)?
         ),
+        RecoveryEventData::Claimed { claim } => format!("claimed:{}", claim.claim_id),
     })
 }
 
@@ -591,6 +770,14 @@ pub enum OperationalRecoveryAggregateError {
     DispositionConflict,
     #[error("operational recovery quarantine requires invariant codes")]
     InvariantCodesRequired,
+    #[error("operational recovery operation is not claimable")]
+    OperationNotClaimable,
+    #[error("operational recovery claim conflicts with persisted ownership")]
+    ClaimConflict,
+    #[error("operational recovery fencing token is invalid")]
+    FencingTokenInvalid,
+    #[error("operational recovery lease must expire after it is claimed")]
+    LeaseWindowInvalid,
     #[error("operational recovery aggregate was not found")]
     NotFound,
     #[error("operational recovery event envelope is invalid")]
@@ -603,4 +790,6 @@ pub enum OperationalRecoveryAggregateError {
     Journal(#[from] WorkspaceEventJournalError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Time(#[from] time::error::Parse),
 }

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Barrier};
 
 use novelx_runtime::{
-    event_journal::EventJournal,
+    event_journal::{EventJournal, NewRuntimeEvent},
     workspace_event_journal::{
         NewWorkspaceEvent, WorkspaceEventJournal, WorkspaceEventJournalError,
     },
@@ -49,6 +49,14 @@ fn upgrades_existing_runtime_database_and_round_trips_chinese_payload() {
         )
         .unwrap();
     assert_eq!(migration_count, 1);
+    let clock_migration_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM runtime_schema_migrations WHERE version = 5",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(clock_migration_count, 1);
 }
 
 #[test]
@@ -190,6 +198,49 @@ fn stream_sequence_is_independent_but_workspace_sequence_is_global() {
             .len(),
         1
     );
+}
+
+#[test]
+fn global_clock_covers_runtime_and_workspace_events_and_guards_append() {
+    let fixture = Fixture::new();
+    let mut workspace = fixture.open();
+    assert_eq!(workspace.current_global_sequence().unwrap(), 0);
+    workspace
+        .append(event("m1", "k1", "goal", "g1"), 0, 0)
+        .unwrap();
+    assert_eq!(workspace.current_global_sequence().unwrap(), 1);
+
+    let mut runtime = EventJournal::open(&fixture.database).unwrap();
+    runtime
+        .append(
+            NewRuntimeEvent {
+                run_id: "run-1".to_owned(),
+                aggregate_type: "run".to_owned(),
+                aggregate_id: "run-1".to_owned(),
+                message_id: "runtime-m1".to_owned(),
+                idempotency_key: "runtime-k1".to_owned(),
+                event_type: "run.started".to_owned(),
+                event_version: 1,
+                payload: json!({"state": "started"}),
+                created_at: "2026-07-13T00:00:00Z".to_owned(),
+            },
+            0,
+            0,
+        )
+        .unwrap();
+    assert_eq!(workspace.current_global_sequence().unwrap(), 2);
+
+    assert!(matches!(
+        workspace.append_at_global_sequence(event("m2", "k2", "plan", "p1"), 1, 0, 1),
+        Err(WorkspaceEventJournalError::GlobalSequenceConflict {
+            expected: 1,
+            actual: 2
+        })
+    ));
+    workspace
+        .append_at_global_sequence(event("m2", "k2", "plan", "p1"), 1, 0, 2)
+        .unwrap();
+    assert_eq!(workspace.current_global_sequence().unwrap(), 3);
 }
 
 fn event(

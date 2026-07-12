@@ -6,8 +6,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-const MIGRATION_VERSION: u32 = 4;
-const MIGRATION_SQL: &str = include_str!("../migrations/0004_workspace_event_journal.sql");
+use crate::event_journal::{EventJournal, EventJournalError};
+
+const MIGRATION_0004: &str = include_str!("../migrations/0004_workspace_event_journal.sql");
+const MIGRATION_0005: &str = include_str!("../migrations/0005_global_event_clock.sql");
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewWorkspaceEvent {
@@ -50,6 +52,8 @@ pub struct WorkspaceEventJournal {
 
 impl WorkspaceEventJournal {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, WorkspaceEventJournalError> {
+        let path = path.as_ref();
+        EventJournal::open(path)?;
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
@@ -59,7 +63,8 @@ impl WorkspaceEventJournal {
              applied_at TEXT NOT NULL, checksum TEXT NOT NULL CHECK (length(checksum) = 64)\
              ) STRICT;",
         )?;
-        apply_migration(&mut connection)?;
+        apply_migration(&mut connection, 4, MIGRATION_0004)?;
+        apply_migration(&mut connection, 5, MIGRATION_0005)?;
         verify_schema(&connection)?;
         Ok(Self { connection })
     }
@@ -74,79 +79,38 @@ impl WorkspaceEventJournal {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(existing) = find_by_message_id(&transaction, &event.message_id)? {
-            if same_event(
-                &existing,
-                &event,
-                expected_workspace_sequence,
-                expected_stream_sequence,
-            ) {
-                transaction.commit()?;
-                return Ok(existing);
-            }
-            return Err(WorkspaceEventJournalError::MessageIdConflict {
-                message_id: event.message_id,
+        append_in_transaction(
+            transaction,
+            event,
+            expected_workspace_sequence,
+            expected_stream_sequence,
+        )
+    }
+
+    pub fn append_at_global_sequence(
+        &mut self,
+        event: NewWorkspaceEvent,
+        expected_workspace_sequence: u64,
+        expected_stream_sequence: u64,
+        expected_global_sequence: u64,
+    ) -> Result<WorkspaceEvent, WorkspaceEventJournalError> {
+        validate(&event)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let actual_global = current_global_sequence(&transaction)?;
+        if actual_global != expected_global_sequence {
+            return Err(WorkspaceEventJournalError::GlobalSequenceConflict {
+                expected: expected_global_sequence,
+                actual: actual_global,
             });
         }
-        if let Some(existing) =
-            find_by_idempotency_key(&transaction, &event.workspace_id, &event.idempotency_key)?
-        {
-            if same_event(
-                &existing,
-                &event,
-                expected_workspace_sequence,
-                expected_stream_sequence,
-            ) {
-                transaction.commit()?;
-                return Ok(existing);
-            }
-            return Err(WorkspaceEventJournalError::IdempotencyConflict {
-                idempotency_key: event.idempotency_key,
-            });
-        }
-        let actual_workspace = current_workspace_sequence(&transaction, &event.workspace_id)?;
-        if actual_workspace != expected_workspace_sequence {
-            return Err(WorkspaceEventJournalError::WorkspaceSequenceConflict {
-                expected: expected_workspace_sequence,
-                actual: actual_workspace,
-            });
-        }
-        let actual_stream = current_stream_sequence(
-            &transaction,
-            &event.workspace_id,
-            &event.stream_type,
-            &event.stream_id,
-        )?;
-        if actual_stream != expected_stream_sequence {
-            return Err(WorkspaceEventJournalError::StreamSequenceConflict {
-                expected: expected_stream_sequence,
-                actual: actual_stream,
-            });
-        }
-        let workspace_sequence = checked_next(actual_workspace)?;
-        let stream_sequence = checked_next(actual_stream)?;
-        transaction.execute(
-            "INSERT INTO workspace_events (workspace_id, workspace_sequence, stream_type, \
-             stream_id, stream_sequence, message_id, idempotency_key, event_type, event_version, \
-             payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                event.workspace_id,
-                to_sql(workspace_sequence)?,
-                event.stream_type,
-                event.stream_id,
-                to_sql(stream_sequence)?,
-                event.message_id,
-                event.idempotency_key,
-                event.event_type,
-                i64::from(event.event_version),
-                serde_json::to_string(&event.payload)?,
-                event.created_at,
-            ],
-        )?;
-        let stored = find_by_message_id(&transaction, &event.message_id)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        transaction.commit()?;
-        Ok(stored)
+        append_in_transaction(
+            transaction,
+            event,
+            expected_workspace_sequence,
+            expected_stream_sequence,
+        )
     }
 
     pub fn read_stream(
@@ -184,6 +148,10 @@ impl WorkspaceEventJournal {
             |row| row.get(0),
         )?;
         u64::try_from(value).map_err(|_| WorkspaceEventJournalError::SequenceOutOfRange)
+    }
+
+    pub fn current_global_sequence(&self) -> Result<u64, WorkspaceEventJournalError> {
+        current_global_sequence(&self.connection)
     }
 
     pub fn current_stream_sequence(
@@ -232,12 +200,95 @@ impl WorkspaceEventJournal {
     }
 }
 
+fn append_in_transaction(
+    transaction: Transaction<'_>,
+    event: NewWorkspaceEvent,
+    expected_workspace_sequence: u64,
+    expected_stream_sequence: u64,
+) -> Result<WorkspaceEvent, WorkspaceEventJournalError> {
+    if let Some(existing) = find_by_message_id(&transaction, &event.message_id)? {
+        if same_event(
+            &existing,
+            &event,
+            expected_workspace_sequence,
+            expected_stream_sequence,
+        ) {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        return Err(WorkspaceEventJournalError::MessageIdConflict {
+            message_id: event.message_id,
+        });
+    }
+    if let Some(existing) =
+        find_by_idempotency_key(&transaction, &event.workspace_id, &event.idempotency_key)?
+    {
+        if same_event(
+            &existing,
+            &event,
+            expected_workspace_sequence,
+            expected_stream_sequence,
+        ) {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        return Err(WorkspaceEventJournalError::IdempotencyConflict {
+            idempotency_key: event.idempotency_key,
+        });
+    }
+    let actual_workspace = current_workspace_sequence(&transaction, &event.workspace_id)?;
+    if actual_workspace != expected_workspace_sequence {
+        return Err(WorkspaceEventJournalError::WorkspaceSequenceConflict {
+            expected: expected_workspace_sequence,
+            actual: actual_workspace,
+        });
+    }
+    let actual_stream = current_stream_sequence(
+        &transaction,
+        &event.workspace_id,
+        &event.stream_type,
+        &event.stream_id,
+    )?;
+    if actual_stream != expected_stream_sequence {
+        return Err(WorkspaceEventJournalError::StreamSequenceConflict {
+            expected: expected_stream_sequence,
+            actual: actual_stream,
+        });
+    }
+    let workspace_sequence = checked_next(actual_workspace)?;
+    let stream_sequence = checked_next(actual_stream)?;
+    transaction.execute(
+        "INSERT INTO workspace_events (workspace_id, workspace_sequence, stream_type, \
+             stream_id, stream_sequence, message_id, idempotency_key, event_type, event_version, \
+             payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            event.workspace_id,
+            to_sql(workspace_sequence)?,
+            event.stream_type,
+            event.stream_id,
+            to_sql(stream_sequence)?,
+            event.message_id,
+            event.idempotency_key,
+            event.event_type,
+            i64::from(event.event_version),
+            serde_json::to_string(&event.payload)?,
+            event.created_at,
+        ],
+    )?;
+    let stored = find_by_message_id(&transaction, &event.message_id)?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    transaction.commit()?;
+    Ok(stored)
+}
+
 #[derive(Debug, Error)]
 pub enum WorkspaceEventJournalError {
     #[error("workspace event field `{0}` must not be empty")]
     EmptyField(&'static str),
     #[error("workspace event sequence is outside the supported range")]
     SequenceOutOfRange,
+    #[error("global event sequence conflict: expected {expected}, actual {actual}")]
+    GlobalSequenceConflict { expected: u64, actual: u64 },
     #[error("workspace event version must be greater than zero")]
     InvalidEventVersion,
     #[error("workspace event message_id `{message_id}` conflicts with another event")]
@@ -258,14 +309,20 @@ pub enum WorkspaceEventJournalError {
     Storage(#[from] rusqlite::Error),
     #[error(transparent)]
     Time(#[from] time::error::Format),
+    #[error(transparent)]
+    RuntimeJournal(#[from] EventJournalError),
 }
 
-fn apply_migration(connection: &mut Connection) -> Result<(), WorkspaceEventJournalError> {
-    let checksum = format!("{:x}", Sha256::digest(MIGRATION_SQL.as_bytes()));
+fn apply_migration(
+    connection: &mut Connection,
+    version: u32,
+    sql: &str,
+) -> Result<(), WorkspaceEventJournalError> {
+    let checksum = format!("{:x}", Sha256::digest(sql.as_bytes()));
     let existing: Option<String> = connection
         .query_row(
             "SELECT checksum FROM runtime_schema_migrations WHERE version = ?1",
-            [i64::from(MIGRATION_VERSION)],
+            [i64::from(version)],
             |row| row.get(0),
         )
         .optional()?;
@@ -277,11 +334,11 @@ fn apply_migration(connection: &mut Connection) -> Result<(), WorkspaceEventJour
         };
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(MIGRATION_SQL)?;
+    transaction.execute_batch(sql)?;
     let applied_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
     transaction.execute(
         "INSERT INTO runtime_schema_migrations (version, applied_at, checksum) VALUES (?1, ?2, ?3)",
-        params![i64::from(MIGRATION_VERSION), applied_at, checksum],
+        params![i64::from(version), applied_at, checksum],
     )?;
     transaction.commit()?;
     Ok(())
@@ -294,6 +351,10 @@ fn verify_schema(connection: &Connection) -> Result<(), WorkspaceEventJournalErr
         "workspace_events_type_order",
         "workspace_events_no_update",
         "workspace_events_no_delete",
+        "runtime_global_event_clock",
+        "runtime_events_advance_global_clock",
+        "workspace_events_advance_global_clock",
+        "runtime_global_event_clock_no_delete",
     ] {
         let exists: Option<i64> = connection
             .query_row(
@@ -307,6 +368,15 @@ fn verify_schema(connection: &Connection) -> Result<(), WorkspaceEventJournalErr
         }
     }
     Ok(())
+}
+
+fn current_global_sequence(connection: &Connection) -> Result<u64, WorkspaceEventJournalError> {
+    let value: i64 = connection.query_row(
+        "SELECT sequence FROM runtime_global_event_clock WHERE singleton_id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    u64::try_from(value).map_err(|_| WorkspaceEventJournalError::SequenceOutOfRange)
 }
 
 fn validate(event: &NewWorkspaceEvent) -> Result<(), WorkspaceEventJournalError> {

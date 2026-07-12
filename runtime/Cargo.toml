@@ -18,7 +18,7 @@ secrecy = "0.10"
 rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 thiserror = "2.0"
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "net", "io-std", "io-util", "sync", "time"] }
 uuid = { version = "1.18", features = ["serde", "v4", "v5"] }
 url = "2.5"
