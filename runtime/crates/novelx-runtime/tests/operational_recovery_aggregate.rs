@@ -1,7 +1,8 @@
 use novelx_runtime::operational_recovery_aggregate::{
     OPERATIONAL_RECOVERY_POLICY_VERSION, OperationalRecoveryAggregateError,
-    OperationalRecoveryClaim, OperationalRecoveryDisposition, OperationalRecoveryEventMetadata,
-    OperationalRecoveryObservation, OperationalRecoveryObservedGate, OperationalRecoveryRepository,
+    OperationalRecoveryClaim, OperationalRecoveryDisposition, OperationalRecoveryEffectClass,
+    OperationalRecoveryEventMetadata, OperationalRecoveryExecution, OperationalRecoveryObservation,
+    OperationalRecoveryObservedGate, OperationalRecoveryOutcome, OperationalRecoveryRepository,
     OperationalRecoverySubject, OperationalRecoveryWaitingReason,
 };
 use rusqlite::Connection;
@@ -357,6 +358,252 @@ fn claim_rejects_stale_global_snapshot_and_non_ready_operations() {
     ));
 }
 
+#[test]
+fn claimed_operation_renews_starts_and_succeeds_with_verified_hashes() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "1",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let first_claim = claim(&observation, "runtime-instance-1", 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            first_claim.clone(),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let renewed = repository
+        .renew_lease(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            &first_claim.claim_id,
+            &first_claim.owner_instance_id,
+            first_claim.fencing_token,
+            "2026-07-13T00:04:00Z".to_owned(),
+            "2026-07-13T00:09:00Z".to_owned(),
+            fixture.clock(),
+            event_metadata("2026-07-13T00:04:00Z"),
+        )
+        .unwrap();
+    let current_claim = renewed.operations[&observation.operation_id]
+        .claim
+        .as_ref()
+        .unwrap();
+    assert_eq!(current_claim.lease_expires_at, "2026-07-13T00:09:00Z");
+    let execution = OperationalRecoveryExecution::derive(
+        current_claim,
+        OperationalRecoveryEffectClass::LocalDeterministic,
+        "2026-07-13T00:05:00Z".to_owned(),
+    )
+    .unwrap();
+    repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            execution.clone(),
+            fixture.clock(),
+            event_metadata("2026-07-13T00:05:00Z"),
+        )
+        .unwrap();
+    let outcome = OperationalRecoveryOutcome::succeeded(
+        &execution,
+        "d".repeat(64),
+        "e".repeat(64),
+        "2026-07-13T00:06:00Z".to_owned(),
+    )
+    .unwrap();
+    let finished = repository
+        .finish_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            outcome.clone(),
+            fixture.clock(),
+            event_metadata("2026-07-13T00:06:00Z"),
+        )
+        .unwrap();
+    assert_eq!(
+        finished.operations[&observation.operation_id].outcome,
+        Some(outcome.clone())
+    );
+    assert_eq!(
+        repository
+            .finish_execution(
+                &subject.workspace_id,
+                &subject.run_id,
+                &observation.operation_id,
+                outcome,
+                fixture.clock(),
+                event_metadata("2026-07-13T00:06:00Z"),
+            )
+            .unwrap()
+            .revision,
+        finished.revision
+    );
+}
+
+#[test]
+fn expired_or_wrong_fence_cannot_renew_or_start_execution() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "2",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let first_claim = claim(&observation, "runtime-instance-1", 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            first_claim.clone(),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    assert!(matches!(
+        repository.renew_lease(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            &first_claim.claim_id,
+            "wrong-owner",
+            1,
+            "2026-07-13T00:01:00Z".to_owned(),
+            "2026-07-13T00:06:00Z".to_owned(),
+            fixture.clock(),
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::FenceMismatch)
+    ));
+    assert!(matches!(
+        repository.renew_lease(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            &first_claim.claim_id,
+            &first_claim.owner_instance_id,
+            1,
+            "2026-07-13T00:05:00Z".to_owned(),
+            "2026-07-13T00:06:00Z".to_owned(),
+            fixture.clock(),
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::LeaseRenewalInvalid)
+    ));
+    assert!(matches!(
+        OperationalRecoveryExecution::derive(
+            &first_claim,
+            OperationalRecoveryEffectClass::LocalDeterministic,
+            "2026-07-13T00:05:01Z".to_owned(),
+        ),
+        Err(OperationalRecoveryAggregateError::ClaimLeaseExpired)
+    ));
+}
+
+#[test]
+fn terminal_outcome_rejects_conflicting_writeback_and_unverified_success() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "3",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let first_claim = claim(&observation, "runtime-instance-1", 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            first_claim.clone(),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let execution = OperationalRecoveryExecution::derive(
+        &first_claim,
+        OperationalRecoveryEffectClass::LocalDeterministic,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            execution.clone(),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    assert!(
+        OperationalRecoveryOutcome::succeeded(
+            &execution,
+            "not-a-hash".to_owned(),
+            "e".repeat(64),
+            "2026-07-13T00:02:00Z".to_owned(),
+        )
+        .is_err()
+    );
+    let unknown = OperationalRecoveryOutcome::outcome_unknown(
+        &execution,
+        "effect_result_missing".to_owned(),
+        "f".repeat(64),
+        "2026-07-13T00:02:00Z".to_owned(),
+    )
+    .unwrap();
+    repository
+        .finish_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            unknown,
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let failed = OperationalRecoveryOutcome::failed_safe(
+        &execution,
+        "safe_failure".to_owned(),
+        "a".repeat(64),
+        "2026-07-13T00:03:00Z".to_owned(),
+    )
+    .unwrap();
+    assert!(matches!(
+        repository.finish_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            failed,
+            fixture.clock(),
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::OperationTerminal)
+    ));
+}
+
 fn subject() -> OperationalRecoverySubject {
     OperationalRecoverySubject {
         workspace_id: "workspace-1".to_owned(),
@@ -384,6 +631,12 @@ fn observation(
 fn metadata() -> OperationalRecoveryEventMetadata {
     OperationalRecoveryEventMetadata {
         created_at: "2026-07-13T00:00:00Z".to_owned(),
+    }
+}
+
+fn event_metadata(created_at: &str) -> OperationalRecoveryEventMetadata {
+    OperationalRecoveryEventMetadata {
+        created_at: created_at.to_owned(),
     }
 }
 
@@ -416,5 +669,12 @@ impl Fixture {
         let path = temp.path().join("runtime.db");
         novelx_runtime::event_journal::EventJournal::open(&path).unwrap();
         Self { _temp: temp, path }
+    }
+
+    fn clock(&self) -> u64 {
+        novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&self.path)
+            .unwrap()
+            .current_global_sequence()
+            .unwrap()
     }
 }

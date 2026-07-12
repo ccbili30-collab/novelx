@@ -15,6 +15,7 @@ const EVENT_TYPE: &str = "operational_recovery.event";
 const EVENT_VERSION: u32 = 1;
 const GENESIS_HASH: &str = "GENESIS";
 pub const OPERATIONAL_RECOVERY_POLICY_VERSION: &str = "operational-recovery-v1";
+pub const MAX_RECOVERY_CLAIM_LEASE_SECONDS: u64 = 300;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -104,6 +105,8 @@ pub struct OperationalRecoveryOperation {
     pub observation: OperationalRecoveryObservation,
     pub disposition: Option<OperationalRecoveryDisposition>,
     pub claim: Option<OperationalRecoveryClaim>,
+    pub execution: Option<OperationalRecoveryExecution>,
+    pub outcome: Option<OperationalRecoveryOutcome>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -169,6 +172,157 @@ impl OperationalRecoveryClaim {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationalRecoveryEffectClass {
+    LocalDeterministic,
+    PersistedProviderResultProjection,
+    VerifiedToolResultProjection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationalRecoveryExecution {
+    pub execution_id: String,
+    pub claim_id: String,
+    pub owner_instance_id: String,
+    pub fencing_token: u64,
+    pub source_fingerprint: String,
+    pub action_spec_sha256: String,
+    pub effect_class: OperationalRecoveryEffectClass,
+    pub started_at: String,
+}
+
+impl OperationalRecoveryExecution {
+    pub fn derive(
+        claim: &OperationalRecoveryClaim,
+        effect_class: OperationalRecoveryEffectClass,
+        started_at: String,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        validate_claim(claim)?;
+        let started = OffsetDateTime::parse(&started_at, &Rfc3339)?;
+        let expires = OffsetDateTime::parse(&claim.lease_expires_at, &Rfc3339)?;
+        if started > expires {
+            return Err(OperationalRecoveryAggregateError::ClaimLeaseExpired);
+        }
+        let execution_id = canonical_sha256(&serde_json::json!({
+            "claimId": claim.claim_id,
+            "ownerInstanceId": claim.owner_instance_id,
+            "fencingToken": claim.fencing_token,
+            "sourceFingerprint": claim.source_fingerprint,
+            "actionSpecSha256": claim.action_spec_sha256,
+            "effectClass": effect_class,
+        }))?;
+        Ok(Self {
+            execution_id,
+            claim_id: claim.claim_id.clone(),
+            owner_instance_id: claim.owner_instance_id.clone(),
+            fencing_token: claim.fencing_token,
+            source_fingerprint: claim.source_fingerprint.clone(),
+            action_spec_sha256: claim.action_spec_sha256.clone(),
+            effect_class,
+            started_at,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum OperationalRecoveryOutcome {
+    Succeeded {
+        execution_id: String,
+        claim_id: String,
+        owner_instance_id: String,
+        fencing_token: u64,
+        result_manifest_sha256: String,
+        final_checkpoint_sha256: String,
+        completed_at: String,
+    },
+    FailedSafe {
+        execution_id: String,
+        claim_id: String,
+        owner_instance_id: String,
+        fencing_token: u64,
+        error_code: String,
+        evidence_sha256: String,
+        failed_at: String,
+    },
+    OutcomeUnknown {
+        execution_id: String,
+        claim_id: String,
+        owner_instance_id: String,
+        fencing_token: u64,
+        reason_code: String,
+        evidence_sha256: String,
+        detected_at: String,
+    },
+}
+
+impl OperationalRecoveryOutcome {
+    pub fn succeeded(
+        execution: &OperationalRecoveryExecution,
+        result_manifest_sha256: String,
+        final_checkpoint_sha256: String,
+        completed_at: String,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        validate_execution(execution)?;
+        require_sha256("result_manifest_sha256", &result_manifest_sha256)?;
+        require_sha256("final_checkpoint_sha256", &final_checkpoint_sha256)?;
+        parse_time("completed_at", &completed_at)?;
+        Ok(Self::Succeeded {
+            execution_id: execution.execution_id.clone(),
+            claim_id: execution.claim_id.clone(),
+            owner_instance_id: execution.owner_instance_id.clone(),
+            fencing_token: execution.fencing_token,
+            result_manifest_sha256,
+            final_checkpoint_sha256,
+            completed_at,
+        })
+    }
+
+    pub fn failed_safe(
+        execution: &OperationalRecoveryExecution,
+        error_code: String,
+        evidence_sha256: String,
+        failed_at: String,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        validate_execution(execution)?;
+        require_text("error_code", &error_code)?;
+        require_sha256("evidence_sha256", &evidence_sha256)?;
+        parse_time("failed_at", &failed_at)?;
+        Ok(Self::FailedSafe {
+            execution_id: execution.execution_id.clone(),
+            claim_id: execution.claim_id.clone(),
+            owner_instance_id: execution.owner_instance_id.clone(),
+            fencing_token: execution.fencing_token,
+            error_code,
+            evidence_sha256,
+            failed_at,
+        })
+    }
+
+    pub fn outcome_unknown(
+        execution: &OperationalRecoveryExecution,
+        reason_code: String,
+        evidence_sha256: String,
+        detected_at: String,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        validate_execution(execution)?;
+        require_text("reason_code", &reason_code)?;
+        require_sha256("evidence_sha256", &evidence_sha256)?;
+        parse_time("detected_at", &detected_at)?;
+        Ok(Self::OutcomeUnknown {
+            execution_id: execution.execution_id.clone(),
+            claim_id: execution.claim_id.clone(),
+            owner_instance_id: execution.owner_instance_id.clone(),
+            fencing_token: execution.fencing_token,
+            reason_code,
+            evidence_sha256,
+            detected_at,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperationalRecoveryAggregate {
     pub subject: OperationalRecoverySubject,
@@ -201,6 +355,23 @@ enum RecoveryEventData {
     },
     Claimed {
         claim: OperationalRecoveryClaim,
+    },
+    LeaseRenewed {
+        operation_id: String,
+        claim_id: String,
+        owner_instance_id: String,
+        fencing_token: u64,
+        previous_expires_at: String,
+        renewed_at: String,
+        lease_expires_at: String,
+    },
+    ExecutionStarted {
+        operation_id: String,
+        execution: OperationalRecoveryExecution,
+    },
+    ExecutionFinished {
+        operation_id: String,
+        outcome: OperationalRecoveryOutcome,
     },
 }
 
@@ -375,6 +546,7 @@ impl OperationalRecoveryRepository {
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
         validate_claim(&claim)?;
+        validate_initial_lease_policy(&claim)?;
         let current = self.load(workspace_id, run_id)?;
         let operation = current
             .operations
@@ -399,6 +571,140 @@ impl OperationalRecoveryRepository {
         self.append_at_global_sequence(
             current,
             RecoveryEventData::Claimed { claim },
+            expected_global_sequence,
+            metadata,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn renew_lease(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        operation_id: &str,
+        claim_id: &str,
+        owner_instance_id: &str,
+        fencing_token: u64,
+        renewed_at: String,
+        lease_expires_at: String,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        let current = self.load(workspace_id, run_id)?;
+        let operation = current
+            .operations
+            .get(operation_id)
+            .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+        let claim = require_current_claim(operation, claim_id, owner_instance_id, fencing_token)?;
+        if operation.outcome.is_some() {
+            return Err(OperationalRecoveryAggregateError::OperationTerminal);
+        }
+        let renewed = parse_time("renewed_at", &renewed_at)?;
+        let previous = parse_time("lease_expires_at", &claim.lease_expires_at)?;
+        let next = parse_time("lease_expires_at", &lease_expires_at)?;
+        if renewed >= previous
+            || next <= previous
+            || next - renewed > time::Duration::seconds(MAX_RECOVERY_CLAIM_LEASE_SECONDS as i64)
+        {
+            return Err(OperationalRecoveryAggregateError::LeaseRenewalInvalid);
+        }
+        let previous_expires_at = claim.lease_expires_at.clone();
+        self.append_at_global_sequence(
+            current,
+            RecoveryEventData::LeaseRenewed {
+                operation_id: operation_id.to_owned(),
+                claim_id: claim_id.to_owned(),
+                owner_instance_id: owner_instance_id.to_owned(),
+                fencing_token,
+                previous_expires_at,
+                renewed_at,
+                lease_expires_at,
+            },
+            expected_global_sequence,
+            metadata,
+        )
+    }
+
+    pub fn start_execution(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        operation_id: &str,
+        execution: OperationalRecoveryExecution,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        validate_execution(&execution)?;
+        let current = self.load(workspace_id, run_id)?;
+        let operation = current
+            .operations
+            .get(operation_id)
+            .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+        let claim = require_current_claim(
+            operation,
+            &execution.claim_id,
+            &execution.owner_instance_id,
+            execution.fencing_token,
+        )?;
+        if execution.source_fingerprint != claim.source_fingerprint
+            || execution.action_spec_sha256 != claim.action_spec_sha256
+        {
+            return Err(OperationalRecoveryAggregateError::ExecutionConflict);
+        }
+        if let Some(existing) = &operation.execution {
+            return if existing == &execution {
+                Ok(current)
+            } else {
+                Err(OperationalRecoveryAggregateError::ExecutionConflict)
+            };
+        }
+        if operation.outcome.is_some() {
+            return Err(OperationalRecoveryAggregateError::OperationTerminal);
+        }
+        self.append_at_global_sequence(
+            current,
+            RecoveryEventData::ExecutionStarted {
+                operation_id: operation_id.to_owned(),
+                execution,
+            },
+            expected_global_sequence,
+            metadata,
+        )
+    }
+
+    pub fn finish_execution(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        operation_id: &str,
+        outcome: OperationalRecoveryOutcome,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        validate_outcome(&outcome)?;
+        let current = self.load(workspace_id, run_id)?;
+        let operation = current
+            .operations
+            .get(operation_id)
+            .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+        let execution = operation
+            .execution
+            .as_ref()
+            .ok_or(OperationalRecoveryAggregateError::ExecutionRequired)?;
+        validate_outcome_matches_execution(&outcome, execution)?;
+        if let Some(existing) = &operation.outcome {
+            return if existing == &outcome {
+                Ok(current)
+            } else {
+                Err(OperationalRecoveryAggregateError::OperationTerminal)
+            };
+        }
+        self.append_at_global_sequence(
+            current,
+            RecoveryEventData::ExecutionFinished {
+                operation_id: operation_id.to_owned(),
+                outcome,
+            },
             expected_global_sequence,
             metadata,
         )
@@ -523,6 +829,8 @@ fn apply_event(
                     observation,
                     disposition: None,
                     claim: None,
+                    execution: None,
+                    outcome: None,
                 },
             );
             aggregate.revision = event.aggregate_revision;
@@ -579,6 +887,7 @@ fn apply_event(
         }
         RecoveryEventData::Claimed { claim } => {
             validate_claim(&claim)?;
+            validate_initial_lease_policy(&claim)?;
             let aggregate = value
                 .as_mut()
                 .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
@@ -595,6 +904,96 @@ fn apply_event(
                 return Err(OperationalRecoveryAggregateError::OperationNotClaimable);
             }
             operation.claim = Some(claim);
+            aggregate.revision = event.aggregate_revision;
+            aggregate.last_event_hash = event.event_hash;
+        }
+        RecoveryEventData::LeaseRenewed {
+            operation_id,
+            claim_id,
+            owner_instance_id,
+            fencing_token,
+            previous_expires_at,
+            renewed_at,
+            lease_expires_at,
+        } => {
+            let aggregate = value
+                .as_mut()
+                .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            let operation = aggregate
+                .operations
+                .get_mut(&operation_id)
+                .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+            if operation.outcome.is_some() {
+                return Err(OperationalRecoveryAggregateError::OperationTerminal);
+            }
+            let claim =
+                require_current_claim(operation, &claim_id, &owner_instance_id, fencing_token)?;
+            if claim.lease_expires_at != previous_expires_at {
+                return Err(OperationalRecoveryAggregateError::LeaseRenewalInvalid);
+            }
+            let renewed = parse_time("renewed_at", &renewed_at)?;
+            let previous = parse_time("previous_expires_at", &previous_expires_at)?;
+            let next = parse_time("lease_expires_at", &lease_expires_at)?;
+            if renewed >= previous
+                || next <= previous
+                || next - renewed > time::Duration::seconds(MAX_RECOVERY_CLAIM_LEASE_SECONDS as i64)
+            {
+                return Err(OperationalRecoveryAggregateError::LeaseRenewalInvalid);
+            }
+            operation.claim.as_mut().unwrap().lease_expires_at = lease_expires_at;
+            aggregate.revision = event.aggregate_revision;
+            aggregate.last_event_hash = event.event_hash;
+        }
+        RecoveryEventData::ExecutionStarted {
+            operation_id,
+            execution,
+        } => {
+            validate_execution(&execution)?;
+            let aggregate = value
+                .as_mut()
+                .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            let operation = aggregate
+                .operations
+                .get_mut(&operation_id)
+                .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+            let claim = require_current_claim(
+                operation,
+                &execution.claim_id,
+                &execution.owner_instance_id,
+                execution.fencing_token,
+            )?;
+            if operation.execution.is_some()
+                || operation.outcome.is_some()
+                || execution.source_fingerprint != claim.source_fingerprint
+                || execution.action_spec_sha256 != claim.action_spec_sha256
+            {
+                return Err(OperationalRecoveryAggregateError::ExecutionConflict);
+            }
+            operation.execution = Some(execution);
+            aggregate.revision = event.aggregate_revision;
+            aggregate.last_event_hash = event.event_hash;
+        }
+        RecoveryEventData::ExecutionFinished {
+            operation_id,
+            outcome,
+        } => {
+            validate_outcome(&outcome)?;
+            let aggregate = value
+                .as_mut()
+                .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            let operation = aggregate
+                .operations
+                .get_mut(&operation_id)
+                .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+            let execution = operation
+                .execution
+                .as_ref()
+                .ok_or(OperationalRecoveryAggregateError::ExecutionRequired)?;
+            if operation.outcome.is_some() {
+                return Err(OperationalRecoveryAggregateError::OperationTerminal);
+            }
+            validate_outcome_matches_execution(&outcome, execution)?;
+            operation.outcome = Some(outcome);
             aggregate.revision = event.aggregate_revision;
             aggregate.last_event_hash = event.event_hash;
         }
@@ -661,6 +1060,160 @@ fn validate_claim(
     }
 }
 
+fn validate_initial_lease_policy(
+    claim: &OperationalRecoveryClaim,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    let claimed = parse_time("claimed_at", &claim.claimed_at)?;
+    let expires = parse_time("lease_expires_at", &claim.lease_expires_at)?;
+    if expires - claimed > time::Duration::seconds(MAX_RECOVERY_CLAIM_LEASE_SECONDS as i64) {
+        Err(OperationalRecoveryAggregateError::LeaseWindowInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_execution(
+    execution: &OperationalRecoveryExecution,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    require_sha256("execution_id", &execution.execution_id)?;
+    require_sha256("claim_id", &execution.claim_id)?;
+    require_text("owner_instance_id", &execution.owner_instance_id)?;
+    if execution.fencing_token == 0 {
+        return Err(OperationalRecoveryAggregateError::FencingTokenInvalid);
+    }
+    require_sha256("source_fingerprint", &execution.source_fingerprint)?;
+    require_sha256("action_spec_sha256", &execution.action_spec_sha256)?;
+    parse_time("started_at", &execution.started_at)?;
+    let derived_id = canonical_sha256(&serde_json::json!({
+        "claimId": execution.claim_id,
+        "ownerInstanceId": execution.owner_instance_id,
+        "fencingToken": execution.fencing_token,
+        "sourceFingerprint": execution.source_fingerprint,
+        "actionSpecSha256": execution.action_spec_sha256,
+        "effectClass": execution.effect_class,
+    }))?;
+    if derived_id == execution.execution_id {
+        Ok(())
+    } else {
+        Err(OperationalRecoveryAggregateError::ExecutionConflict)
+    }
+}
+
+fn validate_outcome(
+    outcome: &OperationalRecoveryOutcome,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    let (execution_id, claim_id, owner_instance_id, fencing_token) = outcome_identity(outcome);
+    require_sha256("execution_id", execution_id)?;
+    require_sha256("claim_id", claim_id)?;
+    require_text("owner_instance_id", owner_instance_id)?;
+    if fencing_token == 0 {
+        return Err(OperationalRecoveryAggregateError::FencingTokenInvalid);
+    }
+    match outcome {
+        OperationalRecoveryOutcome::Succeeded {
+            result_manifest_sha256,
+            final_checkpoint_sha256,
+            completed_at,
+            ..
+        } => {
+            require_sha256("result_manifest_sha256", result_manifest_sha256)?;
+            require_sha256("final_checkpoint_sha256", final_checkpoint_sha256)?;
+            parse_time("completed_at", completed_at)?;
+        }
+        OperationalRecoveryOutcome::FailedSafe {
+            error_code,
+            evidence_sha256,
+            failed_at,
+            ..
+        } => {
+            require_text("error_code", error_code)?;
+            require_sha256("evidence_sha256", evidence_sha256)?;
+            parse_time("failed_at", failed_at)?;
+        }
+        OperationalRecoveryOutcome::OutcomeUnknown {
+            reason_code,
+            evidence_sha256,
+            detected_at,
+            ..
+        } => {
+            require_text("reason_code", reason_code)?;
+            require_sha256("evidence_sha256", evidence_sha256)?;
+            parse_time("detected_at", detected_at)?;
+        }
+    }
+    Ok(())
+}
+
+fn outcome_identity(outcome: &OperationalRecoveryOutcome) -> (&str, &str, &str, u64) {
+    match outcome {
+        OperationalRecoveryOutcome::Succeeded {
+            execution_id,
+            claim_id,
+            owner_instance_id,
+            fencing_token,
+            ..
+        }
+        | OperationalRecoveryOutcome::FailedSafe {
+            execution_id,
+            claim_id,
+            owner_instance_id,
+            fencing_token,
+            ..
+        }
+        | OperationalRecoveryOutcome::OutcomeUnknown {
+            execution_id,
+            claim_id,
+            owner_instance_id,
+            fencing_token,
+            ..
+        } => (execution_id, claim_id, owner_instance_id, *fencing_token),
+    }
+}
+
+fn validate_outcome_matches_execution(
+    outcome: &OperationalRecoveryOutcome,
+    execution: &OperationalRecoveryExecution,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    let (execution_id, claim_id, owner_instance_id, fencing_token) = outcome_identity(outcome);
+    if execution_id == execution.execution_id
+        && claim_id == execution.claim_id
+        && owner_instance_id == execution.owner_instance_id
+        && fencing_token == execution.fencing_token
+    {
+        Ok(())
+    } else {
+        Err(OperationalRecoveryAggregateError::FenceMismatch)
+    }
+}
+
+fn require_current_claim<'a>(
+    operation: &'a OperationalRecoveryOperation,
+    claim_id: &str,
+    owner_instance_id: &str,
+    fencing_token: u64,
+) -> Result<&'a OperationalRecoveryClaim, OperationalRecoveryAggregateError> {
+    let claim = operation
+        .claim
+        .as_ref()
+        .ok_or(OperationalRecoveryAggregateError::ClaimRequired)?;
+    if claim.claim_id == claim_id
+        && claim.owner_instance_id == owner_instance_id
+        && claim.fencing_token == fencing_token
+    {
+        Ok(claim)
+    } else {
+        Err(OperationalRecoveryAggregateError::FenceMismatch)
+    }
+}
+
+fn parse_time(
+    _field: &'static str,
+    value: &str,
+) -> Result<OffsetDateTime, OperationalRecoveryAggregateError> {
+    require_text("timestamp", value)?;
+    Ok(OffsetDateTime::parse(value, &Rfc3339)?)
+}
+
 fn event_hash(
     revision: u64,
     previous_hash: &str,
@@ -710,6 +1263,9 @@ fn event_operation_id(data: &RecoveryEventData) -> &str {
         RecoveryEventData::Waiting { operation_id, .. }
         | RecoveryEventData::Quarantined { operation_id, .. } => operation_id,
         RecoveryEventData::Claimed { claim } => &claim.operation_id,
+        RecoveryEventData::LeaseRenewed { operation_id, .. }
+        | RecoveryEventData::ExecutionStarted { operation_id, .. }
+        | RecoveryEventData::ExecutionFinished { operation_id, .. } => operation_id,
     }
 }
 
@@ -724,6 +1280,21 @@ fn event_suffix(data: &RecoveryEventData) -> Result<String, OperationalRecoveryA
             canonical_sha256(&serde_json::to_value(invariant_codes)?)?
         ),
         RecoveryEventData::Claimed { claim } => format!("claimed:{}", claim.claim_id),
+        RecoveryEventData::LeaseRenewed {
+            claim_id,
+            lease_expires_at,
+            ..
+        } => format!(
+            "lease-renewed:{claim_id}:{}",
+            canonical_sha256(&serde_json::json!(lease_expires_at))?
+        ),
+        RecoveryEventData::ExecutionStarted { execution, .. } => {
+            format!("execution-started:{}", execution.execution_id)
+        }
+        RecoveryEventData::ExecutionFinished { outcome, .. } => format!(
+            "execution-finished:{}",
+            canonical_sha256(&serde_json::to_value(outcome)?)?
+        ),
     })
 }
 
@@ -778,6 +1349,20 @@ pub enum OperationalRecoveryAggregateError {
     FencingTokenInvalid,
     #[error("operational recovery lease must expire after it is claimed")]
     LeaseWindowInvalid,
+    #[error("operational recovery claim lease has expired")]
+    ClaimLeaseExpired,
+    #[error("operational recovery lease renewal is invalid")]
+    LeaseRenewalInvalid,
+    #[error("operational recovery claim is required")]
+    ClaimRequired,
+    #[error("operational recovery fencing identity does not match")]
+    FenceMismatch,
+    #[error("operational recovery execution conflicts with persisted state")]
+    ExecutionConflict,
+    #[error("operational recovery execution must start first")]
+    ExecutionRequired,
+    #[error("operational recovery operation is terminal")]
+    OperationTerminal,
     #[error("operational recovery aggregate was not found")]
     NotFound,
     #[error("operational recovery event envelope is invalid")]

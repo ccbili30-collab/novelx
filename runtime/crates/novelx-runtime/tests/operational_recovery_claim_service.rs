@@ -9,7 +9,7 @@ use novelx_runtime::{
     operational_recovery_aggregate::OperationalRecoveryObservedGate,
     operational_recovery_claim_service::{
         OperationalRecoveryClaimError, OperationalRecoveryClaimRequest,
-        OperationalRecoveryClaimService,
+        OperationalRecoveryClaimService, OperationalRecoveryStartRequest,
     },
     operational_recovery_recording_service::OperationalRecoveryRecordingService,
     operational_recovery_scanner::{OperationalRecoveryGate, OperationalRecoveryScanner},
@@ -107,6 +107,67 @@ fn concurrent_runtime_instances_cannot_both_acquire_the_claim() {
     assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
 }
 
+#[test]
+fn execution_start_uses_fresh_scan_and_exact_fence() {
+    let fixture = Fixture::new();
+    let (run_id, provider) = fixture.create_running_run();
+    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let service = OperationalRecoveryClaimService::new(&fixture.path);
+    let claimed = service
+        .claim_ready(
+            claim_request(&run_id, &operation_id, "runtime-instance-1"),
+            std::slice::from_ref(&provider),
+        )
+        .unwrap();
+    let claim = claimed.operations[&operation_id].claim.as_ref().unwrap();
+    let started = service
+        .start_claimed(
+            OperationalRecoveryStartRequest {
+                workspace_id: "workspace-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                run_id: run_id.clone(),
+                operation_id: operation_id.clone(),
+                claim_id: claim.claim_id.clone(),
+                owner_instance_id: claim.owner_instance_id.clone(),
+                fencing_token: claim.fencing_token,
+                effect_class: novelx_runtime::operational_recovery_aggregate::OperationalRecoveryEffectClass::LocalDeterministic,
+            },
+            std::slice::from_ref(&provider),
+        )
+        .unwrap();
+    assert!(started.operations[&operation_id].execution.is_some());
+
+    assert!(matches!(
+        service.start_claimed(
+            OperationalRecoveryStartRequest {
+                workspace_id: "workspace-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                run_id,
+                operation_id,
+                claim_id: claim.claim_id.clone(),
+                owner_instance_id: "old-owner".to_owned(),
+                fencing_token: claim.fencing_token,
+                effect_class: novelx_runtime::operational_recovery_aggregate::OperationalRecoveryEffectClass::LocalDeterministic,
+            },
+            &[provider],
+        ),
+        Err(OperationalRecoveryClaimError::FenceMismatch)
+    ));
+}
+
+#[test]
+fn claim_lease_duration_is_enforced_by_runtime_policy() {
+    let fixture = Fixture::new();
+    let (run_id, provider) = fixture.create_running_run();
+    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let mut request = claim_request(&run_id, &operation_id, "runtime-instance-1");
+    request.lease_duration_seconds = 301;
+    assert!(matches!(
+        OperationalRecoveryClaimService::new(&fixture.path).claim_ready(request, &[provider]),
+        Err(OperationalRecoveryClaimError::LeaseDurationInvalid)
+    ));
+}
+
 fn claim_request(run_id: &str, operation_id: &str, owner: &str) -> OperationalRecoveryClaimRequest {
     OperationalRecoveryClaimRequest {
         workspace_id: "workspace-1".to_owned(),
@@ -114,8 +175,7 @@ fn claim_request(run_id: &str, operation_id: &str, owner: &str) -> OperationalRe
         run_id: run_id.to_owned(),
         expected_operation_id: operation_id.to_owned(),
         owner_instance_id: owner.to_owned(),
-        claimed_at: "2026-07-13T00:00:00Z".to_owned(),
-        lease_expires_at: "2026-07-13T00:05:00Z".to_owned(),
+        lease_duration_seconds: 30,
         executor_version: "recovery-executor-v1".to_owned(),
         action_spec_sha256: "c".repeat(64),
     }
