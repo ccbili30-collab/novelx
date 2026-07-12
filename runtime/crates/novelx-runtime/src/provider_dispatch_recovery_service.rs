@@ -17,7 +17,10 @@ use crate::{
         OperationalRecoveryEventMetadata, OperationalRecoveryOperation, OperationalRecoveryOutcome,
         OperationalRecoveryRepository, ProviderDispatchResumeCapability,
     },
-    provider_attempt::{ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState},
+    provider_attempt::{
+        ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState,
+        provider_attempt_definition_sha256, provider_attempt_evidence_sha256,
+    },
     provider_gateway::{ProviderGateway, ProviderInferenceRequest, ProviderRegistry},
     provider_inference_service::{
         ProviderAttemptExecutionGuard, ProviderInferenceExecution, ProviderInferenceService,
@@ -551,28 +554,6 @@ fn verify_dispatch_actor(
         return Err(ProviderDispatchRecoveryError::ResumeEvidenceChanged);
     }
     Ok(())
-}
-
-pub(crate) fn provider_attempt_definition_sha256(
-    attempt: &ProviderAttemptAggregate,
-) -> Result<String, serde_json::Error> {
-    canonical_sha256(&serde_json::to_value(attempt.definition())?)
-}
-
-pub(crate) fn provider_attempt_evidence_sha256(
-    attempt: &ProviderAttemptAggregate,
-) -> Result<String, serde_json::Error> {
-    canonical_sha256(&serde_json::json!({
-        "attemptId": attempt.attempt_id(),
-        "aggregateSequence": attempt.aggregate_sequence(),
-        "state": attempt.state(),
-        "definition": attempt.definition(),
-        "dispatchId": attempt.dispatch_id(),
-        "response": attempt.response_receipt(),
-        "responseTextSha256": attempt.response_text_sha256(),
-        "toolCalls": attempt.tool_calls(),
-        "failure": attempt.failure(),
-    }))
 }
 
 fn outcome_matches_manifest(

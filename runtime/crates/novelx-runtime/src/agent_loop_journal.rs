@@ -3,12 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
     agent_loop_service::{
-        AgentLoopDirective, AgentLoopError, AgentLoopService, LoopPhase, ProviderRetryBinding,
-        validate_inference_retry_transition,
+        AgentLoopDirective, AgentLoopError, AgentLoopService, InferenceDispatchIdentity, LoopPhase,
+        ProviderRetryBinding, validate_inference_retry_transition,
     },
     event_journal::{EventJournal, EventJournalError, NewRuntimeEvent, RuntimeEvent},
 };
@@ -41,12 +42,86 @@ pub enum StateTransitionKind {
     InferenceStarted,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingInferenceOrigin {
+    Created,
+    InferenceStarted,
+    InferenceRetried,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentLoopRecord {
     pub service: AgentLoopService,
     pub aggregate_sequence: u64,
     pub last_run_sequence: u64,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLoopProviderAuthorizationSnapshot {
+    run_id: Uuid,
+    invocation_id: String,
+    aggregate_sequence: u64,
+    checkpoint_sha256: String,
+    pending_inference: InferenceDispatchIdentity,
+    pending_inference_sha256: String,
+    pending_inference_persisted_at: String,
+    pending_inference_origin: PendingInferenceOrigin,
+    last_retry_binding: Option<ProviderRetryBinding>,
+    last_retry_binding_sha256: Option<String>,
+}
+
+impl AgentLoopProviderAuthorizationSnapshot {
+    pub const fn run_id(&self) -> Uuid {
+        self.run_id
+    }
+
+    pub fn invocation_id(&self) -> &str {
+        &self.invocation_id
+    }
+
+    pub const fn aggregate_sequence(&self) -> u64 {
+        self.aggregate_sequence
+    }
+
+    pub fn checkpoint_sha256(&self) -> &str {
+        &self.checkpoint_sha256
+    }
+
+    pub const fn pending_inference(&self) -> &InferenceDispatchIdentity {
+        &self.pending_inference
+    }
+
+    pub fn pending_inference_sha256(&self) -> &str {
+        &self.pending_inference_sha256
+    }
+
+    pub fn pending_inference_persisted_at(&self) -> &str {
+        &self.pending_inference_persisted_at
+    }
+
+    pub const fn pending_inference_origin(&self) -> PendingInferenceOrigin {
+        self.pending_inference_origin
+    }
+
+    pub const fn last_retry_binding(&self) -> Option<&ProviderRetryBinding> {
+        self.last_retry_binding.as_ref()
+    }
+
+    pub fn last_retry_binding_sha256(&self) -> Option<&str> {
+        self.last_retry_binding_sha256.as_deref()
+    }
+}
+
+struct AuthoritativeReplay {
+    record: AgentLoopRecord,
+    checkpoint_sha256: String,
+    pending_inference_persisted_at: Option<String>,
+    pending_inference_origin: Option<PendingInferenceOrigin>,
+    last_retry_binding: Option<ProviderRetryBinding>,
+    last_retry_binding_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -312,19 +387,55 @@ impl<'a> AgentLoopJournalRepository<'a> {
         )
     }
 
+    pub fn recover_provider_authorization_snapshot(
+        &self,
+        run_id: &str,
+        invocation_id: &str,
+    ) -> Result<AgentLoopProviderAuthorizationSnapshot, AgentLoopJournalError> {
+        let replayed = replay_authoritative(
+            run_id,
+            invocation_id,
+            &self
+                .journal
+                .read_aggregate(run_id, AGGREGATE_TYPE, invocation_id, 0)?,
+        )?;
+        let service = &replayed.record.service;
+        if service.phase() != LoopPhase::AwaitingProvider {
+            return Err(AgentLoopJournalError::ProviderAuthorizationUnavailable);
+        }
+        let pending_inference = service
+            .pending_inference()
+            .cloned()
+            .ok_or(AgentLoopJournalError::ProviderAuthorizationUnavailable)?;
+        validate_authorization_lineage(&pending_inference, replayed.last_retry_binding.as_ref())?;
+        let pending_inference_sha256 = hash_pending_inference(&pending_inference)?;
+        Ok(AgentLoopProviderAuthorizationSnapshot {
+            run_id: service.identity().run_id,
+            invocation_id: service.identity().invocation_id.clone(),
+            aggregate_sequence: replayed.record.aggregate_sequence,
+            checkpoint_sha256: replayed.checkpoint_sha256,
+            pending_inference,
+            pending_inference_sha256,
+            pending_inference_persisted_at: replayed
+                .pending_inference_persisted_at
+                .ok_or(AgentLoopJournalError::InvalidHistory)?,
+            pending_inference_origin: replayed
+                .pending_inference_origin
+                .ok_or(AgentLoopJournalError::InvalidHistory)?,
+            last_retry_binding: replayed.last_retry_binding,
+            last_retry_binding_sha256: replayed.last_retry_binding_sha256,
+        })
+    }
+
     pub fn recover_if_last_command(
         &self,
         run_id: &str,
         invocation_id: &str,
         command_key: &str,
     ) -> Result<Option<AgentLoopRecord>, AgentLoopJournalError> {
-        require_metadata(
-            command_key,
-            AgentLoopEventMetadata {
-                message_id: command_key,
-                created_at: command_key,
-            },
-        )?;
+        if command_key.trim().is_empty() {
+            return Err(AgentLoopJournalError::MetadataInvalid);
+        }
         let events = self
             .journal
             .read_aggregate(run_id, AGGREGATE_TYPE, invocation_id, 0)?;
@@ -398,6 +509,8 @@ pub enum AgentLoopJournalError {
     UnknownEventVersion(u32),
     #[error("agent loop event history is invalid")]
     InvalidHistory,
+    #[error("agent loop event timestamp is not valid RFC 3339")]
+    EventTimestampInvalid,
     #[error("agent loop checkpoint hash does not match")]
     CheckpointHashMismatch,
     #[error("agent loop transition is invalid")]
@@ -408,6 +521,8 @@ pub enum AgentLoopJournalError {
     MultipleActiveLoops,
     #[error("the pending internal tool call id is duplicated")]
     DuplicatePendingToolCall,
+    #[error("the agent loop is not awaiting an authorizable Provider inference")]
+    ProviderAuthorizationUnavailable,
     #[error(transparent)]
     Loop(#[from] AgentLoopError),
     #[error(transparent)]
@@ -478,11 +593,25 @@ fn replay(
     invocation_id: &str,
     events: &[RuntimeEvent],
 ) -> Result<AgentLoopRecord, AgentLoopJournalError> {
+    replay_authoritative(run_id, invocation_id, events).map(|replayed| replayed.record)
+}
+
+fn replay_authoritative(
+    run_id: &str,
+    invocation_id: &str,
+    events: &[RuntimeEvent],
+) -> Result<AuthoritativeReplay, AgentLoopJournalError> {
     if events.is_empty() {
         return Err(AgentLoopJournalError::InvalidHistory);
     }
     let mut previous_service: Option<AgentLoopService> = None;
+    let mut last_checkpoint_sha256 = None;
+    let mut pending_inference_persisted_at = None;
+    let mut pending_inference_origin = None;
+    let mut last_retry_binding = None;
+    let mut last_retry_binding_sha256 = None;
     for (index, event) in events.iter().enumerate() {
+        validate_timestamp(&event.created_at)?;
         if event.run_id != run_id
             || event.aggregate_type != AGGREGATE_TYPE
             || event.aggregate_id != invocation_id
@@ -524,6 +653,10 @@ fn replay(
             {
                 return Err(AgentLoopJournalError::InvalidHistory);
             }
+            pending_inference_persisted_at = Some(event.created_at.clone());
+            pending_inference_origin = Some(PendingInferenceOrigin::Created);
+            last_retry_binding = None;
+            last_retry_binding_sha256 = None;
         } else {
             let previous = previous_service
                 .as_ref()
@@ -551,6 +684,10 @@ fn replay(
                 if expected != service {
                     return Err(AgentLoopJournalError::TransitionInvalid);
                 }
+                pending_inference_persisted_at = Some(event.created_at.clone());
+                pending_inference_origin = Some(PendingInferenceOrigin::InferenceRetried);
+                last_retry_binding = Some(binding.clone());
+                last_retry_binding_sha256 = payload.retry_binding_sha256.clone();
             } else if event.event_type != "agent_loop.transitioned"
                 || payload.retry_binding.is_some()
                 || payload.retry_binding_sha256.is_some()
@@ -558,16 +695,46 @@ fn replay(
                 || previous.phase() == service.phase()
             {
                 return Err(AgentLoopJournalError::TransitionInvalid);
+            } else {
+                pending_inference_persisted_at =
+                    if payload.directive_kind == DirectiveKind::InferenceStarted {
+                        Some(event.created_at.clone())
+                    } else {
+                        None
+                    };
+                pending_inference_origin =
+                    if payload.directive_kind == DirectiveKind::InferenceStarted {
+                        Some(PendingInferenceOrigin::InferenceStarted)
+                    } else {
+                        None
+                    };
+                last_retry_binding = None;
+                last_retry_binding_sha256 = None;
             }
         }
+        last_checkpoint_sha256 = Some(payload.checkpoint_sha256);
         previous_service = Some(service);
     }
     let last = events.last().ok_or(AgentLoopJournalError::InvalidHistory)?;
-    Ok(AgentLoopRecord {
-        service: previous_service.ok_or(AgentLoopJournalError::InvalidHistory)?,
-        aggregate_sequence: last.aggregate_sequence,
-        last_run_sequence: last.run_sequence,
-        updated_at: last.created_at.clone(),
+    let service = previous_service.ok_or(AgentLoopJournalError::InvalidHistory)?;
+    if service.phase() == LoopPhase::AwaitingProvider {
+        let pending = service
+            .pending_inference()
+            .ok_or(AgentLoopJournalError::InvalidHistory)?;
+        validate_authorization_lineage(pending, last_retry_binding.as_ref())?;
+    }
+    Ok(AuthoritativeReplay {
+        record: AgentLoopRecord {
+            service,
+            aggregate_sequence: last.aggregate_sequence,
+            last_run_sequence: last.run_sequence,
+            updated_at: last.created_at.clone(),
+        },
+        checkpoint_sha256: last_checkpoint_sha256.ok_or(AgentLoopJournalError::InvalidHistory)?,
+        pending_inference_persisted_at,
+        pending_inference_origin,
+        last_retry_binding,
+        last_retry_binding_sha256,
     })
 }
 
@@ -617,6 +784,48 @@ fn hash_checkpoint(checkpoint: &Value) -> Result<String, serde_json::Error> {
 
 fn hash_retry_binding(binding: &ProviderRetryBinding) -> Result<String, serde_json::Error> {
     serde_json::to_vec(binding).map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn hash_pending_inference(
+    pending: &InferenceDispatchIdentity,
+) -> Result<String, serde_json::Error> {
+    canonical_serialized_sha256(pending)
+}
+
+fn canonical_serialized_sha256<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    canonical_value_sha256(&serde_json::to_value(value)?)
+}
+
+fn canonical_value_sha256(value: &Value) -> Result<String, serde_json::Error> {
+    fn canonicalize(value: Value) -> Value {
+        match value {
+            Value::Array(values) => Value::Array(values.into_iter().map(canonicalize).collect()),
+            Value::Object(values) => {
+                let mut entries = values.into_iter().collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, canonicalize(value)))
+                        .collect(),
+                )
+            }
+            scalar => scalar,
+        }
+    }
+    serde_json::to_vec(&canonicalize(value.clone()))
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn validate_authorization_lineage(
+    pending: &InferenceDispatchIdentity,
+    last_retry_binding: Option<&ProviderRetryBinding>,
+) -> Result<(), AgentLoopJournalError> {
+    match (pending.attempt_number, last_retry_binding) {
+        (1, None) => Ok(()),
+        (attempt, Some(binding)) if attempt > 1 && binding.next == *pending => Ok(()),
+        _ => Err(AgentLoopJournalError::InvalidHistory),
+    }
 }
 
 fn current_run_sequence(journal: &EventJournal, run_id: &str) -> Result<u64, EventJournalError> {
@@ -669,5 +878,12 @@ fn require_metadata(
     {
         return Err(AgentLoopJournalError::MetadataInvalid);
     }
+    validate_timestamp(metadata.created_at)?;
     Ok(())
+}
+
+fn validate_timestamp(value: &str) -> Result<(), AgentLoopJournalError> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map(|_| ())
+        .map_err(|_| AgentLoopJournalError::EventTimestampInvalid)
 }

@@ -10,11 +10,11 @@ use crate::{
         OperationalRecoveryEventMetadata, OperationalRecoveryRepository,
         ProviderDispatchResumeAuthorization,
     },
-    provider_attempt::{ProviderAttemptAggregate, ProviderAttemptError},
-    provider_dispatch_recovery_service::{
-        DispatchEvidence, ProviderDispatchRecoveryError, provider_attempt_definition_sha256,
+    provider_attempt::{
+        ProviderAttemptAggregate, ProviderAttemptError, provider_attempt_definition_sha256,
         provider_attempt_evidence_sha256,
     },
+    provider_dispatch_recovery_service::{DispatchEvidence, ProviderDispatchRecoveryError},
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
     workspace_runtime_lease::WorkspaceRuntimeLease,
 };

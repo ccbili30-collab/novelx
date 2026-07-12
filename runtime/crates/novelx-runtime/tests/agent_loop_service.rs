@@ -51,6 +51,47 @@ fn provider_completion_must_match_the_persisted_dispatch_identity() {
 }
 
 #[test]
+fn initial_and_new_non_retry_inferences_must_start_at_attempt_one() {
+    let mut invalid_initial = dispatch_identity(1);
+    invalid_initial.attempt_number = 2;
+    assert_eq!(
+        AgentLoopService::new(
+            identity(RunPermissionMode::Free),
+            policy(4),
+            invalid_initial,
+        )
+        .unwrap_err(),
+        AgentLoopError::IdentityInvalid
+    );
+
+    let mut service = service(RunPermissionMode::Free, 4);
+    let calls = vec![provider_calls().remove(0)];
+    service
+        .accept_provider_outcome(completion(1, calls.clone(), None), materialized(&calls))
+        .unwrap();
+    service
+        .accept_tool_results(vec![tool_result(
+            "provider-call-1",
+            "read_project_file",
+            false,
+        )])
+        .unwrap();
+    let context_compilation_id = Uuid::new_v4();
+    service
+        .accept_context_compiled(context_compilation_id)
+        .unwrap();
+    let mut invalid_next = dispatch_identity_for(2, context_compilation_id);
+    invalid_next.attempt_number = 2;
+    assert_eq!(
+        service
+            .acknowledge_inference_started(invalid_next)
+            .unwrap_err(),
+        AgentLoopError::ProviderIdentityMismatch
+    );
+    assert_eq!(service.phase(), LoopPhase::AwaitingInferenceStart);
+}
+
+#[test]
 fn retry_replaces_only_the_pending_attempt_and_survives_checkpoint_restore() {
     let mut service = service(RunPermissionMode::Free, 4);
     let previous = dispatch_identity(1);
@@ -290,30 +331,38 @@ fn cancellation_is_terminal_and_prevents_assist_resume() {
 
 fn service(mode: RunPermissionMode, maximum_tool_rounds: u32) -> AgentLoopService {
     AgentLoopService::new(
-        AgentLoopIdentity {
-            run_id: run_id(),
-            project_id: "project-1".to_owned(),
-            invocation_id: "steward-1".to_owned(),
-            initial_context_compilation_id: context_id(1),
-            source_scope: ToolSourceScope {
-                source_checkpoint_id: "checkpoint-1".to_owned(),
-                resource_ids: vec!["world-1".to_owned()],
-                scope_sha256: "a".repeat(64),
-            },
-            permission: ToolPermissionPolicy {
-                mode,
-                policy_id: "tool-policy".to_owned(),
-                policy_version: "1.0.0".to_owned(),
-                policy_sha256: "b".repeat(64),
-            },
-        },
-        AgentLoopPolicy {
-            maximum_tool_rounds,
-            tool_schema_version: 1,
-        },
+        identity(mode),
+        policy(maximum_tool_rounds),
         dispatch_identity(1),
     )
     .unwrap()
+}
+
+fn identity(mode: RunPermissionMode) -> AgentLoopIdentity {
+    AgentLoopIdentity {
+        run_id: run_id(),
+        project_id: "project-1".to_owned(),
+        invocation_id: "steward-1".to_owned(),
+        initial_context_compilation_id: context_id(1),
+        source_scope: ToolSourceScope {
+            source_checkpoint_id: "checkpoint-1".to_owned(),
+            resource_ids: vec!["world-1".to_owned()],
+            scope_sha256: "a".repeat(64),
+        },
+        permission: ToolPermissionPolicy {
+            mode,
+            policy_id: "tool-policy".to_owned(),
+            policy_version: "1.0.0".to_owned(),
+            policy_sha256: "b".repeat(64),
+        },
+    }
+}
+
+const fn policy(maximum_tool_rounds: u32) -> AgentLoopPolicy {
+    AgentLoopPolicy {
+        maximum_tool_rounds,
+        tool_schema_version: 1,
+    }
 }
 
 fn completion(

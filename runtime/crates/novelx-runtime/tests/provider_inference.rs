@@ -9,16 +9,35 @@ use novelx_protocol::{
     ContextRepresentation, ProviderRunIdentity, TokenizerIdentity, TokenizerKind,
 };
 use novelx_runtime::provider_gateway::{
-    ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderGateway, ProviderGatewayError,
-    ProviderInferenceFunctionCall, ProviderInferenceMessage, ProviderInferenceRequest,
-    ProviderInferenceRole, ProviderInferenceToolCall, ProviderInputCapability, ProviderRegistry,
-    ProviderRetryPolicy, provider_config_sha256,
+    PreparedProviderHttpDispatch, ProviderApiFlavor, ProviderAuthScheme, ProviderConfig,
+    ProviderGateway, ProviderGatewayError, ProviderInferenceFunctionCall, ProviderInferenceMessage,
+    ProviderInferenceRequest, ProviderInferenceRole, ProviderInferenceToolCall,
+    ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
 };
 use novelx_runtime::provider_retry_after::ProviderRetryAfterKind;
+use sha2::Digest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 const API_KEY: &str = "provider-inference-sensitive-key";
+
+macro_rules! assert_not_impl {
+    ($type:ty, $trait:path) => {
+        const _: fn() = || {
+            trait AmbiguousIfImpl<A> {
+                fn marker() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            struct Invalid;
+            impl<T: ?Sized + $trait> AmbiguousIfImpl<Invalid> for T {}
+            let _ = <$type as AmbiguousIfImpl<_>>::marker;
+        };
+    };
+}
+
+assert_not_impl!(PreparedProviderHttpDispatch, Clone);
+assert_not_impl!(PreparedProviderHttpDispatch, std::fmt::Debug);
+assert_not_impl!(PreparedProviderHttpDispatch, serde::Serialize);
 
 #[tokio::test]
 async fn posts_a_real_loopback_request_bound_to_the_compiled_context_receipt() {
@@ -60,6 +79,106 @@ async fn posts_a_real_loopback_request_bound_to_the_compiled_context_receipt() {
     assert!(captured.contains("authorization: Bearer provider-inference-sensitive-key"));
     assert!(captured.contains("\"model\":\"deepseek-chat\""));
     assert!(captured.contains("\"content\":\"继续银湾故事\""));
+}
+
+#[tokio::test]
+async fn prepares_complete_http_dispatch_without_network_or_secret_projection() {
+    let (base_url, request_count, server) = spawn_counting_server().await;
+    let (registry, identity) = bound_registry(base_url.clone(), 2_000);
+    let provider = registry.resolve(&identity).unwrap();
+    let gateway = ProviderGateway::new().unwrap();
+    let prepared = gateway
+        .prepare_inference(provider, inference_request(compilation_receipt()))
+        .unwrap();
+    let expected_payload_sha256 = prepared.transport_payload_sha256().to_owned();
+    let expected_payload_bytes = prepared.transport_payload_bytes();
+    let before = tokio::time::Instant::now();
+
+    let dispatch = gateway.prepare_http_dispatch(provider, prepared).unwrap();
+    let after = tokio::time::Instant::now();
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(dispatch.method(), reqwest::Method::POST);
+    assert_eq!(
+        dispatch.endpoint().as_str(),
+        format!("{base_url}/chat/completions")
+    );
+    assert_eq!(
+        dispatch.request_timeout(),
+        Some(Duration::from_millis(2_000))
+    );
+    assert_eq!(dispatch.transport_payload_sha256(), expected_payload_sha256);
+    assert_eq!(dispatch.transport_payload_bytes(), expected_payload_bytes);
+    assert_eq!(dispatch.compilation(), &compilation_receipt());
+    assert_eq!(dispatch.provider(), &identity);
+    assert!(
+        dispatch.total_deadline_at() >= before + Duration::from_millis(3_000)
+            && dispatch.total_deadline_at() <= after + Duration::from_millis(3_000)
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn prebuilt_send_kernel_executes_exactly_one_request_and_parses_response() {
+    let (base_url, requests, server) = spawn_http_server(vec![ServerReply::Immediate(
+        json_response(200, successful_body()),
+    )])
+    .await;
+    let (registry, identity) = bound_registry(base_url, 2_000);
+    let provider = registry.resolve(&identity).unwrap();
+    let gateway = ProviderGateway::new().unwrap();
+    let prepared = gateway
+        .prepare_inference(provider, inference_request(compilation_receipt()))
+        .unwrap();
+    let expected_payload_sha256 = prepared.transport_payload_sha256().to_owned();
+
+    let outcome = gateway.infer_prepared(provider, prepared).await.unwrap();
+
+    assert_eq!(outcome.text.as_deref(), Some("完成"));
+    server.await.unwrap();
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let request = &captured[0];
+    assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+    assert!(request.contains("content-type: application/json"));
+    assert!(request.contains(&format!("authorization: Bearer {API_KEY}")));
+    let body = request.split_once("\r\n\r\n").unwrap().1.as_bytes();
+    assert_eq!(
+        format!("{:x}", sha2::Sha256::digest(body)),
+        expected_payload_sha256
+    );
+}
+
+#[test]
+fn invalid_base_url_and_sensitive_header_fail_before_http_dispatch_exists() {
+    let mut invalid_url = provider_config("not a provider URL".to_owned(), 2_000);
+    let invalid_hash = provider_config_sha256(&invalid_url).unwrap();
+    let mut registry = ProviderRegistry::default();
+    assert!(matches!(
+        registry.bind(invalid_url.clone(), &invalid_hash, API_KEY.to_owned()),
+        Err(ProviderGatewayError::BaseUrlInvalid)
+    ));
+
+    invalid_url.base_url = "http://127.0.0.1:9/v1".to_owned();
+    let valid_hash = provider_config_sha256(&invalid_url).unwrap();
+    registry
+        .bind(invalid_url, &valid_hash, "invalid\ncredential".to_owned())
+        .unwrap();
+    let identity = ProviderRunIdentity {
+        profile_id: "profile-1".to_owned(),
+        provider_id: "deepseek".to_owned(),
+        model_id: "deepseek-chat".to_owned(),
+        config_sha256: valid_hash,
+    };
+    let provider = registry.resolve(&identity).unwrap();
+    let gateway = ProviderGateway::new().unwrap();
+    let prepared = gateway
+        .prepare_inference(provider, inference_request(compilation_receipt()))
+        .unwrap();
+    assert!(matches!(
+        gateway.prepare_http_dispatch(provider, prepared),
+        Err(ProviderGatewayError::RequestBuild(_))
+    ));
 }
 
 #[tokio::test]
@@ -592,7 +711,21 @@ fn bound_registry(
     base_url: String,
     request_timeout_ms: u64,
 ) -> (ProviderRegistry, ProviderRunIdentity) {
-    let config = ProviderConfig {
+    let config = provider_config(base_url, request_timeout_ms);
+    let hash = provider_config_sha256(&config).unwrap();
+    let identity = ProviderRunIdentity {
+        profile_id: config.profile_id.clone(),
+        provider_id: config.provider_id.clone(),
+        model_id: config.model_id.clone(),
+        config_sha256: hash.clone(),
+    };
+    let mut registry = ProviderRegistry::default();
+    registry.bind(config, &hash, API_KEY.to_owned()).unwrap();
+    (registry, identity)
+}
+
+fn provider_config(base_url: String, request_timeout_ms: u64) -> ProviderConfig {
+    ProviderConfig {
         schema_version: 1,
         profile_id: "profile-1".to_owned(),
         provider_id: "deepseek".to_owned(),
@@ -611,17 +744,7 @@ fn bound_registry(
             max_attempts: 1,
             max_total_delay_ms: 0,
         },
-    };
-    let hash = provider_config_sha256(&config).unwrap();
-    let identity = ProviderRunIdentity {
-        profile_id: config.profile_id.clone(),
-        provider_id: config.provider_id.clone(),
-        model_id: config.model_id.clone(),
-        config_sha256: hash.clone(),
-    };
-    let mut registry = ProviderRegistry::default();
-    registry.bind(config, &hash, API_KEY.to_owned()).unwrap();
-    (registry, identity)
+    }
 }
 
 #[derive(Clone)]

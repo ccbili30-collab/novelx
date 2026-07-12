@@ -6,7 +6,7 @@ use novelx_protocol::{
 use novelx_runtime::{
     agent_loop_journal::{
         AgentLoopEventMetadata, AgentLoopJournalError, AgentLoopJournalRepository,
-        StateTransitionKind,
+        PendingInferenceOrigin, StateTransitionKind,
     },
     agent_loop_service::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, AssistToolDecision,
@@ -18,6 +18,110 @@ use novelx_runtime::{
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+#[test]
+fn initial_provider_authorization_snapshot_binds_the_replayed_attempt_one_head() {
+    let fixture = Fixture::new();
+    let initial = service("invocation-snapshot-initial");
+    let expected_pending = initial.pending_inference().unwrap().clone();
+    let expected_checkpoint_sha256 = initial.checkpoint_sha256().unwrap();
+    let mut journal = fixture.open();
+    let mut repository = AgentLoopJournalRepository::new(&mut journal);
+    repository
+        .create(
+            &initial,
+            "create-snapshot-initial",
+            metadata_at("snapshot-initial-1", "2026-07-12T01:02:03Z"),
+        )
+        .unwrap();
+
+    let snapshot = repository
+        .recover_provider_authorization_snapshot(
+            &run_id().to_string(),
+            "invocation-snapshot-initial",
+        )
+        .unwrap();
+    assert_eq!(snapshot.run_id(), run_id());
+    assert_eq!(snapshot.invocation_id(), "invocation-snapshot-initial");
+    assert_eq!(snapshot.aggregate_sequence(), 1);
+    assert_eq!(snapshot.checkpoint_sha256(), expected_checkpoint_sha256);
+    assert_eq!(snapshot.pending_inference(), &expected_pending);
+    assert_eq!(
+        snapshot.pending_inference_sha256(),
+        canonical_sha(&serde_json::to_value(&expected_pending).unwrap())
+    );
+    assert!(is_lowercase_sha256(snapshot.checkpoint_sha256()));
+    assert!(is_lowercase_sha256(snapshot.pending_inference_sha256()));
+    assert_eq!(
+        snapshot.pending_inference_persisted_at(),
+        "2026-07-12T01:02:03Z"
+    );
+    assert_eq!(
+        snapshot.pending_inference_origin(),
+        PendingInferenceOrigin::Created
+    );
+    assert_eq!(snapshot.last_retry_binding(), None);
+    assert_eq!(snapshot.last_retry_binding_sha256(), None);
+}
+
+#[test]
+fn a_forged_request_two_created_checkpoint_is_not_reported_as_a_continuation() {
+    let fixture = Fixture::new();
+    let mut checkpoint = service("invocation-forged-created").checkpoint().unwrap();
+    let forged_dispatch = dispatch_identity(2, context_id());
+    checkpoint["expectedRequestNumber"] = json!(2);
+    checkpoint["pendingInference"] = serde_json::to_value(&forged_dispatch).unwrap();
+    let forged = AgentLoopService::restore(checkpoint).unwrap();
+    let mut journal = fixture.open();
+    let mut repository = AgentLoopJournalRepository::new(&mut journal);
+    repository
+        .create(
+            &forged,
+            "create-forged-request-two",
+            metadata_at("forged-request-two-1", "2026-07-12T01:03:03Z"),
+        )
+        .unwrap();
+
+    let snapshot = repository
+        .recover_provider_authorization_snapshot(&run_id().to_string(), "invocation-forged-created")
+        .unwrap();
+    assert_eq!(snapshot.pending_inference().request_number, 2);
+    assert_eq!(
+        snapshot.pending_inference_origin(),
+        PendingInferenceOrigin::Created
+    );
+    assert_ne!(
+        snapshot.pending_inference_origin(),
+        PendingInferenceOrigin::InferenceStarted
+    );
+}
+
+#[test]
+fn tampering_a_created_event_type_cannot_forge_a_continuation_origin() {
+    let fixture = Fixture::new();
+    {
+        let mut journal = fixture.open();
+        AgentLoopJournalRepository::new(&mut journal)
+            .create(
+                &service("invocation-origin-tamper"),
+                "create-origin-tamper",
+                metadata_at("origin-tamper-1", "2026-07-12T01:04:03Z"),
+            )
+            .unwrap();
+    }
+    fixture.mutate(
+        "UPDATE runtime_events SET event_type = 'agent_loop.transitioned' WHERE aggregate_type = 'agent_loop'",
+        &[],
+    );
+    let mut journal = fixture.open();
+    assert!(matches!(
+        AgentLoopJournalRepository::new(&mut journal).recover_provider_authorization_snapshot(
+            &run_id().to_string(),
+            "invocation-origin-tamper"
+        ),
+        Err(AgentLoopJournalError::InvalidHistory)
+    ));
+}
 
 #[test]
 fn persists_recovers_and_resumes_assist_by_internal_tool_call_id() {
@@ -46,6 +150,10 @@ fn persists_recovers_and_resumes_assist_by_internal_tool_call_id() {
         )
         .unwrap();
     assert_eq!(stored.service.phase(), LoopPhase::AwaitingApproval);
+    assert!(matches!(
+        repository.recover_provider_authorization_snapshot(&run_id().to_string(), "invocation-1"),
+        Err(AgentLoopJournalError::ProviderAuthorizationUnavailable)
+    ));
     drop(journal);
 
     let mut journal = fixture.open();
@@ -167,7 +275,12 @@ fn persists_inference_started_without_fabricating_a_directive() {
         .acknowledge_inference_started(dispatch_identity(2, compilation_id))
         .unwrap();
     let first = repository
-        .append_inference_started(&previous, &current, "started-ack", metadata("ack-6"))
+        .append_inference_started(
+            &previous,
+            &current,
+            "started-ack",
+            metadata_at("ack-6", "2026-07-12T02:03:04Z"),
+        )
         .unwrap();
     let retry = repository
         .append_state_transition(
@@ -175,7 +288,7 @@ fn persists_inference_started_without_fabricating_a_directive() {
             &current,
             StateTransitionKind::InferenceStarted,
             "started-ack",
-            metadata("ack-6-retry"),
+            metadata_at("ack-6-retry", "2026-07-12T02:03:05Z"),
         )
         .unwrap();
     assert_eq!(first.aggregate_sequence, retry.aggregate_sequence);
@@ -186,6 +299,17 @@ fn persists_inference_started_without_fabricating_a_directive() {
             .service
             .phase(),
         LoopPhase::AwaitingProvider
+    );
+    let snapshot = repository
+        .recover_provider_authorization_snapshot(&run_id().to_string(), "invocation-ack")
+        .unwrap();
+    assert_eq!(
+        snapshot.pending_inference_persisted_at(),
+        "2026-07-12T02:03:04Z"
+    );
+    assert_eq!(
+        snapshot.pending_inference_origin(),
+        PendingInferenceOrigin::InferenceStarted
     );
 }
 
@@ -208,7 +332,7 @@ fn persists_and_replays_the_only_allowed_same_phase_retry_transition() {
             &current,
             &binding,
             "retry-attempt-2",
-            metadata("retry-2"),
+            metadata_at("retry-2", "2026-07-12T03:04:05Z"),
         )
         .unwrap();
     let idempotent = repository
@@ -217,7 +341,7 @@ fn persists_and_replays_the_only_allowed_same_phase_retry_transition() {
             &current,
             &binding,
             "retry-attempt-2",
-            metadata("retry-2-again"),
+            metadata_at("retry-2-again", "2026-07-12T03:04:06Z"),
         )
         .unwrap();
     assert_eq!(first.aggregate_sequence, idempotent.aggregate_sequence);
@@ -230,6 +354,32 @@ fn persists_and_replays_the_only_allowed_same_phase_retry_transition() {
         .unwrap();
     assert_eq!(recovered.service, current);
     assert_eq!(recovered.service.pending_inference(), Some(&binding.next));
+    let snapshot = repository
+        .recover_provider_authorization_snapshot(&run_id().to_string(), "invocation-retry")
+        .unwrap();
+    assert_eq!(snapshot.aggregate_sequence(), 2);
+    assert_eq!(
+        snapshot.checkpoint_sha256(),
+        current.checkpoint_sha256().unwrap()
+    );
+    assert_eq!(snapshot.pending_inference(), &binding.next);
+    assert_eq!(snapshot.last_retry_binding(), Some(&binding));
+    assert_eq!(
+        snapshot.last_retry_binding_sha256(),
+        Some(sha(&serde_json::to_vec(&binding).unwrap()).as_str())
+    );
+    assert!(is_lowercase_sha256(snapshot.pending_inference_sha256()));
+    assert!(is_lowercase_sha256(
+        snapshot.last_retry_binding_sha256().unwrap()
+    ));
+    assert_eq!(
+        snapshot.pending_inference_persisted_at(),
+        "2026-07-12T03:04:05Z"
+    );
+    assert_eq!(
+        snapshot.pending_inference_origin(),
+        PendingInferenceOrigin::InferenceRetried
+    );
 
     assert!(matches!(
         repository.append_state_transition(
@@ -251,6 +401,114 @@ fn persists_and_replays_the_only_allowed_same_phase_retry_transition() {
         ),
         Err(AgentLoopJournalError::StaleCheckpoint)
     ));
+}
+
+#[test]
+fn a_new_non_retry_provider_round_clears_the_previous_retry_binding() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    let mut repository = AgentLoopJournalRepository::new(&mut journal);
+    let mut current = service("invocation-retry-cleared");
+    repository
+        .create(
+            &current,
+            "create-retry-cleared",
+            metadata("retry-cleared-1"),
+        )
+        .unwrap();
+
+    let previous = current.clone();
+    let binding = retry_binding(previous.pending_inference().unwrap());
+    current.acknowledge_inference_retry(&binding).unwrap();
+    repository
+        .append_inference_retried(
+            &previous,
+            &current,
+            &binding,
+            "retry-cleared-attempt-2",
+            metadata("retry-cleared-2"),
+        )
+        .unwrap();
+
+    let previous = current.clone();
+    let call = provider_call();
+    let mut retried_completion = completion(call.clone());
+    retried_completion.identity.attempt_id = binding.next.attempt_id;
+    retried_completion.identity.attempt_number = u64::from(binding.next.attempt_number);
+    let directive = current
+        .accept_provider_outcome(retried_completion, vec![materialized(&call)])
+        .unwrap();
+    repository
+        .append_transition(
+            &previous,
+            &current,
+            &directive,
+            "retry-cleared-await-approval",
+            metadata("retry-cleared-3"),
+        )
+        .unwrap();
+
+    let previous = current.clone();
+    let directive = current
+        .resolve_assist(vec![AssistToolDecision::approve("provider-call-1")])
+        .unwrap();
+    repository
+        .append_transition(
+            &previous,
+            &current,
+            &directive,
+            "retry-cleared-execute",
+            metadata("retry-cleared-4"),
+        )
+        .unwrap();
+
+    let previous = current.clone();
+    let directive = current.accept_tool_results(vec![tool_result()]).unwrap();
+    repository
+        .append_transition(
+            &previous,
+            &current,
+            &directive,
+            "retry-cleared-context",
+            metadata("retry-cleared-5"),
+        )
+        .unwrap();
+
+    let previous = current.clone();
+    let next_context_id = Uuid::new_v4();
+    let directive = current.accept_context_compiled(next_context_id).unwrap();
+    repository
+        .append_transition(
+            &previous,
+            &current,
+            &directive,
+            "retry-cleared-next-inference",
+            metadata("retry-cleared-6"),
+        )
+        .unwrap();
+
+    let previous = current.clone();
+    let next_dispatch = dispatch_identity(2, next_context_id);
+    current
+        .acknowledge_inference_started(next_dispatch.clone())
+        .unwrap();
+    repository
+        .append_inference_started(
+            &previous,
+            &current,
+            "retry-cleared-started",
+            metadata("retry-cleared-7"),
+        )
+        .unwrap();
+
+    let snapshot = repository
+        .recover_provider_authorization_snapshot(&run_id().to_string(), "invocation-retry-cleared")
+        .unwrap();
+    assert_eq!(snapshot.aggregate_sequence(), 7);
+    assert_eq!(snapshot.pending_inference(), &next_dispatch);
+    assert_eq!(snapshot.pending_inference().attempt_number, 1);
+    assert_eq!(snapshot.last_retry_binding(), None);
+    assert_eq!(snapshot.last_retry_binding_sha256(), None);
 }
 
 #[test]
@@ -331,6 +589,17 @@ fn replay_rejects_missing_malformed_and_forged_retry_binding() {
                 .is_err(),
             "corrupted retry history unexpectedly recovered: {case}"
         );
+        drop(journal);
+        let mut journal = fixture.open();
+        assert!(
+            AgentLoopJournalRepository::new(&mut journal)
+                .recover_provider_authorization_snapshot(
+                    &run_id().to_string(),
+                    &format!("invocation-{case}"),
+                )
+                .is_err(),
+            "corrupted retry history unexpectedly produced an authorization snapshot: {case}"
+        );
     }
 }
 
@@ -360,27 +629,58 @@ fn rejects_a_corrupted_checkpoint_hash() {
 }
 
 #[test]
-fn replays_legacy_events_without_the_optional_retry_binding_field() {
+fn provider_authorization_snapshot_rejects_a_tampered_non_rfc3339_event_time() {
     let fixture = Fixture::new();
     {
         let mut journal = fixture.open();
         AgentLoopJournalRepository::new(&mut journal)
             .create(
-                &service("invocation-legacy"),
-                "create-legacy",
-                metadata("legacy-1"),
+                &service("invocation-time-tamper"),
+                "create-time-tamper",
+                metadata_at("time-tamper-1", "2026-07-12T04:05:06Z"),
             )
             .unwrap();
     }
     fixture.mutate(
-        "UPDATE runtime_events SET payload_json = json_remove(json_remove(payload_json, '$.retryBinding'), '$.retryBindingSha256') WHERE aggregate_type = 'agent_loop'",
+        "UPDATE runtime_events SET created_at = 'not-rfc3339' WHERE aggregate_type = 'agent_loop'",
         &[],
     );
     let mut journal = fixture.open();
-    let recovered = AgentLoopJournalRepository::new(&mut journal)
+    assert!(matches!(
+        AgentLoopJournalRepository::new(&mut journal).recover_provider_authorization_snapshot(
+            &run_id().to_string(),
+            "invocation-time-tamper"
+        ),
+        Err(AgentLoopJournalError::EventTimestampInvalid)
+    ));
+}
+
+#[test]
+fn replays_legacy_events_without_the_optional_retry_binding_field() {
+    let fixture = Fixture::new();
+    let legacy = service("invocation-legacy");
+    let legacy_checkpoint = legacy.checkpoint().unwrap();
+    let legacy_checkpoint_sha256 = sha(&serde_json::to_vec(&legacy_checkpoint).unwrap());
+    {
+        let mut journal = fixture.open();
+        AgentLoopJournalRepository::new(&mut journal)
+            .create(&legacy, "create-legacy", metadata("legacy-1"))
+            .unwrap();
+    }
+    fixture.mutate(
+        "UPDATE runtime_events SET payload_json = json_set(json_remove(json_remove(payload_json, '$.retryBinding'), '$.retryBindingSha256'), '$.checkpointSha256', ?1) WHERE aggregate_type = 'agent_loop'",
+        &[&legacy_checkpoint_sha256],
+    );
+    let mut journal = fixture.open();
+    let repository = AgentLoopJournalRepository::new(&mut journal);
+    let recovered = repository
         .recover(&run_id().to_string(), "invocation-legacy")
         .unwrap();
     assert_eq!(recovered.service.phase(), LoopPhase::AwaitingProvider);
+    let snapshot = repository
+        .recover_provider_authorization_snapshot(&run_id().to_string(), "invocation-legacy")
+        .unwrap();
+    assert_eq!(snapshot.checkpoint_sha256(), legacy_checkpoint_sha256);
 }
 
 #[test]
@@ -739,9 +1039,13 @@ fn tool_result() -> FinalizedToolResult {
 }
 
 fn metadata(message_id: &str) -> AgentLoopEventMetadata<'_> {
+    metadata_at(message_id, "2026-07-12T00:00:00Z")
+}
+
+fn metadata_at<'a>(message_id: &'a str, created_at: &'a str) -> AgentLoopEventMetadata<'a> {
     AgentLoopEventMetadata {
         message_id,
-        created_at: "2026-07-12T00:00:00Z",
+        created_at,
     }
 }
 
@@ -795,4 +1099,33 @@ fn retry_binding(previous: &InferenceDispatchIdentity) -> ProviderRetryBinding {
 
 fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn canonical_sha(value: &serde_json::Value) -> String {
+    fn canonicalize(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(canonicalize).collect())
+            }
+            serde_json::Value::Object(values) => {
+                let mut entries = values.into_iter().collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                serde_json::Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, canonicalize(value)))
+                        .collect(),
+                )
+            }
+            scalar => scalar,
+        }
+    }
+    sha(&serde_json::to_vec(&canonicalize(value.clone())).unwrap())
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }

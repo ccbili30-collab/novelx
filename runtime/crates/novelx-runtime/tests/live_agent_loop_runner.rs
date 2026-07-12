@@ -8,7 +8,10 @@ use novelx_protocol::{
     ToolAuthorizationResolve,
 };
 use novelx_runtime::{
-    agent_loop_service::AgentLoopPolicy,
+    agent_loop_journal::{AgentLoopEventMetadata, AgentLoopJournalRepository},
+    agent_loop_service::{
+        AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, InferenceDispatchIdentity, LoopPhase,
+    },
     context_compile_service::ContextCompileService,
     event_journal::EventJournal,
     live_agent_loop_runner::{
@@ -18,7 +21,8 @@ use novelx_runtime::{
     project_tool_execution_service::ProjectToolExecutionService,
     provider_gateway::{
         ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderGateway,
-        ProviderInferenceRequest, ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy,
+        ProviderInferenceOutcome, ProviderInferenceReceipt, ProviderInferenceRequest,
+        ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, ProviderUsageReceipt,
         provider_config_sha256,
     },
     provider_inference_service::ProviderInferenceExecution,
@@ -30,6 +34,178 @@ use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
+
+#[test]
+fn awaiting_provider_is_precreated_once_and_reused_after_restart() {
+    let fixture = Fixture::new();
+    let base_url = "http://127.0.0.1:9/v1".to_owned();
+    let (providers, provider) = registry(base_url.clone());
+    let (run_id, receipt) = fixture.seed(&providers, provider.clone(), RunPermissionMode::Free);
+    let execution = execution(run_id, provider, receipt, "precreate-once");
+    let runner = open_runner(&fixture, providers, "project-1");
+
+    let first = runner.ensure_awaiting_provider(&execution).unwrap();
+    assert_eq!(first.phase(), LoopPhase::AwaitingProvider);
+    assert_eq!(first.pending_inference().unwrap().attempt_number, 1);
+    let second = runner.ensure_awaiting_provider(&execution).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(agent_loop_event_count(&fixture, &execution), 1);
+    drop(runner);
+
+    let (providers, _) = registry(base_url);
+    let reopened = open_runner(&fixture, providers, "project-1");
+    assert_eq!(
+        reopened.ensure_awaiting_provider(&execution).unwrap(),
+        first
+    );
+    assert_eq!(agent_loop_event_count(&fixture, &execution), 1);
+}
+
+#[test]
+fn awaiting_provider_precreation_rejects_authority_and_dispatch_tampering() {
+    let fixture = Fixture::new();
+    let (providers, provider) = registry("http://127.0.0.1:9/v1".to_owned());
+    let (run_id, receipt) = fixture.seed(&providers, provider.clone(), RunPermissionMode::Free);
+    let execution = execution(run_id, provider, receipt, "tamper-check");
+    let runner = open_runner(&fixture, providers, "project-1");
+    runner.ensure_awaiting_provider(&execution).unwrap();
+
+    let mut dispatch_tampered = execution.clone();
+    dispatch_tampered.attempt_id = Uuid::new_v4().to_string();
+    assert!(matches!(
+        runner.ensure_awaiting_provider(&dispatch_tampered),
+        Err(LiveAgentLoopError::ResumeStateInvalid)
+    ));
+
+    let mut context_tampered = execution.clone();
+    context_tampered
+        .request
+        .compilation
+        .canonical_context_sha256 = "0".repeat(64);
+    assert!(matches!(
+        runner.ensure_awaiting_provider(&context_tampered),
+        Err(LiveAgentLoopError::IdentityInvalid)
+    ));
+
+    let mut invocation_tampered = execution.clone();
+    invocation_tampered.invocation_id = "other-agent".to_owned();
+    assert!(matches!(
+        runner.ensure_awaiting_provider(&invocation_tampered),
+        Err(LiveAgentLoopError::IdentityInvalid)
+    ));
+
+    let mut provider_tampered = execution.clone();
+    provider_tampered.provider.model_id = "other-model".to_owned();
+    assert!(matches!(
+        runner.ensure_awaiting_provider(&provider_tampered),
+        Err(LiveAgentLoopError::IdentityInvalid)
+    ));
+
+    let (other_project_providers, _) = registry("http://127.0.0.1:9/v1".to_owned());
+    let other_project_runner = open_runner(&fixture, other_project_providers, "other-project");
+    assert!(matches!(
+        other_project_runner.ensure_awaiting_provider(&execution),
+        Err(LiveAgentLoopError::IdentityInvalid)
+    ));
+    assert_eq!(agent_loop_event_count(&fixture, &execution), 1);
+}
+
+#[test]
+fn awaiting_provider_rejects_persisted_source_scope_and_permission_tampering() {
+    for tamper in ["source", "permission"] {
+        let fixture = Fixture::new();
+        let (providers, provider) = registry("http://127.0.0.1:9/v1".to_owned());
+        let (run_id, receipt) = fixture.seed(&providers, provider.clone(), RunPermissionMode::Free);
+        let execution = execution(run_id, provider, receipt, &format!("tamper-{tamper}"));
+        let mut journal = EventJournal::open(&fixture.database).unwrap();
+        let run = RunAggregate::recover(&journal, &execution.run_id).unwrap();
+        let pinned = run.pinned_identity();
+        let mut identity = AgentLoopIdentity {
+            run_id,
+            project_id: pinned.project_id.clone(),
+            invocation_id: execution.invocation_id.clone(),
+            initial_context_compilation_id: execution.request.compilation.compilation_id,
+            source_scope: novelx_protocol::ToolSourceScope {
+                source_checkpoint_id: pinned.source_checkpoint_id.clone(),
+                resource_ids: pinned.scope_resource_ids.clone(),
+                scope_sha256: pinned.resource_scope_sha256.clone(),
+            },
+            permission: novelx_protocol::ToolPermissionPolicy {
+                mode: pinned.mode,
+                policy_id: pinned.tool_policy.id.clone(),
+                policy_version: pinned.tool_policy.version.clone(),
+                policy_sha256: pinned.tool_policy.sha256.clone(),
+            },
+        };
+        match tamper {
+            "source" => identity.source_scope.source_checkpoint_id = "forged-checkpoint".to_owned(),
+            "permission" => identity.permission.policy_sha256 = "0".repeat(64),
+            _ => unreachable!(),
+        }
+        let dispatch = InferenceDispatchIdentity {
+            inference_id: Uuid::parse_str(&execution.inference_id).unwrap(),
+            attempt_id: Uuid::parse_str(&execution.attempt_id).unwrap(),
+            request_number: execution.request.compilation.request_number,
+            context_compilation_id: execution.request.compilation.compilation_id,
+            attempt_number: execution.attempt_number,
+            inference_idempotency_key: execution.inference_idempotency_key.clone(),
+        };
+        let forged = AgentLoopService::new(identity, loop_policy(), dispatch).unwrap();
+        AgentLoopJournalRepository::new(&mut journal)
+            .create(
+                &forged,
+                &format!("forged-{tamper}"),
+                AgentLoopEventMetadata {
+                    message_id: "forged-message",
+                    created_at: "2026-07-13T00:00:00Z",
+                },
+            )
+            .unwrap();
+        drop(journal);
+
+        let runner = open_runner(&fixture, providers, "project-1");
+        assert!(matches!(
+            runner.ensure_awaiting_provider(&execution),
+            Err(LiveAgentLoopError::ResumeStateInvalid)
+        ));
+        assert_eq!(agent_loop_event_count(&fixture, &execution), 1);
+    }
+}
+
+#[tokio::test]
+async fn precreated_loop_accepts_a_text_outcome_and_persists_completed() {
+    let fixture = Fixture::new();
+    let (providers, provider) = registry("http://127.0.0.1:9/v1".to_owned());
+    let (run_id, receipt) = fixture.seed(&providers, provider.clone(), RunPermissionMode::Free);
+    let execution = execution(run_id, provider, receipt, "precreated-text");
+    let runner = open_runner(&fixture, providers, "project-1");
+    runner.ensure_awaiting_provider(&execution).unwrap();
+
+    let outcome = runner
+        .run(
+            execution.clone(),
+            Some(text_outcome(&execution, "正文完成")),
+            |_| async { Ok(()) },
+            || false,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        LiveAgentLoopOutcome::Completed { ref output, rounds: 0, .. } if output == "正文完成"
+    ));
+    let mut journal = EventJournal::open(&fixture.database).unwrap();
+    let persisted = AgentLoopJournalRepository::new(&mut journal)
+        .recover(&execution.run_id, &execution.invocation_id)
+        .unwrap();
+    assert_eq!(persisted.service.phase(), LoopPhase::Completed);
+    assert_eq!(persisted.aggregate_sequence, 2);
+    drop(journal);
+    assert!(matches!(
+        runner.ensure_awaiting_provider(&execution),
+        Err(LiveAgentLoopError::ResumeStateInvalid)
+    ));
+}
 
 #[tokio::test]
 async fn free_live_loop_executes_read_and_stat_then_sends_results_to_second_inference() {
@@ -296,6 +472,85 @@ async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_ro
         matches!(completed, LiveAgentLoopOutcome::Completed { ref output, .. } if output == "银湾资料核对完成。")
     );
     server.await.unwrap();
+}
+
+fn open_runner(
+    fixture: &Fixture,
+    providers: ProviderRegistry,
+    project_id: &str,
+) -> LiveAgentLoopRunner {
+    LiveAgentLoopRunner::open(
+        &fixture.database,
+        ProjectRoot::open(fixture.project.path().to_str().unwrap()).unwrap(),
+        project_id.to_owned(),
+        providers,
+        ProviderGateway::new().unwrap(),
+        loop_policy(),
+    )
+    .unwrap()
+}
+
+const fn loop_policy() -> AgentLoopPolicy {
+    AgentLoopPolicy {
+        maximum_tool_rounds: 4,
+        tool_schema_version: 1,
+    }
+}
+
+fn execution(
+    run_id: Uuid,
+    provider: ProviderRunIdentity,
+    receipt: novelx_protocol::ContextCompilationReceipt,
+    idempotency_key: &str,
+) -> ProviderInferenceExecution {
+    ProviderInferenceExecution {
+        run_id: run_id.to_string(),
+        attempt_id: Uuid::new_v4().to_string(),
+        inference_id: Uuid::new_v4().to_string(),
+        invocation_id: "steward-1".to_owned(),
+        inference_idempotency_key: idempotency_key.to_owned(),
+        attempt_number: 1,
+        provider,
+        request: ProviderInferenceRequest {
+            compilation: receipt,
+            messages: vec![],
+            tools: vec![],
+        },
+    }
+}
+
+fn agent_loop_event_count(fixture: &Fixture, execution: &ProviderInferenceExecution) -> usize {
+    EventJournal::open(&fixture.database)
+        .unwrap()
+        .read_aggregate(&execution.run_id, "agent_loop", &execution.invocation_id, 0)
+        .unwrap()
+        .len()
+}
+
+fn text_outcome(execution: &ProviderInferenceExecution, text: &str) -> ProviderInferenceOutcome {
+    ProviderInferenceOutcome {
+        text: Some(text.to_owned()),
+        tool_calls: vec![],
+        receipt: ProviderInferenceReceipt {
+            context_compilation_id: execution.request.compilation.compilation_id,
+            canonical_context_sha256: execution
+                .request
+                .compilation
+                .canonical_context_sha256
+                .clone(),
+            requested_model_id: execution.provider.model_id.clone(),
+            actual_model_id: execution.provider.model_id.clone(),
+            response_id_sha256: "c".repeat(64),
+            response_body_sha256: "d".repeat(64),
+            finish_reason: "stop".to_owned(),
+            usage: ProviderUsageReceipt {
+                input_tokens: 10,
+                output_tokens: 2,
+                total_tokens: 12,
+            },
+            provider_request_count: 1,
+        },
+    }
 }
 
 struct Fixture {

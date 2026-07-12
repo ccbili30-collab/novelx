@@ -181,6 +181,7 @@ impl AgentLoopService {
             || policy.maximum_tool_rounds == 0
             || policy.tool_schema_version == 0
             || !valid_inference_dispatch(&initial_inference)
+            || initial_inference.attempt_number != 1
             || initial_inference.request_number != 1
             || initial_inference.context_compilation_id != identity.initial_context_compilation_id
         {
@@ -463,6 +464,7 @@ impl AgentLoopService {
     ) -> Result<(), AgentLoopError> {
         self.require_phase(LoopPhase::AwaitingInferenceStart)?;
         if !valid_inference_dispatch(&dispatch)
+            || dispatch.attempt_number != 1
             || dispatch.request_number != self.expected_request_number
             || dispatch.context_compilation_id != self.expected_context_compilation_id
         {

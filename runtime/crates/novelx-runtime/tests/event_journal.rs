@@ -1,4 +1,5 @@
 use novelx_runtime::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent};
+use novelx_runtime::workspace_event_journal::WorkspaceEventJournal;
 use rusqlite::{Connection, params};
 use serde_json::json;
 use tempfile::TempDir;
@@ -130,6 +131,48 @@ fn stale_run_or_aggregate_sequences_fail_without_writing() {
         journal.append(invalid_version, 0, 0),
         Err(EventJournalError::InvalidEventVersion)
     ));
+}
+
+#[test]
+fn global_sequence_append_reports_inserted_and_never_rearms_an_idempotent_event() {
+    let fixture = Fixture::new();
+    drop(WorkspaceEventJournal::open(&fixture.database_path).unwrap());
+    let mut journal = fixture.open();
+    let first = event("run-global", "provider_attempt", "attempt-1", "m1", "k1", 1);
+
+    let inserted = journal
+        .append_at_global_sequence(first.clone(), 0, 0, 0)
+        .unwrap();
+    assert!(inserted.inserted);
+    assert_eq!(inserted.event.run_sequence, 1);
+
+    let replayed = journal.append_at_global_sequence(first, 0, 0, 0).unwrap();
+    assert!(!replayed.inserted);
+    assert_eq!(replayed.event, inserted.event);
+
+    assert!(matches!(
+        journal.append_at_global_sequence(
+            event("run-global", "provider_attempt", "attempt-1", "m2", "k2", 2),
+            1,
+            1,
+            0,
+        ),
+        Err(EventJournalError::GlobalSequenceConflict {
+            expected: 0,
+            actual: 1
+        })
+    ));
+
+    let second = journal
+        .append_at_global_sequence(
+            event("run-global", "provider_attempt", "attempt-1", "m2", "k2", 2),
+            1,
+            1,
+            1,
+        )
+        .unwrap();
+    assert!(second.inserted);
+    assert_eq!(second.event.run_sequence, 2);
 }
 
 #[test]

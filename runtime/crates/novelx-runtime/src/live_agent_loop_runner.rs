@@ -20,7 +20,7 @@ use crate::{
         FinalizedToolResult, InferenceDispatchIdentity,
     },
     artifact_store::ArtifactStore,
-    context_compile_service::recover_compilation_receipt,
+    context_compile_service::{recover_compilation_receipt, recover_compiled_record},
     continuation_context_service::{ContinuationContextService, ContinuationContextServiceError},
     event_journal::{EventJournal, EventJournalError},
     project_path::ProjectRoot,
@@ -33,6 +33,7 @@ use crate::{
     },
     provider_tool_materializer::{ProviderToolMaterializer, ProviderToolMaterializerError},
     run_aggregate::{RunAggregate, RunAggregateError},
+    run_state::RunState,
     tool_coordination_service::ToolCoordinationStatus,
 };
 use crate::{
@@ -187,6 +188,109 @@ impl LiveAgentLoopRunner {
         })
     }
 
+    pub fn ensure_awaiting_provider(
+        &self,
+        execution: &ProviderInferenceExecution,
+    ) -> Result<AgentLoopService, LiveAgentLoopError> {
+        let run_id =
+            Uuid::parse_str(&execution.run_id).map_err(|_| LiveAgentLoopError::IdentityInvalid)?;
+        if execution.invocation_id.trim().is_empty() {
+            return Err(LiveAgentLoopError::IdentityInvalid);
+        }
+        let mut journal = EventJournal::open(&self.database_path)?;
+        let run = RunAggregate::recover(&journal, &execution.run_id)?;
+        let pinned = run.pinned_identity();
+        if run.state() != RunState::Running
+            || pinned.project_id != self.project_id
+            || execution.provider != pinned.provider
+        {
+            return Err(LiveAgentLoopError::IdentityInvalid);
+        }
+        let compiled = recover_compiled_record(
+            &journal,
+            &execution.run_id,
+            execution.request.compilation.compilation_id,
+        )?;
+        let source_command = compiled
+            .source_command
+            .as_ref()
+            .ok_or(LiveAgentLoopError::IdentityInvalid)?;
+        if compiled.receipt != execution.request.compilation
+            || !compiled.receipt.accepted
+            || source_command.invocation_id != execution.invocation_id
+            || source_command.request_number != compiled.receipt.request_number
+            || source_command.provider != pinned.provider
+            || source_command.context_policy != pinned.context_policy
+        {
+            return Err(LiveAgentLoopError::IdentityInvalid);
+        }
+        let identity = AgentLoopIdentity {
+            run_id,
+            project_id: self.project_id.clone(),
+            invocation_id: execution.invocation_id.clone(),
+            initial_context_compilation_id: compiled.receipt.compilation_id,
+            source_scope: ToolSourceScope {
+                source_checkpoint_id: pinned.source_checkpoint_id.clone(),
+                resource_ids: pinned.scope_resource_ids.clone(),
+                scope_sha256: pinned.resource_scope_sha256.clone(),
+            },
+            permission: ToolPermissionPolicy {
+                mode: pinned.mode,
+                policy_id: pinned.tool_policy.id.clone(),
+                policy_version: pinned.tool_policy.version.clone(),
+                policy_sha256: pinned.tool_policy.sha256.clone(),
+            },
+        };
+        let dispatch = dispatch_identity(execution)?;
+        let events =
+            journal.read_aggregate(&execution.run_id, "agent_loop", &execution.invocation_id, 0)?;
+        let loop_service = {
+            let mut repository = AgentLoopJournalRepository::new(&mut journal);
+            if events.is_empty() {
+                if repository.find_active_for_run(&execution.run_id)?.is_some() {
+                    return Err(LiveAgentLoopError::ResumeStateInvalid);
+                }
+                let proposed = AgentLoopService::new(identity, self.policy, dispatch)?;
+                let message_id = Uuid::new_v4().to_string();
+                let created_at = timestamp()?;
+                let record = repository.create(
+                    &proposed,
+                    &format!("agent-loop:{}:create", execution.invocation_id),
+                    AgentLoopEventMetadata {
+                        message_id: &message_id,
+                        created_at: &created_at,
+                    },
+                )?;
+                return Ok(record.service);
+            }
+            repository
+                .recover(&execution.run_id, &execution.invocation_id)?
+                .service
+        };
+        let persisted_initial_context = recover_compiled_record(
+            &journal,
+            &execution.run_id,
+            loop_service.identity().initial_context_compilation_id,
+        )?;
+        let persisted_initial_source = persisted_initial_context
+            .source_command
+            .as_ref()
+            .ok_or(LiveAgentLoopError::ResumeStateInvalid)?;
+        if !same_loop_authority(loop_service.identity(), &identity)
+            || !persisted_initial_context.receipt.accepted
+            || persisted_initial_source.invocation_id != execution.invocation_id
+            || persisted_initial_source.request_number
+                != persisted_initial_context.receipt.request_number
+            || persisted_initial_source.provider != pinned.provider
+            || persisted_initial_source.context_policy != pinned.context_policy
+            || loop_service.phase() != crate::agent_loop_service::LoopPhase::AwaitingProvider
+            || loop_service.pending_inference() != Some(&dispatch)
+        {
+            return Err(LiveAgentLoopError::ResumeStateInvalid);
+        }
+        Ok(loop_service)
+    }
+
     pub async fn run<F, Fut, C>(
         &self,
         mut execution: ProviderInferenceExecution,
@@ -201,65 +305,7 @@ impl LiveAgentLoopRunner {
     {
         let run_id =
             Uuid::parse_str(&execution.run_id).map_err(|_| LiveAgentLoopError::IdentityInvalid)?;
-        let run =
-            RunAggregate::recover(&EventJournal::open(&self.database_path)?, &execution.run_id)?;
-        let pinned = run.pinned_identity();
-        if pinned.project_id != self.project_id || execution.invocation_id.trim().is_empty() {
-            return Err(LiveAgentLoopError::IdentityInvalid);
-        }
-        let identity = AgentLoopIdentity {
-            run_id,
-            project_id: self.project_id.clone(),
-            invocation_id: execution.invocation_id.clone(),
-            initial_context_compilation_id: execution.request.compilation.compilation_id,
-            source_scope: ToolSourceScope {
-                source_checkpoint_id: pinned.source_checkpoint_id.clone(),
-                resource_ids: pinned.scope_resource_ids.clone(),
-                scope_sha256: pinned.resource_scope_sha256.clone(),
-            },
-            permission: ToolPermissionPolicy {
-                mode: pinned.mode,
-                policy_id: pinned.tool_policy.id.clone(),
-                policy_version: pinned.tool_policy.version.clone(),
-                policy_sha256: pinned.tool_policy.sha256.clone(),
-            },
-        };
-        let dispatch = dispatch_identity(&execution)?;
-        let mut loop_service;
-        {
-            let mut journal = EventJournal::open(&self.database_path)?;
-            let events = journal.read_aggregate(
-                &execution.run_id,
-                "agent_loop",
-                &execution.invocation_id,
-                0,
-            )?;
-            if events.is_empty() {
-                let proposed = AgentLoopService::new(identity, self.policy, dispatch)?;
-                let message_id = Uuid::new_v4().to_string();
-                let created_at = timestamp()?;
-                AgentLoopJournalRepository::new(&mut journal).create(
-                    &proposed,
-                    &format!("agent-loop:{}:create", execution.invocation_id),
-                    AgentLoopEventMetadata {
-                        message_id: &message_id,
-                        created_at: &created_at,
-                    },
-                )?;
-                loop_service = proposed;
-            } else {
-                loop_service = AgentLoopJournalRepository::new(&mut journal)
-                    .recover(&execution.run_id, &execution.invocation_id)?
-                    .service;
-                if !same_resumable_identity(loop_service.identity(), &identity)
-                    || loop_service.phase()
-                        != crate::agent_loop_service::LoopPhase::AwaitingProvider
-                    || loop_service.pending_inference() != Some(&dispatch)
-                {
-                    return Err(LiveAgentLoopError::ResumeStateInvalid);
-                }
-            }
-        }
+        let mut loop_service = self.ensure_awaiting_provider(&execution)?;
         let mut next_outcome = initial_outcome;
         let mut rounds = 0_u32;
         loop {
@@ -650,7 +696,7 @@ fn protocol_call(call: &crate::provider_gateway::ProviderToolCall) -> ProviderIn
     }
 }
 
-fn same_resumable_identity(left: &AgentLoopIdentity, right: &AgentLoopIdentity) -> bool {
+fn same_loop_authority(left: &AgentLoopIdentity, right: &AgentLoopIdentity) -> bool {
     left.run_id == right.run_id
         && left.project_id == right.project_id
         && left.invocation_id == right.invocation_id

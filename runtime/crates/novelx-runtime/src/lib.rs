@@ -35,6 +35,8 @@ pub mod provider_attempt;
 pub mod provider_dispatch_recovery_service;
 pub mod provider_dispatch_recovery_supervisor;
 pub mod provider_dispatch_resume_authorization_service;
+pub mod provider_effect_authorization_service;
+pub mod provider_effect_capability;
 pub mod provider_gateway;
 pub mod provider_inference_protocol;
 pub mod provider_inference_service;

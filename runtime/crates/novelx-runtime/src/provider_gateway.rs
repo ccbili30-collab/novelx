@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use novelx_protocol::{ContextCompilationReceipt, ProviderRunIdentity};
 use secrecy::{ExposeSecret, SecretString};
@@ -241,6 +242,53 @@ impl PreparedProviderInference {
     }
 }
 
+/// A move-only, fully built HTTP dispatch prepared before the durable `provider.sent` boundary.
+///
+/// This type intentionally implements neither `Clone`, `Debug`, `Serialize`, nor `Deserialize`:
+/// its prebuilt request contains the sensitive Authorization header.
+pub struct PreparedProviderHttpDispatch {
+    request: reqwest::Request,
+    compilation: ContextCompilationReceipt,
+    provider: ProviderRunIdentity,
+    transport_payload_sha256: String,
+    transport_payload_bytes: u64,
+    total_deadline_at: tokio::time::Instant,
+}
+
+impl PreparedProviderHttpDispatch {
+    pub fn method(&self) -> &reqwest::Method {
+        self.request.method()
+    }
+
+    pub fn endpoint(&self) -> &Url {
+        self.request.url()
+    }
+
+    pub fn request_timeout(&self) -> Option<Duration> {
+        self.request.timeout().copied()
+    }
+
+    pub fn transport_payload_sha256(&self) -> &str {
+        &self.transport_payload_sha256
+    }
+
+    pub const fn transport_payload_bytes(&self) -> u64 {
+        self.transport_payload_bytes
+    }
+
+    pub const fn compilation(&self) -> &ContextCompilationReceipt {
+        &self.compilation
+    }
+
+    pub const fn provider(&self) -> &ProviderRunIdentity {
+        &self.provider
+    }
+
+    pub fn total_deadline_at(&self) -> tokio::time::Instant {
+        self.total_deadline_at
+    }
+}
+
 pub struct BoundProvider {
     config: ProviderConfig,
     config_sha256: String,
@@ -403,16 +451,55 @@ impl ProviderGateway {
         })
     }
 
+    pub fn prepare_http_dispatch(
+        &self,
+        provider: &BoundProvider,
+        prepared: PreparedProviderInference,
+    ) -> Result<PreparedProviderHttpDispatch, ProviderGatewayError> {
+        validate_inference_request(provider, &prepared.request)?;
+        let actual_payload_sha256 = format!("{:x}", Sha256::digest(&prepared.transport_payload));
+        if actual_payload_sha256 != prepared.transport_payload_sha256 {
+            return Err(ProviderGatewayError::PreparedPayloadMismatch);
+        }
+        let endpoint = endpoint_url(&provider.config.base_url, "chat/completions")?;
+        let request_timeout = Duration::from_millis(provider.config.request_timeout_ms);
+        let total_deadline_at =
+            tokio::time::Instant::now() + Duration::from_millis(provider.config.total_deadline_ms);
+        let provider_identity = ProviderRunIdentity {
+            profile_id: provider.config.profile_id.clone(),
+            provider_id: provider.config.provider_id.clone(),
+            model_id: provider.config.model_id.clone(),
+            config_sha256: provider.config_sha256.clone(),
+        };
+        let compilation = prepared.request.compilation.clone();
+        let transport_payload_bytes =
+            u64::try_from(prepared.transport_payload.len()).unwrap_or(u64::MAX);
+        let request = self
+            .client
+            .post(endpoint)
+            .bearer_auth(provider.credential.expose_secret())
+            .timeout(request_timeout)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(prepared.transport_payload)
+            .build()
+            .map_err(ProviderGatewayError::RequestBuild)?;
+        Ok(PreparedProviderHttpDispatch {
+            request,
+            compilation,
+            provider: provider_identity,
+            transport_payload_sha256: actual_payload_sha256,
+            transport_payload_bytes,
+            total_deadline_at,
+        })
+    }
+
     pub async fn infer_prepared(
         &self,
         provider: &BoundProvider,
         prepared: PreparedProviderInference,
     ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
-        validate_inference_request(provider, &prepared.request)?;
-        let deadline = std::time::Duration::from_millis(provider.config.total_deadline_ms);
-        tokio::time::timeout(deadline, self.infer_within_deadline(provider, prepared))
-            .await
-            .map_err(|_| ProviderGatewayError::Timeout)?
+        let dispatch = self.prepare_http_dispatch(provider, prepared)?;
+        self.execute_http_dispatch(dispatch).await
     }
 
     pub async fn infer_prepared_cancellable(
@@ -438,26 +525,30 @@ impl ProviderGateway {
         }
     }
 
-    async fn infer_within_deadline(
+    pub(crate) async fn execute_http_dispatch(
         &self,
-        provider: &BoundProvider,
-        prepared: PreparedProviderInference,
+        dispatch: PreparedProviderHttpDispatch,
     ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
-        let timeout = std::time::Duration::from_millis(provider.config.request_timeout_ms);
-        let url = endpoint_url(&provider.config.base_url, "chat/completions")?;
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(provider.credential.expose_secret())
-            .timeout(timeout)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(prepared.transport_payload)
-            .send()
-            .await
-            .map_err(classify_transport_error)?;
-        classify_response_status(&response)?;
-        let payload = read_json_response(response).await?;
-        parse_inference_response(provider, &prepared.request.compilation, &payload)
+        let PreparedProviderHttpDispatch {
+            request,
+            compilation,
+            provider,
+            total_deadline_at,
+            transport_payload_sha256: _,
+            transport_payload_bytes: _,
+        } = dispatch;
+        tokio::time::timeout_at(total_deadline_at, async move {
+            let response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(classify_transport_error)?;
+            classify_response_status(&response)?;
+            let payload = read_json_response(response).await?;
+            parse_inference_response(&provider, &compilation, &payload)
+        })
+        .await
+        .map_err(|_| ProviderGatewayError::Timeout)?
     }
 
     async fn test_connection_within_deadline(
@@ -635,7 +726,7 @@ fn validate_message_sequence(
 }
 
 fn parse_inference_response(
-    provider: &BoundProvider,
+    provider: &ProviderRunIdentity,
     compilation: &ContextCompilationReceipt,
     payload: &Value,
 ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
@@ -653,7 +744,7 @@ fn parse_inference_response(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or(ProviderGatewayError::ResponseMalformed)?;
-    if actual_model_id != provider.config.model_id {
+    if actual_model_id != provider.model_id {
         return Err(ProviderGatewayError::ResponseModelMismatch);
     }
     let choice = payload
@@ -712,7 +803,7 @@ fn parse_inference_response(
         receipt: ProviderInferenceReceipt {
             context_compilation_id: compilation.compilation_id,
             canonical_context_sha256: compilation.canonical_context_sha256.clone(),
-            requested_model_id: provider.config.model_id.clone(),
+            requested_model_id: provider.model_id.clone(),
             actual_model_id: actual_model_id.to_owned(),
             response_id_sha256: format!("{:x}", Sha256::digest(response_id.as_bytes())),
             response_body_sha256,
@@ -1042,10 +1133,14 @@ pub enum ProviderGatewayError {
     ProfileMismatch,
     #[error("Provider inference request does not match its Context Compilation receipt")]
     ContextReceiptMismatch,
+    #[error("Prepared Provider transport payload hash does not match its body")]
+    PreparedPayloadMismatch,
     #[error("Provider configuration serialization failed: {0}")]
     Serialize(serde_json::Error),
     #[error("Provider HTTP client could not be created: {0}")]
     ClientBuild(reqwest::Error),
+    #[error("Provider HTTP request could not be built before dispatch: {0}")]
+    RequestBuild(reqwest::Error),
     #[error("Provider authentication was rejected")]
     AuthenticationRejected(u16),
     #[error("Provider rate limit was reached")]

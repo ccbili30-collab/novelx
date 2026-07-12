@@ -38,6 +38,12 @@ pub struct RuntimeEvent {
     pub created_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppendRuntimeEventOutcome {
+    pub event: RuntimeEvent,
+    pub inserted: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AggregateAddress {
     pub run_id: String,
@@ -61,6 +67,8 @@ pub enum EventJournalError {
     RunSequenceConflict { expected: u64, actual: u64 },
     #[error("runtime aggregate sequence conflict: expected {expected}, actual {actual}")]
     AggregateSequenceConflict { expected: u64, actual: u64 },
+    #[error("runtime global event sequence conflict: expected {expected}, actual {actual}")]
+    GlobalSequenceConflict { expected: u64, actual: u64 },
     #[error("runtime migration {version} checksum mismatch")]
     MigrationChecksumMismatch { version: u32 },
     #[error("runtime migration 0002 verification failed")]
@@ -116,6 +124,46 @@ impl EventJournal {
         expected_run_sequence: u64,
         expected_aggregate_sequence: u64,
     ) -> Result<RuntimeEvent, EventJournalError> {
+        self.append_with_outcome(event, expected_run_sequence, expected_aggregate_sequence)
+            .map(|outcome| outcome.event)
+    }
+
+    pub fn append_with_outcome(
+        &mut self,
+        event: NewRuntimeEvent,
+        expected_run_sequence: u64,
+        expected_aggregate_sequence: u64,
+    ) -> Result<AppendRuntimeEventOutcome, EventJournalError> {
+        self.append_inner(
+            event,
+            expected_run_sequence,
+            expected_aggregate_sequence,
+            None,
+        )
+    }
+
+    pub fn append_at_global_sequence(
+        &mut self,
+        event: NewRuntimeEvent,
+        expected_run_sequence: u64,
+        expected_aggregate_sequence: u64,
+        expected_global_sequence: u64,
+    ) -> Result<AppendRuntimeEventOutcome, EventJournalError> {
+        self.append_inner(
+            event,
+            expected_run_sequence,
+            expected_aggregate_sequence,
+            Some(expected_global_sequence),
+        )
+    }
+
+    fn append_inner(
+        &mut self,
+        event: NewRuntimeEvent,
+        expected_run_sequence: u64,
+        expected_aggregate_sequence: u64,
+        expected_global_sequence: Option<u64>,
+    ) -> Result<AppendRuntimeEventOutcome, EventJournalError> {
         validate(&event)?;
         let transaction = self
             .connection
@@ -129,7 +177,10 @@ impl EventJournal {
                 expected_aggregate_sequence,
             ) {
                 transaction.commit()?;
-                return Ok(existing);
+                return Ok(AppendRuntimeEventOutcome {
+                    event: existing,
+                    inserted: false,
+                });
             }
             return Err(EventJournalError::MessageIdConflict {
                 message_id: event.message_id,
@@ -145,11 +196,24 @@ impl EventJournal {
                 expected_aggregate_sequence,
             ) {
                 transaction.commit()?;
-                return Ok(existing);
+                return Ok(AppendRuntimeEventOutcome {
+                    event: existing,
+                    inserted: false,
+                });
             }
             return Err(EventJournalError::IdempotencyConflict {
                 idempotency_key: event.idempotency_key,
             });
+        }
+
+        if let Some(expected_global_sequence) = expected_global_sequence {
+            let actual_global = current_global_sequence(&transaction)?;
+            if actual_global != expected_global_sequence {
+                return Err(EventJournalError::GlobalSequenceConflict {
+                    expected: expected_global_sequence,
+                    actual: actual_global,
+                });
+            }
         }
 
         let actual_run = current_run_sequence(&transaction, &event.run_id)?;
@@ -197,7 +261,10 @@ impl EventJournal {
         let inserted = find_by_message_id(&transaction, &event.message_id)?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         transaction.commit()?;
-        Ok(inserted)
+        Ok(AppendRuntimeEventOutcome {
+            event: inserted,
+            inserted: true,
+        })
     }
 
     pub fn read_run(
@@ -415,6 +482,15 @@ fn current_aggregate_sequence(
         "SELECT COALESCE(MAX(aggregate_sequence), 0) FROM runtime_events \
          WHERE run_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3",
         params![run_id, aggregate_type, aggregate_id],
+        |row| row.get(0),
+    )?;
+    u64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)
+}
+
+fn current_global_sequence(transaction: &Transaction<'_>) -> Result<u64, EventJournalError> {
+    let value: i64 = transaction.query_row(
+        "SELECT sequence FROM runtime_global_event_clock WHERE singleton_id = 1",
+        [],
         |row| row.get(0),
     )?;
     u64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)

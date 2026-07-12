@@ -3,7 +3,8 @@ use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
 use novelx_runtime::provider_attempt::{
     ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptError,
     ProviderAttemptFailure, ProviderAttemptMetadata, ProviderAttemptRecovery, ProviderAttemptState,
-    ProviderDeliveryCertainty, ProviderResponseReceipt,
+    ProviderDeliveryCertainty, ProviderResponseReceipt, provider_attempt_definition_sha256,
+    provider_attempt_evidence_sha256,
 };
 use novelx_runtime::provider_retry_after::{ProviderRetryAfterKind, ProviderRetryAfterReceipt};
 use rusqlite::{Connection, params};
@@ -54,6 +55,22 @@ fn requested_sent_responded_persists_and_recovers() {
     assert_eq!(recovered.state(), ProviderAttemptState::Responded);
     assert_eq!(recovered.recovery(), ProviderAttemptRecovery::Completed);
     assert_eq!(recovered.aggregate_sequence(), 3);
+    assert_eq!(recovered.requested_message_id(), "message-1");
+    assert_eq!(recovered.requested_at(), "2026-07-12T00:00:00Z");
+    assert_eq!(
+        recovered.requested_idempotency_key_sha256(),
+        format!("{:x}", sha2::Sha256::digest(b"request-key-1"))
+    );
+    assert_eq!(
+        provider_attempt_definition_sha256(&recovered)
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        provider_attempt_evidence_sha256(&recovered).unwrap().len(),
+        64
+    );
     assert_eq!(recovered.response_text(), Some("provider output"));
     assert_eq!(recovered.response_text_sha256().map(str::len), Some(64));
     assert_eq!(
