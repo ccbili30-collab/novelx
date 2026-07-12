@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
@@ -8,7 +9,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { RuntimeV2ProcessSupervisor } from "../../src/main/runtimeV2ProcessSupervisor";
 import { RuntimeV2SupervisorError } from "../../src/main/runtimeV2ProcessSupervisor";
 import { RUNTIME_V2_PROTOCOL_VERSION } from "../../src/shared/runtimeV2Protocol";
-import type { RuntimeV2RunStartPayload } from "../../src/shared/runtimeV2Protocol";
+import type { RuntimeV2ContextCompilePayload, RuntimeV2RunStartPayload } from "../../src/shared/runtimeV2Protocol";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const runtimeRoot = path.join(appRoot, "runtime");
@@ -224,6 +225,51 @@ describe("Runtime V2 real Rust handshake", () => {
     await supervisor.stop();
     expect(countRuntimeEvents(databasePath, runId)).toBe(2);
   }, 30_000);
+
+  it("persists one authoritative context compilation and recovers the same receipt after restart", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-runtime-v2-context-"));
+    tempRoots.push(root);
+    const databasePath = path.join(root, "runtime.db");
+    const runId = "57b943bd-422f-448d-b0ca-ab0c27a10f38";
+    const configSha256 = "bc9267f85e52b4ac2945b81966aa9a4cc7f513642cfa8f0057f7fc35b90586c8";
+    const start = runStartPayload();
+    start.pinnedIdentity.provider.profileId = "profile-1";
+    start.pinnedIdentity.provider.configSha256 = configSha256;
+    const compile = contextCompilePayload(start);
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    const handshake = await supervisor.start();
+    expect(handshake.hello.payload.capabilities).toContain("contexts_v1");
+    await supervisor.bindProvider(runtimeProviderConfig(), configSha256, "context-integration-secret");
+    await supervisor.startRun(runId, start);
+    await supervisor.prepareRun(runId, { prepareIdempotencyKey: "integration-context-prepare-1" });
+    const first = await supervisor.compileContext(runId, compile);
+    const retried = await supervisor.compileContext(runId, compile);
+
+    expect(first).toMatchObject({
+      requestNumber: 1,
+      compilerVersion: "1.0.0",
+      tokenizer: {
+        kind: "fallback_estimate",
+        providerId: "deepseek",
+        modelId: "deepseek-chat",
+      },
+      representation: "normalized_messages",
+      contextWindow: 1_000_000,
+      accepted: true,
+      includedItemIds: ["system-1", "current-1"],
+      omittedItemIds: [],
+      incomplete: false,
+    });
+    expect(retried).toEqual(first);
+    await supervisor.stop();
+    expect(countRuntimeEvents(databasePath, runId)).toBe(3);
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    await supervisor.start();
+    await expect(supervisor.compileContext(runId, compile)).resolves.toEqual(first);
+    expect(countRuntimeEvents(databasePath, runId)).toBe(3);
+  }, 30_000);
 });
 
 function createWorkspaceSupervisor(databasePath: string): RuntimeV2ProcessSupervisor {
@@ -297,6 +343,47 @@ function runtimeProviderConfig() {
     totalDeadlineMs: 120_000,
     retryPolicy: { maxAttempts: 3, maxTotalDelayMs: 30_000 },
   };
+}
+
+function contextCompilePayload(start: RuntimeV2RunStartPayload): RuntimeV2ContextCompilePayload {
+  const system = "Stay within the pinned project and cite stable sources.";
+  const current = "Continue the coastline discussion.";
+  return {
+    compileIdempotencyKey: "integration-context-compile-1",
+    invocationId: "steward-invocation-1",
+    requestNumber: 1,
+    provider: start.pinnedIdentity.provider,
+    contextPolicy: start.pinnedIdentity.contextPolicy,
+    compilerVersion: "1.0.0",
+    contextWindow: 1_000_000,
+    configuredMaxOutputTokens: null,
+    safetyReserveTokens: 100_000,
+    items: [
+      {
+        type: "system_prompt",
+        itemId: "system-1",
+        content: system,
+        contentSha256: sha256Text(system),
+        disclosure: "agent_internal",
+        required: true,
+      },
+      {
+        type: "session_message",
+        itemId: "current-1",
+        messageId: "message-current-1",
+        role: "user",
+        content: current,
+        contentSha256: sha256Text(current),
+        createdAt: "2026-07-12T00:00:01Z",
+        disclosure: "project_private",
+        required: true,
+      },
+    ],
+  };
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function isProcessAlive(pid: number): boolean {

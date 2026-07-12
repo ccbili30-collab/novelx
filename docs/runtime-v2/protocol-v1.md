@@ -256,22 +256,49 @@ Exactly one terminal ledger result is permitted: completed, failed, denied, canc
 
 ## 7. Context And Source Receipts
 
-`context.compiled` records budget categories and hashes, not private raw context in the public projection:
+Rust Runtime V2 is authoritative for the final normalized Provider input. Electron and domain modules may submit typed source candidates, but they do not independently trim, reorder or serialize the final request.
+
+The initial Context Compiler protocol has three messages:
+
+- `context.compile`: Run-scoped `command` with a strict payload containing the business idempotency key, invocation/request identity, pinned Provider and context-policy identities, compiler version, context window, output/safety policy and typed items.
+- `context.compilation`: correlated, Run-scoped `response` carrying the immutable compilation receipt.
+- `context.rejected`: correlated, Run-scoped `response` carrying a structured Runtime Error. A nonfatal capacity, identity or policy rejection does not become a generic planning error.
+
+Typed context items distinguish system Prompt, tool protocol, session message, retrieval source, runtime exchange and output reserve. Each model-visible content item carries a SHA-256 identity and disclosure class. Tool calls and results remain typed runtime exchanges rather than unclassified strings.
+
+Successful compilation persists a `context.compiled` event before `context.compilation` is returned and before any future Provider inference request may be issued. An identical business idempotency retry returns the persisted receipt; a changed request under the same key is rejected.
+
+The receipt records budget categories and hashes, not private raw context in the public projection:
 
 ```json
 {
+  "compilationId": "uuid",
+  "requestNumber": 1,
+  "tokenizer": {
+    "kind": "fallback_estimate",
+    "id": "novelx.unicode-mixed-v1",
+    "version": "1.0.0",
+    "providerId": "provider-id",
+    "modelId": "model-id"
+  },
   "contextWindow": 262144,
-  "systemTokens": 12000,
-  "historyTokens": 24000,
-  "retrievalTokens": 32000,
+  "estimatedInputTokens": 68000,
+  "exactInputTokens": null,
+  "safetyReserveTokens": 4096,
   "outputReserveTokens": 8192,
-  "availableInputTokens": 185952,
+  "availableInputTokens": 249856,
   "compilerVersion": "1.0.0",
-  "sourceReceiptIds": ["uuid"]
+  "canonicalContextSha256": "sha256",
+  "includedItemIds": ["system", "tools", "current-user"],
+  "omittedItemIds": [],
+  "incomplete": false,
+  "accepted": true
 }
 ```
 
-A source receipt identifies the project resource, stable version, byte or logical range, content hash and durable task-memory note that covers it. Source content cannot be compacted until the covering task-memory record and receipt are committed.
+The current implementation uses the versioned conservative `novelx.unicode-mixed-v1` fallback estimator and records `exactInputTokens: null`. `provider_exact` and `known_model` are reserved tokenizer identities, not completed tokenizer integrations. `incomplete` is true whenever an item is omitted or an included retrieval source declares partial coverage.
+
+A future source receipt must identify the project resource, stable version, character or logical locator, content hash and durable task-memory note that covers it. Source content cannot be compacted until the covering task-memory record and receipt are committed. The initial compiler records item inclusion/omission and source identities, but full compaction, source locator/range coverage and durable-note replacement are not implemented yet.
 
 ## 8. Error Contract
 

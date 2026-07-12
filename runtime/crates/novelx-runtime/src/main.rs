@@ -1,10 +1,11 @@
 use std::io::{self, BufRead, Write};
 
 use novelx_protocol::{
-    Envelope, MessageType, PROTOCOL_VERSION, RunCancel, RunPrepare, RunSnapshot, RunStart,
-    RuntimeBuild, RuntimeError, RuntimeErrorClass, RuntimeHello, RuntimeIdentity,
-    RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
+    ContextCompilationReceipt, ContextCompile, Envelope, MessageType, PROTOCOL_VERSION, RunCancel,
+    RunPrepare, RunSnapshot, RunStart, RuntimeBuild, RuntimeError, RuntimeErrorClass, RuntimeHello,
+    RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
 };
+use novelx_runtime::context_compile_service::{ContextCompileService, ContextCompileServiceError};
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
 use novelx_runtime::provider_gateway::{
     ProviderBindSensitiveEnvelope, ProviderGatewayError, ProviderRegistry,
@@ -23,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "handshake".to_owned(),
             "runtime_control".to_owned(),
             "runs_v1".to_owned(),
+            "contexts_v1".to_owned(),
         ],
         build: RuntimeBuild {
             commit: option_env!("NOVELX_BUILD_COMMIT")
@@ -249,6 +251,13 @@ fn run_command_loop(
                 journal,
                 provider_registry,
             )?,
+            "context.compile" => handle_context_compile(
+                output,
+                &command,
+                runtime_sequence,
+                journal,
+                provider_registry,
+            )?,
             _ => unreachable!("validated command name"),
         }
     }
@@ -305,6 +314,13 @@ fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), St
             }
             serde_json::from_value::<RunPrepare>(command.payload.clone())
                 .map_err(|error| format!("invalid run.prepare payload: {error}"))?;
+        }
+        "context.compile" => {
+            if command.run_id.is_none() {
+                return Err("context.compile requires runId".to_owned());
+            }
+            serde_json::from_value::<ContextCompile>(command.payload.clone())
+                .map_err(|error| format!("invalid context.compile payload: {error}"))?;
         }
         _ => return Err(format!("unknown runtime command: {}", command.name)),
     }
@@ -448,6 +464,157 @@ fn handle_run_prepare(
         Err(failure) => {
             write_run_command_failure(output, command, runtime_sequence, run_id, failure)
         }
+    }
+}
+
+fn handle_context_compile(
+    output: &mut impl Write,
+    command: &Envelope,
+    runtime_sequence: u64,
+    journal: &mut Option<EventJournal>,
+    providers: &ProviderRegistry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run_id = command.run_id.expect("validated context.compile runId");
+    let compile: ContextCompile = serde_json::from_value(command.payload.clone())?;
+    let Some(journal) = journal.as_mut() else {
+        return write_context_rejected(
+            output,
+            command,
+            runtime_sequence,
+            run_id,
+            context_error(
+                "RUNTIME_STORAGE_REQUIRED",
+                RuntimeErrorClass::Storage,
+                "Runtime storage is required to compile context.",
+            ),
+        );
+    };
+    match ContextCompileService::new(journal, providers).compile(
+        run_id,
+        command.message_id,
+        compile,
+    ) {
+        Ok(receipt) => write_context_compilation(output, command, runtime_sequence, receipt),
+        Err(error) => {
+            let fatal = matches!(
+                error,
+                ContextCompileServiceError::InvalidHistory | ContextCompileServiceError::Journal(_)
+            );
+            eprintln!("context.compile rejected: {error}");
+            write_context_rejected(
+                output,
+                command,
+                runtime_sequence,
+                run_id,
+                context_service_error(&error),
+            )?;
+            if fatal {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "fatal Context Compiler failure",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+}
+
+fn write_context_compilation(
+    output: &mut impl Write,
+    command: &Envelope,
+    sequence: u64,
+    receipt: ContextCompilationReceipt,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut response = response_envelope(command, sequence, "context.compilation", receipt)?;
+    response.run_id = command.run_id;
+    write_envelope(output, &response)
+}
+
+fn write_context_rejected(
+    output: &mut impl Write,
+    command: &Envelope,
+    sequence: u64,
+    run_id: Uuid,
+    error: RuntimeError,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut response = response_envelope(command, sequence, "context.rejected", error)?;
+    response.run_id = Some(run_id);
+    write_envelope(output, &response)
+}
+
+fn context_service_error(error: &ContextCompileServiceError) -> RuntimeError {
+    match error {
+        ContextCompileServiceError::Compiler(
+            novelx_runtime::context_compiler::ContextCompilerError::RequiredContextExceedsWindow {
+                ..
+            },
+        ) => context_error(
+            "AGENT_CONTEXT_BUDGET_EXCEEDED",
+            RuntimeErrorClass::ContextCapacity,
+            "The required context does not fit the selected model window.",
+        ),
+        ContextCompileServiceError::Compiler(
+            novelx_runtime::context_compiler::ContextCompilerError::ToolPairingInvalid { .. },
+        ) => context_error(
+            "PROVIDER_PROTOCOL_FAILED",
+            RuntimeErrorClass::Protocol,
+            "The tool transcript is incomplete or mismatched.",
+        ),
+        ContextCompileServiceError::Provider(ProviderGatewayError::CredentialRequired) => {
+            context_error(
+                "REAL_GM_PROVIDER_REQUIRED",
+                RuntimeErrorClass::ProviderAuth,
+                "A configured model service is required.",
+            )
+        }
+        ContextCompileServiceError::ProviderCapabilityMismatch
+        | ContextCompileServiceError::PinnedIdentityMismatch
+        | ContextCompileServiceError::Provider(ProviderGatewayError::ProfileMismatch) => {
+            context_error(
+                "PROVIDER_PROFILE_MISMATCH",
+                RuntimeErrorClass::Validation,
+                "The model or context policy differs from the pinned Run.",
+            )
+        }
+        ContextCompileServiceError::IdempotencyConflict => context_error(
+            "CONTEXT_COMPILE_IDEMPOTENCY_CONFLICT",
+            RuntimeErrorClass::Validation,
+            "This context request conflicts with an existing compilation.",
+        ),
+        ContextCompileServiceError::RunStateInvalid => context_error(
+            "CONTEXT_COMPILE_RUN_STATE_INVALID",
+            RuntimeErrorClass::Validation,
+            "The Run must pass Provider preparation before context compilation.",
+        ),
+        ContextCompileServiceError::InvalidInput(_)
+        | ContextCompileServiceError::Compiler(_)
+        | ContextCompileServiceError::Provider(_) => context_error(
+            "CONTEXT_COMPILE_INVALID",
+            RuntimeErrorClass::Validation,
+            "The context compilation input is invalid.",
+        ),
+        ContextCompileServiceError::Run(_)
+        | ContextCompileServiceError::Journal(_)
+        | ContextCompileServiceError::Json(_)
+        | ContextCompileServiceError::Time(_)
+        | ContextCompileServiceError::InvalidHistory => context_error(
+            "CONTEXT_COMPILE_RUNTIME_FAILED",
+            RuntimeErrorClass::Storage,
+            "The context compilation could not be persisted or recovered.",
+        ),
+    }
+}
+
+fn context_error(code: &str, class: RuntimeErrorClass, public_message: &str) -> RuntimeError {
+    RuntimeError {
+        code: code.to_owned(),
+        class,
+        retryable: false,
+        public_message: public_message.to_owned(),
+        stage: "context.compile".to_owned(),
+        attempt: 0,
+        diagnostic_id: Uuid::new_v4(),
     }
 }
 

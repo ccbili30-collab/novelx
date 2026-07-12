@@ -17,6 +17,9 @@ import {
   parseRuntimeV2RunCancelEnvelope,
   parseRuntimeV2RunSnapshotEnvelope,
   parseRuntimeV2RunStartEnvelope,
+  parseRuntimeV2ContextCompileEnvelope,
+  parseRuntimeV2ContextCompilationEnvelope,
+  parseRuntimeV2ContextRejectedEnvelope,
   parseRuntimeV2SensitiveProviderBindEnvelope,
   parseRuntimeV2ProviderBoundEnvelope,
   runtimeV2EnvelopeSchema,
@@ -273,6 +276,60 @@ function runSnapshotEnvelope(overrides: Record<string, unknown> = {}) {
       runSequence: 1, aggregateSequence: 1, createdAt: "2026-07-12T00:00:09Z", updatedAt: "2026-07-12T00:00:09Z",
       terminalError: null,
     }, ...overrides,
+  };
+}
+
+function contextCompileEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    ...runStartEnvelope(), messageId: "aa24d2f9-f4ea-478e-b7ea-33e5aef00d7d", name: "context.compile", sequence: 9,
+    payload: {
+      compileIdempotencyKey: "compile-1", invocationId: "run-1:steward", requestNumber: 1,
+      provider: runPinnedIdentity().provider, contextPolicy: runPinnedIdentity().contextPolicy,
+      compilerVersion: "1.0.0", contextWindow: 128_000, configuredMaxOutputTokens: null,
+      safetyReserveTokens: 12_800,
+      items: [
+        { type: "system_prompt", itemId: "system-1", content: "系统约束", contentSha256: "1".repeat(64), disclosure: "agent_internal", required: true },
+        { type: "tool_protocol", itemId: "tool-1", toolName: "project.read", schemaVersion: 1, protocol: { type: "object" }, contentSha256: "2".repeat(64), disclosure: "agent_internal", required: true },
+        { type: "session_message", itemId: "message-1", messageId: "user-message-1", role: "user", content: "继续海岸讨论", contentSha256: "3".repeat(64), createdAt: "2026-07-12T00:00:12Z", disclosure: "project_private", required: true },
+        { type: "retrieval_source", itemId: "source-1", sourceReceiptId: "receipt-1", sourceKind: "document", stableVersionId: "version-1", content: "海岸形成于沉降纪元", contentSha256: "4".repeat(64), complete: true, disclosure: "project_private", required: false },
+        { type: "runtime_exchange", itemId: "exchange-1", exchangeId: "tool-call-1", kind: "tool_call", content: { toolCallId: "tool-call-1", toolName: "project.read", argumentsSha256: "5".repeat(64) }, contentSha256: "6".repeat(64), disclosure: "agent_internal", required: true },
+        { type: "output_reserve", itemId: "output-1", requestedTokens: 8_192, policyId: "auto-output-v1", disclosure: "agent_internal" },
+      ],
+    },
+    ...overrides,
+  };
+}
+
+function contextCompilationEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    ...runStartEnvelope(), messageId: "f717bf82-774f-41bc-b86c-dbf0f70ed699", messageType: "response",
+    name: "context.compilation", correlationId: contextCompileEnvelope().messageId, sequence: 9,
+    payload: {
+      compilationId: "4fd4ac92-f863-49ca-8844-69d36d716cdf", requestNumber: 1, compilerVersion: "1.0.0",
+      tokenizer: { kind: "fallback_estimate", id: "unicode-mixed", version: "1.0.0", providerId: "deepseek", modelId: "deepseek-chat" },
+      representation: "normalized_messages", canonicalContextSha256: "7".repeat(64), serializedInputBytes: 12_000,
+      estimatedInputTokens: 4_000, exactInputTokens: null, contextWindow: 128_000,
+      safetyReserveTokens: 12_800, outputReserveTokens: 8_192, availableInputTokens: 107_008,
+      accepted: true,
+      budget: [
+        { category: "system_prompt", estimatedTokens: 500 },
+        { category: "tool_protocol", estimatedTokens: 300 },
+        { category: "session_history", estimatedTokens: 200 },
+        { category: "retrieval", estimatedTokens: 3_000 },
+      ],
+      includedItemIds: ["system-1", "tool-1", "message-1"], omittedItemIds: ["source-1"], incomplete: true,
+      disclosure: "agent_internal",
+    },
+    ...overrides,
+  };
+}
+
+function contextRejectedEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    ...runStartEnvelope(), messageId: "ae778e0c-14a4-4d0f-8805-cc17453df823", messageType: "response",
+    name: "context.rejected", correlationId: contextCompileEnvelope().messageId, sequence: 9,
+    payload: { ...errorEnvelope().payload, code: "AGENT_CONTEXT_BUDGET_EXCEEDED", class: "context_capacity", stage: "context.compile" },
+    ...overrides,
   };
 }
 
@@ -577,6 +634,77 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     }))).not.toThrow();
     expect(() => parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope({
       payload: { ...runSnapshotEnvelope().payload, terminalError: undefined },
+    }))).toThrow();
+  });
+
+  it("mirrors strict tagged context.compile items and correlated compilation responses", () => {
+    expect(parseRuntimeV2ContextCompileEnvelope(contextCompileEnvelope())).toEqual(contextCompileEnvelope());
+    expect(parseRuntimeV2ContextCompilationEnvelope(contextCompilationEnvelope())).toEqual(contextCompilationEnvelope());
+    expect(parseRuntimeV2ContextRejectedEnvelope(contextRejectedEnvelope())).toEqual(contextRejectedEnvelope());
+    expect(parseRuntimeV2ContextCompileEnvelope(contextCompileEnvelope()).payload.items.map((item) => item.type)).toEqual([
+      "system_prompt", "tool_protocol", "session_message", "retrieval_source", "runtime_exchange", "output_reserve",
+    ]);
+  });
+
+  it("rejects unknown context command fields and malformed tagged item variants", () => {
+    expect(() => parseRuntimeV2ContextCompileEnvelope(contextCompileEnvelope({
+      payload: { ...contextCompileEnvelope().payload, apiKey: "must-not-cross-runtime" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompileEnvelope(contextCompileEnvelope({ correlationId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompileEnvelope(contextCompileEnvelope({ runId: null }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompileEnvelope(contextCompileEnvelope({
+      payload: {
+        ...contextCompileEnvelope().payload,
+        items: [{
+          ...contextCompileEnvelope().payload.items[0],
+          toolName: "wrong-variant-field",
+        }],
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompileEnvelope(contextCompileEnvelope({
+      payload: {
+        ...contextCompileEnvelope().payload,
+        items: [{ ...contextCompileEnvelope().payload.items[0], type: "unknown_item" }],
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompileEnvelope(contextCompileEnvelope({
+      payload: {
+        ...contextCompileEnvelope().payload,
+        items: [contextCompileEnvelope().payload.items[0], contextCompileEnvelope().payload.items[0]],
+      },
+    }))).toThrow();
+  });
+
+  it("enforces context compilation budget identities and strict receipt fields", () => {
+    expect(() => parseRuntimeV2ContextCompilationEnvelope(contextCompilationEnvelope({
+      payload: { ...contextCompilationEnvelope().payload, availableInputTokens: 107_009 },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompilationEnvelope(contextCompilationEnvelope({
+      payload: { ...contextCompilationEnvelope().payload, estimatedInputTokens: 107_009 },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompilationEnvelope(contextCompilationEnvelope({
+      payload: {
+        ...contextCompilationEnvelope().payload,
+        budget: [
+          { category: "retrieval", estimatedTokens: 1 },
+          { category: "retrieval", estimatedTokens: 2 },
+        ],
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompilationEnvelope(contextCompilationEnvelope({
+      payload: {
+        ...contextCompilationEnvelope().payload,
+        includedItemIds: ["system-1"], omittedItemIds: ["system-1"],
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompilationEnvelope(contextCompilationEnvelope({
+      payload: { ...contextCompilationEnvelope().payload, incomplete: false },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ContextCompilationEnvelope(contextCompilationEnvelope({
+      payload: { ...contextCompilationEnvelope().payload, internalPacket: "must-not-cross-runtime" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2ContextRejectedEnvelope(contextRejectedEnvelope({
+      payload: { ...contextRejectedEnvelope().payload, internalError: "secret" },
     }))).toThrow();
   });
 

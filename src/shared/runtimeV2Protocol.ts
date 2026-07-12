@@ -340,6 +340,176 @@ export const runtimeV2RunRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend
   payload: runtimeV2ErrorSchema,
 }).strict();
 
+export const runtimeV2ContextDisclosureSchema = z.enum([
+  "public", "project_private", "agent_internal", "player_hidden",
+]);
+
+export const runtimeV2ContextItemSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("system_prompt"),
+    itemId: identityStringSchema,
+    content: z.string(),
+    contentSha256: sha256Schema,
+    disclosure: runtimeV2ContextDisclosureSchema,
+    required: z.boolean(),
+  }).strict(),
+  z.object({
+    type: z.literal("tool_protocol"),
+    itemId: identityStringSchema,
+    toolName: identityStringSchema,
+    schemaVersion: z.number().int().min(0).max(0xffff_ffff),
+    protocol: z.json(),
+    contentSha256: sha256Schema,
+    disclosure: runtimeV2ContextDisclosureSchema,
+    required: z.boolean(),
+  }).strict(),
+  z.object({
+    type: z.literal("session_message"),
+    itemId: identityStringSchema,
+    messageId: identityStringSchema,
+    role: z.enum(["user", "assistant"]),
+    content: z.string(),
+    contentSha256: sha256Schema,
+    createdAt: z.iso.datetime({ offset: true }),
+    disclosure: runtimeV2ContextDisclosureSchema,
+    required: z.boolean(),
+  }).strict(),
+  z.object({
+    type: z.literal("retrieval_source"),
+    itemId: identityStringSchema,
+    sourceReceiptId: identityStringSchema,
+    sourceKind: z.enum(["document", "graph_assertion", "task_memory", "project_file"]),
+    stableVersionId: identityStringSchema,
+    content: z.string(),
+    contentSha256: sha256Schema,
+    complete: z.boolean(),
+    disclosure: runtimeV2ContextDisclosureSchema,
+    required: z.boolean(),
+  }).strict(),
+  z.object({
+    type: z.literal("runtime_exchange"),
+    itemId: identityStringSchema,
+    exchangeId: identityStringSchema,
+    kind: z.enum(["user_message", "assistant_message", "tool_call", "tool_result", "correction"]),
+    content: z.json(),
+    contentSha256: sha256Schema,
+    disclosure: runtimeV2ContextDisclosureSchema,
+    required: z.boolean(),
+  }).strict(),
+  z.object({
+    type: z.literal("output_reserve"),
+    itemId: identityStringSchema,
+    requestedTokens: z.number().int().min(0).safe(),
+    policyId: identityStringSchema,
+    disclosure: runtimeV2ContextDisclosureSchema,
+  }).strict(),
+]);
+
+export const runtimeV2ContextCompilePayloadSchema = z.object({
+  compileIdempotencyKey: identityStringSchema,
+  invocationId: identityStringSchema,
+  requestNumber: z.number().int().positive().safe(),
+  provider: providerRunIdentitySchema,
+  contextPolicy: versionedPolicyIdentitySchema,
+  compilerVersion: semanticVersionSchema,
+  contextWindow: z.number().int().positive().max(10_000_000),
+  configuredMaxOutputTokens: z.number().int().min(0).max(1_000_000).nullable(),
+  safetyReserveTokens: z.number().int().min(0).safe(),
+  items: z.array(runtimeV2ContextItemSchema).min(1).max(100_000),
+}).strict().superRefine((payload, context) => {
+  if (payload.safetyReserveTokens > payload.contextWindow) {
+    context.addIssue({ code: "custom", path: ["safetyReserveTokens"], message: "Safety reserve cannot exceed context window." });
+  }
+  if (payload.configuredMaxOutputTokens !== null && payload.configuredMaxOutputTokens > payload.contextWindow) {
+    context.addIssue({ code: "custom", path: ["configuredMaxOutputTokens"], message: "Output limit cannot exceed context window." });
+  }
+  const itemIds = payload.items.map((item) => item.itemId);
+  if (new Set(itemIds).size !== itemIds.length) {
+    context.addIssue({ code: "custom", path: ["items"], message: "Context item IDs must be unique." });
+  }
+});
+
+export const runtimeV2ContextCompileEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("context.compile"),
+  correlationId: z.null(),
+  runId: z.uuid(),
+  payload: runtimeV2ContextCompilePayloadSchema,
+}).strict();
+
+export const runtimeV2ContextBudgetCategorySchema = z.enum([
+  "system_prompt", "tool_protocol", "session_history", "collaboration", "retrieval",
+  "runtime_conversation", "output_reserve", "safety_reserve", "accounting_overhead",
+]);
+
+export const runtimeV2ContextCompilationReceiptSchema = z.object({
+  compilationId: z.uuid(),
+  requestNumber: z.number().int().positive().safe(),
+  compilerVersion: semanticVersionSchema,
+  tokenizer: z.object({
+    kind: z.enum(["provider_exact", "known_model", "fallback_estimate"]),
+    id: identityStringSchema,
+    version: identityStringSchema,
+    providerId: identityStringSchema.nullable(),
+    modelId: identityStringSchema.nullable(),
+  }).strict(),
+  representation: z.enum(["normalized_messages", "pi_context_json", "open_ai_chat_completions"]),
+  canonicalContextSha256: sha256Schema,
+  serializedInputBytes: z.number().int().min(0).safe(),
+  estimatedInputTokens: z.number().int().min(0).safe(),
+  exactInputTokens: z.number().int().min(0).safe().nullable(),
+  contextWindow: z.number().int().positive().max(10_000_000),
+  safetyReserveTokens: z.number().int().min(0).safe(),
+  outputReserveTokens: z.number().int().min(0).safe(),
+  availableInputTokens: z.number().int().min(0).safe(),
+  accepted: z.boolean(),
+  budget: z.array(z.object({
+    category: runtimeV2ContextBudgetCategorySchema,
+    estimatedTokens: z.number().int().min(0).safe(),
+  }).strict()).max(9),
+  includedItemIds: z.array(identityStringSchema).max(100_000),
+  omittedItemIds: z.array(identityStringSchema).max(100_000),
+  incomplete: z.boolean(),
+  disclosure: runtimeV2ContextDisclosureSchema,
+}).strict().superRefine((receipt, context) => {
+  const reserved = receipt.safetyReserveTokens + receipt.outputReserveTokens;
+  if (reserved > receipt.contextWindow || receipt.availableInputTokens !== receipt.contextWindow - reserved) {
+    context.addIssue({ code: "custom", path: ["availableInputTokens"], message: "Available input budget is inconsistent with reserves." });
+  }
+  if (receipt.estimatedInputTokens > receipt.availableInputTokens) {
+    context.addIssue({ code: "custom", path: ["estimatedInputTokens"], message: "Accepted input cannot exceed available budget." });
+  }
+  const categories = receipt.budget.map((allocation) => allocation.category);
+  if (new Set(categories).size !== categories.length) {
+    context.addIssue({ code: "custom", path: ["budget"], message: "Budget categories must be unique." });
+  }
+  const included = new Set(receipt.includedItemIds);
+  if (included.size !== receipt.includedItemIds.length
+      || new Set(receipt.omittedItemIds).size !== receipt.omittedItemIds.length
+      || receipt.omittedItemIds.some((itemId) => included.has(itemId))) {
+    context.addIssue({ code: "custom", path: ["includedItemIds"], message: "Included and omitted item IDs must be unique and disjoint." });
+  }
+  if (receipt.omittedItemIds.length > 0 && !receipt.incomplete) {
+    context.addIssue({ code: "custom", path: ["incomplete"], message: "Omitted context must mark the receipt incomplete." });
+  }
+});
+
+export const runtimeV2ContextCompilationEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("context.compilation"),
+  correlationId: z.uuid(),
+  runId: z.uuid(),
+  payload: runtimeV2ContextCompilationReceiptSchema,
+}).strict();
+
+export const runtimeV2ContextRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("context.rejected"),
+  correlationId: z.uuid(),
+  runId: z.uuid(),
+  payload: runtimeV2ErrorSchema,
+}).strict();
+
 export const runtimeV2ProviderConfigSchema = z.object({
   schemaVersion: z.literal(1),
   profileId: identityStringSchema,
@@ -455,6 +625,14 @@ export type RuntimeV2RunCancelEnvelope = z.infer<typeof runtimeV2RunCancelEnvelo
 export type RuntimeV2RunSnapshotPayload = z.infer<typeof runtimeV2RunSnapshotPayloadSchema>;
 export type RuntimeV2RunSnapshotEnvelope = z.infer<typeof runtimeV2RunSnapshotEnvelopeSchema>;
 export type RuntimeV2RunRejectedEnvelope = z.infer<typeof runtimeV2RunRejectedEnvelopeSchema>;
+export type RuntimeV2ContextDisclosure = z.infer<typeof runtimeV2ContextDisclosureSchema>;
+export type RuntimeV2ContextItem = z.infer<typeof runtimeV2ContextItemSchema>;
+export type RuntimeV2ContextCompilePayload = z.infer<typeof runtimeV2ContextCompilePayloadSchema>;
+export type RuntimeV2ContextCompileEnvelope = z.infer<typeof runtimeV2ContextCompileEnvelopeSchema>;
+export type RuntimeV2ContextBudgetCategory = z.infer<typeof runtimeV2ContextBudgetCategorySchema>;
+export type RuntimeV2ContextCompilationReceipt = z.infer<typeof runtimeV2ContextCompilationReceiptSchema>;
+export type RuntimeV2ContextCompilationEnvelope = z.infer<typeof runtimeV2ContextCompilationEnvelopeSchema>;
+export type RuntimeV2ContextRejectedEnvelope = z.infer<typeof runtimeV2ContextRejectedEnvelopeSchema>;
 export type RuntimeV2ProviderConfig = z.infer<typeof runtimeV2ProviderConfigSchema>;
 export type RuntimeV2SensitiveProviderBindEnvelope = z.infer<typeof runtimeV2SensitiveProviderBindEnvelopeSchema>;
 export type RuntimeV2ProviderBindingReceipt = z.infer<typeof runtimeV2ProviderBindingReceiptSchema>;
@@ -547,6 +725,18 @@ export function parseRuntimeV2RunSnapshotEnvelope(value: unknown): RuntimeV2RunS
 
 export function parseRuntimeV2RunRejectedEnvelope(value: unknown): RuntimeV2RunRejectedEnvelope {
   return parseVersionedEnvelope(value, runtimeV2RunRejectedEnvelopeSchema);
+}
+
+export function parseRuntimeV2ContextCompileEnvelope(value: unknown): RuntimeV2ContextCompileEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ContextCompileEnvelopeSchema);
+}
+
+export function parseRuntimeV2ContextCompilationEnvelope(value: unknown): RuntimeV2ContextCompilationEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ContextCompilationEnvelopeSchema);
+}
+
+export function parseRuntimeV2ContextRejectedEnvelope(value: unknown): RuntimeV2ContextRejectedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ContextRejectedEnvelopeSchema);
 }
 
 export function parseRuntimeV2SensitiveProviderBindEnvelope(value: unknown): RuntimeV2SensitiveProviderBindEnvelope {

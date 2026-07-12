@@ -277,6 +277,189 @@ pub struct RunSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ContextDisclosure {
+    Public,
+    ProjectPrivate,
+    AgentInternal,
+    PlayerHidden,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMessageRole {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRuntimeExchangeKind {
+    UserMessage,
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    Correction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSourceKind {
+    Document,
+    GraphAssertion,
+    TaskMemory,
+    ProjectFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ContextItem {
+    SystemPrompt {
+        item_id: String,
+        content: String,
+        content_sha256: String,
+        disclosure: ContextDisclosure,
+        required: bool,
+    },
+    ToolProtocol {
+        item_id: String,
+        tool_name: String,
+        schema_version: u32,
+        protocol: Value,
+        content_sha256: String,
+        disclosure: ContextDisclosure,
+        required: bool,
+    },
+    SessionMessage {
+        item_id: String,
+        message_id: String,
+        role: ContextMessageRole,
+        content: String,
+        content_sha256: String,
+        created_at: String,
+        disclosure: ContextDisclosure,
+        required: bool,
+    },
+    RetrievalSource {
+        item_id: String,
+        source_receipt_id: String,
+        source_kind: ContextSourceKind,
+        stable_version_id: String,
+        content: String,
+        content_sha256: String,
+        complete: bool,
+        disclosure: ContextDisclosure,
+        required: bool,
+    },
+    RuntimeExchange {
+        item_id: String,
+        exchange_id: String,
+        kind: ContextRuntimeExchangeKind,
+        content: Value,
+        content_sha256: String,
+        disclosure: ContextDisclosure,
+        required: bool,
+    },
+    OutputReserve {
+        item_id: String,
+        requested_tokens: u64,
+        policy_id: String,
+        disclosure: ContextDisclosure,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenizerKind {
+    ProviderExact,
+    KnownModel,
+    FallbackEstimate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TokenizerIdentity {
+    pub kind: TokenizerKind,
+    pub id: String,
+    pub version: String,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextBudgetCategory {
+    SystemPrompt,
+    ToolProtocol,
+    SessionHistory,
+    Collaboration,
+    Retrieval,
+    RuntimeConversation,
+    OutputReserve,
+    SafetyReserve,
+    AccountingOverhead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextBudgetAllocation {
+    pub category: ContextBudgetCategory,
+    pub estimated_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextCompile {
+    pub compile_idempotency_key: String,
+    pub invocation_id: String,
+    pub request_number: u64,
+    pub provider: ProviderRunIdentity,
+    pub context_policy: VersionedPolicyIdentity,
+    pub compiler_version: String,
+    pub context_window: u64,
+    pub configured_max_output_tokens: Option<u64>,
+    pub safety_reserve_tokens: u64,
+    pub items: Vec<ContextItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRepresentation {
+    NormalizedMessages,
+    PiContextJson,
+    OpenAiChatCompletions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextCompilationReceipt {
+    pub compilation_id: Uuid,
+    pub request_number: u64,
+    pub compiler_version: String,
+    pub tokenizer: TokenizerIdentity,
+    pub representation: ContextRepresentation,
+    pub canonical_context_sha256: String,
+    pub serialized_input_bytes: u64,
+    pub estimated_input_tokens: u64,
+    pub exact_input_tokens: Option<u64>,
+    pub context_window: u64,
+    pub safety_reserve_tokens: u64,
+    pub output_reserve_tokens: u64,
+    pub available_input_tokens: u64,
+    pub accepted: bool,
+    pub budget: Vec<ContextBudgetAllocation>,
+    pub included_item_ids: Vec<String>,
+    pub omitted_item_ids: Vec<String>,
+    pub incomplete: bool,
+    pub disclosure: ContextDisclosure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeErrorClass {
     Protocol,
     ProviderAuth,
@@ -379,5 +562,200 @@ mod tests {
                 maximum: MAX_SAFE_SEQUENCE,
             })
         );
+    }
+
+    #[test]
+    fn context_compile_and_receipt_round_trip_with_strict_tagged_items() {
+        let items = vec![
+            ContextItem::SystemPrompt {
+                item_id: "system-1".to_owned(),
+                content: "Stay within the project.".to_owned(),
+                content_sha256: "a".repeat(64),
+                disclosure: ContextDisclosure::AgentInternal,
+                required: true,
+            },
+            ContextItem::ToolProtocol {
+                item_id: "tool-1".to_owned(),
+                tool_name: "project.read".to_owned(),
+                schema_version: 1,
+                protocol: serde_json::json!({ "type": "object" }),
+                content_sha256: "b".repeat(64),
+                disclosure: ContextDisclosure::AgentInternal,
+                required: true,
+            },
+            ContextItem::SessionMessage {
+                item_id: "session-1".to_owned(),
+                message_id: "message-1".to_owned(),
+                role: ContextMessageRole::User,
+                content: "Continue the coastline discussion.".to_owned(),
+                content_sha256: "c".repeat(64),
+                created_at: "2026-07-12T00:00:00Z".to_owned(),
+                disclosure: ContextDisclosure::ProjectPrivate,
+                required: false,
+            },
+            ContextItem::RetrievalSource {
+                item_id: "source-1".to_owned(),
+                source_receipt_id: "receipt-1".to_owned(),
+                source_kind: ContextSourceKind::Document,
+                stable_version_id: "version-1".to_owned(),
+                content: "The coast was formed by subsidence.".to_owned(),
+                content_sha256: "d".repeat(64),
+                complete: true,
+                disclosure: ContextDisclosure::ProjectPrivate,
+                required: true,
+            },
+            ContextItem::RuntimeExchange {
+                item_id: "exchange-1".to_owned(),
+                exchange_id: "tool-call-1".to_owned(),
+                kind: ContextRuntimeExchangeKind::ToolResult,
+                content: serde_json::json!({ "ok": true }),
+                content_sha256: "e".repeat(64),
+                disclosure: ContextDisclosure::AgentInternal,
+                required: true,
+            },
+            ContextItem::OutputReserve {
+                item_id: "output-1".to_owned(),
+                requested_tokens: 8_192,
+                policy_id: "auto-output-v1".to_owned(),
+                disclosure: ContextDisclosure::AgentInternal,
+            },
+        ];
+        let compile = ContextCompile {
+            compile_idempotency_key: "compile-1".to_owned(),
+            invocation_id: "run-1:steward".to_owned(),
+            request_number: 1,
+            provider: ProviderRunIdentity {
+                profile_id: "profile-1".to_owned(),
+                provider_id: "provider-1".to_owned(),
+                model_id: "model-1".to_owned(),
+                config_sha256: "f".repeat(64),
+            },
+            context_policy: VersionedPolicyIdentity {
+                id: "context-policy".to_owned(),
+                version: "1.0.0".to_owned(),
+                sha256: "1".repeat(64),
+            },
+            compiler_version: "1.0.0".to_owned(),
+            context_window: 262_144,
+            configured_max_output_tokens: None,
+            safety_reserve_tokens: 26_215,
+            items,
+        };
+        let encoded = serde_json::to_string(&compile).unwrap();
+        assert!(encoded.contains("\"type\":\"system_prompt\""));
+        assert!(encoded.contains("\"requestedTokens\":8192"));
+        assert_eq!(
+            serde_json::from_str::<ContextCompile>(&encoded).unwrap(),
+            compile
+        );
+
+        let receipt = ContextCompilationReceipt {
+            compilation_id: Uuid::new_v4(),
+            request_number: 1,
+            compiler_version: "1.0.0".to_owned(),
+            tokenizer: TokenizerIdentity {
+                kind: TokenizerKind::FallbackEstimate,
+                id: "unicode-mixed".to_owned(),
+                version: "1.0.0".to_owned(),
+                provider_id: Some("provider-1".to_owned()),
+                model_id: Some("model-1".to_owned()),
+            },
+            representation: ContextRepresentation::NormalizedMessages,
+            canonical_context_sha256: "2".repeat(64),
+            serialized_input_bytes: 12_000,
+            estimated_input_tokens: 4_000,
+            exact_input_tokens: None,
+            context_window: 262_144,
+            safety_reserve_tokens: 26_215,
+            output_reserve_tokens: 8_192,
+            available_input_tokens: 227_737,
+            accepted: true,
+            budget: vec![ContextBudgetAllocation {
+                category: ContextBudgetCategory::SystemPrompt,
+                estimated_tokens: 500,
+            }],
+            included_item_ids: vec!["system-1".to_owned()],
+            omitted_item_ids: vec!["session-1".to_owned()],
+            incomplete: true,
+            disclosure: ContextDisclosure::AgentInternal,
+        };
+        let encoded = serde_json::to_string(&receipt).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ContextCompilationReceipt>(&encoded).unwrap(),
+            receipt
+        );
+    }
+
+    #[test]
+    fn context_protocol_rejects_unknown_compile_and_item_fields() {
+        let compile_with_unknown = serde_json::json!({
+            "compileIdempotencyKey": "compile-1",
+            "invocationId": "run-1:steward",
+            "requestNumber": 1,
+            "provider": {
+                "profileId": "profile-1",
+                "providerId": "provider-1",
+                "modelId": "model-1",
+                "configSha256": "a"
+            },
+            "contextPolicy": { "id": "policy", "version": "1", "sha256": "b" },
+            "compilerVersion": "1.0.0",
+            "contextWindow": 128000,
+            "configuredMaxOutputTokens": null,
+            "safetyReserveTokens": 12800,
+            "items": [],
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<ContextCompile>(compile_with_unknown).is_err());
+
+        let item_with_unknown = serde_json::json!({
+            "type": "system_prompt",
+            "itemId": "system-1",
+            "content": "prompt",
+            "contentSha256": "a",
+            "disclosure": "agent_internal",
+            "required": true,
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<ContextItem>(item_with_unknown).is_err());
+
+        let tokenizer_with_unknown = serde_json::json!({
+            "kind": "fallback_estimate",
+            "id": "unicode-mixed",
+            "version": "1.0.0",
+            "providerId": null,
+            "modelId": null,
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<TokenizerIdentity>(tokenizer_with_unknown).is_err());
+
+        let receipt_with_unknown = serde_json::json!({
+            "compilationId": Uuid::new_v4(),
+            "requestNumber": 1,
+            "compilerVersion": "1.0.0",
+            "tokenizer": {
+                "kind": "fallback_estimate",
+                "id": "unicode-mixed",
+                "version": "1.0.0",
+                "providerId": null,
+                "modelId": null
+            },
+            "representation": "normalized_messages",
+            "canonicalContextSha256": "a",
+            "serializedInputBytes": 1,
+            "estimatedInputTokens": 1,
+            "exactInputTokens": null,
+            "contextWindow": 128000,
+            "safetyReserveTokens": 12800,
+            "outputReserveTokens": 8192,
+            "availableInputTokens": 107008,
+            "accepted": true,
+            "budget": [],
+            "includedItemIds": [],
+            "omittedItemIds": [],
+            "disclosure": "agent_internal",
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<ContextCompilationReceipt>(receipt_with_unknown).is_err());
     }
 }

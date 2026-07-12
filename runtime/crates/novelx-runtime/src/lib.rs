@@ -1,3 +1,5 @@
+pub mod context_compile_service;
+pub mod context_compiler;
 pub mod event_journal;
 pub mod provider_gateway;
 pub mod recovery;

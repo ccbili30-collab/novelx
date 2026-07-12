@@ -50,24 +50,33 @@
 - Added journal-backed `run.prepare`: the Runtime resolves the exact Provider identity pinned at `run.start`, persists `run.preparing` only for an exact live binding, and persists typed `REAL_GM_PROVIDER_REQUIRED` or `PROVIDER_PROFILE_MISMATCH` terminal failures otherwise.
 - Added nullable structured `terminalError` to Run snapshots and event-version-2 `run.failed` replay so Provider prerequisite failures retain their public code, class, stage and diagnostic identity across Runtime restarts.
 - Extended the Electron Supervisor with a typed `prepareRun` command path using the same sequence, correlation, timeout and schema enforcement as other Run commands.
+- Accepted ADR-0007: Rust Runtime V2 owns final typed context normalization, token admission and the receipt that must precede a Provider request.
+- Added strict Run-scoped `context.compile`, correlated `context.compilation` and typed `context.rejected` protocol paths.
+- Added typed context items for system Prompt, tool protocol, session messages, retrieval sources, runtime exchanges and output reserve, including content hashes and disclosure classes.
+- Added a journal-backed Context Compile Service that validates pinned Run/Provider/context-policy identities, preserves business idempotency and persists `context.compiled` before returning its receipt.
+- Added per-request context compilation receipts with deterministic input hash, category budgets, included/omitted item identities, output/safety reserves and explicit tokenizer identity.
+- Added the versioned conservative `novelx.unicode-mixed-v1` fallback estimator. Receipts explicitly report `fallback_estimate`; they do not claim exact token counts.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 59 tests.
+- Rust workspace tests pass: 76 tests, including 8 pure Context Compiler contract tests and 7 SQLite Context Compile Service persistence/lifecycle/completeness tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 50 tests, including sensitive Provider isolation, Run schema strictness, `run.prepare` persistence/idempotency, fatal timeout cleanup, post-ready crash rejection and real restart recovery.
+- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 54 tests, including strict typed context schemas and a real Electron-to-Rust `context.compile` restart/idempotency path.
 - `git diff --check` passes.
-- Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and explicit `handshake`, `runtime_control` and `runs_v1` capabilities.
+- Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and explicit `handshake`, `runtime_control`, `runs_v1` and `contexts_v1` capabilities.
 
 ## Not Completed
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor is a continuously connected, independently tested module but is not part of production startup.
 - The runtime opens and recovers the supplied workspace database and processes durable Run acceptance/query plus status/shutdown controls, but it does not yet schedule Provider or tool execution.
-- `run.start` durably creates a Run and `run.prepare` now verifies its pinned Provider prerequisite. No full inference request, Context Compiler, tool scheduling or Provider attempt journal exists yet. Cancellation is connected only at the Run state level because no Provider/tool work exists yet to interrupt.
-- The ToolCall state machine and event-backed aggregate exist, but the real tool executor, full Provider inference pipeline, context compiler, recovery execution policy and domain tools are not implemented.
+- `run.start` durably creates a Run, `run.prepare` verifies its pinned Provider prerequisite, and `context.compile` can persist a typed receipt. No full inference request, tool scheduling or Provider attempt journal exists yet. Cancellation is connected only at the Run state level because no Provider/tool work exists yet to interrupt.
+- The ToolCall state machine, event-backed aggregate and first Context Compiler service exist, but the real tool executor, full Provider inference pipeline, recovery execution policy and domain tools are not implemented.
 - The Provider Gateway can bind/validate a profile, perform a real minimal connection ping and gate `run.prepare`; durable Provider attempt events, full inference requests and post-prepare Run scheduling are not connected.
+- Exact Provider/model tokenizer integrations are not implemented; the compiler currently uses only the disclosed conservative fallback estimator.
+- Context compaction, durable task-note replacement, source locator/range receipts and full truncation disclosure are not implemented. Current item inclusion/omission metadata is not a substitute for those capabilities.
+- Electron production startup and the live Agent workflow do not route through `context.compile`; the compiler is protocol/service foundation only and has not sent a real Provider inference request.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.
