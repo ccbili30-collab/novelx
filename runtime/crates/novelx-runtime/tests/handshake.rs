@@ -586,8 +586,8 @@ fn provider_bind_records_only_the_matching_recovery_candidate_without_inference(
         )
         .unwrap();
     assert_eq!(
-        recovery_count, 3,
-        "unbound observed/waiting + bound observed"
+        recovery_count, 4,
+        "unbound observed/waiting + bound observed/explicit-execution waiting"
     );
     assert_eq!(
         provider_attempt_count, 0,

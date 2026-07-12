@@ -492,6 +492,11 @@ fn operational_recovery_guard(
             RuntimeErrorClass::SourceConflict,
             false,
         ),
+        OperationalRecoveryGate::WaitingForExplicitExecution => (
+            "RUN_RECOVERY_EXPLICIT_EXECUTION_REQUIRED",
+            RuntimeErrorClass::Protocol,
+            false,
+        ),
         OperationalRecoveryGate::RecoveryReady => (
             "RUN_RECOVERY_OPERATION_REQUIRED",
             RuntimeErrorClass::Protocol,
@@ -540,6 +545,9 @@ fn operational_recovery_public_message(gate: OperationalRecoveryGate) -> &'stati
         }
         OperationalRecoveryGate::WaitingForReconciliation => {
             "\u{8be5}\u{8fd0}\u{884c}\u{5b58}\u{5728}\u{7ed3}\u{679c}\u{672a}\u{77e5}\u{7684}\u{5916}\u{90e8}\u{64cd}\u{4f5c}\u{ff0c}\u{5fc5}\u{987b}\u{5148}\u{5b8c}\u{6210}\u{5bf9}\u{8d26}\u{3002}"
+        }
+        OperationalRecoveryGate::WaitingForExplicitExecution => {
+            "\u{8be5}\u{8fd0}\u{884c}\u{7684}\u{4e0b}\u{4e00}\u{6b65}\u{53ef}\u{80fd}\u{4ea7}\u{751f}\u{65b0}\u{7684}\u{5916}\u{90e8}\u{526f}\u{4f5c}\u{7528}\u{ff0c}\u{5fc5}\u{987b}\u{7b49}\u{5f85}\u{4e13}\u{7528}\u{6267}\u{884c}\u{534f}\u{8bae}\u{3002}"
         }
         OperationalRecoveryGate::RecoveryReady => {
             "\u{8be5}\u{8fd0}\u{884c}\u{5df2}\u{5177}\u{5907}\u{6062}\u{590d}\u{6761}\u{4ef6}\u{ff0c}\u{4f46}\u{53ea}\u{80fd}\u{7531}\u{53d7}\u{5ba1}\u{8ba1}\u{7684}\u{6062}\u{590d}\u{64cd}\u{4f5c}\u{7ee7}\u{7eed}\u{3002}"

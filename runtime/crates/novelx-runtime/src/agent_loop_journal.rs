@@ -235,6 +235,32 @@ impl<'a> AgentLoopJournalRepository<'a> {
         )
     }
 
+    pub fn recover_if_last_command(
+        &self,
+        run_id: &str,
+        invocation_id: &str,
+        command_key: &str,
+    ) -> Result<Option<AgentLoopRecord>, AgentLoopJournalError> {
+        require_metadata(
+            command_key,
+            AgentLoopEventMetadata {
+                message_id: command_key,
+                created_at: command_key,
+            },
+        )?;
+        let events = self
+            .journal
+            .read_aggregate(run_id, AGGREGATE_TYPE, invocation_id, 0)?;
+        if events
+            .last()
+            .is_some_and(|event| event.idempotency_key == command_key)
+        {
+            replay(run_id, invocation_id, &events).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn find_active_for_run(
         &self,
         run_id: &str,

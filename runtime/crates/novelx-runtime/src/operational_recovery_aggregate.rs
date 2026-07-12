@@ -33,6 +33,7 @@ pub enum OperationalRecoveryObservedGate {
     AwaitingProviderBinding,
     WaitingForApproval,
     WaitingForReconciliation,
+    WaitingForExplicitExecution,
     RecoveryReady,
     Quarantined,
     TerminalProjectionOnly,
@@ -44,6 +45,7 @@ pub enum OperationalRecoveryWaitingReason {
     ProviderBinding,
     HostApproval,
     Reconciliation,
+    ExplicitExecution,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

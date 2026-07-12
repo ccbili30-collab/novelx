@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use novelx_protocol::ProviderRunIdentity;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -11,7 +12,7 @@ use crate::{
         AssignmentRecoveryClassification, AssignmentRecoveryReport, RecoveredAssignment,
     },
     agent_loop_journal::AgentLoopJournalRepository,
-    agent_loop_service::LoopPhase,
+    agent_loop_service::{AgentLoopService, LoopPhase},
     event_journal::{EventJournal, EventJournalError},
     provider_attempt::{
         ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptRecovery,
@@ -28,9 +29,49 @@ pub enum OperationalRecoveryGate {
     AwaitingProviderBinding,
     WaitingForApproval,
     WaitingForReconciliation,
+    WaitingForExplicitExecution,
     RecoveryReady,
     Quarantined,
     TerminalProjectionOnly,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum OperationalRecoveryAction {
+    PersistedProviderResultProjection {
+        invocation_id: String,
+        attempt_id: String,
+        expected_loop_checkpoint_sha256: String,
+        expected_attempt_sequence: u64,
+        response_body_sha256: String,
+    },
+    ContextEvidenceRequired {
+        invocation_id: String,
+    },
+    ProviderDispatchRequired {
+        invocation_id: Option<String>,
+    },
+    ToolEvidenceOrDispatchRequired {
+        invocation_id: String,
+    },
+    InferenceStartEvidenceRequired {
+        invocation_id: String,
+    },
+    PersistedEvidenceConflict {
+        invocation_id: String,
+    },
+    NoExecutableProjection,
+    TerminalProjection,
+}
+
+impl OperationalRecoveryAction {
+    pub fn action_spec_sha256(&self) -> Result<String, OperationalRecoveryScanError> {
+        canonical_sha256(serde_json::to_value(self)?)
+    }
+
+    pub const fn may_execute_without_new_external_effect(&self) -> bool {
+        matches!(self, Self::PersistedProviderResultProjection { .. })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,6 +80,7 @@ pub struct OperationalRecoveryRun {
     pub run_state: RunState,
     pub source_fingerprint: String,
     pub gate: OperationalRecoveryGate,
+    pub action: OperationalRecoveryAction,
     pub active_agent_loop_id: Option<String>,
     pub active_agent_loop_phase: Option<LoopPhase>,
     pub provider_attempt_states: Vec<ProviderAttemptState>,
@@ -157,17 +199,14 @@ impl<'a> OperationalRecoveryScanner<'a> {
                     },
                 )?;
             if record.service.is_active() {
-                active_loops.push((
-                    invocation_id.clone(),
-                    record.service.phase(),
-                    record.service.checkpoint_sha256().map_err(|source| {
-                        OperationalRecoveryScanError::AgentLoopCheckpointFailed {
-                            run_id: run_id.to_owned(),
-                            invocation_id: invocation_id.clone(),
-                            source,
-                        }
-                    })?,
-                ));
+                let checkpoint = record.service.checkpoint_sha256().map_err(|source| {
+                    OperationalRecoveryScanError::AgentLoopCheckpointFailed {
+                        run_id: run_id.to_owned(),
+                        invocation_id: invocation_id.clone(),
+                        source,
+                    }
+                })?;
+                active_loops.push((invocation_id.clone(), record.service, checkpoint));
             }
         }
         if active_loops.len() > 1 {
@@ -214,7 +253,7 @@ impl<'a> OperationalRecoveryScanner<'a> {
         let approval_wait = run.state() == RunState::WaitingForApproval
             || active_loop
                 .as_ref()
-                .is_some_and(|(_, phase, _)| *phase == LoopPhase::AwaitingApproval)
+                .is_some_and(|(_, service, _)| service.phase() == LoopPhase::AwaitingApproval)
             || tools.iter().any(|tool| {
                 tool.authorization() == ToolAuthorization::ApprovalRequired
                     && tool.state() == ToolState::Requested
@@ -227,9 +266,9 @@ impl<'a> OperationalRecoveryScanner<'a> {
         });
         let terminal_tool_without_verified_manifest =
             tools.iter().any(|tool| tool.state().is_terminal());
-        let local_continuation = active_loop.as_ref().is_some_and(|(_, phase, _)| {
+        let local_continuation = active_loop.as_ref().is_some_and(|(_, service, _)| {
             matches!(
-                phase,
+                service.phase(),
                 LoopPhase::AwaitingToolResults
                     | LoopPhase::AwaitingContextCompilation
                     | LoopPhase::AwaitingInferenceStart
@@ -261,7 +300,7 @@ impl<'a> OperationalRecoveryScanner<'a> {
 
         let terminal_with_unknown_effect = run.state().is_terminal()
             && (provider_unknown || tool_unknown || terminal_tool_without_verified_manifest);
-        let gate = if terminal_with_unknown_effect {
+        let mut gate = if terminal_with_unknown_effect {
             reasons.push("terminal_run_has_unknown_external_outcome".to_owned());
             OperationalRecoveryGate::Quarantined
         } else if !reasons.is_empty() {
@@ -294,13 +333,34 @@ impl<'a> OperationalRecoveryScanner<'a> {
             OperationalRecoveryGate::AwaitingProviderBinding
         };
 
+        let action = classify_action(
+            gate,
+            run,
+            active_loop.as_ref(),
+            provider_attempt_ids,
+            &attempts,
+        );
+        if matches!(
+            action,
+            OperationalRecoveryAction::PersistedEvidenceConflict { .. }
+        ) {
+            reasons.push("persisted_provider_evidence_conflict".to_owned());
+            gate = OperationalRecoveryGate::Quarantined;
+        } else if gate == OperationalRecoveryGate::RecoveryReady
+            && !action.may_execute_without_new_external_effect()
+        {
+            reasons.push(action_wait_reason(&action).to_owned());
+            gate = OperationalRecoveryGate::WaitingForExplicitExecution;
+        }
+
         Ok(OperationalRecoveryRun {
             run_id: run_id.to_owned(),
             run_state: run.state(),
             source_fingerprint,
             gate,
+            action,
             active_agent_loop_id: active_loop.as_ref().map(|(id, _, _)| id.clone()),
-            active_agent_loop_phase: active_loop.map(|(_, phase, _)| phase),
+            active_agent_loop_phase: active_loop.map(|(_, service, _)| service.phase()),
             provider_attempt_states: attempts
                 .iter()
                 .map(ProviderAttemptAggregate::state)
@@ -311,11 +371,142 @@ impl<'a> OperationalRecoveryScanner<'a> {
     }
 }
 
+fn action_wait_reason(action: &OperationalRecoveryAction) -> &'static str {
+    match action {
+        OperationalRecoveryAction::ProviderDispatchRequired { .. } => {
+            "provider_dispatch_requires_effect_protocol"
+        }
+        OperationalRecoveryAction::ToolEvidenceOrDispatchRequired { .. } => {
+            "tool_result_manifest_or_dispatch_protocol_required"
+        }
+        OperationalRecoveryAction::ContextEvidenceRequired { .. } => {
+            "persisted_context_compilation_evidence_required"
+        }
+        OperationalRecoveryAction::InferenceStartEvidenceRequired { .. } => {
+            "deterministic_inference_start_evidence_required"
+        }
+        OperationalRecoveryAction::PersistedEvidenceConflict { .. } => {
+            "persisted_provider_evidence_conflict"
+        }
+        OperationalRecoveryAction::NoExecutableProjection => "no_unique_local_recovery_projection",
+        OperationalRecoveryAction::TerminalProjection => "terminal_projection_only",
+        OperationalRecoveryAction::PersistedProviderResultProjection { .. } => {
+            "persisted_provider_result_projection_ready"
+        }
+    }
+}
+
+fn classify_action(
+    gate: OperationalRecoveryGate,
+    run: &RunAggregate,
+    active_loop: Option<&(String, AgentLoopService, String)>,
+    provider_attempt_ids: &[String],
+    attempts: &[ProviderAttemptAggregate],
+) -> OperationalRecoveryAction {
+    if gate == OperationalRecoveryGate::TerminalProjectionOnly {
+        return OperationalRecoveryAction::TerminalProjection;
+    }
+    if gate != OperationalRecoveryGate::RecoveryReady {
+        return OperationalRecoveryAction::NoExecutableProjection;
+    }
+    let Some((invocation_id, service, checkpoint_sha256)) = active_loop else {
+        return if attempts.is_empty() {
+            OperationalRecoveryAction::ProviderDispatchRequired {
+                invocation_id: None,
+            }
+        } else {
+            OperationalRecoveryAction::NoExecutableProjection
+        };
+    };
+    match service.phase() {
+        LoopPhase::AwaitingProvider => {
+            let Some(dispatch) = service.pending_inference() else {
+                return OperationalRecoveryAction::NoExecutableProjection;
+            };
+            let same_request = provider_attempt_ids
+                .iter()
+                .zip(attempts)
+                .filter(|(_, attempt)| {
+                    attempt.definition().invocation_id == *invocation_id
+                        && attempt.definition().request_number == dispatch.request_number
+                })
+                .collect::<Vec<_>>();
+            if same_request.len() > 1 {
+                return OperationalRecoveryAction::PersistedEvidenceConflict {
+                    invocation_id: invocation_id.clone(),
+                };
+            }
+            let Some((attempt_id, attempt)) = same_request.into_iter().next() else {
+                return OperationalRecoveryAction::ProviderDispatchRequired {
+                    invocation_id: Some(invocation_id.clone()),
+                };
+            };
+            let matched = (attempt.state() == ProviderAttemptState::Responded
+                && attempt_id == &dispatch.attempt_id.to_string()
+                && attempt.definition().inference_id == dispatch.inference_id.to_string()
+                && attempt.definition().context_compilation_id == dispatch.context_compilation_id
+                && attempt.definition().attempt_number == dispatch.attempt_number
+                && attempt.definition().provider == run.pinned_identity().provider
+                && attempt.response_receipt().is_some_and(|receipt| {
+                    receipt.actual_provider_id == run.pinned_identity().provider.provider_id
+                        && receipt.actual_model_id == run.pinned_identity().provider.model_id
+                }))
+            .then_some((attempt_id, attempt));
+            matched.map_or_else(
+                || {
+                    if attempt.state() == ProviderAttemptState::Requested
+                        && attempt_id == &dispatch.attempt_id.to_string()
+                    {
+                        OperationalRecoveryAction::ProviderDispatchRequired {
+                            invocation_id: Some(invocation_id.clone()),
+                        }
+                    } else {
+                        OperationalRecoveryAction::PersistedEvidenceConflict {
+                            invocation_id: invocation_id.clone(),
+                        }
+                    }
+                },
+                |(attempt_id, attempt)| {
+                    let response = attempt
+                        .response_receipt()
+                        .unwrap_or_else(|| unreachable!("matched responded attempt"));
+                    OperationalRecoveryAction::PersistedProviderResultProjection {
+                        invocation_id: invocation_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        expected_loop_checkpoint_sha256: checkpoint_sha256.clone(),
+                        expected_attempt_sequence: attempt.aggregate_sequence(),
+                        response_body_sha256: response.response_body_sha256.clone(),
+                    }
+                },
+            )
+        }
+        LoopPhase::AwaitingContextCompilation => {
+            OperationalRecoveryAction::ContextEvidenceRequired {
+                invocation_id: invocation_id.clone(),
+            }
+        }
+        LoopPhase::AwaitingToolResults => {
+            OperationalRecoveryAction::ToolEvidenceOrDispatchRequired {
+                invocation_id: invocation_id.clone(),
+            }
+        }
+        LoopPhase::AwaitingInferenceStart => {
+            OperationalRecoveryAction::InferenceStartEvidenceRequired {
+                invocation_id: invocation_id.clone(),
+            }
+        }
+        LoopPhase::AwaitingApproval
+        | LoopPhase::Completed
+        | LoopPhase::Cancelled
+        | LoopPhase::Failed => OperationalRecoveryAction::NoExecutableProjection,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn source_fingerprint(
     run: &RunAggregate,
     assignment: Option<&RecoveredAssignment>,
-    active_loop: Option<&(String, LoopPhase, String)>,
+    active_loop: Option<&(String, AgentLoopService, String)>,
     provider_attempt_ids: &[String],
     attempts: &[ProviderAttemptAggregate],
     tool_call_ids: &[String],
@@ -368,10 +559,10 @@ fn source_fingerprint(
             "classification": assignment_classification_name(&value.classification),
         })
     });
-    let loop_evidence = active_loop.map(|(id, phase, checkpoint_sha256)| {
+    let loop_evidence = active_loop.map(|(id, service, checkpoint_sha256)| {
         json!({
             "invocationId": id,
-            "phase": loop_phase_name(*phase),
+            "phase": loop_phase_name(service.phase()),
             "checkpointSha256": checkpoint_sha256,
         })
     });

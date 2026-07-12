@@ -11,7 +11,9 @@ use novelx_runtime::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, InferenceDispatchIdentity,
     },
     event_journal::EventJournal,
-    operational_recovery_scanner::{OperationalRecoveryGate, OperationalRecoveryScanner},
+    operational_recovery_scanner::{
+        OperationalRecoveryAction, OperationalRecoveryGate, OperationalRecoveryScanner,
+    },
     provider_attempt::{
         ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptMetadata,
         ProviderResponseReceipt,
@@ -37,8 +39,16 @@ fn exact_provider_binding_is_required_when_no_durable_outcome_exists() {
     assert_eq!(unbound_fingerprint, fixture.fingerprint(&[], &run_id));
     assert_eq!(
         fixture.gate(std::slice::from_ref(&provider), &run_id),
-        OperationalRecoveryGate::RecoveryReady
+        OperationalRecoveryGate::WaitingForExplicitExecution
     );
+    assert!(matches!(
+        fixture
+            .recovered_run(std::slice::from_ref(&provider), &run_id)
+            .action,
+        OperationalRecoveryAction::ProviderDispatchRequired {
+            invocation_id: None
+        }
+    ));
     assert_ne!(
         unbound_fingerprint,
         fixture.fingerprint(std::slice::from_ref(&provider), &run_id)
@@ -106,28 +116,61 @@ fn persisted_provider_response_is_evidence_first_without_provider_binding() {
     let run_id = Uuid::new_v4().to_string();
     let provider = create_running_run(&fixture, &run_id);
     let mut journal = fixture.open();
-    let run = RunAggregate::recover(&journal, &run_id).unwrap();
+    let compilation_id = Uuid::new_v4();
+    let inference_id = Uuid::new_v4();
+    let attempt_id = Uuid::new_v4();
+    let loop_service = projectable_loop_service(
+        Uuid::parse_str(&run_id).unwrap(),
+        compilation_id,
+        inference_id,
+        attempt_id,
+    );
+    AgentLoopJournalRepository::new(&mut journal)
+        .create(
+            &loop_service,
+            "projectable-loop-create",
+            loop_metadata("projectable-loop-message"),
+        )
+        .unwrap();
+    let requested_sequence = current_run_sequence(&journal, &run_id);
     let mut attempt = ProviderAttemptAggregate::create(
         &mut journal,
         &run_id,
-        "attempt-1",
-        attempt_definition(&run_id, provider),
-        run.last_run_sequence(),
+        &attempt_id.to_string(),
+        ProviderAttemptDefinition {
+            run_id: run_id.clone(),
+            inference_id: inference_id.to_string(),
+            invocation_id: "invocation-1".to_owned(),
+            context_compilation_id: compilation_id,
+            canonical_context_sha256: "b".repeat(64),
+            transport_payload_sha256: "c".repeat(64),
+            provider,
+            request_number: 1,
+            attempt_number: 1,
+            output_reserve_tokens: 4096,
+            request_timeout_ms: 30_000,
+            total_deadline_ms: 120_000,
+            max_attempts: 3,
+            max_total_delay_ms: 30_000,
+        },
+        requested_sequence,
         provider_metadata("provider-request", "provider-request-key"),
     )
     .unwrap();
+    let sent_sequence = current_run_sequence(&journal, &run_id);
     attempt
         .mark_sent(
             &mut journal,
-            run.last_run_sequence() + 1,
+            sent_sequence,
             "dispatch-1",
             provider_metadata("provider-sent", "provider-sent-key"),
         )
         .unwrap();
+    let responded_sequence = current_run_sequence(&journal, &run_id);
     attempt
         .respond_with_output(
             &mut journal,
-            run.last_run_sequence() + 2,
+            responded_sequence,
             response_receipt(),
             Some("persisted output".to_owned()),
             vec![],
@@ -140,6 +183,10 @@ fn persisted_provider_response_is_evidence_first_without_provider_binding() {
         fixture.gate(&[], &run_id),
         OperationalRecoveryGate::RecoveryReady
     );
+    assert!(matches!(
+        fixture.recovered_run(&[], &run_id).action,
+        OperationalRecoveryAction::PersistedProviderResultProjection { .. }
+    ));
 }
 
 #[test]
@@ -484,6 +531,46 @@ fn loop_service(run_id: Uuid, invocation_id: &str) -> AgentLoopService {
     .unwrap()
 }
 
+fn projectable_loop_service(
+    run_id: Uuid,
+    compilation_id: Uuid,
+    inference_id: Uuid,
+    attempt_id: Uuid,
+) -> AgentLoopService {
+    AgentLoopService::new(
+        AgentLoopIdentity {
+            run_id,
+            project_id: "project-1".to_owned(),
+            invocation_id: "invocation-1".to_owned(),
+            initial_context_compilation_id: compilation_id,
+            source_scope: ToolSourceScope {
+                source_checkpoint_id: "checkpoint-1".to_owned(),
+                resource_ids: vec!["resource-1".to_owned()],
+                scope_sha256: "f".repeat(64),
+            },
+            permission: ToolPermissionPolicy {
+                mode: RunPermissionMode::Assist,
+                policy_id: "policy-1".to_owned(),
+                policy_version: "1".to_owned(),
+                policy_sha256: "a".repeat(64),
+            },
+        },
+        AgentLoopPolicy {
+            maximum_tool_rounds: 4,
+            tool_schema_version: 1,
+        },
+        InferenceDispatchIdentity {
+            inference_id,
+            attempt_id,
+            request_number: 1,
+            context_compilation_id: compilation_id,
+            attempt_number: 1,
+            inference_idempotency_key: "invocation-1:inference:1".to_owned(),
+        },
+    )
+    .unwrap()
+}
+
 fn run_metadata<'a>(message_id: &'a str, key: &'a str) -> EventMetadata<'a> {
     EventMetadata {
         message_id,
@@ -516,6 +603,14 @@ fn loop_metadata(message_id: &str) -> AgentLoopEventMetadata<'_> {
         message_id,
         created_at: "2026-07-12T00:00:00Z",
     }
+}
+
+fn current_run_sequence(journal: &EventJournal, run_id: &str) -> u64 {
+    journal
+        .read_run(run_id, 0)
+        .unwrap()
+        .last()
+        .map_or(0, |event| event.run_sequence)
 }
 
 struct Fixture {

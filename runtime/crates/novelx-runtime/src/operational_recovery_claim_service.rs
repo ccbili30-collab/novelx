@@ -16,12 +16,14 @@ use crate::{
         OperationalRecoverySubject,
     },
     operational_recovery_scanner::{
-        OperationalRecoveryGate, OperationalRecoveryRun, OperationalRecoveryScanError,
-        OperationalRecoveryScanner,
+        OperationalRecoveryAction, OperationalRecoveryGate, OperationalRecoveryRun,
+        OperationalRecoveryScanError, OperationalRecoveryScanner,
     },
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
     workspace_runtime_lease::WorkspaceRuntimeLease,
 };
+
+pub const OPERATIONAL_RECOVERY_EXECUTOR_VERSION: &str = "runtime-v2-local-projection-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperationalRecoveryClaimRequest {
@@ -30,8 +32,6 @@ pub struct OperationalRecoveryClaimRequest {
     pub run_id: String,
     pub expected_operation_id: String,
     pub lease_duration_seconds: u64,
-    pub executor_version: String,
-    pub action_spec_sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,7 +43,6 @@ pub struct OperationalRecoveryStartRequest {
     pub claim_id: String,
     pub owner_instance_id: String,
     pub fencing_token: u64,
-    pub effect_class: OperationalRecoveryEffectClass,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,6 +87,7 @@ impl OperationalRecoveryClaimService {
             &request.run_id,
             bound_providers,
         )?;
+        let action_spec_sha256 = run.action.action_spec_sha256()?;
         let subject = OperationalRecoverySubject {
             workspace_id: request.workspace_id.clone(),
             project_id: request.project_id.clone(),
@@ -108,8 +108,8 @@ impl OperationalRecoveryClaimService {
             observation.source_fingerprint.clone(),
             claimed_at.clone(),
             lease_expires_at,
-            request.executor_version,
-            request.action_spec_sha256,
+            OPERATIONAL_RECOVERY_EXECUTOR_VERSION.to_owned(),
+            action_spec_sha256,
         )?;
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
         let persisted = repository.load(&request.workspace_id, &request.run_id)?;
@@ -148,6 +148,8 @@ impl OperationalRecoveryClaimService {
             &request.run_id,
             bound_providers,
         )?;
+        let action_spec_sha256 = run.action.action_spec_sha256()?;
+        let effect_class = effect_class_for_action(&run.action)?;
         let subject = OperationalRecoverySubject {
             workspace_id: request.workspace_id.clone(),
             project_id: request.project_id.clone(),
@@ -177,9 +179,14 @@ impl OperationalRecoveryClaimService {
         {
             return Err(OperationalRecoveryClaimError::FenceMismatch);
         }
+        if claim.executor_version != OPERATIONAL_RECOVERY_EXECUTOR_VERSION
+            || claim.action_spec_sha256 != action_spec_sha256
+        {
+            return Err(OperationalRecoveryClaimError::ActionFenceMismatch);
+        }
         let started_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
         let execution =
-            OperationalRecoveryExecution::derive(claim, request.effect_class, started_at.clone())?;
+            OperationalRecoveryExecution::derive(claim, effect_class, started_at.clone())?;
         repository
             .start_execution(
                 &request.workspace_id,
@@ -292,6 +299,20 @@ impl OperationalRecoveryClaimService {
                 expected: expected_operation_id.to_owned(),
                 actual: actual.operation_id.clone(),
             })?;
+        if let Some(stale) = &expected.stale {
+            return if stale.actual_operation_id == actual.operation_id
+                && stale.actual_source_fingerprint == actual.source_fingerprint
+            {
+                Err(OperationalRecoveryClaimError::OperationMarkedStale {
+                    expected: expected_operation_id.to_owned(),
+                    actual: actual.operation_id,
+                })
+            } else {
+                Err(OperationalRecoveryClaimError::Aggregate(
+                    OperationalRecoveryAggregateError::OperationTerminal,
+                ))
+            };
+        }
         let (current_claim_id, current_fencing_token) =
             expected.claim.as_ref().map_or((None, None), |claim| {
                 (Some(claim.claim_id.clone()), Some(claim.fencing_token))
@@ -352,6 +373,17 @@ impl OperationalRecoveryClaimService {
     }
 }
 
+fn effect_class_for_action(
+    action: &OperationalRecoveryAction,
+) -> Result<OperationalRecoveryEffectClass, OperationalRecoveryClaimError> {
+    match action {
+        OperationalRecoveryAction::PersistedProviderResultProjection { .. } => {
+            Ok(OperationalRecoveryEffectClass::PersistedProviderResultProjection)
+        }
+        _ => Err(OperationalRecoveryClaimError::ActionNotLocallyExecutable),
+    }
+}
+
 fn observed_gate(value: OperationalRecoveryGate) -> OperationalRecoveryObservedGate {
     match value {
         OperationalRecoveryGate::AwaitingProviderBinding => {
@@ -362,6 +394,9 @@ fn observed_gate(value: OperationalRecoveryGate) -> OperationalRecoveryObservedG
         }
         OperationalRecoveryGate::WaitingForReconciliation => {
             OperationalRecoveryObservedGate::WaitingForReconciliation
+        }
+        OperationalRecoveryGate::WaitingForExplicitExecution => {
+            OperationalRecoveryObservedGate::WaitingForExplicitExecution
         }
         OperationalRecoveryGate::RecoveryReady => OperationalRecoveryObservedGate::RecoveryReady,
         OperationalRecoveryGate::Quarantined => OperationalRecoveryObservedGate::Quarantined,
@@ -399,6 +434,10 @@ pub enum OperationalRecoveryClaimError {
     ClaimMissing,
     #[error("operational recovery claim fencing identity does not match")]
     FenceMismatch,
+    #[error("operational recovery action or executor fence does not match the current scan")]
+    ActionFenceMismatch,
+    #[error("operational recovery action is not a local-only executable projection")]
+    ActionNotLocallyExecutable,
     #[error("operational recovery workspace lease does not protect this database")]
     WorkspaceLeaseMismatch,
     #[error("operational recovery lease duration is outside the server policy")]

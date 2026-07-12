@@ -106,6 +106,14 @@ fn record_run(
             run.source_fingerprint.clone(),
             metadata(),
         )?,
+        OperationalRecoveryGate::WaitingForExplicitExecution => repository.wait(
+            workspace_id,
+            &run.run_id,
+            &operation_id,
+            OperationalRecoveryWaitingReason::ExplicitExecution,
+            run.source_fingerprint.clone(),
+            metadata(),
+        )?,
         OperationalRecoveryGate::Quarantined => repository.quarantine(
             workspace_id,
             &run.run_id,
@@ -135,6 +143,9 @@ fn map_gate(value: OperationalRecoveryGate) -> OperationalRecoveryObservedGate {
         }
         OperationalRecoveryGate::WaitingForReconciliation => {
             OperationalRecoveryObservedGate::WaitingForReconciliation
+        }
+        OperationalRecoveryGate::WaitingForExplicitExecution => {
+            OperationalRecoveryObservedGate::WaitingForExplicitExecution
         }
         OperationalRecoveryGate::RecoveryReady => OperationalRecoveryObservedGate::RecoveryReady,
         OperationalRecoveryGate::Quarantined => OperationalRecoveryObservedGate::Quarantined,

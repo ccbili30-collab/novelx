@@ -5,7 +5,8 @@ use novelx_runtime::{
     },
     operational_recovery_recording_service::OperationalRecoveryRecordingService,
     operational_recovery_scanner::{
-        OperationalRecoveryGate, OperationalRecoveryReport, OperationalRecoveryRun,
+        OperationalRecoveryAction, OperationalRecoveryGate, OperationalRecoveryReport,
+        OperationalRecoveryRun,
     },
     run_state::RunState,
 };
@@ -101,6 +102,17 @@ fn report(digit: &str, gate: OperationalRecoveryGate) -> OperationalRecoveryRepo
             run_state: RunState::Running,
             source_fingerprint: digit.repeat(64),
             gate,
+            action: if gate == OperationalRecoveryGate::RecoveryReady {
+                OperationalRecoveryAction::PersistedProviderResultProjection {
+                    invocation_id: "invocation-1".to_owned(),
+                    attempt_id: "attempt-1".to_owned(),
+                    expected_loop_checkpoint_sha256: "c".repeat(64),
+                    expected_attempt_sequence: 3,
+                    response_body_sha256: "d".repeat(64),
+                }
+            } else {
+                OperationalRecoveryAction::NoExecutableProjection
+            },
             active_agent_loop_id: None,
             active_agent_loop_phase: None,
             provider_attempt_states: vec![],
