@@ -12,6 +12,7 @@ const EVENT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolCallDefinition {
+    pub provider_tool_call_id: String,
     pub tool_name: String,
     pub schema_version: u32,
     pub arguments_hash: String,
@@ -423,7 +424,8 @@ fn validate_event_address(
 }
 
 fn validate_definition(definition: &ToolCallDefinition) -> Result<(), ToolAggregateError> {
-    if definition.tool_name.trim().is_empty()
+    if definition.provider_tool_call_id.trim().is_empty()
+        || definition.tool_name.trim().is_empty()
         || !is_sha256(&definition.arguments_hash)
         || definition.schema_version == 0
         || definition.attempt == 0
@@ -471,6 +473,7 @@ fn tool_event(
             "sideEffect": side_effect_name(draft.machine.side_effect()),
             "outcomeKnowledge": draft.outcome.map(outcome_name),
             "reason": metadata.reason,
+            "providerToolCallId": definition.provider_tool_call_id,
             "toolName": definition.tool_name,
             "schemaVersion": definition.schema_version,
             "argumentsHash": definition.arguments_hash,
@@ -494,6 +497,7 @@ struct ToolPayload {
     authorization: ToolAuthorization,
     side_effect: ToolSideEffect,
     outcome_knowledge: Option<ToolOutcomeKnowledge>,
+    provider_tool_call_id: String,
     tool_name: String,
     schema_version: u32,
     arguments_hash: String,
@@ -504,6 +508,7 @@ struct ToolPayload {
 impl ToolPayload {
     fn definition(&self) -> ToolCallDefinition {
         ToolCallDefinition {
+            provider_tool_call_id: self.provider_tool_call_id.clone(),
             tool_name: self.tool_name.clone(),
             schema_version: self.schema_version,
             arguments_hash: self.arguments_hash.clone(),
@@ -518,13 +523,14 @@ fn parse_payload(value: &Value) -> Result<ToolPayload, ToolAggregateError> {
     let object = value
         .as_object()
         .ok_or(ToolAggregateError::InvalidPayload)?;
-    const KEYS: [&str; 11] = [
+    const KEYS: [&str; 12] = [
         "previousState",
         "currentState",
         "authorization",
         "sideEffect",
         "outcomeKnowledge",
         "reason",
+        "providerToolCallId",
         "toolName",
         "schemaVersion",
         "argumentsHash",
@@ -541,6 +547,7 @@ fn parse_payload(value: &Value) -> Result<ToolPayload, ToolAggregateError> {
         authorization: parse_authorization(required_string(object, "authorization")?)?,
         side_effect: parse_side_effect(required_string(object, "sideEffect")?)?,
         outcome_knowledge: parse_optional_outcome(&object["outcomeKnowledge"])?,
+        provider_tool_call_id: required_string(object, "providerToolCallId")?.to_owned(),
         tool_name: required_string(object, "toolName")?.to_owned(),
         schema_version: required_u32(object, "schemaVersion")?,
         arguments_hash: required_string(object, "argumentsHash")?.to_owned(),

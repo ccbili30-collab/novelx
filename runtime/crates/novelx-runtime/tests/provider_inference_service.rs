@@ -483,6 +483,8 @@ fn execution(provider: ProviderRunIdentity) -> ProviderInferenceExecution {
             messages: vec![ProviderInferenceMessage {
                 role: ProviderInferenceRole::User,
                 content: "继续银湾故事".to_owned(),
+                tool_calls: vec![],
+                tool_call_id: None,
             }],
             tools: vec![],
         },
@@ -495,6 +497,8 @@ fn authoritative_request() -> ProviderInferenceRequest {
         messages: vec![ProviderInferenceMessage {
             role: ProviderInferenceRole::User,
             content: "权威正文".to_owned(),
+            tool_calls: vec![],
+            tool_call_id: None,
         }],
         tools: vec![],
     }

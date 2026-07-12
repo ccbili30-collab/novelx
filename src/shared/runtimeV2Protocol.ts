@@ -835,7 +835,7 @@ export const runtimeV2ToolPermissionLeaseSchema = z.object({
   }
 });
 export const runtimeV2ToolRequestPayloadSchema = z.object({
-  requestIdempotencyKey: identityStringSchema, toolCallId: z.uuid(), invocationId: identityStringSchema,
+  requestIdempotencyKey: identityStringSchema, toolCallId: z.uuid(), providerToolCallId: identityStringSchema, invocationId: identityStringSchema,
   toolName: identityStringSchema, schemaVersion: z.number().int().positive().max(65_535),
   attempt: z.number().int().positive().safe(), sideEffect: runtimeV2ToolSideEffectSchema,
   parallel: z.boolean(), arguments: runtimeV2ToolArtifactReceiptSchema,
@@ -853,7 +853,7 @@ export const runtimeV2ToolAuthorizationResolveEnvelopeSchema = runtimeV2Envelope
   runId: z.uuid(), payload: runtimeV2ToolAuthorizationResolvePayloadSchema,
 }).strict();
 const runtimeV2ToolEventIdentitySchema = z.object({
-  runId: z.uuid(), toolCallId: z.uuid(), invocationId: identityStringSchema, toolName: identityStringSchema,
+  runId: z.uuid(), toolCallId: z.uuid(), providerToolCallId: identityStringSchema, invocationId: identityStringSchema, toolName: identityStringSchema,
   schemaVersion: z.number().int().positive().max(65_535), attempt: z.number().int().positive().safe(),
   sideEffect: runtimeV2ToolSideEffectSchema, parallel: z.boolean(), argumentsSha256: sha256Schema,
   sourceScopeSha256: sha256Schema,

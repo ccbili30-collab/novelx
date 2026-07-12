@@ -707,6 +707,7 @@ pub struct ToolPermissionLease {
 pub struct ToolRequest {
     pub request_idempotency_key: String,
     pub tool_call_id: Uuid,
+    pub provider_tool_call_id: String,
     pub invocation_id: String,
     pub tool_name: String,
     pub schema_version: u32,
@@ -738,6 +739,7 @@ pub struct ToolAuthorizationResolve {
 pub struct ToolEventIdentity {
     pub run_id: Uuid,
     pub tool_call_id: Uuid,
+    pub provider_tool_call_id: String,
     pub invocation_id: String,
     pub tool_name: String,
     pub schema_version: u32,
@@ -818,6 +820,7 @@ impl ToolRequest {
                 self.request_idempotency_key.as_str(),
             ),
             ("invocationId", self.invocation_id.as_str()),
+            ("providerToolCallId", self.provider_tool_call_id.as_str()),
             ("toolName", self.tool_name.as_str()),
         ] {
             if value.trim().is_empty() {
@@ -931,7 +934,8 @@ fn validate_tool_policy(value: &ToolPermissionPolicy) -> Result<(), ToolProtocol
 fn validate_tool_event_identity(
     value: &ToolEventIdentity,
 ) -> Result<(), ToolProtocolValidationError> {
-    if value.invocation_id.trim().is_empty()
+    if value.provider_tool_call_id.trim().is_empty()
+        || value.invocation_id.trim().is_empty()
         || value.tool_name.trim().is_empty()
         || value.schema_version == 0
         || value.attempt == 0
@@ -1704,6 +1708,7 @@ mod tests {
         let request = ToolRequest {
             request_idempotency_key: "tool-1".to_owned(),
             tool_call_id: Uuid::new_v4(),
+            provider_tool_call_id: "call-provider-1".to_owned(),
             invocation_id: "invocation-1".to_owned(),
             tool_name: "project.read".to_owned(),
             schema_version: 1,
@@ -1734,6 +1739,14 @@ mod tests {
             request
         );
         let mut bad = request;
+        bad.provider_tool_call_id.clear();
+        assert_eq!(
+            bad.validate(),
+            Err(ToolProtocolValidationError::InvalidField(
+                "providerToolCallId"
+            ))
+        );
+        bad.provider_tool_call_id = "call-provider-1".to_owned();
         bad.source_scope.resource_ids = vec!["resource-2".to_owned(), "resource-1".to_owned()];
         assert_eq!(
             bad.validate(),

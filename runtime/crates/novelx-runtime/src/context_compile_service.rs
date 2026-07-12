@@ -16,7 +16,8 @@ use crate::context_compiler::{
 };
 use crate::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent};
 use crate::provider_gateway::{
-    ProviderGatewayError, ProviderInferenceMessage, ProviderInferenceRole, ProviderRegistry,
+    ProviderGatewayError, ProviderInferenceFunctionCall, ProviderInferenceMessage,
+    ProviderInferenceRole, ProviderInferenceToolCall, ProviderRegistry,
 };
 use crate::run_aggregate::{RunAggregate, RunAggregateError};
 use crate::run_state::RunState;
@@ -294,11 +295,15 @@ fn to_compile_request(
                 ) {
                     transcript.push(parse_tool_entry(*kind, content)?);
                 }
+                let is_tool_exchange = matches!(
+                    kind,
+                    ContextRuntimeExchangeKind::ToolCall | ContextRuntimeExchangeKind::ToolResult
+                );
                 items.push(context_item(
                     item_id,
                     ContextItemClass::RuntimeConversation,
                     serde_json::to_string(content)?,
-                    *required,
+                    *required || is_tool_exchange,
                     90,
                 ));
             }
@@ -355,11 +360,31 @@ fn normalized_provider_input(
 ) -> Result<PersistedNormalizedProviderInput, ContextCompileServiceError> {
     let mut messages = Vec::new();
     let mut tools = Vec::new();
+    let mut pending_tool_calls: Option<(String, Vec<ProviderInferenceToolCall>)> = None;
     for item in &command.items {
         let item_id = protocol_item_id(item);
         if !included_item_ids.iter().any(|included| included == item_id) {
             continue;
         }
+        if let ProtocolContextItem::RuntimeExchange {
+            kind: ContextRuntimeExchangeKind::ToolCall,
+            content,
+            ..
+        } = item
+        {
+            let (group_id, call) = provider_tool_call(content)?;
+            match &mut pending_tool_calls {
+                Some((current_group, calls)) if current_group == &group_id => calls.push(call),
+                Some(_) => {
+                    return Err(ContextCompileServiceError::InvalidInput(
+                        "tool call group ordering",
+                    ));
+                }
+                None => pending_tool_calls = Some((group_id, vec![call])),
+            }
+            continue;
+        }
+        flush_tool_calls(&mut messages, &mut pending_tool_calls);
         match item {
             ProtocolContextItem::SystemPrompt { content, .. } => {
                 messages.push(provider_message(
@@ -382,20 +407,26 @@ fn normalized_provider_input(
                 ));
             }
             ProtocolContextItem::RuntimeExchange { kind, content, .. } => {
-                let role = match kind {
+                messages.push(match kind {
                     ContextRuntimeExchangeKind::UserMessage
-                    | ContextRuntimeExchangeKind::Correction => ProviderInferenceRole::User,
-                    ContextRuntimeExchangeKind::AssistantMessage => {
-                        ProviderInferenceRole::Assistant
+                    | ContextRuntimeExchangeKind::Correction => provider_message(
+                        ProviderInferenceRole::User,
+                        serde_json::to_string(content)?,
+                    ),
+                    ContextRuntimeExchangeKind::AssistantMessage => provider_message(
+                        ProviderInferenceRole::Assistant,
+                        serde_json::to_string(content)?,
+                    ),
+                    ContextRuntimeExchangeKind::ToolCall => unreachable!(),
+                    ContextRuntimeExchangeKind::ToolResult => {
+                        provider_tool_result_message(content)?
                     }
-                    ContextRuntimeExchangeKind::ToolCall
-                    | ContextRuntimeExchangeKind::ToolResult => ProviderInferenceRole::Tool,
-                };
-                messages.push(provider_message(role, serde_json::to_string(content)?));
+                });
             }
             ProtocolContextItem::OutputReserve { .. } => {}
         }
     }
+    flush_tool_calls(&mut messages, &mut pending_tool_calls);
     if messages.is_empty() {
         return Err(ContextCompileServiceError::InvalidInput(
             "normalized provider messages",
@@ -416,7 +447,95 @@ fn protocol_item_id(item: &ProtocolContextItem) -> &str {
 }
 
 fn provider_message(role: ProviderInferenceRole, content: String) -> ProviderInferenceMessage {
-    ProviderInferenceMessage { role, content }
+    ProviderInferenceMessage {
+        role,
+        content,
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+    }
+}
+
+fn provider_tool_call(
+    content: &Value,
+) -> Result<(String, ProviderInferenceToolCall), ContextCompileServiceError> {
+    let (tool_call_id, tool_name, value) = tool_exchange_value(content, "arguments")?;
+    let assistant_message_id = content
+        .get("assistantMessageId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ContextCompileServiceError::InvalidInput(
+            "assistantMessageId",
+        ))?
+        .to_owned();
+    Ok((
+        assistant_message_id,
+        ProviderInferenceToolCall {
+            id: tool_call_id,
+            call_type: "function".to_owned(),
+            function: ProviderInferenceFunctionCall {
+                name: tool_name,
+                arguments: serde_json::to_string(value)?,
+            },
+        },
+    ))
+}
+
+fn flush_tool_calls(
+    messages: &mut Vec<ProviderInferenceMessage>,
+    pending: &mut Option<(String, Vec<ProviderInferenceToolCall>)>,
+) {
+    let Some((_assistant_message_id, tool_calls)) = pending.take() else {
+        return;
+    };
+    messages.push(ProviderInferenceMessage {
+        role: ProviderInferenceRole::Assistant,
+        content: String::new(),
+        tool_calls,
+        tool_call_id: None,
+    });
+}
+
+fn provider_tool_result_message(
+    content: &Value,
+) -> Result<ProviderInferenceMessage, ContextCompileServiceError> {
+    let (tool_call_id, _tool_name, value) = tool_exchange_value(content, "result")?;
+    Ok(ProviderInferenceMessage {
+        role: ProviderInferenceRole::Tool,
+        content: serde_json::to_string(value)?,
+        tool_calls: Vec::new(),
+        tool_call_id: Some(tool_call_id),
+    })
+}
+
+fn tool_exchange_value<'a>(
+    content: &'a Value,
+    value_name: &'static str,
+) -> Result<(String, String, &'a Value), ContextCompileServiceError> {
+    let object = content
+        .as_object()
+        .ok_or(ContextCompileServiceError::InvalidInput("tool exchange"))?;
+    let text = |name: &'static str| {
+        object
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or(ContextCompileServiceError::InvalidInput(name))
+    };
+    let value = object
+        .get(value_name)
+        .ok_or(ContextCompileServiceError::InvalidInput(value_name))?;
+    let expected_hash = text(if value_name == "arguments" {
+        "argumentsSha256"
+    } else {
+        "resultSha256"
+    })?;
+    if hash_json(value)? != expected_hash {
+        return Err(ContextCompileServiceError::InvalidInput(
+            "tool exchange hash",
+        ));
+    }
+    Ok((text("providerToolCallId")?, text("toolName")?, value))
 }
 
 fn parse_tool_entry(
@@ -435,12 +554,12 @@ fn parse_tool_entry(
     };
     match kind {
         ContextRuntimeExchangeKind::ToolCall => Ok(ToolTranscriptEntry::Call {
-            tool_call_id: string("toolCallId")?,
+            tool_call_id: string("providerToolCallId")?,
             tool_name: string("toolName")?,
             arguments_sha256: string("argumentsSha256")?,
         }),
         ContextRuntimeExchangeKind::ToolResult => Ok(ToolTranscriptEntry::Result {
-            tool_call_id: string("toolCallId")?,
+            tool_call_id: string("providerToolCallId")?,
             tool_name: string("toolName")?,
             result_sha256: string("resultSha256")?,
             is_error: object

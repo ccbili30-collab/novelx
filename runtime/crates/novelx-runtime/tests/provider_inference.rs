@@ -10,8 +10,9 @@ use novelx_protocol::{
 };
 use novelx_runtime::provider_gateway::{
     ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderGateway, ProviderGatewayError,
-    ProviderInferenceMessage, ProviderInferenceRequest, ProviderInferenceRole,
-    ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
+    ProviderInferenceFunctionCall, ProviderInferenceMessage, ProviderInferenceRequest,
+    ProviderInferenceRole, ProviderInferenceToolCall, ProviderInputCapability, ProviderRegistry,
+    ProviderRetryPolicy, provider_config_sha256,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
@@ -58,6 +59,178 @@ async fn posts_a_real_loopback_request_bound_to_the_compiled_context_receipt() {
     assert!(captured.contains("authorization: Bearer provider-inference-sensitive-key"));
     assert!(captured.contains("\"model\":\"deepseek-chat\""));
     assert!(captured.contains("\"content\":\"继续银湾故事\""));
+}
+
+#[tokio::test]
+async fn sends_strict_openai_compatible_tool_continuation_messages() {
+    let response = json_response(
+        200,
+        r#"{"id":"response-2","model":"deepseek-chat","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"已读取。"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#,
+    );
+    let (base_url, requests, server) =
+        spawn_http_server(vec![ServerReply::Immediate(response)]).await;
+    let (registry, identity) = bound_registry(base_url, 2_000);
+    let mut request = inference_request(compilation_receipt());
+    request.messages.extend([
+        ProviderInferenceMessage {
+            role: ProviderInferenceRole::Assistant,
+            content: String::new(),
+            tool_calls: vec![
+                ProviderInferenceToolCall {
+                    id: "call-1".to_owned(),
+                    call_type: "function".to_owned(),
+                    function: ProviderInferenceFunctionCall {
+                        name: "read_project_file".to_owned(),
+                        arguments: serde_json::to_string(&serde_json::json!({
+                            "path": "设定/海岸线.md",
+                            "offsetChars": 0,
+                            "maxChars": 4000
+                        }))
+                        .unwrap(),
+                    },
+                },
+                ProviderInferenceToolCall {
+                    id: "call-2".to_owned(),
+                    call_type: "function".to_owned(),
+                    function: ProviderInferenceFunctionCall {
+                        name: "stat_project_file".to_owned(),
+                        arguments: serde_json::to_string(&serde_json::json!({
+                            "path": "设定/海岸线.md"
+                        }))
+                        .unwrap(),
+                    },
+                },
+            ],
+            tool_call_id: None,
+        },
+        ProviderInferenceMessage {
+            role: ProviderInferenceRole::Tool,
+            content: serde_json::to_string(&serde_json::json!({
+                "content": "银湾海岸",
+                "complete": true
+            }))
+            .unwrap(),
+            tool_calls: vec![],
+            tool_call_id: Some("call-1".to_owned()),
+        },
+        ProviderInferenceMessage {
+            role: ProviderInferenceRole::Tool,
+            content: serde_json::to_string(&serde_json::json!({
+                "kind": "file",
+                "size": 18
+            }))
+            .unwrap(),
+            tool_calls: vec![],
+            tool_call_id: Some("call-2".to_owned()),
+        },
+    ]);
+
+    let outcome = ProviderGateway::new()
+        .unwrap()
+        .infer(registry.resolve(&identity).unwrap(), request)
+        .await
+        .unwrap();
+    assert_eq!(outcome.text.as_deref(), Some("已读取。"));
+
+    server.await.unwrap();
+    let captured = requests.lock().unwrap().join("\n");
+    let body: serde_json::Value = serde_json::from_str(
+        captured
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap(),
+    )
+    .unwrap();
+    let assistant = &body["messages"][1];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["content"], "");
+    assert_eq!(assistant["tool_calls"][0]["id"], "call-1");
+    assert_eq!(assistant["tool_calls"][0]["type"], "function");
+    assert_eq!(
+        assistant["tool_calls"][0]["function"]["name"],
+        "read_project_file"
+    );
+    assert_eq!(assistant["tool_calls"][1]["id"], "call-2");
+    assert_eq!(
+        assistant["tool_calls"][1]["function"]["name"],
+        "stat_project_file"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            assistant["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({ "path": "设定/海岸线.md", "offsetChars": 0, "maxChars": 4000 })
+    );
+    let tool = &body["messages"][2];
+    assert_eq!(tool["role"], "tool");
+    assert_eq!(tool["tool_call_id"], "call-1");
+    assert!(tool.get("name").is_none());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(tool["content"].as_str().unwrap()).unwrap(),
+        serde_json::json!({ "content": "银湾海岸", "complete": true })
+    );
+    let second_tool = &body["messages"][3];
+    assert_eq!(second_tool["role"], "tool");
+    assert_eq!(second_tool["tool_call_id"], "call-2");
+    assert!(!captured.contains("\"toolCalls\""));
+    assert!(!captured.contains("\"toolCallId\""));
+}
+
+#[test]
+fn deserializes_legacy_persisted_messages_without_new_tool_fields() {
+    let legacy: ProviderInferenceMessage = serde_json::from_value(serde_json::json!({
+        "role": "tool",
+        "content": "legacy persisted exchange"
+    }))
+    .unwrap();
+    assert_eq!(legacy.role, ProviderInferenceRole::Tool);
+    assert!(legacy.tool_calls.is_empty());
+    assert_eq!(legacy.tool_call_id, None);
+}
+
+#[tokio::test]
+async fn rejects_orphaned_or_unfinished_tool_messages_before_provider_io() {
+    for malformed in [
+        ProviderInferenceMessage {
+            role: ProviderInferenceRole::Tool,
+            content: "{}".to_owned(),
+            tool_calls: vec![],
+            tool_call_id: Some("orphan".to_owned()),
+        },
+        ProviderInferenceMessage {
+            role: ProviderInferenceRole::Assistant,
+            content: String::new(),
+            tool_calls: vec![ProviderInferenceToolCall {
+                id: "unfinished".to_owned(),
+                call_type: "function".to_owned(),
+                function: ProviderInferenceFunctionCall {
+                    name: "read_project_file".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            }],
+            tool_call_id: None,
+        },
+    ] {
+        let (base_url, request_count, server) = spawn_counting_server().await;
+        let (registry, identity) = bound_registry(base_url, 2_000);
+        let mut request = inference_request(compilation_receipt());
+        request.messages.push(malformed);
+
+        let error = ProviderGateway::new()
+            .unwrap()
+            .infer(registry.resolve(&identity).unwrap(), request)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderGatewayError::ContextReceiptMismatch
+        ));
+        assert_eq!(request_count.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
 }
 
 #[tokio::test]
@@ -319,6 +492,8 @@ fn inference_request(compilation: ContextCompilationReceipt) -> ProviderInferenc
         messages: vec![ProviderInferenceMessage {
             role: ProviderInferenceRole::User,
             content: "继续银湾故事".to_owned(),
+            tool_calls: vec![],
+            tool_call_id: None,
         }],
         tools: vec![],
     }

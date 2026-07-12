@@ -151,6 +151,8 @@ fn execution() -> ProviderInferenceExecution {
             messages: vec![ProviderInferenceMessage {
                 role: ProviderInferenceRole::User,
                 content: "ping".to_owned(),
+                tool_calls: vec![],
+                tool_call_id: None,
             }],
             tools: vec![],
         },

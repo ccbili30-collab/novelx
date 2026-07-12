@@ -20,5 +20,5 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "net", "io-std", "io-util", "sync", "time"] }
-uuid = { version = "1.18", features = ["serde", "v4"] }
+uuid = { version = "1.18", features = ["serde", "v4", "v5"] }
 url = "2.5"

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use thiserror::Error;
 
 #[derive(Clone, Debug)]
@@ -48,7 +49,8 @@ impl ScanBudget {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IncompleteReason {
     FileLimit,
     TotalByteLimit,
@@ -62,13 +64,15 @@ pub enum IncompleteReason {
     SymlinkSkipped,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScanCompleteness {
     pub complete: bool,
     pub reasons: Vec<IncompleteReason>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScanStatistics {
     pub files_considered: usize,
     pub files_read: usize,
@@ -77,14 +81,16 @@ pub struct ScanStatistics {
     pub binary_files_skipped: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GlobResult {
     pub paths: Vec<String>,
     pub completeness: ScanCompleteness,
     pub statistics: ScanStatistics,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchMatch {
     pub path: String,
     pub line: usize,
@@ -92,7 +98,8 @@ pub struct SearchMatch {
     pub preview: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchResult {
     pub matches: Vec<SearchMatch>,
     pub completeness: ScanCompleteness,

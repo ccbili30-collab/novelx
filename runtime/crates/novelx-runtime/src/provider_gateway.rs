@@ -148,6 +148,30 @@ pub enum ProviderInferenceRole {
 pub struct ProviderInferenceMessage {
     pub role: ProviderInferenceRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "tool_calls")]
+    pub tool_calls: Vec<ProviderInferenceToolCall>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "tool_call_id"
+    )]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: ProviderInferenceFunctionCall,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceFunctionCall {
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -540,7 +564,59 @@ fn validate_inference_request(
     {
         return Err(ProviderGatewayError::ContextReceiptMismatch);
     }
+    validate_message_sequence(&request.messages)?;
     Ok(())
+}
+
+fn validate_message_sequence(
+    messages: &[ProviderInferenceMessage],
+) -> Result<(), ProviderGatewayError> {
+    let mut pending = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+    for message in messages {
+        if !pending.is_empty() && message.role != ProviderInferenceRole::Tool {
+            return Err(ProviderGatewayError::ContextReceiptMismatch);
+        }
+        match message.role {
+            ProviderInferenceRole::Assistant if !message.tool_calls.is_empty() => {
+                if message.tool_call_id.is_some() {
+                    return Err(ProviderGatewayError::ContextReceiptMismatch);
+                }
+                for call in &message.tool_calls {
+                    if call.id.trim().is_empty()
+                        || call.call_type != "function"
+                        || call.function.name.trim().is_empty()
+                        || serde_json::from_str::<Value>(&call.function.arguments).is_err()
+                        || !seen.insert(call.id.as_str())
+                        || !pending.insert(call.id.as_str())
+                    {
+                        return Err(ProviderGatewayError::ContextReceiptMismatch);
+                    }
+                }
+            }
+            ProviderInferenceRole::Tool => {
+                if !message.tool_calls.is_empty() {
+                    return Err(ProviderGatewayError::ContextReceiptMismatch);
+                }
+                let Some(call_id) = message.tool_call_id.as_deref() else {
+                    return Err(ProviderGatewayError::ContextReceiptMismatch);
+                };
+                if !pending.remove(call_id) {
+                    return Err(ProviderGatewayError::ContextReceiptMismatch);
+                }
+            }
+            _ => {
+                if !message.tool_calls.is_empty() || message.tool_call_id.is_some() {
+                    return Err(ProviderGatewayError::ContextReceiptMismatch);
+                }
+            }
+        }
+    }
+    if pending.is_empty() {
+        Ok(())
+    } else {
+        Err(ProviderGatewayError::ContextReceiptMismatch)
+    }
 }
 
 fn parse_inference_response(

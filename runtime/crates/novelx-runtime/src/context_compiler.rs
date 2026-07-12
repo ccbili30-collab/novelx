@@ -362,44 +362,76 @@ fn pair_tools(entries: &[ToolTranscriptEntry]) -> Result<Vec<ToolPair>, ContextC
     let mut pairs = Vec::new();
     let mut index = 0;
     while index < entries.len() {
-        let ToolTranscriptEntry::Call {
+        let group_start = index;
+        let mut calls = Vec::new();
+        while let Some(ToolTranscriptEntry::Call {
             tool_call_id,
             tool_name,
             arguments_sha256,
-        } = &entries[index]
-        else {
+        }) = entries.get(index)
+        {
+            if !is_sha256(arguments_sha256) || calls.iter().any(|(id, _, _)| id == tool_call_id) {
+                return Err(ContextCompilerError::ToolPairingInvalid {
+                    tool_call_id: tool_call_id.clone(),
+                });
+            }
+            calls.push((
+                tool_call_id.clone(),
+                tool_name.clone(),
+                arguments_sha256.clone(),
+            ));
+            index += 1;
+        }
+        if calls.is_empty() {
             return Err(ContextCompilerError::ToolPairingInvalid {
                 tool_call_id: entry_id(&entries[index]).to_owned(),
             });
-        };
-        let Some(ToolTranscriptEntry::Result {
-            tool_call_id: result_id,
-            tool_name: result_name,
-            result_sha256,
-            is_error,
-        }) = entries.get(index + 1)
-        else {
-            return Err(ContextCompilerError::ToolPairingInvalid {
-                tool_call_id: tool_call_id.clone(),
-            });
-        };
-        if tool_call_id != result_id
-            || tool_name != result_name
-            || !is_sha256(arguments_sha256)
-            || !is_sha256(result_sha256)
-        {
-            return Err(ContextCompilerError::ToolPairingInvalid {
-                tool_call_id: tool_call_id.clone(),
+        }
+        let mut results = HashMap::new();
+        for _ in 0..calls.len() {
+            let Some(ToolTranscriptEntry::Result {
+                tool_call_id,
+                tool_name,
+                result_sha256,
+                is_error,
+            }) = entries.get(index)
+            else {
+                return Err(ContextCompilerError::ToolPairingInvalid {
+                    tool_call_id: calls[0].0.clone(),
+                });
+            };
+            if !is_sha256(result_sha256)
+                || results
+                    .insert(
+                        tool_call_id.clone(),
+                        (tool_name.clone(), result_sha256.clone(), *is_error),
+                    )
+                    .is_some()
+            {
+                return Err(ContextCompilerError::ToolPairingInvalid {
+                    tool_call_id: tool_call_id.clone(),
+                });
+            }
+            index += 1;
+        }
+        for (tool_call_id, tool_name, arguments_sha256) in calls {
+            let Some((result_name, result_sha256, is_error)) = results.remove(&tool_call_id) else {
+                return Err(ContextCompilerError::ToolPairingInvalid { tool_call_id });
+            };
+            if result_name != tool_name {
+                return Err(ContextCompilerError::ToolPairingInvalid { tool_call_id });
+            }
+            pairs.push(ToolPair {
+                tool_call_id,
+                tool_name,
+                arguments_sha256,
+                result_sha256,
+                is_error,
             });
         }
-        pairs.push(ToolPair {
-            tool_call_id: tool_call_id.clone(),
-            tool_name: tool_name.clone(),
-            arguments_sha256: arguments_sha256.clone(),
-            result_sha256: result_sha256.clone(),
-            is_error: *is_error,
-        });
-        index += 2;
+        if index == group_start {
+            return Err(ContextCompilerError::InvalidInput("tool transcript"));
+        }
     }
     Ok(pairs)
 }

@@ -1,8 +1,8 @@
 mod support;
 
 use novelx_protocol::{
-    ContextCompile, ContextDisclosure, ContextItem, ContextMessageRole, ContextSourceKind,
-    RunPrepare, RunStart, TokenizerKind,
+    ContextCompile, ContextDisclosure, ContextItem, ContextMessageRole, ContextRuntimeExchangeKind,
+    ContextSourceKind, RunPrepare, RunStart, TokenizerKind,
 };
 use novelx_runtime::context_compile_service::{ContextCompileService, ContextCompileServiceError};
 use novelx_runtime::event_journal::EventJournal;
@@ -220,6 +220,190 @@ fn included_partial_source_marks_receipt_incomplete() {
     assert!(receipt.omitted_item_ids.is_empty());
 }
 
+#[test]
+fn persists_openai_compatible_assistant_tool_calls_and_correlated_tool_results() {
+    let fixture = Fixture::new();
+    let (run_id, providers, mut command) = fixture.seed();
+    command.items.push(runtime_exchange(
+        "optional-runtime-history-too-large",
+        ContextRuntimeExchangeKind::AssistantMessage,
+        serde_json::json!({ "text": "旧对话".repeat(400_000) }),
+        false,
+    ));
+    command.items.push(runtime_exchange(
+        "tool-call-1",
+        ContextRuntimeExchangeKind::ToolCall,
+        serde_json::json!({
+            "assistantMessageId": "assistant-tool-turn-1",
+            "providerToolCallId": "call-1",
+            "toolName": "read_project_file",
+            "arguments": { "path": "设定/海岸线.md", "offsetChars": 0, "maxChars": 4000 },
+            "argumentsSha256": sha256(serde_json::to_string(&serde_json::json!({
+                "path": "设定/海岸线.md", "offsetChars": 0, "maxChars": 4000
+            })).unwrap().as_bytes()),
+        }),
+        false,
+    ));
+    command.items.push(runtime_exchange(
+        "tool-call-2",
+        ContextRuntimeExchangeKind::ToolCall,
+        serde_json::json!({
+            "assistantMessageId": "assistant-tool-turn-1",
+            "providerToolCallId": "call-2",
+            "toolName": "stat_project_file",
+            "arguments": { "path": "设定/海岸线.md" },
+            "argumentsSha256": sha256(serde_json::to_string(&serde_json::json!({
+                "path": "设定/海岸线.md"
+            })).unwrap().as_bytes()),
+        }),
+        false,
+    ));
+    command.items.push(runtime_exchange(
+        "tool-result-1",
+        ContextRuntimeExchangeKind::ToolResult,
+        serde_json::json!({
+            "providerToolCallId": "call-1",
+            "toolName": "read_project_file",
+            "result": { "content": "银湾海岸", "complete": true },
+            "resultSha256": sha256(serde_json::to_string(&serde_json::json!({
+                "content": "银湾海岸", "complete": true
+            })).unwrap().as_bytes()),
+            "isError": false,
+        }),
+        false,
+    ));
+    command.items.push(runtime_exchange(
+        "tool-result-2",
+        ContextRuntimeExchangeKind::ToolResult,
+        serde_json::json!({
+            "providerToolCallId": "call-2",
+            "toolName": "stat_project_file",
+            "result": { "kind": "file", "size": 18 },
+            "resultSha256": sha256(serde_json::to_string(&serde_json::json!({
+                "kind": "file", "size": 18
+            })).unwrap().as_bytes()),
+            "isError": false,
+        }),
+        false,
+    ));
+    let mut journal = fixture.open();
+
+    ContextCompileService::new(&mut journal, &providers)
+        .compile(run_id, Uuid::new_v4(), command.clone())
+        .unwrap();
+
+    let event = context_events(&journal, run_id, &command).remove(0);
+    assert!(event.payload["receipt"]["incomplete"].as_bool().unwrap());
+    assert!(
+        event.payload["receipt"]["omittedItemIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "optional-runtime-history-too-large")
+    );
+    let messages = event.payload["normalizedInput"]["messages"]
+        .as_array()
+        .unwrap();
+    let assistant = messages
+        .iter()
+        .find(|message| message["role"] == "assistant" && message.get("tool_calls").is_some())
+        .unwrap();
+    assert_eq!(assistant["content"], "");
+    assert_eq!(assistant["tool_calls"][0]["id"], "call-1");
+    assert_eq!(assistant["tool_calls"][0]["type"], "function");
+    assert_eq!(
+        assistant["tool_calls"][0]["function"]["name"],
+        "read_project_file"
+    );
+    assert_eq!(
+        assistant["tool_calls"][0]["function"]["arguments"],
+        serde_json::to_string(&serde_json::json!({
+            "path": "设定/海岸线.md", "offsetChars": 0, "maxChars": 4000
+        }))
+        .unwrap()
+    );
+    assert_eq!(assistant["tool_calls"][1]["id"], "call-2");
+    assert_eq!(
+        assistant["tool_calls"][1]["function"]["name"],
+        "stat_project_file"
+    );
+    let results = messages
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    let result = results
+        .iter()
+        .find(|message| message["tool_call_id"] == "call-1")
+        .unwrap();
+    assert_eq!(result["tool_call_id"], "call-1");
+    assert!(result.get("name").is_none());
+    assert_eq!(
+        result["content"],
+        serde_json::to_string(&serde_json::json!({ "content": "银湾海岸", "complete": true }))
+            .unwrap()
+    );
+    assert!(
+        event.payload["receipt"]["includedItemIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "tool-call-1")
+    );
+    assert!(
+        event.payload["receipt"]["includedItemIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "tool-result-1")
+    );
+    assert!(
+        event.payload["receipt"]["includedItemIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "tool-call-2")
+    );
+    assert!(
+        event.payload["receipt"]["includedItemIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "tool-result-2")
+    );
+}
+
+#[test]
+fn rejects_internal_tool_ids_when_the_persisted_provider_call_id_is_missing() {
+    let fixture = Fixture::new();
+    let (run_id, providers, mut command) = fixture.seed();
+    command.items.push(runtime_exchange(
+        "tool-call-without-provider-id",
+        ContextRuntimeExchangeKind::ToolCall,
+        serde_json::json!({
+            "assistantMessageId": "assistant-tool-turn-1",
+            "toolCallId": "internal-tool-aggregate-id",
+            "toolName": "read_project_file",
+            "arguments": { "path": "设定/海岸线.md" },
+            "argumentsSha256": sha256(serde_json::to_string(&serde_json::json!({
+                "path": "设定/海岸线.md"
+            })).unwrap().as_bytes()),
+        }),
+        true,
+    ));
+    let mut journal = fixture.open();
+
+    let error = ContextCompileService::new(&mut journal, &providers)
+        .compile(run_id, Uuid::new_v4(), command.clone())
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ContextCompileServiceError::InvalidInput("providerToolCallId")
+    ));
+    assert!(context_events(&journal, run_id, &command).is_empty());
+}
+
 fn context_events(
     journal: &EventJournal,
     run_id: Uuid,
@@ -250,6 +434,23 @@ fn session_item(content: &str) -> ContextItem {
         created_at: "2026-07-12T00:00:01Z".to_owned(),
         disclosure: ContextDisclosure::ProjectPrivate,
         required: true,
+    }
+}
+
+fn runtime_exchange(
+    item_id: &str,
+    kind: ContextRuntimeExchangeKind,
+    content: serde_json::Value,
+    required: bool,
+) -> ContextItem {
+    ContextItem::RuntimeExchange {
+        item_id: item_id.to_owned(),
+        exchange_id: item_id.to_owned(),
+        kind,
+        content_sha256: sha256(serde_json::to_vec(&content).unwrap().as_slice()),
+        content,
+        disclosure: ContextDisclosure::AgentInternal,
+        required,
     }
 }
 

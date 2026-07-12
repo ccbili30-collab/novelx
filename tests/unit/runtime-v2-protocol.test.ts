@@ -934,14 +934,17 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     const request = {
       protocolVersion: 1, messageId: MESSAGE_ID, messageType: "command", name: "tool.request",
       sentAt: "2026-07-12T00:00:00Z", correlationId: null, runId, sequence: 1,
-      payload: { requestIdempotencyKey: "tool-request-1", toolCallId, invocationId: "invocation-1", toolName: "project.read",
+      payload: { requestIdempotencyKey: "tool-request-1", toolCallId, providerToolCallId: "call-provider-1", invocationId: "invocation-1", toolName: "project.read",
         schemaVersion: 1, attempt: 1, sideEffect: "none", parallel: false,
         arguments: { artifactId: "5280c959-1f02-4c20-ae9f-851878d4e050", mediaType: "application/json", sha256: "a".repeat(64), utf8Bytes: 2 },
         sourceScope: { sourceCheckpointId: "checkpoint-1", resourceIds: ["resource-1"], scopeSha256: "b".repeat(64) },
         permission: { mode: "assist", policyId: "tools", policyVersion: "1.0.0", policySha256: "c".repeat(64) } },
     };
     expect(parseRuntimeV2ToolRequestEnvelope(request)).toEqual(request);
-    const identity = { runId, toolCallId, invocationId: "invocation-1", toolName: "project.read", schemaVersion: 1,
+    const requestWithoutProviderCallId = structuredClone(request);
+    delete (requestWithoutProviderCallId.payload as Record<string, unknown>).providerToolCallId;
+    expect(() => parseRuntimeV2ToolRequestEnvelope(requestWithoutProviderCallId)).toThrow();
+    const identity = { runId, toolCallId, providerToolCallId: "call-provider-1", invocationId: "invocation-1", toolName: "project.read", schemaVersion: 1,
       attempt: 1, sideEffect: "none", parallel: false, argumentsSha256: "a".repeat(64), sourceScopeSha256: "b".repeat(64) };
     const requested = { ...request, messageType: "event", name: "tool.requested", correlationId: MESSAGE_ID,
       payload: { ...identity, permission: request.payload.permission, authorization: "approval_required" } };

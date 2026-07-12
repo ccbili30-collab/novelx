@@ -70,6 +70,7 @@ fn persists_all_transitions_and_recovers_after_reopening_sqlite() {
         json!({
             "previousState": "requested", "currentState": "requested", "authorization": "approval_required",
             "sideEffect": "staged_write", "outcomeKnowledge": null, "reason": "review required",
+            "providerToolCallId": "call-provider-1",
             "toolName": "project_file.put", "schemaVersion": 2, "argumentsHash": ARGUMENTS_HASH, "attempt": 1, "parallel": false,
         })
     );
@@ -355,6 +356,7 @@ fn recovery_rejects_unknown_version_event_malformed_payload_and_second_terminal(
         "unknown_version",
         "unknown_event",
         "malformed",
+        "provider_id_mismatch",
         "second_terminal",
     ] {
         let fixture = Fixture::new();
@@ -391,6 +393,10 @@ fn recovery_rejects_unknown_version_event_malformed_payload_and_second_terminal(
                     .insert("extra".to_owned(), json!(true));
                 ("tool.failed", 1)
             }
+            "provider_id_mismatch" => {
+                payload["providerToolCallId"] = json!("call-provider-other");
+                ("tool.failed", 1)
+            }
             "second_terminal" => ("tool.failed", 1),
             _ => unreachable!(),
         };
@@ -422,6 +428,7 @@ fn recovery_rejects_unknown_version_event_malformed_payload_and_second_terminal(
             }
             "unknown_event" => assert!(matches!(error, ToolAggregateError::UnknownEvent(_))),
             "malformed" => assert!(matches!(error, ToolAggregateError::InvalidPayload)),
+            "provider_id_mismatch" => assert!(matches!(error, ToolAggregateError::StateMismatch)),
             "second_terminal" => assert!(matches!(error, ToolAggregateError::Transition(_))),
             _ => unreachable!(),
         }
@@ -430,6 +437,7 @@ fn recovery_rejects_unknown_version_event_malformed_payload_and_second_terminal(
 
 fn definition(side_effect: ToolSideEffect) -> ToolCallDefinition {
     ToolCallDefinition {
+        provider_tool_call_id: "call-provider-1".to_owned(),
         tool_name: "project_file.put".to_owned(),
         schema_version: 2,
         arguments_hash: ARGUMENTS_HASH.to_owned(),
