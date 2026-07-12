@@ -17,9 +17,11 @@ use novelx_runtime::provider_gateway::{
     ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
 };
 use novelx_runtime::provider_inference_service::{
-    ProviderInferenceExecution, ProviderInferenceService, ProviderInferenceServiceError,
+    PreparedProviderAttempt, ProviderInferenceExecution, ProviderInferenceService,
+    ProviderInferenceServiceError,
 };
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
+use novelx_runtime::run_state::RunState;
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
@@ -29,6 +31,117 @@ use uuid::Uuid;
 const API_KEY: &str = "provider-service-sensitive-key";
 const RUN_ID: &str = "run-provider-service-1";
 const ATTEMPT_ID: &str = "attempt-provider-service-1";
+
+#[tokio::test]
+async fn dispatch_runs_with_the_journal_closed_and_finalize_writes_the_terminal_event_after_reopen()
+{
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("分段完成"),
+    )))
+    .await;
+    let (providers, identity) = bound_registry(base_url, 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+
+    let prepared = {
+        let mut journal = fixture.open();
+        let mut service = ProviderInferenceService::new(&mut journal, &providers, &gateway);
+        service
+            .prepare_attempt(execution(identity.clone()))
+            .unwrap()
+    };
+    let PreparedProviderAttempt::Dispatch(prepared) = prepared else {
+        panic!("new attempt must require dispatch");
+    };
+    {
+        let journal = fixture.open();
+        assert_eq!(
+            attempt_events(&journal)
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider.requested", "provider.sent"]
+        );
+    }
+
+    let dispatched = ProviderInferenceService::dispatch_attempt(
+        &gateway,
+        providers.resolve(&identity).unwrap(),
+        *prepared,
+    )
+    .await;
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    {
+        let journal = fixture.open();
+        assert_eq!(attempt_events(&journal).len(), 2);
+    }
+
+    let outcome = {
+        let mut journal = fixture.open();
+        ProviderInferenceService::new(&mut journal, &providers, &gateway)
+            .finalize_attempt(dispatched)
+            .unwrap()
+    };
+
+    server.await.unwrap();
+    assert_eq!(outcome.text, "分段完成");
+    let journal = fixture.open();
+    assert_eq!(
+        attempt_events(&journal).last().unwrap().event_type,
+        "provider.responded"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_carries_a_definitive_provider_failure_until_finalize_persists_it() {
+    let fixture = Fixture::new();
+    let (base_url, _, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        401,
+        r#"{"error":"invalid key"}"#,
+    )))
+    .await;
+    let (providers, identity) = bound_registry(base_url, 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+
+    let prepared = {
+        let mut journal = fixture.open();
+        let mut service = ProviderInferenceService::new(&mut journal, &providers, &gateway);
+        service
+            .prepare_attempt(execution(identity.clone()))
+            .unwrap()
+    };
+    let PreparedProviderAttempt::Dispatch(prepared) = prepared else {
+        panic!("new attempt must require dispatch");
+    };
+    let dispatched = ProviderInferenceService::dispatch_attempt(
+        &gateway,
+        providers.resolve(&identity).unwrap(),
+        *prepared,
+    )
+    .await;
+    {
+        let journal = fixture.open();
+        assert_eq!(attempt_events(&journal).len(), 2);
+    }
+
+    let error = {
+        let mut journal = fixture.open();
+        ProviderInferenceService::new(&mut journal, &providers, &gateway)
+            .finalize_attempt(dispatched)
+            .unwrap_err()
+    };
+
+    server.await.unwrap();
+    assert!(matches!(error, ProviderInferenceServiceError::Gateway(_)));
+    let journal = fixture.open();
+    assert_eq!(
+        attempt_events(&journal).last().unwrap().event_type,
+        "provider.failed"
+    );
+}
 
 #[tokio::test]
 async fn persists_requested_sent_responded_and_recovers_the_response_text_after_reopen() {
@@ -113,13 +226,19 @@ async fn timeout_persists_outcome_unknown_and_the_same_execution_is_never_auto_r
     let gateway = ProviderGateway::new().unwrap();
     let execution = execution(identity);
     let mut journal = fixture.open();
-    let mut service = ProviderInferenceService::new(&mut journal, &providers, &gateway);
-
-    let first = service.execute(execution.clone()).await.unwrap_err();
+    let first = {
+        let mut service = ProviderInferenceService::new(&mut journal, &providers, &gateway);
+        service.execute(execution.clone()).await.unwrap_err()
+    };
     assert!(matches!(
         first,
         ProviderInferenceServiceError::DeliveryUnknown(_)
     ));
+    assert_eq!(
+        RunAggregate::recover(&journal, RUN_ID).unwrap().state(),
+        RunState::WaitingForReconciliation
+    );
+    let mut service = ProviderInferenceService::new(&mut journal, &providers, &gateway);
     let second = service.execute(execution).await.unwrap_err();
     assert!(matches!(
         second,
@@ -498,13 +617,33 @@ impl Fixture {
         let mut journal = self.open();
         let mut identity = pinned_identity();
         identity.provider = provider.clone();
-        RunAggregate::create(
+        let mut run = RunAggregate::create(
             &mut journal,
             RUN_ID,
             identity,
             EventMetadata {
                 message_id: "run-message-1",
                 idempotency_key: "run-key-1",
+                created_at: "2026-07-12T00:00:00Z",
+                reason: None,
+            },
+        )
+        .unwrap();
+        run.prepare(
+            &mut journal,
+            EventMetadata {
+                message_id: "run-message-2",
+                idempotency_key: "run-key-2",
+                created_at: "2026-07-12T00:00:00Z",
+                reason: None,
+            },
+        )
+        .unwrap();
+        run.start(
+            &mut journal,
+            EventMetadata {
+                message_id: "run-message-3",
+                idempotency_key: "run-key-3",
                 created_at: "2026-07-12T00:00:00Z",
                 reason: None,
             },
@@ -542,7 +681,7 @@ impl Fixture {
                     }),
                     created_at: "2026-07-12T00:00:01Z".to_owned(),
                 },
-                1,
+                3,
                 0,
             )
             .unwrap();

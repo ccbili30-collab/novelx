@@ -165,6 +165,7 @@ const fn classify(state: RunState) -> RecoveryClassification {
             RecoveryClassification::Resumable(state)
         }
         RunState::WaitingForApproval => RecoveryClassification::WaitingForApproval,
+        RunState::WaitingForReconciliation => RecoveryClassification::ReconciliationRequired,
         RunState::Committing => RecoveryClassification::CommitUncertain,
         RunState::Blocked | RunState::Cancelled | RunState::Failed | RunState::Completed => {
             RecoveryClassification::Terminal(state)

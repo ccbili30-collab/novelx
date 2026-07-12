@@ -212,6 +212,70 @@ fn exact_bound_provider_prepares_once_and_retry_returns_the_same_snapshot() {
     assert_eq!(retried, first);
 }
 
+#[test]
+fn snapshot_projects_persisted_waiting_for_reconciliation_as_nonterminal() {
+    let fixture = Fixture::new();
+    let run_id = Uuid::new_v4();
+    {
+        let mut journal = fixture.open();
+        let mut run = RunAggregate::create(
+            &mut journal,
+            &run_id.to_string(),
+            pinned_identity(),
+            EventMetadata {
+                message_id: "create-message",
+                idempotency_key: "create-key",
+                created_at: "2026-07-12T00:00:00Z",
+                reason: None,
+            },
+        )
+        .unwrap();
+        run.prepare(
+            &mut journal,
+            EventMetadata {
+                message_id: "prepare-message",
+                idempotency_key: "prepare-key",
+                created_at: "2026-07-12T00:00:01Z",
+                reason: None,
+            },
+        )
+        .unwrap();
+        run.start(
+            &mut journal,
+            EventMetadata {
+                message_id: "start-message",
+                idempotency_key: "start-key",
+                created_at: "2026-07-12T00:00:02Z",
+                reason: None,
+            },
+        )
+        .unwrap();
+        run.wait_for_reconciliation(
+            &mut journal,
+            EventMetadata {
+                message_id: "reconciliation-message",
+                idempotency_key: "reconciliation-key",
+                created_at: "2026-07-12T00:00:03Z",
+                reason: Some("provider outcome unknown"),
+            },
+        )
+        .unwrap();
+    }
+    let mut journal = Some(fixture.open());
+    let snapshot = RunCommandService::new(&mut journal, Some(&binding()))
+        .get(run_id)
+        .unwrap();
+    assert_eq!(
+        snapshot.state,
+        novelx_protocol::RunLifecycleState::WaitingForReconciliation
+    );
+    assert_eq!(
+        snapshot.recovery_classification,
+        novelx_protocol::RunRecoveryClassification::WaitingForReconciliation
+    );
+    assert!(snapshot.terminal_error.is_none());
+}
+
 fn start_payload() -> RunStart {
     RunStart {
         start_idempotency_key: "stable-start-1".to_owned(),

@@ -244,6 +244,7 @@ pub enum RunLifecycleState {
     Preparing,
     Running,
     WaitingForApproval,
+    WaitingForReconciliation,
     Committing,
     Retrying,
     Blocked,
@@ -257,6 +258,7 @@ pub enum RunLifecycleState {
 pub enum RunRecoveryClassification {
     Resumable,
     WaitingForApproval,
+    WaitingForReconciliation,
     CommitUncertain,
     Terminal,
 }

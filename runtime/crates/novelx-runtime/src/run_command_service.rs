@@ -362,6 +362,7 @@ fn lifecycle_state(state: RunState) -> RunLifecycleState {
         RunState::Preparing => RunLifecycleState::Preparing,
         RunState::Running => RunLifecycleState::Running,
         RunState::WaitingForApproval => RunLifecycleState::WaitingForApproval,
+        RunState::WaitingForReconciliation => RunLifecycleState::WaitingForReconciliation,
         RunState::Committing => RunLifecycleState::Committing,
         RunState::Retrying => RunLifecycleState::Retrying,
         RunState::Blocked => RunLifecycleState::Blocked,
@@ -377,6 +378,7 @@ fn recovery_classification(state: RunState) -> RunRecoveryClassification {
             RunRecoveryClassification::Resumable
         }
         RunState::WaitingForApproval => RunRecoveryClassification::WaitingForApproval,
+        RunState::WaitingForReconciliation => RunRecoveryClassification::WaitingForReconciliation,
         RunState::Committing => RunRecoveryClassification::CommitUncertain,
         RunState::Blocked | RunState::Cancelled | RunState::Failed | RunState::Completed => {
             RunRecoveryClassification::Terminal

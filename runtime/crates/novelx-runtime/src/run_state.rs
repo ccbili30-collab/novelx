@@ -7,6 +7,7 @@ pub enum RunState {
     Preparing,
     Running,
     WaitingForApproval,
+    WaitingForReconciliation,
     Committing,
     Retrying,
     Blocked,
@@ -64,6 +65,13 @@ impl RunStateMachine {
         self.transition(RunState::WaitingForApproval, &[RunState::Running])
     }
 
+    pub fn wait_for_reconciliation(&mut self) -> Result<(), TransitionError> {
+        self.transition(
+            RunState::WaitingForReconciliation,
+            &[RunState::Running, RunState::Retrying],
+        )
+    }
+
     pub fn begin_commit(&mut self) -> Result<(), TransitionError> {
         self.transition(
             RunState::Committing,
@@ -74,7 +82,12 @@ impl RunStateMachine {
     pub fn retry(&mut self) -> Result<(), TransitionError> {
         self.transition(
             RunState::Retrying,
-            &[RunState::Preparing, RunState::Running, RunState::Committing],
+            &[
+                RunState::Preparing,
+                RunState::Running,
+                RunState::WaitingForReconciliation,
+                RunState::Committing,
+            ],
         )
     }
 
@@ -85,6 +98,7 @@ impl RunStateMachine {
                 RunState::Preparing,
                 RunState::Running,
                 RunState::WaitingForApproval,
+                RunState::WaitingForReconciliation,
                 RunState::Committing,
                 RunState::Retrying,
             ],
@@ -99,6 +113,7 @@ impl RunStateMachine {
                 RunState::Preparing,
                 RunState::Running,
                 RunState::WaitingForApproval,
+                RunState::WaitingForReconciliation,
                 RunState::Committing,
                 RunState::Retrying,
             ],
@@ -113,6 +128,7 @@ impl RunStateMachine {
                 RunState::Preparing,
                 RunState::Running,
                 RunState::WaitingForApproval,
+                RunState::WaitingForReconciliation,
                 RunState::Committing,
                 RunState::Retrying,
             ],
@@ -191,6 +207,14 @@ mod tests {
                     RunStateMachine::wait_for_approval,
                 ],
                 RunState::WaitingForApproval,
+            ),
+            (
+                &[
+                    RunStateMachine::prepare,
+                    RunStateMachine::start,
+                    RunStateMachine::wait_for_reconciliation,
+                ],
+                RunState::WaitingForReconciliation,
             ),
             (
                 &[
@@ -295,5 +319,31 @@ mod tests {
             );
             assert_eq!(machine.state(), *terminal_state);
         }
+    }
+
+    #[test]
+    fn reconciliation_is_nonterminal_but_cannot_commit_or_complete_directly() {
+        let mut machine = RunStateMachine::new();
+        machine.prepare().unwrap();
+        machine.start().unwrap();
+        machine.wait_for_reconciliation().unwrap();
+        assert!(!machine.state().is_terminal());
+        assert!(matches!(
+            machine.begin_commit(),
+            Err(TransitionError::IllegalTransition {
+                source: RunState::WaitingForReconciliation,
+                target: RunState::Committing,
+            })
+        ));
+        assert!(matches!(
+            machine.complete(),
+            Err(TransitionError::IllegalTransition {
+                source: RunState::WaitingForReconciliation,
+                target: RunState::Completed,
+            })
+        ));
+        assert_eq!(machine.state(), RunState::WaitingForReconciliation);
+        machine.retry().unwrap();
+        assert_eq!(machine.state(), RunState::Retrying);
     }
 }

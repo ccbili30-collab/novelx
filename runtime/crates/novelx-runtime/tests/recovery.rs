@@ -41,6 +41,11 @@ fn reopens_the_database_and_returns_stably_sorted_mixed_classifications() {
             "10-completed",
             &[Step::Prepare, Step::Start, Step::Complete],
         );
+        create_run(
+            &mut journal,
+            "11-reconciliation",
+            &[Step::Prepare, Step::Start, Step::Reconcile],
+        );
     }
 
     let journal = fixture.open();
@@ -62,9 +67,10 @@ fn reopens_the_database_and_returns_stably_sorted_mixed_classifications() {
             "08-cancelled",
             "09-failed",
             "10-completed",
+            "11-reconciliation",
         ]
     );
-    assert_eq!(report.recovered_nonterminal_count, 6);
+    assert_eq!(report.recovered_nonterminal_count, 7);
     assert_eq!(
         report.runs[0].classification,
         RecoveryClassification::Resumable(RunState::Created)
@@ -96,6 +102,11 @@ fn reopens_the_database_and_returns_stably_sorted_mixed_classifications() {
     assert_eq!(
         report.runs[9].classification,
         RecoveryClassification::Terminal(RunState::Completed)
+    );
+    assert_eq!(report.runs[10].state, RunState::WaitingForReconciliation);
+    assert_eq!(
+        report.runs[10].classification,
+        RecoveryClassification::ReconciliationRequired
     );
 }
 
@@ -295,6 +306,7 @@ enum Step {
     Cancel,
     Fail,
     Complete,
+    Reconcile,
 }
 
 fn create_run(journal: &mut EventJournal, run_id: &str, steps: &[Step]) {
@@ -329,6 +341,7 @@ fn create_run(journal: &mut EventJournal, run_id: &str, steps: &[Step]) {
             Step::Cancel => run.cancel(journal, metadata),
             Step::Fail => run.fail(journal, metadata),
             Step::Complete => run.complete(journal, metadata),
+            Step::Reconcile => run.wait_for_reconciliation(journal, metadata),
         }
         .unwrap();
     }

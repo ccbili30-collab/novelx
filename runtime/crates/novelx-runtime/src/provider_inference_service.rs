@@ -11,10 +11,11 @@ use crate::provider_attempt::{
     ProviderDeliveryCertainty, ProviderResponseReceipt,
 };
 use crate::provider_gateway::{
-    ProviderGateway, ProviderGatewayError, ProviderInferenceOutcome, ProviderInferenceReceipt,
-    ProviderInferenceRequest, ProviderRegistry,
+    BoundProvider, PreparedProviderInference, ProviderGateway, ProviderGatewayError,
+    ProviderInferenceOutcome, ProviderInferenceReceipt, ProviderInferenceRequest, ProviderRegistry,
 };
-use crate::run_aggregate::{RunAggregate, RunAggregateError};
+use crate::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
+use crate::run_state::RunState;
 
 pub struct ProviderInferenceService<'a> {
     journal: &'a mut EventJournal,
@@ -31,6 +32,23 @@ pub struct ProviderInferenceExecution {
     pub attempt_number: u16,
     pub provider: ProviderRunIdentity,
     pub request: ProviderInferenceRequest,
+}
+
+pub enum PreparedProviderAttempt {
+    Recovered(Box<ProviderInferenceOutcome>),
+    Dispatch(Box<ProviderAttemptDispatch>),
+}
+
+pub struct ProviderAttemptDispatch {
+    execution: ProviderInferenceExecution,
+    attempt: ProviderAttemptAggregate,
+    prepared: PreparedProviderInference,
+}
+
+pub struct DispatchedProviderAttempt {
+    execution: ProviderInferenceExecution,
+    attempt: ProviderAttemptAggregate,
+    result: Result<ProviderInferenceOutcome, ProviderGatewayError>,
 }
 
 impl<'a> ProviderInferenceService<'a> {
@@ -50,8 +68,56 @@ impl<'a> ProviderInferenceService<'a> {
         &mut self,
         execution: ProviderInferenceExecution,
     ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
+        let prepared = self.prepare_attempt(execution)?;
+        let dispatch = match prepared {
+            PreparedProviderAttempt::Recovered(outcome) => return Ok(*outcome),
+            PreparedProviderAttempt::Dispatch(dispatch) => *dispatch,
+        };
+        let provider = self.providers.resolve(&dispatch.execution.provider)?;
+        let dispatched = Self::dispatch_attempt(self.gateway, provider, dispatch).await;
+        self.finalize_attempt(dispatched)
+    }
+
+    pub fn prepare_attempt(
+        &mut self,
+        execution: ProviderInferenceExecution,
+    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
         validate_execution(&execution)?;
         let run = RunAggregate::recover(self.journal, &execution.run_id)?;
+        if run.state() != RunState::Running {
+            if run.state() == RunState::WaitingForReconciliation
+                && !self
+                    .journal
+                    .read_aggregate(
+                        &execution.run_id,
+                        "provider_attempt",
+                        &execution.attempt_id,
+                        0,
+                    )?
+                    .is_empty()
+            {
+                let existing = ProviderAttemptAggregate::recover(
+                    self.journal,
+                    &execution.run_id,
+                    &execution.attempt_id,
+                )?;
+                return match existing.state() {
+                    ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
+                        Err(ProviderInferenceServiceError::OutcomeUnknown)
+                    }
+                    ProviderAttemptState::Responded => recovered_outcome(&existing)
+                        .map(Box::new)
+                        .map(PreparedProviderAttempt::Recovered),
+                    ProviderAttemptState::Failed => Err(
+                        ProviderInferenceServiceError::ExistingTerminal(existing.recovery()),
+                    ),
+                    ProviderAttemptState::Requested => {
+                        Err(ProviderInferenceServiceError::RunNotRunning(run.state()))
+                    }
+                };
+            }
+            return Err(ProviderInferenceServiceError::RunNotRunning(run.state()));
+        }
         if run.pinned_identity().provider != execution.provider {
             return Err(ProviderInferenceServiceError::PinnedProviderMismatch);
         }
@@ -103,7 +169,9 @@ impl<'a> ProviderInferenceService<'a> {
         )?;
         match attempt.state() {
             ProviderAttemptState::Responded => {
-                return recovered_outcome(&attempt);
+                return recovered_outcome(&attempt)
+                    .map(Box::new)
+                    .map(PreparedProviderAttempt::Recovered);
             }
             ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
                 return Err(ProviderInferenceServiceError::OutcomeUnknown);
@@ -127,7 +195,38 @@ impl<'a> ProviderInferenceService<'a> {
             metadata(&sent_message_id, &sent_key, &sent_at),
         )?;
 
-        match self.gateway.infer_prepared(provider, prepared).await {
+        Ok(PreparedProviderAttempt::Dispatch(Box::new(
+            ProviderAttemptDispatch {
+                execution,
+                attempt,
+                prepared,
+            },
+        )))
+    }
+
+    pub async fn dispatch_attempt(
+        gateway: &ProviderGateway,
+        provider: &BoundProvider,
+        dispatch: ProviderAttemptDispatch,
+    ) -> DispatchedProviderAttempt {
+        let result = gateway.infer_prepared(provider, dispatch.prepared).await;
+        DispatchedProviderAttempt {
+            execution: dispatch.execution,
+            attempt: dispatch.attempt,
+            result,
+        }
+    }
+
+    pub fn finalize_attempt(
+        &mut self,
+        dispatched: DispatchedProviderAttempt,
+    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
+        let DispatchedProviderAttempt {
+            execution,
+            mut attempt,
+            result,
+        } = dispatched;
+        match result {
             Ok(outcome) => {
                 let response = response_receipt(&execution.provider, &outcome.receipt);
                 let responded_message_id = Uuid::new_v4().to_string();
@@ -165,6 +264,18 @@ impl<'a> ProviderInferenceService<'a> {
                     Uuid::new_v4(),
                     metadata(&unknown_message_id, &unknown_key, &unknown_at),
                 )?;
+                let mut run = RunAggregate::recover(self.journal, &execution.run_id)?;
+                let reconciliation_message_id = Uuid::new_v4().to_string();
+                let reconciliation_key = format!("{}:run-reconciliation", execution.attempt_id);
+                run.wait_for_reconciliation(
+                    self.journal,
+                    EventMetadata {
+                        message_id: &reconciliation_message_id,
+                        idempotency_key: &reconciliation_key,
+                        created_at: &unknown_at,
+                        reason: Some("provider_outcome_unknown"),
+                    },
+                )?;
                 Err(ProviderInferenceServiceError::DeliveryUnknown(Box::new(
                     error,
                 )))
@@ -181,6 +292,8 @@ pub enum ProviderInferenceServiceError {
     ContextReceiptNotPersisted,
     #[error("Provider inference identity does not match the provider pinned to this Run")]
     PinnedProviderMismatch,
+    #[error("Provider inference requires a running Run, but the Run is {0:?}")]
+    RunNotRunning(RunState),
     #[error("Persisted normalized Provider input is invalid")]
     ContextNormalizedInputInvalid,
     #[error("Persisted normalized Provider input hash does not match its content")]

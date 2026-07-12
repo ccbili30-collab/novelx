@@ -61,6 +61,67 @@ fn persists_transitions_and_recovers_after_reopening_sqlite() {
 }
 
 #[test]
+fn persists_waiting_for_reconciliation_and_rejects_direct_commit_or_completion() {
+    let fixture = Fixture::new();
+    {
+        let mut journal = fixture.open();
+        let mut run = RunAggregate::create(
+            &mut journal,
+            "run-reconciliation",
+            pinned_identity(),
+            metadata("message-1", None),
+        )
+        .unwrap();
+        run.prepare(&mut journal, metadata("message-2", None))
+            .unwrap();
+        run.start(&mut journal, metadata("message-3", None))
+            .unwrap();
+        run.wait_for_reconciliation(
+            &mut journal,
+            metadata("message-4", Some("provider outcome unknown")),
+        )
+        .unwrap();
+        assert_eq!(run.state(), RunState::WaitingForReconciliation);
+        assert!(!run.state().is_terminal());
+        assert!(matches!(
+            run.begin_commit(&mut journal, metadata("message-5", None)),
+            Err(RunAggregateError::Transition(
+                TransitionError::IllegalTransition {
+                    source: RunState::WaitingForReconciliation,
+                    target: RunState::Committing,
+                }
+            ))
+        ));
+        assert!(matches!(
+            run.complete(&mut journal, metadata("message-6", None)),
+            Err(RunAggregateError::Transition(
+                TransitionError::IllegalTransition {
+                    source: RunState::WaitingForReconciliation,
+                    target: RunState::Completed,
+                }
+            ))
+        ));
+    }
+
+    let journal = fixture.open();
+    let recovered = RunAggregate::recover(&journal, "run-reconciliation").unwrap();
+    assert_eq!(recovered.state(), RunState::WaitingForReconciliation);
+    let events = journal
+        .read_aggregate("run-reconciliation", "run", "run-reconciliation", 0)
+        .unwrap();
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[3].event_type, "run.waiting_for_reconciliation");
+    assert_eq!(
+        events[3].payload,
+        json!({
+            "previousState": "running",
+            "currentState": "waiting_for_reconciliation",
+            "reason": "provider outcome unknown",
+        })
+    );
+}
+
+#[test]
 fn stable_start_idempotency_recovers_the_current_run_without_a_second_creation() {
     let fixture = Fixture::new();
     {

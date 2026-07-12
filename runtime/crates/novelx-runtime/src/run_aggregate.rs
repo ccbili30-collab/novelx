@@ -112,6 +112,14 @@ impl RunAggregate {
         self.apply(journal, metadata, RunState::WaitingForApproval)
     }
 
+    pub fn wait_for_reconciliation(
+        &mut self,
+        journal: &mut EventJournal,
+        metadata: EventMetadata<'_>,
+    ) -> Result<(), RunAggregateError> {
+        self.apply(journal, metadata, RunState::WaitingForReconciliation)
+    }
+
     pub fn begin_commit(
         &mut self,
         journal: &mut EventJournal,
@@ -645,6 +653,7 @@ fn transition_machine(
         RunState::Preparing => machine.prepare(),
         RunState::Running => machine.start(),
         RunState::WaitingForApproval => machine.wait_for_approval(),
+        RunState::WaitingForReconciliation => machine.wait_for_reconciliation(),
         RunState::Committing => machine.begin_commit(),
         RunState::Retrying => machine.retry(),
         RunState::Blocked => machine.block(),
@@ -660,6 +669,7 @@ fn event_type(state: RunState) -> &'static str {
         RunState::Preparing => "run.preparing",
         RunState::Running => "run.running",
         RunState::WaitingForApproval => "run.waiting_for_approval",
+        RunState::WaitingForReconciliation => "run.waiting_for_reconciliation",
         RunState::Committing => "run.committing",
         RunState::Retrying => "run.retrying",
         RunState::Blocked => "run.blocked",
@@ -674,6 +684,7 @@ fn state_for_event(value: &str) -> Result<RunState, RunAggregateError> {
         "run.preparing" => Ok(RunState::Preparing),
         "run.running" => Ok(RunState::Running),
         "run.waiting_for_approval" => Ok(RunState::WaitingForApproval),
+        "run.waiting_for_reconciliation" => Ok(RunState::WaitingForReconciliation),
         "run.committing" => Ok(RunState::Committing),
         "run.retrying" => Ok(RunState::Retrying),
         "run.blocked" => Ok(RunState::Blocked),
@@ -690,6 +701,7 @@ fn state_name(state: RunState) -> &'static str {
         RunState::Preparing => "preparing",
         RunState::Running => "running",
         RunState::WaitingForApproval => "waiting_for_approval",
+        RunState::WaitingForReconciliation => "waiting_for_reconciliation",
         RunState::Committing => "committing",
         RunState::Retrying => "retrying",
         RunState::Blocked => "blocked",
@@ -705,6 +717,7 @@ fn parse_state(value: &str) -> Result<RunState, RunAggregateError> {
         "preparing" => Ok(RunState::Preparing),
         "running" => Ok(RunState::Running),
         "waiting_for_approval" => Ok(RunState::WaitingForApproval),
+        "waiting_for_reconciliation" => Ok(RunState::WaitingForReconciliation),
         "committing" => Ok(RunState::Committing),
         "retrying" => Ok(RunState::Retrying),
         "blocked" => Ok(RunState::Blocked),

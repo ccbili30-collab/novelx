@@ -606,6 +606,27 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope())).toEqual(runSnapshotEnvelope());
   });
 
+  it("accepts waiting_for_reconciliation only with its nonterminal recovery classification", () => {
+    expect(parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope({
+      payload: {
+        ...runSnapshotEnvelope().payload,
+        state: "waiting_for_reconciliation",
+        recoveryClassification: "waiting_for_reconciliation",
+      },
+    })).payload).toMatchObject({
+      state: "waiting_for_reconciliation",
+      recoveryClassification: "waiting_for_reconciliation",
+      terminalError: null,
+    });
+    expect(() => parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope({
+      payload: {
+        ...runSnapshotEnvelope().payload,
+        state: "waiting_for_reconciliation",
+        recoveryClassification: "terminal",
+      },
+    }))).toThrow();
+  });
+
   it("rejects changed, secret-bearing or noncanonical Run identities", () => {
     expect(() => parseRuntimeV2RunStartEnvelope(runStartEnvelope({ runId: null }))).toThrow();
     expect(() => parseRuntimeV2RunStartEnvelope(runStartEnvelope({

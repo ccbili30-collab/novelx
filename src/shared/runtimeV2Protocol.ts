@@ -305,10 +305,12 @@ export const runtimeV2RunSnapshotPayloadSchema = z.object({
   runId: z.uuid(),
   pinnedIdentity: runtimeV2RunPinnedIdentitySchema,
   state: z.enum([
-    "created", "preparing", "running", "waiting_for_approval", "committing",
+    "created", "preparing", "running", "waiting_for_approval", "waiting_for_reconciliation", "committing",
     "retrying", "blocked", "cancelled", "failed", "completed",
   ]),
-  recoveryClassification: z.enum(["resumable", "waiting_for_approval", "commit_uncertain", "terminal"]),
+  recoveryClassification: z.enum([
+    "resumable", "waiting_for_approval", "waiting_for_reconciliation", "commit_uncertain", "terminal",
+  ]),
   runSequence: z.number().int().positive().safe(),
   aggregateSequence: z.number().int().positive().safe(),
   createdAt: z.iso.datetime({ offset: true }),
@@ -317,6 +319,22 @@ export const runtimeV2RunSnapshotPayloadSchema = z.object({
 }).strict().superRefine((snapshot, context) => {
   if (snapshot.runSequence < snapshot.aggregateSequence) {
     context.addIssue({ code: "custom", path: ["runSequence"], message: "runSequence cannot precede aggregateSequence." });
+  }
+  const expectedRecovery = snapshot.state === "waiting_for_approval"
+    ? "waiting_for_approval"
+    : snapshot.state === "waiting_for_reconciliation"
+      ? "waiting_for_reconciliation"
+      : snapshot.state === "committing"
+        ? "commit_uncertain"
+        : ["blocked", "cancelled", "failed", "completed"].includes(snapshot.state)
+          ? "terminal"
+          : "resumable";
+  if (snapshot.recoveryClassification !== expectedRecovery) {
+    context.addIssue({
+      code: "custom",
+      path: ["recoveryClassification"],
+      message: `recoveryClassification must be ${expectedRecovery} for state ${snapshot.state}.`,
+    });
   }
 });
 
