@@ -39,11 +39,16 @@
 - Extracted Run acceptance/query, snapshot projection and failure classification from the binary entry point into a dedicated `RunCommandService`; NDJSON transport no longer owns Run domain decisions.
 - Added isolated service tests for restart recovery, nonfatal workspace rejection with zero writes and fatal corrupted-history classification.
 - Added strict, journal-backed `run.cancel` with a stable business idempotency key, persisted reason, terminal snapshot and restart recovery; cancellation does not kill the Runtime process.
+- Accepted ADR-0006: Rust owns Provider request policy, HTTP, response validation and receipts; Electron temporarily retains Windows `safeStorage` and may inject only a short-lived sensitive credential.
+- Added a strict, secret-free Rust Provider configuration contract with schema/API/auth versions, Auto/fixed output policy, timeout/deadline/retry budgets, HTTPS/loopback URL restrictions and TypeScript-compatible canonical hashing.
+- Added a zeroizing in-memory Provider registry that resolves only an exact profile/provider/model/config hash pinned by the Run; binding receipts cannot serialize credentials.
+- Added an asynchronous Reqwest Provider Gateway with redirects disabled, bounded response size, total/request deadlines, optional `/models` capability discovery, configured-capability fallback and strict minimal chat ping validation.
+- Added real loopback HTTP transport tests for a 1M Provider capability and a Provider that does not expose `/models`.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 51 tests.
+- Rust workspace tests pass: 56 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
 - Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 45 tests, including Run schema strictness, fatal timeout cleanup, post-ready crash rejection and real restart recovery.
@@ -55,7 +60,8 @@
 - The Electron application entry point does not launch the supervisor yet; the supervisor is a continuously connected, independently tested module but is not part of production startup.
 - The runtime opens and recovers the supplied workspace database and processes durable Run acceptance/query plus status/shutdown controls, but it does not yet schedule Provider or tool execution.
 - `run.start` currently stops at durable `created`; Preparing/Provider/context/tool scheduling is not connected. Cancellation is connected only at the Run state level because no Provider/tool work exists yet to interrupt.
-- The ToolCall state machine and event-backed aggregate exist, but the real tool executor, Provider call, context compiler, recovery execution policy and domain tools are not implemented.
+- The ToolCall state machine and event-backed aggregate exist, but the real tool executor, full Provider inference pipeline, context compiler, recovery execution policy and domain tools are not implemented.
+- The Provider Gateway can bind/validate a profile and perform a real minimal connection ping, but sensitive credential injection, durable Provider attempt events, full inference requests and Run scheduling are not connected.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.

@@ -1,4 +1,5 @@
 pub mod event_journal;
+pub mod provider_gateway;
 pub mod recovery;
 pub mod run_aggregate;
 pub mod run_command_service;
