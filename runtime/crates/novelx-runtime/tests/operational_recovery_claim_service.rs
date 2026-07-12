@@ -8,11 +8,17 @@ use novelx_runtime::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, InferenceDispatchIdentity,
     },
     event_journal::EventJournal,
-    operational_recovery_aggregate::OperationalRecoveryObservedGate,
+    operational_recovery_aggregate::{
+        OperationalRecoveryEventMetadata, OperationalRecoveryObservedGate,
+        OperationalRecoveryRepository, OperationalRecoveryResume,
+    },
     operational_recovery_claim_service::{
         OperationalRecoveryClaimError, OperationalRecoveryClaimRequest,
         OperationalRecoveryClaimService, OperationalRecoveryStartRequest,
         OperationalRecoveryTransferRequest,
+    },
+    operational_recovery_completion_service::{
+        OperationalRecoveryCompletionRequest, OperationalRecoveryCompletionService,
     },
     operational_recovery_projection_service::{
         OperationalRecoveryProjectionService, PersistedProviderProjectionDirective,
@@ -177,29 +183,72 @@ fn execution_start_uses_fresh_scan_and_exact_fence() {
         .unwrap()
         .execution_id
         .clone();
-    let action = fixture
-        .scan(std::slice::from_ref(&provider))
-        .runs
-        .into_iter()
-        .find(|run| run.run_id == run_id)
-        .unwrap()
-        .action;
     let projection = OperationalRecoveryProjectionService::new(&fixture.path);
     let request = PersistedProviderProjectionRequest {
+        workspace_id: "workspace-1".to_owned(),
         run_id: run_id.clone(),
+        operation_id: operation_id.clone(),
         execution_id,
-        action,
     };
     let first = projection
-        .project_persisted_provider_result(request.clone())
+        .project_persisted_provider_result(request.clone(), &lease)
         .unwrap();
     let repeated = projection
-        .project_persisted_provider_result(request)
+        .project_persisted_provider_result(request.clone(), &lease)
         .unwrap();
     assert_eq!(first, repeated);
     assert_eq!(
         first.directive,
         PersistedProviderProjectionDirective::Completed
+    );
+    drop(lease);
+    let resumed_lease = fixture.lease("runtime-instance-2");
+    let mut recovery = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    let execution = recovery.load("workspace-1", &run_id).unwrap().operations[&operation_id]
+        .execution
+        .as_ref()
+        .unwrap()
+        .clone();
+    let resume = OperationalRecoveryResume::derive(
+        &execution,
+        "runtime-instance-2".to_owned(),
+        "2026-07-13T00:10:00Z".to_owned(),
+    )
+    .unwrap();
+    recovery
+        .authorize_local_execution_resume(
+            "workspace-1",
+            &run_id,
+            &operation_id,
+            resume,
+            &resumed_lease,
+            fixture.global_clock(),
+            OperationalRecoveryEventMetadata {
+                created_at: "2026-07-13T00:10:00Z".to_owned(),
+            },
+        )
+        .unwrap();
+    let resumed = projection
+        .resume_started_persisted_provider_result(request.clone(), &resumed_lease)
+        .unwrap();
+    assert_eq!(resumed, first);
+    let completion_request = OperationalRecoveryCompletionRequest {
+        workspace_id: "workspace-1".to_owned(),
+        run_id: run_id.clone(),
+        operation_id: operation_id.clone(),
+        execution_id: execution.execution_id,
+    };
+    let completion = OperationalRecoveryCompletionService::new(&fixture.path);
+    let finished = completion
+        .finish_persisted_provider_projection(completion_request.clone(), &resumed, &resumed_lease)
+        .unwrap();
+    assert!(finished.operations[&operation_id].outcome.is_some());
+    assert_eq!(
+        completion
+            .finish_persisted_provider_projection(completion_request, &resumed, &resumed_lease,)
+            .unwrap()
+            .revision,
+        finished.revision
     );
 }
 
@@ -490,6 +539,13 @@ impl Fixture {
         let mut journal = EventJournal::open(&self.path).unwrap();
         OperationalRecoveryScanner::new(&mut journal, &assignments, providers)
             .scan("workspace-1", "project-1")
+            .unwrap()
+    }
+
+    fn global_clock(&self) -> u64 {
+        novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&self.path)
+            .unwrap()
+            .current_global_sequence()
             .unwrap()
     }
 

@@ -110,8 +110,44 @@ pub struct OperationalRecoveryOperation {
     pub disposition: Option<OperationalRecoveryDisposition>,
     pub claim: Option<OperationalRecoveryClaim>,
     pub execution: Option<OperationalRecoveryExecution>,
+    pub resumes: Vec<OperationalRecoveryResume>,
     pub outcome: Option<OperationalRecoveryOutcome>,
     pub stale: Option<OperationalRecoveryStale>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationalRecoveryResume {
+    pub resume_id: String,
+    pub execution_id: String,
+    pub original_owner_instance_id: String,
+    pub resumer_instance_id: String,
+    pub fencing_token: u64,
+    pub resumed_at: String,
+}
+
+impl OperationalRecoveryResume {
+    pub fn derive(
+        execution: &OperationalRecoveryExecution,
+        resumer_instance_id: String,
+        resumed_at: String,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        validate_execution(execution)?;
+        require_text("resumer_instance_id", &resumer_instance_id)?;
+        parse_time("resumed_at", &resumed_at)?;
+        let resume_id = canonical_sha256(&serde_json::json!({
+            "executionId": execution.execution_id,
+            "resumerInstanceId": resumer_instance_id,
+        }))?;
+        Ok(Self {
+            resume_id,
+            execution_id: execution.execution_id.clone(),
+            original_owner_instance_id: execution.owner_instance_id.clone(),
+            resumer_instance_id,
+            fencing_token: execution.fencing_token,
+            resumed_at,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -449,6 +485,10 @@ enum RecoveryEventData {
         operation_id: String,
         execution: OperationalRecoveryExecution,
     },
+    ExecutionResumeAuthorized {
+        operation_id: String,
+        resume: OperationalRecoveryResume,
+    },
     ExecutionFinished {
         operation_id: String,
         outcome: OperationalRecoveryOutcome,
@@ -632,6 +672,14 @@ impl OperationalRecoveryRepository {
         validate_claim(&claim)?;
         validate_initial_lease_policy(&claim)?;
         let current = self.load(workspace_id, run_id)?;
+        if current.operations.iter().any(|(operation_id, operation)| {
+            operation_id != &claim.operation_id
+                && operation.claim.is_some()
+                && operation.outcome.is_none()
+                && operation.stale.is_none()
+        }) {
+            return Err(OperationalRecoveryAggregateError::ActiveOperationConflict);
+        }
         let operation = current
             .operations
             .get(&claim.operation_id)
@@ -914,6 +962,66 @@ impl OperationalRecoveryRepository {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_local_execution_resume(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        operation_id: &str,
+        resume: OperationalRecoveryResume,
+        exclusive_lease: &WorkspaceRuntimeLease,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        validate_resume(&resume)?;
+        if !exclusive_lease.proves_exclusive_owner(&resume.resumer_instance_id) {
+            return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
+        }
+        let current = self.load(workspace_id, run_id)?;
+        let operation = current
+            .operations
+            .get(operation_id)
+            .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+        let execution = operation
+            .execution
+            .as_ref()
+            .ok_or(OperationalRecoveryAggregateError::ExecutionRequired)?;
+        if operation.outcome.is_some()
+            || operation.stale.is_some()
+            || execution.effect_class
+                != OperationalRecoveryEffectClass::PersistedProviderResultProjection
+            || resume.execution_id != execution.execution_id
+            || resume.original_owner_instance_id != execution.owner_instance_id
+            || resume.fencing_token != execution.fencing_token
+        {
+            return Err(OperationalRecoveryAggregateError::ResumeNotAllowed);
+        }
+        let derived = OperationalRecoveryResume::derive(
+            execution,
+            resume.resumer_instance_id.clone(),
+            resume.resumed_at.clone(),
+        )?;
+        if derived != resume {
+            return Err(OperationalRecoveryAggregateError::ResumeConflict);
+        }
+        if operation
+            .resumes
+            .iter()
+            .any(|existing| existing.resume_id == resume.resume_id)
+        {
+            return Ok(current);
+        }
+        self.append_at_global_sequence(
+            current,
+            RecoveryEventData::ExecutionResumeAuthorized {
+                operation_id: operation_id.to_owned(),
+                resume,
+            },
+            expected_global_sequence,
+            metadata,
+        )
+    }
+
     fn append(
         &mut self,
         current: OperationalRecoveryAggregate,
@@ -1034,6 +1142,7 @@ fn apply_event(
                     disposition: None,
                     claim: None,
                     execution: None,
+                    resumes: vec![],
                     outcome: None,
                     stale: None,
                 },
@@ -1096,6 +1205,18 @@ fn apply_event(
             let aggregate = value
                 .as_mut()
                 .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            if aggregate
+                .operations
+                .iter()
+                .any(|(operation_id, operation)| {
+                    operation_id != &claim.operation_id
+                        && operation.claim.is_some()
+                        && operation.outcome.is_none()
+                        && operation.stale.is_none()
+                })
+            {
+                return Err(OperationalRecoveryAggregateError::ActiveOperationConflict);
+            }
             let operation = aggregate
                 .operations
                 .get_mut(&claim.operation_id)
@@ -1140,6 +1261,7 @@ fn apply_event(
                 || claim.operation_id != previous.operation_id
                 || claim.source_fingerprint != previous.source_fingerprint
                 || claim.executor_version != previous.executor_version
+                || claim.action_spec != previous.action_spec
                 || claim.action_spec_sha256 != previous.action_spec_sha256
                 || claim.fencing_token
                     != previous
@@ -1152,6 +1274,48 @@ fn apply_event(
                 return Err(OperationalRecoveryAggregateError::ClaimTransferInvalid);
             }
             operation.claim = Some(claim);
+            aggregate.revision = event.aggregate_revision;
+            aggregate.last_event_hash = event.event_hash;
+        }
+        RecoveryEventData::ExecutionResumeAuthorized {
+            operation_id,
+            resume,
+        } => {
+            validate_resume(&resume)?;
+            let aggregate = value
+                .as_mut()
+                .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            let operation = aggregate
+                .operations
+                .get_mut(&operation_id)
+                .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+            let execution = operation
+                .execution
+                .as_ref()
+                .ok_or(OperationalRecoveryAggregateError::ExecutionRequired)?;
+            if operation.outcome.is_some()
+                || operation.stale.is_some()
+                || execution.effect_class
+                    != OperationalRecoveryEffectClass::PersistedProviderResultProjection
+                || resume.execution_id != execution.execution_id
+                || resume.original_owner_instance_id != execution.owner_instance_id
+                || resume.fencing_token != execution.fencing_token
+                || operation
+                    .resumes
+                    .iter()
+                    .any(|existing| existing.resume_id == resume.resume_id)
+            {
+                return Err(OperationalRecoveryAggregateError::ResumeNotAllowed);
+            }
+            let derived = OperationalRecoveryResume::derive(
+                execution,
+                resume.resumer_instance_id.clone(),
+                resume.resumed_at.clone(),
+            )?;
+            if derived != resume {
+                return Err(OperationalRecoveryAggregateError::ResumeConflict);
+            }
+            operation.resumes.push(resume);
             aggregate.revision = event.aggregate_revision;
             aggregate.last_event_hash = event.event_hash;
         }
@@ -1383,6 +1547,23 @@ fn validate_execution(
     }
 }
 
+fn validate_resume(
+    resume: &OperationalRecoveryResume,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    require_sha256("resume_id", &resume.resume_id)?;
+    require_sha256("execution_id", &resume.execution_id)?;
+    require_text(
+        "original_owner_instance_id",
+        &resume.original_owner_instance_id,
+    )?;
+    require_text("resumer_instance_id", &resume.resumer_instance_id)?;
+    if resume.fencing_token == 0 {
+        return Err(OperationalRecoveryAggregateError::FencingTokenInvalid);
+    }
+    parse_time("resumed_at", &resume.resumed_at)?;
+    Ok(())
+}
+
 fn validate_stale(
     stale: &OperationalRecoveryStale,
 ) -> Result<(), OperationalRecoveryAggregateError> {
@@ -1571,6 +1752,7 @@ fn event_operation_id(data: &RecoveryEventData) -> &str {
         RecoveryEventData::ClaimTransferred { operation_id, .. }
         | RecoveryEventData::LeaseRenewed { operation_id, .. }
         | RecoveryEventData::ExecutionStarted { operation_id, .. }
+        | RecoveryEventData::ExecutionResumeAuthorized { operation_id, .. }
         | RecoveryEventData::ExecutionFinished { operation_id, .. }
         | RecoveryEventData::StaleMarked { operation_id, .. } => operation_id,
     }
@@ -1602,6 +1784,9 @@ fn event_suffix(data: &RecoveryEventData) -> Result<String, OperationalRecoveryA
         ),
         RecoveryEventData::ExecutionStarted { execution, .. } => {
             format!("execution-started:{}", execution.execution_id)
+        }
+        RecoveryEventData::ExecutionResumeAuthorized { resume, .. } => {
+            format!("execution-resumed:{}", resume.resume_id)
         }
         RecoveryEventData::ExecutionFinished { outcome, .. } => format!(
             "execution-finished:{}",
@@ -1658,6 +1843,8 @@ pub enum OperationalRecoveryAggregateError {
     InvariantCodesRequired,
     #[error("operational recovery operation is not claimable")]
     OperationNotClaimable,
+    #[error("another operational recovery operation is still active for this run")]
+    ActiveOperationConflict,
     #[error("operational recovery claim conflicts with persisted ownership")]
     ClaimConflict,
     #[error("operational recovery action spec does not match its persisted SHA-256")]
@@ -1684,6 +1871,10 @@ pub enum OperationalRecoveryAggregateError {
     ExecutionConflict,
     #[error("operational recovery execution must start first")]
     ExecutionRequired,
+    #[error("operational recovery local execution resume is not allowed")]
+    ResumeNotAllowed,
+    #[error("operational recovery local execution resume conflicts with persisted history")]
+    ResumeConflict,
     #[error("operational recovery operation is terminal")]
     OperationTerminal,
     #[error("operational recovery stale evidence did not change")]

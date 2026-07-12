@@ -17,6 +17,7 @@ pub mod live_agent_loop_runner;
 pub mod operational_recovery_action;
 pub mod operational_recovery_aggregate;
 pub mod operational_recovery_claim_service;
+pub mod operational_recovery_completion_service;
 pub mod operational_recovery_projection_service;
 pub mod operational_recovery_recording_service;
 pub mod operational_recovery_scanner;

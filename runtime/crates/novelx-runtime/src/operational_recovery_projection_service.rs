@@ -16,17 +16,23 @@ use crate::{
     },
     artifact_store::{ArtifactStore, ArtifactStoreError},
     event_journal::{EventJournal, EventJournalError},
+    operational_recovery_aggregate::{
+        OperationalRecoveryAggregateError, OperationalRecoveryEffectClass,
+        OperationalRecoveryRepository,
+    },
     operational_recovery_scanner::OperationalRecoveryAction,
     provider_attempt::{ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState},
     provider_tool_materializer::{ProviderToolMaterializer, ProviderToolMaterializerError},
     run_aggregate::{RunAggregate, RunAggregateError},
+    workspace_runtime_lease::WorkspaceRuntimeLease,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistedProviderProjectionRequest {
+    pub workspace_id: String,
     pub run_id: String,
+    pub operation_id: String,
     pub execution_id: String,
-    pub action: OperationalRecoveryAction,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -39,6 +45,24 @@ pub struct PersistedProviderProjectionManifest {
     pub resulting_loop_checkpoint_sha256: String,
     pub directive: PersistedProviderProjectionDirective,
     pub manifest_sha256: String,
+}
+
+impl PersistedProviderProjectionManifest {
+    pub fn verify(&self) -> Result<(), OperationalRecoveryProjectionError> {
+        let expected = manifest_hash(
+            &self.run_id,
+            &self.invocation_id,
+            &self.attempt_id,
+            &self.execution_id,
+            &self.resulting_loop_checkpoint_sha256,
+            self.directive,
+        )?;
+        if expected == self.manifest_sha256 {
+            Ok(())
+        } else {
+            Err(OperationalRecoveryProjectionError::ManifestHashMismatch)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -63,16 +87,92 @@ impl OperationalRecoveryProjectionService {
     pub fn project_persisted_provider_result(
         &self,
         request: PersistedProviderProjectionRequest,
+        exclusive_lease: &WorkspaceRuntimeLease,
     ) -> Result<PersistedProviderProjectionManifest, OperationalRecoveryProjectionError> {
+        self.project(request, exclusive_lease, ProjectionAuthority::ClaimOwner)
+    }
+
+    pub fn resume_started_persisted_provider_result(
+        &self,
+        request: PersistedProviderProjectionRequest,
+        exclusive_lease: &WorkspaceRuntimeLease,
+    ) -> Result<PersistedProviderProjectionManifest, OperationalRecoveryProjectionError> {
+        self.project(
+            request,
+            exclusive_lease,
+            ProjectionAuthority::AuthorizedResumer,
+        )
+    }
+
+    fn project(
+        &self,
+        request: PersistedProviderProjectionRequest,
+        exclusive_lease: &WorkspaceRuntimeLease,
+        authority: ProjectionAuthority,
+    ) -> Result<PersistedProviderProjectionManifest, OperationalRecoveryProjectionError> {
+        require_text("workspace_id", &request.workspace_id)?;
         require_text("run_id", &request.run_id)?;
+        require_text("operation_id", &request.operation_id)?;
         require_text("execution_id", &request.execution_id)?;
+        if !exclusive_lease.protects_database(&self.database_path) {
+            return Err(OperationalRecoveryProjectionError::WorkspaceLeaseMismatch);
+        }
+        let recovery = OperationalRecoveryRepository::open(&self.database_path)?
+            .load(&request.workspace_id, &request.run_id)?;
+        let operation = recovery
+            .operations
+            .get(&request.operation_id)
+            .ok_or(OperationalRecoveryProjectionError::RecoveryOperationMissing)?;
+        let claim = operation
+            .claim
+            .as_ref()
+            .ok_or(OperationalRecoveryProjectionError::RecoveryClaimMissing)?;
+        let execution = operation
+            .execution
+            .as_ref()
+            .ok_or(OperationalRecoveryProjectionError::RecoveryExecutionMissing)?;
+        if operation.outcome.is_some()
+            || operation.stale.is_some()
+            || execution.execution_id != request.execution_id
+            || execution.claim_id != claim.claim_id
+            || execution.fencing_token != claim.fencing_token
+            || execution.action_spec_sha256 != claim.action_spec_sha256
+            || execution.effect_class
+                != OperationalRecoveryEffectClass::PersistedProviderResultProjection
+        {
+            return Err(OperationalRecoveryProjectionError::RecoveryFenceMismatch);
+        }
+        match authority {
+            ProjectionAuthority::ClaimOwner
+                if !exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) =>
+            {
+                return Err(OperationalRecoveryProjectionError::ExclusiveOwnerMismatch);
+            }
+            ProjectionAuthority::AuthorizedResumer
+                if !operation.resumes.last().is_some_and(|resume| {
+                    resume.execution_id == execution.execution_id
+                        && resume.fencing_token == execution.fencing_token
+                        && exclusive_lease.proves_exclusive_owner(&resume.resumer_instance_id)
+                }) =>
+            {
+                return Err(OperationalRecoveryProjectionError::ResumeAuthorizationMissing);
+            }
+            _ => {}
+        }
+        let action = claim
+            .action_spec
+            .clone()
+            .ok_or(OperationalRecoveryProjectionError::PersistedActionMissing)?;
+        if action.action_spec_sha256()? != claim.action_spec_sha256 {
+            return Err(OperationalRecoveryProjectionError::RecoveryFenceMismatch);
+        }
         let OperationalRecoveryAction::PersistedProviderResultProjection {
             invocation_id,
             attempt_id,
             expected_loop_checkpoint_sha256,
             expected_attempt_sequence,
             response_body_sha256,
-        } = request.action
+        } = action
         else {
             return Err(OperationalRecoveryProjectionError::ActionNotProjectable);
         };
@@ -214,6 +314,12 @@ impl OperationalRecoveryProjectionService {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ProjectionAuthority {
+    ClaimOwner,
+    AuthorizedResumer,
+}
+
 fn directive_from_phase(
     phase: crate::agent_loop_service::LoopPhase,
 ) -> Result<PersistedProviderProjectionDirective, OperationalRecoveryProjectionError> {
@@ -239,15 +345,14 @@ fn manifest(
     resulting_loop_checkpoint_sha256: String,
     directive: PersistedProviderProjectionDirective,
 ) -> Result<PersistedProviderProjectionManifest, OperationalRecoveryProjectionError> {
-    let material = serde_json::json!({
-        "runId": run_id,
-        "invocationId": invocation_id,
-        "attemptId": attempt_id,
-        "executionId": execution_id,
-        "resultingLoopCheckpointSha256": resulting_loop_checkpoint_sha256,
-        "directive": directive,
-    });
-    let manifest_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&material)?));
+    let manifest_sha256 = manifest_hash(
+        &run_id,
+        &invocation_id,
+        &attempt_id,
+        &execution_id,
+        &resulting_loop_checkpoint_sha256,
+        directive,
+    )?;
     Ok(PersistedProviderProjectionManifest {
         run_id,
         invocation_id,
@@ -257,6 +362,28 @@ fn manifest(
         directive,
         manifest_sha256,
     })
+}
+
+fn manifest_hash(
+    run_id: &str,
+    invocation_id: &str,
+    attempt_id: &str,
+    execution_id: &str,
+    resulting_loop_checkpoint_sha256: &str,
+    directive: PersistedProviderProjectionDirective,
+) -> Result<String, OperationalRecoveryProjectionError> {
+    let material = serde_json::json!({
+        "runId": run_id,
+        "invocationId": invocation_id,
+        "attemptId": attempt_id,
+        "executionId": execution_id,
+        "resultingLoopCheckpointSha256": resulting_loop_checkpoint_sha256,
+        "directive": directive,
+    });
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&material)?)
+    ))
 }
 
 fn require_text(
@@ -276,6 +403,22 @@ pub enum OperationalRecoveryProjectionError {
     EmptyField(&'static str),
     #[error("operational recovery action is not a persisted Provider result projection")]
     ActionNotProjectable,
+    #[error("operational recovery workspace lease does not protect this database")]
+    WorkspaceLeaseMismatch,
+    #[error("operational recovery projection requires the current exclusive Claim owner")]
+    ExclusiveOwnerMismatch,
+    #[error("operational recovery projection requires a persisted resume authorization")]
+    ResumeAuthorizationMissing,
+    #[error("operational recovery operation was not found")]
+    RecoveryOperationMissing,
+    #[error("operational recovery Claim was not found")]
+    RecoveryClaimMissing,
+    #[error("operational recovery Execution was not found")]
+    RecoveryExecutionMissing,
+    #[error("operational recovery persisted action was not found")]
+    PersistedActionMissing,
+    #[error("operational recovery Claim, Execution or action fence does not match")]
+    RecoveryFenceMismatch,
     #[error("agent loop checkpoint changed before local projection")]
     LoopCheckpointChanged,
     #[error("pending Provider inference is missing")]
@@ -288,6 +431,8 @@ pub enum OperationalRecoveryProjectionError {
     ProviderResponseChanged,
     #[error("persisted Provider result produced an unsupported local directive")]
     DirectiveInvalid,
+    #[error("persisted Provider projection manifest hash does not match its contents")]
+    ManifestHashMismatch,
     #[error(transparent)]
     Journal(#[from] EventJournalError),
     #[error(transparent)]
@@ -298,6 +443,8 @@ pub enum OperationalRecoveryProjectionError {
     ProviderAttempt(#[from] ProviderAttemptError),
     #[error(transparent)]
     Run(#[from] RunAggregateError),
+    #[error(transparent)]
+    RecoveryAggregate(#[from] OperationalRecoveryAggregateError),
     #[error(transparent)]
     Artifact(#[from] ArtifactStoreError),
     #[error(transparent)]

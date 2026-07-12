@@ -4,7 +4,8 @@ use novelx_runtime::operational_recovery_aggregate::{
     OperationalRecoveryClaim, OperationalRecoveryDisposition, OperationalRecoveryEffectClass,
     OperationalRecoveryEventMetadata, OperationalRecoveryExecution, OperationalRecoveryObservation,
     OperationalRecoveryObservedGate, OperationalRecoveryOutcome, OperationalRecoveryRepository,
-    OperationalRecoveryStale, OperationalRecoverySubject, OperationalRecoveryWaitingReason,
+    OperationalRecoveryResume, OperationalRecoveryStale, OperationalRecoverySubject,
+    OperationalRecoveryWaitingReason,
 };
 use novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease;
 use rusqlite::Connection;
@@ -39,6 +40,85 @@ fn claim_rejects_a_typed_action_whose_hash_was_forged() {
         ),
         Err(OperationalRecoveryAggregateError::ActionSpecHashMismatch)
     ));
+}
+
+#[test]
+fn a_new_exclusive_runtime_can_authorize_resume_of_a_started_local_projection() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "a",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let claim = claim(&observation, "old-runtime", 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim.clone(),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let execution = OperationalRecoveryExecution::derive(
+        &claim,
+        OperationalRecoveryEffectClass::PersistedProviderResultProjection,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            execution.clone(),
+            fixture.clock(),
+            event_metadata("2026-07-13T00:01:00Z"),
+        )
+        .unwrap();
+    let new_lease = fixture.lease("new-runtime");
+    let resume = OperationalRecoveryResume::derive(
+        &execution,
+        "new-runtime".to_owned(),
+        "2026-07-13T00:02:00Z".to_owned(),
+    )
+    .unwrap();
+    let resumed = repository
+        .authorize_local_execution_resume(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            resume.clone(),
+            &new_lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:02:00Z"),
+        )
+        .unwrap();
+    assert_eq!(
+        resumed.operations[&observation.operation_id].resumes,
+        std::slice::from_ref(&resume)
+    );
+    assert_eq!(
+        repository
+            .authorize_local_execution_resume(
+                &subject.workspace_id,
+                &subject.run_id,
+                &observation.operation_id,
+                resume,
+                &new_lease,
+                fixture.clock(),
+                event_metadata("2026-07-13T00:02:00Z"),
+            )
+            .unwrap()
+            .revision,
+        resumed.revision
+    );
 }
 
 #[test]
@@ -935,5 +1015,9 @@ impl Fixture {
             .unwrap()
             .current_global_sequence()
             .unwrap()
+    }
+
+    fn lease(&self, instance_id: &str) -> WorkspaceRuntimeLease {
+        WorkspaceRuntimeLease::acquire(&self.path, instance_id).unwrap()
     }
 }
