@@ -51,6 +51,14 @@ fn claim_service_rescans_and_claims_the_recorded_ready_operation() {
         claim.source_fingerprint,
         operation.observation.source_fingerprint
     );
+    let action = claim
+        .action_spec
+        .as_ref()
+        .expect("new claims persist action");
+    assert_eq!(
+        action.action_spec_sha256().unwrap(),
+        claim.action_spec_sha256
+    );
 }
 
 #[test]

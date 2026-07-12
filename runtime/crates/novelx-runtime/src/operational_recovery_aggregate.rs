@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+use crate::operational_recovery_action::OperationalRecoveryAction;
 use crate::workspace_event_journal::{
     NewWorkspaceEvent, WorkspaceEvent, WorkspaceEventJournal, WorkspaceEventJournalError,
 };
@@ -181,6 +182,8 @@ pub struct OperationalRecoveryClaim {
     pub claimed_at: String,
     pub lease_expires_at: String,
     pub executor_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_spec: Option<OperationalRecoveryAction>,
     pub action_spec_sha256: String,
 }
 
@@ -194,6 +197,7 @@ impl OperationalRecoveryClaim {
         claimed_at: String,
         lease_expires_at: String,
         executor_version: String,
+        action_spec: Option<OperationalRecoveryAction>,
         action_spec_sha256: String,
     ) -> Result<Self, OperationalRecoveryAggregateError> {
         require_sha256("operation_id", &operation_id)?;
@@ -211,6 +215,14 @@ impl OperationalRecoveryClaim {
         }
         require_text("executor_version", &executor_version)?;
         require_sha256("action_spec_sha256", &action_spec_sha256)?;
+        if action_spec
+            .as_ref()
+            .map(OperationalRecoveryAction::action_spec_sha256)
+            .transpose()?
+            .is_some_and(|actual| actual != action_spec_sha256)
+        {
+            return Err(OperationalRecoveryAggregateError::ActionSpecHashMismatch);
+        }
         let claim_id = canonical_sha256(&serde_json::json!({
             "operationId": operation_id,
             "ownerInstanceId": owner_instance_id,
@@ -228,6 +240,7 @@ impl OperationalRecoveryClaim {
             claimed_at,
             lease_expires_at,
             executor_version,
+            action_spec,
             action_spec_sha256,
         })
     }
@@ -681,6 +694,7 @@ impl OperationalRecoveryRepository {
             || claim.operation_id != previous.operation_id
             || claim.source_fingerprint != previous.source_fingerprint
             || claim.executor_version != previous.executor_version
+            || claim.action_spec != previous.action_spec
             || claim.action_spec_sha256 != previous.action_spec_sha256
             || claim.fencing_token
                 != previous
@@ -1320,6 +1334,7 @@ fn validate_claim(
         claim.claimed_at.clone(),
         claim.lease_expires_at.clone(),
         claim.executor_version.clone(),
+        claim.action_spec.clone(),
         claim.action_spec_sha256.clone(),
     )?;
     if derived == *claim {
@@ -1645,6 +1660,8 @@ pub enum OperationalRecoveryAggregateError {
     OperationNotClaimable,
     #[error("operational recovery claim conflicts with persisted ownership")]
     ClaimConflict,
+    #[error("operational recovery action spec does not match its persisted SHA-256")]
+    ActionSpecHashMismatch,
     #[error("operational recovery fencing token is invalid")]
     FencingTokenInvalid,
     #[error("operational recovery requires the exclusive workspace runtime owner")]

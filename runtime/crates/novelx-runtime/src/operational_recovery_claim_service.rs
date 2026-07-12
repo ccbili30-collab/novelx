@@ -87,7 +87,8 @@ impl OperationalRecoveryClaimService {
             &request.run_id,
             bound_providers,
         )?;
-        let action_spec_sha256 = run.action.action_spec_sha256()?;
+        let action_spec = run.action.clone();
+        let action_spec_sha256 = action_spec.action_spec_sha256()?;
         let subject = OperationalRecoverySubject {
             workspace_id: request.workspace_id.clone(),
             project_id: request.project_id.clone(),
@@ -109,6 +110,7 @@ impl OperationalRecoveryClaimService {
             claimed_at.clone(),
             lease_expires_at,
             OPERATIONAL_RECOVERY_EXECUTOR_VERSION.to_owned(),
+            Some(action_spec),
             action_spec_sha256,
         )?;
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
@@ -251,6 +253,7 @@ impl OperationalRecoveryClaimService {
             claimed_at.clone(),
             (claimed + Duration::seconds(lease_seconds)).format(&Rfc3339)?,
             previous.executor_version.clone(),
+            previous.action_spec.clone(),
             previous.action_spec_sha256.clone(),
         )?;
         repository
@@ -450,6 +453,8 @@ pub enum OperationalRecoveryClaimError {
     WorkspaceJournal(#[from] WorkspaceEventJournalError),
     #[error(transparent)]
     Scan(#[from] OperationalRecoveryScanError),
+    #[error(transparent)]
+    ActionJson(#[from] serde_json::Error),
     #[error(transparent)]
     Aggregate(#[from] OperationalRecoveryAggregateError),
     #[error(transparent)]

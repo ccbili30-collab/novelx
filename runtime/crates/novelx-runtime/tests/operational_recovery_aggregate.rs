@@ -1,3 +1,4 @@
+use novelx_runtime::operational_recovery_action::OperationalRecoveryAction;
 use novelx_runtime::operational_recovery_aggregate::{
     OPERATIONAL_RECOVERY_POLICY_VERSION, OperationalRecoveryAggregateError,
     OperationalRecoveryClaim, OperationalRecoveryDisposition, OperationalRecoveryEffectClass,
@@ -8,6 +9,37 @@ use novelx_runtime::operational_recovery_aggregate::{
 use novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease;
 use rusqlite::Connection;
 use tempfile::TempDir;
+
+#[test]
+fn claim_rejects_a_typed_action_whose_hash_was_forged() {
+    let observation = observation(
+        &subject(),
+        "a",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let action = OperationalRecoveryAction::PersistedProviderResultProjection {
+        invocation_id: "invocation-1".to_owned(),
+        attempt_id: "attempt-1".to_owned(),
+        expected_loop_checkpoint_sha256: "b".repeat(64),
+        expected_attempt_sequence: 3,
+        response_body_sha256: "c".repeat(64),
+    };
+    assert!(matches!(
+        OperationalRecoveryClaim::derive(
+            observation.operation_id,
+            "runtime-1".to_owned(),
+            1,
+            observation.source_fingerprint,
+            "2026-07-13T00:00:00Z".to_owned(),
+            "2026-07-13T00:05:00Z".to_owned(),
+            "runtime-v2-local-projection-v1".to_owned(),
+            Some(action),
+            "d".repeat(64),
+        ),
+        Err(OperationalRecoveryAggregateError::ActionSpecHashMismatch)
+    ));
+}
 
 #[test]
 fn identical_observation_and_wait_are_idempotent_across_reopen() {
@@ -665,6 +697,7 @@ fn expired_unstarted_claim_transfers_with_exclusive_owner_and_increments_fence()
         "2026-07-13T00:05:00Z".to_owned(),
         "2026-07-13T00:10:00Z".to_owned(),
         first_claim.executor_version.clone(),
+        first_claim.action_spec.clone(),
         first_claim.action_spec_sha256.clone(),
     )
     .unwrap();
@@ -724,6 +757,7 @@ fn expired_unstarted_claim_transfers_with_exclusive_owner_and_increments_fence()
         "2026-07-13T00:10:00Z".to_owned(),
         "2026-07-13T00:15:00Z".to_owned(),
         second_claim.executor_version,
+        second_claim.action_spec,
         second_claim.action_spec_sha256,
     )
     .unwrap();
@@ -877,6 +911,7 @@ fn claim(
         "2026-07-13T00:00:00Z".to_owned(),
         "2026-07-13T00:05:00Z".to_owned(),
         "recovery-executor-v1".to_owned(),
+        None,
         "b".repeat(64),
     )
     .unwrap()

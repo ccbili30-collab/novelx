@@ -14,6 +14,7 @@ pub mod event_journal;
 pub mod goal_aggregate;
 pub mod goal_plan_command_service;
 pub mod live_agent_loop_runner;
+pub mod operational_recovery_action;
 pub mod operational_recovery_aggregate;
 pub mod operational_recovery_claim_service;
 pub mod operational_recovery_projection_service;
