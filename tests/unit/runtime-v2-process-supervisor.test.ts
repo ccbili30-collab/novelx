@@ -124,6 +124,24 @@ describe("RuntimeV2ProcessSupervisor", () => {
     expect(isAlive(pid)).toBe(false);
   });
 
+  it("binds a Provider through the sensitive command path and exposes only a safe receipt", async () => {
+    const supervisor = createSupervisor(createFixture("success"));
+    await supervisor.start();
+
+    const receipt = await supervisor.bindProvider(providerConfig(), "a".repeat(64), "unit-secret-key");
+
+    expect(receipt).toEqual({
+      profileId: "profile-1",
+      providerId: "deepseek",
+      modelId: "deepseek-chat",
+      configSha256: "a".repeat(64),
+      contextWindow: 1_000_000,
+      maxTokens: null,
+    });
+    expect(JSON.stringify(receipt)).not.toContain("unit-secret-key");
+    expect(supervisor.stderr).not.toContain("unit-secret-key");
+  });
+
   it("reports an unexpected post-ready crash and rejects an in-flight command", async () => {
     const failures: RuntimeV2SupervisorError[] = [];
     const supervisor = createSupervisor(createFixture("exit-on-status"), {
@@ -203,6 +221,26 @@ function isAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+function providerConfig() {
+  return {
+    schemaVersion: 1 as const,
+    profileId: "profile-1",
+    providerId: "deepseek",
+    displayName: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/v1",
+    modelId: "deepseek-chat",
+    apiFlavor: "open_ai_chat_completions" as const,
+    authScheme: "bearer" as const,
+    contextWindow: 1_000_000,
+    maxTokens: null,
+    reasoning: false,
+    input: ["text" as const],
+    requestTimeoutMs: 30_000,
+    totalDeadlineMs: 120_000,
+    retryPolicy: { maxAttempts: 3, maxTotalDelayMs: 30_000 },
+  };
+}
+
 async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -240,6 +278,17 @@ input.on("line", (line) => {
     runtimeSequence += 1;
     if (scenario === "exit-on-status" && command.name === "runtime.status.get") process.exit(9);
     if (scenario === "ignore-status" && command.name === "runtime.status.get") return;
+    if (command.name === "provider.bind") {
+      process.stdout.write(JSON.stringify(envelope(1, "provider.bound", {
+        profileId: command.payload.config.profileId,
+        providerId: command.payload.config.providerId,
+        modelId: command.payload.config.modelId,
+        configSha256: command.payload.configSha256,
+        contextWindow: command.payload.config.contextWindow,
+        maxTokens: command.payload.config.maxTokens,
+      }, command.messageId, runtimeSequence, "response")) + "\n");
+      return;
+    }
     if (command.name === "runtime.status.get") {
       process.stdout.write(JSON.stringify(envelope(1, "runtime.status", {
         initialized: true, workspaceDatabaseConfigured: false, recoveredRunCount: 0,

@@ -16,6 +16,8 @@ import {
   parseRuntimeV2RunCancelEnvelope,
   parseRuntimeV2RunSnapshotEnvelope,
   parseRuntimeV2RunStartEnvelope,
+  parseRuntimeV2SensitiveProviderBindEnvelope,
+  parseRuntimeV2ProviderBoundEnvelope,
   runtimeV2EnvelopeSchema,
 } from "../../src/shared/runtimeV2Protocol";
 
@@ -262,6 +264,35 @@ function runSnapshotEnvelope(overrides: Record<string, unknown> = {}) {
       runId, pinnedIdentity: runPinnedIdentity(), state: "created", recoveryClassification: "resumable",
       runSequence: 1, aggregateSequence: 1, createdAt: "2026-07-12T00:00:09Z", updatedAt: "2026-07-12T00:00:09Z",
     }, ...overrides,
+  };
+}
+
+function providerConfig() {
+  return {
+    schemaVersion: 1, profileId: "profile-1", providerId: "deepseek", displayName: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/v1", modelId: "deepseek-chat",
+    apiFlavor: "open_ai_chat_completions", authScheme: "bearer", contextWindow: 1_000_000,
+    maxTokens: null, reasoning: false, input: ["text"], requestTimeoutMs: 30_000,
+    totalDeadlineMs: 120_000, retryPolicy: { maxAttempts: 3, maxTotalDelayMs: 30_000 },
+  };
+}
+
+function sensitiveProviderBindEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1, messageId: "44d85a68-1e0a-408c-bce7-d99e191576cf", messageType: "sensitive_command",
+    name: "provider.bind", sentAt: "2026-07-12T00:00:10Z", correlationId: null, runId: null, sequence: 8,
+    payload: { config: providerConfig(), configSha256: "a".repeat(64), credential: "sensitive-test-key" },
+    ...overrides,
+  };
+}
+
+function providerBoundEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1, messageId: "e56f65e3-f591-4b74-a9ad-a54cc704ae7e", messageType: "response",
+    name: "provider.bound", sentAt: "2026-07-12T00:00:11Z",
+    correlationId: sensitiveProviderBindEnvelope().messageId, runId: null, sequence: 8,
+    payload: { profileId: "profile-1", providerId: "deepseek", modelId: "deepseek-chat", configSha256: "a".repeat(64), contextWindow: 1_000_000, maxTokens: null },
+    ...overrides,
   };
 }
 
@@ -529,5 +560,24 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
       runId: "0c49e78c-3a5c-45b5-a1ca-af61173f35a6",
     }))).toThrow();
     expect(() => parseRuntimeV2RunCancelEnvelope(runCancelEnvelope({ payload: { cancelIdempotencyKey: "", reason: "" } }))).toThrow();
+  });
+
+  it("keeps Provider credentials on a dedicated sensitive message type", () => {
+    expect(parseRuntimeV2SensitiveProviderBindEnvelope(sensitiveProviderBindEnvelope()))
+      .toEqual(sensitiveProviderBindEnvelope());
+    expect(parseRuntimeV2ProviderBoundEnvelope(providerBoundEnvelope())).toEqual(providerBoundEnvelope());
+    expect(runtimeV2EnvelopeSchema.safeParse(sensitiveProviderBindEnvelope()).success).toBe(false);
+    expect(JSON.stringify(providerBoundEnvelope())).not.toContain("sensitive-test-key");
+  });
+
+  it("rejects malformed sensitive Provider bindings", () => {
+    expect(() => parseRuntimeV2SensitiveProviderBindEnvelope(sensitiveProviderBindEnvelope({ messageType: "command" }))).toThrow();
+    expect(() => parseRuntimeV2SensitiveProviderBindEnvelope(sensitiveProviderBindEnvelope({ runId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2SensitiveProviderBindEnvelope(sensitiveProviderBindEnvelope({
+      payload: { ...sensitiveProviderBindEnvelope().payload, credential: "" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2SensitiveProviderBindEnvelope(sensitiveProviderBindEnvelope({
+      payload: { ...sensitiveProviderBindEnvelope().payload, apiKey: "wrong-field" },
+    }))).toThrow();
   });
 });

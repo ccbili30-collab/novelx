@@ -237,6 +237,78 @@ fn persists_gets_and_idempotently_retries_a_run_over_the_real_protocol() {
 }
 
 #[test]
+fn binds_a_sensitive_provider_without_echoing_the_credential() {
+    let (mut child, _hello) = spawn_and_read_hello();
+    let initialize = initialize_envelope(PROTOCOL_VERSION, "runtime.initialize");
+    write_envelope(&mut child, &initialize);
+    assert_eq!(read_next_envelope(&mut child).name, "runtime.ready");
+
+    let secret = "runtime-sensitive-provider-key";
+    let message_id = uuid::Uuid::new_v4();
+    write_line(
+        &mut child,
+        &serde_json::json!({
+            "protocolVersion": 1,
+            "messageId": message_id,
+            "messageType": "sensitive_command",
+            "name": "provider.bind",
+            "sentAt": "2026-07-12T00:00:10Z",
+            "correlationId": null,
+            "runId": null,
+            "sequence": 2,
+            "payload": {
+                "config": {
+                    "schemaVersion": 1,
+                    "profileId": "profile-1",
+                    "providerId": "deepseek",
+                    "displayName": "DeepSeek",
+                    "baseUrl": "https://api.deepseek.com/v1",
+                    "modelId": "deepseek-chat",
+                    "apiFlavor": "open_ai_chat_completions",
+                    "authScheme": "bearer",
+                    "contextWindow": 1000000,
+                    "maxTokens": null,
+                    "reasoning": false,
+                    "input": ["text"],
+                    "requestTimeoutMs": 30000,
+                    "totalDeadlineMs": 120000,
+                    "retryPolicy": { "maxAttempts": 3, "maxTotalDelayMs": 30000 }
+                },
+                "configSha256": "bc9267f85e52b4ac2945b81966aa9a4cc7f513642cfa8f0057f7fc35b90586c8",
+                "credential": secret
+            }
+        })
+        .to_string(),
+    );
+    let bound = read_next_envelope(&mut child);
+    assert_eq!(bound.name, "provider.bound");
+    assert_eq!(bound.correlation_id, Some(message_id));
+    assert!(!serde_json::to_string(&bound).unwrap().contains(secret));
+
+    let status = command_envelope("runtime.status.get", 3, serde_json::json!({}));
+    write_envelope(&mut child, &status);
+    assert_response(
+        &read_next_envelope(&mut child),
+        &status,
+        "runtime.status",
+        4,
+    );
+    let shutdown = command_envelope("runtime.shutdown", 4, serde_json::json!({}));
+    write_envelope(&mut child, &shutdown);
+    assert_response(
+        &read_next_envelope(&mut child),
+        &shutdown,
+        "runtime.stopped",
+        5,
+    );
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+}
+
+#[test]
 fn protocol_violations_emit_correlated_runtime_error_and_fail_closed() {
     let cases = [
         "duplicate_sequence",

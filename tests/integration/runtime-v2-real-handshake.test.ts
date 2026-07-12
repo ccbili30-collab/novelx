@@ -88,6 +88,18 @@ describe("Runtime V2 real Rust handshake", () => {
       protocolVersion: RUNTIME_V2_PROTOCOL_VERSION,
       runtimeVersion: handshake.hello.payload.runtimeVersion,
     });
+    const secret = "real-handshake-sensitive-key";
+    await expect(supervisor.bindProvider(
+      runtimeProviderConfig(),
+      "bc9267f85e52b4ac2945b81966aa9a4cc7f513642cfa8f0057f7fc35b90586c8",
+      secret,
+    )).resolves.toMatchObject({
+      profileId: "profile-1",
+      providerId: "deepseek",
+      modelId: "deepseek-chat",
+      contextWindow: 1_000_000,
+    });
+    expect(supervisor.stderr).not.toContain(secret);
 
     await supervisor.stop();
 
@@ -198,6 +210,26 @@ function runStartPayload(): RuntimeV2RunStartPayload {
       resourceScopeSha256: "1".repeat(64),
       userInputSha256: "2".repeat(64),
     },
+  };
+}
+
+function runtimeProviderConfig() {
+  return {
+    schemaVersion: 1 as const,
+    profileId: "profile-1",
+    providerId: "deepseek",
+    displayName: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/v1",
+    modelId: "deepseek-chat",
+    apiFlavor: "open_ai_chat_completions" as const,
+    authScheme: "bearer" as const,
+    contextWindow: 1_000_000,
+    maxTokens: null,
+    reasoning: false,
+    input: ["text" as const],
+    requestTimeoutMs: 30_000,
+    totalDeadlineMs: 120_000,
+    retryPolicy: { maxAttempts: 3, maxTotalDelayMs: 30_000 },
   };
 }
 

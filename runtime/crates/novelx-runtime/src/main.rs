@@ -6,6 +6,9 @@ use novelx_protocol::{
     RuntimeReady, RuntimeStatus, RuntimeStopped,
 };
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
+use novelx_runtime::provider_gateway::{
+    ProviderBindSensitiveEnvelope, ProviderGatewayError, ProviderRegistry,
+};
 use novelx_runtime::recovery::{RecoveryCoordinator, RecoveryError};
 use novelx_runtime::run_command_service::{RunCommandFailure, RunCommandService, WorkspaceBinding};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -132,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     output.write_all(b"\n")?;
     output.flush()?;
 
+    let mut provider_registry = ProviderRegistry::default();
     run_command_loop(
         &mut lines,
         &mut output,
@@ -139,6 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         recovered_run_count,
         &mut journal,
         workspace_binding.as_ref(),
+        &mut provider_registry,
     )
 }
 
@@ -174,10 +179,27 @@ fn run_command_loop(
     recovered_run_count: u64,
     journal: &mut Option<EventJournal>,
     workspace_binding: Option<&WorkspaceBinding>,
+    provider_registry: &mut ProviderRegistry,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for ((expected_host_sequence, runtime_sequence), line) in (2_u64..).zip(3_u64..).zip(lines) {
         let line = line?;
-        let command: Envelope = serde_json::from_str(&line)?;
+        let value: serde_json::Value = serde_json::from_str(&line)?;
+        if value.get("messageType").and_then(serde_json::Value::as_str) == Some("sensitive_command")
+        {
+            let sensitive: ProviderBindSensitiveEnvelope = serde_json::from_value(value)?;
+            if let Err(error) = sensitive.validate(expected_host_sequence) {
+                write_protocol_error(
+                    output,
+                    sensitive.message_id,
+                    runtime_sequence,
+                    &error.to_string(),
+                )?;
+                return Err(io::Error::new(io::ErrorKind::InvalidData, error.to_string()).into());
+            }
+            handle_provider_bind(output, sensitive, runtime_sequence, provider_registry)?;
+            continue;
+        }
+        let command: Envelope = serde_json::from_value(value)?;
         if let Err(error) = validate_command(&command, expected_host_sequence) {
             write_protocol_error(output, command.message_id, runtime_sequence, &error)?;
             return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
@@ -283,6 +305,64 @@ fn require_empty_payload(command: &Envelope) -> Result<(), String> {
     }
 }
 
+fn handle_provider_bind(
+    output: &mut impl Write,
+    command: ProviderBindSensitiveEnvelope,
+    runtime_sequence: u64,
+    registry: &mut ProviderRegistry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let correlation_id = command.message_id;
+    let payload = command.payload;
+    match registry.bind(payload.config, &payload.config_sha256, payload.credential) {
+        Ok(receipt) => write_correlated_response(
+            output,
+            correlation_id,
+            runtime_sequence,
+            "provider.bound",
+            receipt,
+        ),
+        Err(error) => {
+            eprintln!("provider.bind rejected: {error}");
+            write_correlated_response(
+                output,
+                correlation_id,
+                runtime_sequence,
+                "provider.rejected",
+                provider_binding_error(&error),
+            )
+        }
+    }
+}
+
+fn provider_binding_error(error: &ProviderGatewayError) -> RuntimeError {
+    let (code, class, public_message) = match error {
+        ProviderGatewayError::CredentialInvalid | ProviderGatewayError::CredentialRequired => (
+            "PROVIDER_CREDENTIAL_REQUIRED",
+            RuntimeErrorClass::ProviderAuth,
+            "模型服务凭据不可用。",
+        ),
+        ProviderGatewayError::ConfigHashMismatch | ProviderGatewayError::ProfileMismatch => (
+            "PROVIDER_PROFILE_MISMATCH",
+            RuntimeErrorClass::Validation,
+            "模型服务配置与任务记录不一致。",
+        ),
+        _ => (
+            "PROVIDER_CONFIG_INVALID",
+            RuntimeErrorClass::Validation,
+            "模型服务配置无效。",
+        ),
+    };
+    RuntimeError {
+        code: code.to_owned(),
+        class,
+        retryable: false,
+        public_message: public_message.to_owned(),
+        stage: "provider.bind".to_owned(),
+        attempt: 0,
+        diagnostic_id: Uuid::new_v4(),
+    }
+}
+
 fn handle_run_start(
     output: &mut impl Write,
     command: &Envelope,
@@ -382,6 +462,19 @@ fn write_response(
     payload: impl serde::Serialize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = response_envelope(command, sequence, name, payload)?;
+    write_envelope(output, &response)
+}
+
+fn write_correlated_response(
+    output: &mut impl Write,
+    correlation_id: Uuid,
+    sequence: u64,
+    name: &str,
+    payload: impl serde::Serialize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    let mut response = Envelope::new(MessageType::Response, name, sent_at, sequence, payload)?;
+    response.correlation_id = Some(correlation_id);
     write_envelope(output, &response)
 }
 

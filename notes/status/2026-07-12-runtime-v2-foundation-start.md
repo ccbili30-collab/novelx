@@ -44,14 +44,17 @@
 - Added a zeroizing in-memory Provider registry that resolves only an exact profile/provider/model/config hash pinned by the Run; binding receipts cannot serialize credentials.
 - Added an asynchronous Reqwest Provider Gateway with redirects disabled, bounded response size, total/request deadlines, optional `/models` capability discovery, configured-capability fallback and strict minimal chat ping validation.
 - Added real loopback HTTP transport tests for a 1M Provider capability and a Provider that does not expose `/models`.
+- Added a dedicated `sensitive_command` Provider binding path. Ordinary Runtime envelopes reject it; Rust consumes the credential only into zeroizing memory and returns a secret-free binding receipt.
+- Extended the Electron Supervisor to send the sensitive frame from a Buffer that is overwritten after the pipe write callback, correlate `provider.bound`/`provider.rejected`, and never expose the credential in stderr or receipts.
+- Added real TypeScript-to-Rust sensitive binding tests and output/stderr leak assertions.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 56 tests.
+- Rust workspace tests pass: 57 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 45 tests, including Run schema strictness, fatal timeout cleanup, post-ready crash rejection and real restart recovery.
+- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 48 tests, including sensitive Provider isolation, Run schema strictness, fatal timeout cleanup, post-ready crash rejection and real restart recovery.
 - `git diff --check` passes.
 - Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and explicit `handshake`, `runtime_control` and `runs_v1` capabilities.
 
@@ -61,7 +64,7 @@
 - The runtime opens and recovers the supplied workspace database and processes durable Run acceptance/query plus status/shutdown controls, but it does not yet schedule Provider or tool execution.
 - `run.start` currently stops at durable `created`; Preparing/Provider/context/tool scheduling is not connected. Cancellation is connected only at the Run state level because no Provider/tool work exists yet to interrupt.
 - The ToolCall state machine and event-backed aggregate exist, but the real tool executor, full Provider inference pipeline, context compiler, recovery execution policy and domain tools are not implemented.
-- The Provider Gateway can bind/validate a profile and perform a real minimal connection ping, but sensitive credential injection, durable Provider attempt events, full inference requests and Run scheduling are not connected.
+- The Provider Gateway can bind/validate a profile and perform a real minimal connection ping, and sensitive credential injection is connected. Durable Provider attempt events, full inference requests and Run scheduling are not connected.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.

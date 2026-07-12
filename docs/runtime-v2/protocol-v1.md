@@ -156,6 +156,10 @@ The strict stopped response payload is:
 
 Command and response payloads reject unknown fields. Host command sequence and runtime response sequence are independently monotonic for the lifetime of the connection; matching numeric values across directions do not imply shared ownership.
 
+Provider credentials do not use the ordinary `command` envelope. `provider.bind` uses the dedicated `sensitive_command` message type with the same Host connection sequence. Its strict payload is `{ config, configSha256, credential }`. The Runtime validates and consumes it in memory, never appends it to the Event Journal and responds only with secret-free `provider.bound` or typed `provider.rejected`. Generic Runtime envelope parsers reject `sensitive_command` so it cannot accidentally enter ordinary command logging or projections.
+
+The migration implementation sends the sensitive frame from Electron Main as a UTF-8 Buffer and overwrites that Buffer after the stdin write callback. JavaScript strings and operating-system pipe buffers cannot be proven zeroized; ADR-0006 records this limitation and the future Windows Credential Manager route.
+
 When `workspaceDatabasePath` is configured, `runtime.initialize` also requires non-empty `projectId` and `workspaceId`. When no workspace database is configured, all three fields are null. A Run whose pinned project/workspace identity does not match initialization is rejected without a journal write.
 
 ## 4. Run Commands

@@ -7,8 +7,53 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
+use uuid::Uuid;
 
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
+
+#[derive(Clone, Copy, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensitiveMessageType {
+    SensitiveCommand,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderBindSensitiveEnvelope {
+    pub protocol_version: u16,
+    pub message_id: Uuid,
+    pub message_type: SensitiveMessageType,
+    pub name: String,
+    pub sent_at: String,
+    pub correlation_id: Option<Uuid>,
+    pub run_id: Option<Uuid>,
+    pub sequence: u64,
+    pub payload: ProviderBindSensitivePayload,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderBindSensitivePayload {
+    pub config: ProviderConfig,
+    pub config_sha256: String,
+    pub credential: String,
+}
+
+impl ProviderBindSensitiveEnvelope {
+    pub fn validate(&self, expected_sequence: u64) -> Result<(), ProviderGatewayError> {
+        if self.protocol_version != novelx_protocol::PROTOCOL_VERSION
+            || self.message_type != SensitiveMessageType::SensitiveCommand
+            || self.name != "provider.bind"
+            || self.correlation_id.is_some()
+            || self.run_id.is_some()
+            || self.sequence != expected_sequence
+            || self.sent_at.trim().is_empty()
+        {
+            return Err(ProviderGatewayError::SensitiveProtocolInvalid);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -445,6 +490,8 @@ fn classify_status(status: reqwest::StatusCode) -> Result<(), ProviderGatewayErr
 
 #[derive(Debug, Error)]
 pub enum ProviderGatewayError {
+    #[error("Sensitive Provider protocol message is invalid")]
+    SensitiveProtocolInvalid,
     #[error("Provider configuration schema version is unsupported")]
     SchemaVersionUnsupported,
     #[error("Provider field `{0}` must not be empty")]

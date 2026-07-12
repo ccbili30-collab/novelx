@@ -8,12 +8,15 @@ import {
   parseRuntimeV2HelloEnvelope,
   parseRuntimeV2ErrorEnvelope,
   parseRuntimeV2InitializationFailedEnvelope,
+  parseRuntimeV2ProviderBoundEnvelope,
+  parseRuntimeV2ProviderRejectedEnvelope,
   parseRuntimeV2ReadyEnvelope,
   parseRuntimeV2RunRejectedEnvelope,
   parseRuntimeV2RunSnapshotEnvelope,
   parseRuntimeV2StatusEnvelope,
   parseRuntimeV2StoppedEnvelope,
   runtimeV2InitializeEnvelopeSchema,
+  runtimeV2SensitiveProviderBindEnvelopeSchema,
   runtimeV2RunGetEnvelopeSchema,
   runtimeV2RunCancelEnvelopeSchema,
   runtimeV2RunStartEnvelopeSchema,
@@ -23,6 +26,8 @@ import {
   type RuntimeV2Error,
   type RuntimeV2InitializeEnvelope,
   type RuntimeV2ReadyEnvelope,
+  type RuntimeV2ProviderBindingReceipt,
+  type RuntimeV2ProviderConfig,
   type RuntimeV2RunSnapshotPayload,
   type RuntimeV2RunCancelPayload,
   type RuntimeV2RunStartPayload,
@@ -71,6 +76,7 @@ export type RuntimeV2SupervisorErrorCode =
   | "RUNTIME_V2_COMMAND_TIMEOUT"
   | "RUNTIME_V2_EXITED_AFTER_READY"
   | "RUNTIME_V2_RUN_REJECTED"
+  | "RUNTIME_V2_PROVIDER_REJECTED"
   | "RUNTIME_V2_WRITE_FAILED";
 
 export class RuntimeV2SupervisorError extends Error {
@@ -172,6 +178,15 @@ export class RuntimeV2ProcessSupervisor {
   async cancelRun(runId: string, payload: RuntimeV2RunCancelPayload): Promise<RuntimeV2RunSnapshotPayload> {
     const response = await this.#sendCommand("run.cancel", "run.snapshot", runId, payload);
     return parseRuntimeV2RunSnapshotEnvelope(response).payload;
+  }
+
+  async bindProvider(
+    config: RuntimeV2ProviderConfig,
+    configSha256: string,
+    credential: string,
+  ): Promise<RuntimeV2ProviderBindingReceipt> {
+    const response = await this.#sendSensitiveProviderBind(config, configSha256, credential);
+    return parseRuntimeV2ProviderBoundEnvelope(response).payload;
   }
 
   async stop(): Promise<void> {
@@ -318,6 +333,10 @@ export class RuntimeV2ProcessSupervisor {
               ? parseRuntimeV2RunSnapshotEnvelope(value)
               : name === "run.rejected"
                 ? parseRuntimeV2RunRejectedEnvelope(value)
+                : name === "provider.bound"
+                  ? parseRuntimeV2ProviderBoundEnvelope(value)
+                  : name === "provider.rejected"
+                    ? parseRuntimeV2ProviderRejectedEnvelope(value)
             : null;
       if (!response) throw new Error(`unexpected Runtime V2 message after ready: ${String(name)}.`);
       if (response.sequence !== this.#expectedRuntimeSequence) {
@@ -330,9 +349,13 @@ export class RuntimeV2ProcessSupervisor {
       if (!pending) throw new Error(`Runtime V2 response has no pending command: ${String(correlationId)}.`);
       this.#pending.delete(correlationId);
       clearTimeout(pending.timer);
-      if (response.name === "runtime.error" || response.name === "run.rejected") {
+      if (response.name === "runtime.error" || response.name === "run.rejected" || response.name === "provider.rejected") {
         pending.reject(new RuntimeV2SupervisorError(
-          response.name === "run.rejected" ? "RUNTIME_V2_RUN_REJECTED" : "RUNTIME_V2_PROTOCOL_INVALID",
+          response.name === "run.rejected"
+            ? "RUNTIME_V2_RUN_REJECTED"
+            : response.name === "provider.rejected"
+              ? "RUNTIME_V2_PROVIDER_REJECTED"
+              : "RUNTIME_V2_PROTOCOL_INVALID",
           response.payload.publicMessage,
           { publicPayload: response.payload, stderr: this.#stderr },
         ));
@@ -345,6 +368,59 @@ export class RuntimeV2ProcessSupervisor {
     } catch (error) {
       this.#failRuntime(toProtocolError(error));
     }
+  }
+
+  #sendSensitiveProviderBind(
+    config: RuntimeV2ProviderConfig,
+    configSha256: string,
+    credential: string,
+  ): Promise<unknown> {
+    const child = this.#child;
+    if (!child || !this.#ready || child.stdin.destroyed) {
+      return Promise.reject(new RuntimeV2SupervisorError("RUNTIME_V2_NOT_READY", "Runtime V2 is not ready."));
+    }
+    const sequence = this.#nextHostSequence;
+    this.#nextHostSequence += 1;
+    const command = runtimeV2SensitiveProviderBindEnvelopeSchema.parse({
+      protocolVersion: RUNTIME_V2_PROTOCOL_VERSION,
+      messageId: randomUUID(),
+      messageType: "sensitive_command",
+      name: "provider.bind",
+      sentAt: new Date().toISOString(),
+      correlationId: null,
+      runId: null,
+      sequence,
+      payload: { config, configSha256, credential },
+    });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(command.messageId);
+        const error = new RuntimeV2SupervisorError(
+          "RUNTIME_V2_COMMAND_TIMEOUT",
+          `provider.bind did not complete within ${this.#options.commandTimeoutMs}ms.${stderrSuffix(this.#stderr)}`,
+          { stderr: this.#stderr },
+        );
+        reject(error);
+        this.#failRuntime(error);
+      }, this.#options.commandTimeoutMs);
+      this.#pending.set(command.messageId, { expectedName: "provider.bound", resolve, reject, timer });
+      const sensitiveBytes = Buffer.from(`${JSON.stringify(command)}\n`, "utf8");
+      child.stdin.write(sensitiveBytes, (error) => {
+        sensitiveBytes.fill(0);
+        if (!error) return;
+        const pending = this.#pending.get(command.messageId);
+        if (!pending) return;
+        this.#pending.delete(command.messageId);
+        clearTimeout(pending.timer);
+        const failure = new RuntimeV2SupervisorError(
+          "RUNTIME_V2_WRITE_FAILED",
+          "provider.bind could not be written.",
+          { cause: error },
+        );
+        reject(failure);
+        this.#failRuntime(failure);
+      });
+    });
   }
 
   #sendCommand(
@@ -435,7 +511,7 @@ export class RuntimeV2ProcessSupervisor {
 }
 
 interface PendingCommand {
-  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot";
+  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "provider.bound";
   resolve(value: unknown): void;
   reject(error: RuntimeV2SupervisorError): void;
   timer: NodeJS.Timeout;

@@ -327,6 +327,92 @@ export const runtimeV2RunRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend
   payload: runtimeV2ErrorSchema,
 }).strict();
 
+export const runtimeV2ProviderConfigSchema = z.object({
+  schemaVersion: z.literal(1),
+  profileId: identityStringSchema,
+  providerId: identityStringSchema,
+  displayName: identityStringSchema,
+  baseUrl: z.url().superRefine((value, context) => {
+    const url = new URL(value);
+    const secure = url.protocol === "https:";
+    const loopback = url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+    if (!secure && !loopback) context.addIssue({ code: "custom", message: "Remote Provider URLs require HTTPS." });
+    if (url.username || url.password || url.search || url.hash) {
+      context.addIssue({ code: "custom", message: "Provider URL cannot contain credentials, query or fragment." });
+    }
+  }),
+  modelId: identityStringSchema,
+  apiFlavor: z.literal("open_ai_chat_completions"),
+  authScheme: z.literal("bearer"),
+  contextWindow: z.number().int().positive().max(10_000_000),
+  maxTokens: z.number().int().positive().max(1_000_000).nullable(),
+  reasoning: z.boolean(),
+  input: z.array(z.enum(["text", "image"])).min(1).max(2),
+  requestTimeoutMs: z.number().int().min(1_000).max(300_000),
+  totalDeadlineMs: z.number().int().min(1_000).max(900_000),
+  retryPolicy: z.object({
+    maxAttempts: z.number().int().min(1).max(10),
+    maxTotalDelayMs: z.number().int().min(0).max(900_000),
+  }).strict(),
+}).strict().superRefine((config, context) => {
+  if (config.maxTokens !== null && config.maxTokens > config.contextWindow) {
+    context.addIssue({ code: "custom", path: ["maxTokens"], message: "maxTokens cannot exceed contextWindow." });
+  }
+  if (config.totalDeadlineMs < config.requestTimeoutMs) {
+    context.addIssue({ code: "custom", path: ["totalDeadlineMs"], message: "totalDeadlineMs cannot precede requestTimeoutMs." });
+  }
+  if (config.retryPolicy.maxTotalDelayMs > config.totalDeadlineMs) {
+    context.addIssue({ code: "custom", path: ["retryPolicy", "maxTotalDelayMs"], message: "Retry delay budget cannot exceed total deadline." });
+  }
+  const inputOrder = { text: 0, image: 1 } as const;
+  for (let index = 1; index < config.input.length; index += 1) {
+    if (inputOrder[config.input[index - 1]] >= inputOrder[config.input[index]]) {
+      context.addIssue({ code: "custom", path: ["input", index], message: "Input capabilities must be sorted and unique." });
+    }
+  }
+});
+
+export const runtimeV2SensitiveProviderBindEnvelopeSchema = z.object({
+  protocolVersion: z.literal(RUNTIME_V2_PROTOCOL_VERSION),
+  messageId: z.uuid(),
+  messageType: z.literal("sensitive_command"),
+  name: z.literal("provider.bind"),
+  sentAt: z.iso.datetime({ offset: true }),
+  correlationId: z.null(),
+  runId: z.null(),
+  sequence: z.number().int().positive().safe(),
+  payload: z.object({
+    config: runtimeV2ProviderConfigSchema,
+    configSha256: sha256Schema,
+    credential: z.string().trim().min(1).max(8_192),
+  }).strict(),
+}).strict();
+
+export const runtimeV2ProviderBindingReceiptSchema = z.object({
+  profileId: identityStringSchema,
+  providerId: identityStringSchema,
+  modelId: identityStringSchema,
+  configSha256: sha256Schema,
+  contextWindow: z.number().int().positive().max(10_000_000),
+  maxTokens: z.number().int().positive().max(1_000_000).nullable(),
+}).strict();
+
+export const runtimeV2ProviderBoundEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("provider.bound"),
+  correlationId: z.uuid(),
+  runId: z.null(),
+  payload: runtimeV2ProviderBindingReceiptSchema,
+}).strict();
+
+export const runtimeV2ProviderRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("provider.rejected"),
+  correlationId: z.uuid(),
+  runId: z.null(),
+  payload: runtimeV2ErrorSchema,
+}).strict();
+
 export type RuntimeV2MessageType = z.infer<typeof runtimeV2MessageTypeSchema>;
 export type RuntimeV2Envelope = z.infer<typeof runtimeV2EnvelopeSchema>;
 export type RuntimeV2HelloPayload = z.infer<typeof runtimeV2HelloPayloadSchema>;
@@ -354,6 +440,11 @@ export type RuntimeV2RunCancelEnvelope = z.infer<typeof runtimeV2RunCancelEnvelo
 export type RuntimeV2RunSnapshotPayload = z.infer<typeof runtimeV2RunSnapshotPayloadSchema>;
 export type RuntimeV2RunSnapshotEnvelope = z.infer<typeof runtimeV2RunSnapshotEnvelopeSchema>;
 export type RuntimeV2RunRejectedEnvelope = z.infer<typeof runtimeV2RunRejectedEnvelopeSchema>;
+export type RuntimeV2ProviderConfig = z.infer<typeof runtimeV2ProviderConfigSchema>;
+export type RuntimeV2SensitiveProviderBindEnvelope = z.infer<typeof runtimeV2SensitiveProviderBindEnvelopeSchema>;
+export type RuntimeV2ProviderBindingReceipt = z.infer<typeof runtimeV2ProviderBindingReceiptSchema>;
+export type RuntimeV2ProviderBoundEnvelope = z.infer<typeof runtimeV2ProviderBoundEnvelopeSchema>;
+export type RuntimeV2ProviderRejectedEnvelope = z.infer<typeof runtimeV2ProviderRejectedEnvelopeSchema>;
 
 export class RuntimeV2ProtocolVersionError extends Error {
   readonly code = "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED";
@@ -437,6 +528,18 @@ export function parseRuntimeV2RunSnapshotEnvelope(value: unknown): RuntimeV2RunS
 
 export function parseRuntimeV2RunRejectedEnvelope(value: unknown): RuntimeV2RunRejectedEnvelope {
   return parseVersionedEnvelope(value, runtimeV2RunRejectedEnvelopeSchema);
+}
+
+export function parseRuntimeV2SensitiveProviderBindEnvelope(value: unknown): RuntimeV2SensitiveProviderBindEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2SensitiveProviderBindEnvelopeSchema);
+}
+
+export function parseRuntimeV2ProviderBoundEnvelope(value: unknown): RuntimeV2ProviderBoundEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ProviderBoundEnvelopeSchema);
+}
+
+export function parseRuntimeV2ProviderRejectedEnvelope(value: unknown): RuntimeV2ProviderRejectedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ProviderRejectedEnvelopeSchema);
 }
 
 function parseVersionedEnvelope<T>(value: unknown, schema: z.ZodType<T>): T {
