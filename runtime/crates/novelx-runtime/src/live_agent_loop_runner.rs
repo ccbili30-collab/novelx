@@ -17,9 +17,10 @@ use crate::{
     agent_loop_journal::{AgentLoopEventMetadata, AgentLoopJournalRepository},
     agent_loop_service::{
         AgentLoopDirective, AgentLoopIdentity, AgentLoopPolicy, AgentLoopService,
-        FinalizedToolResult,
+        FinalizedToolResult, InferenceDispatchIdentity,
     },
     artifact_store::ArtifactStore,
+    context_compile_service::recover_compilation_receipt,
     continuation_context_service::{ContinuationContextService, ContinuationContextServiceError},
     event_journal::{EventJournal, EventJournalError},
     project_path::ProjectRoot,
@@ -81,6 +82,54 @@ pub struct LiveAgentLoopRunner {
 }
 
 impl LiveAgentLoopRunner {
+    pub async fn resume_awaiting_provider<F, Fut, C>(
+        &self,
+        run_id: Uuid,
+        invocation_id: &str,
+        progress: F,
+        cancelled: C,
+    ) -> Result<LiveAgentLoopOutcome, LiveAgentLoopError>
+    where
+        F: FnMut(LiveAgentLoopProgress) -> Fut,
+        Fut: Future<Output = Result<(), LiveAgentLoopError>>,
+        C: FnMut() -> bool,
+    {
+        let run_id_text = run_id.to_string();
+        let loop_service = {
+            let mut journal = EventJournal::open(&self.database_path)?;
+            AgentLoopJournalRepository::new(&mut journal)
+                .recover(&run_id_text, invocation_id)?
+                .service
+        };
+        if loop_service.phase() != crate::agent_loop_service::LoopPhase::AwaitingProvider {
+            return Err(LiveAgentLoopError::ResumeStateInvalid);
+        }
+        let dispatch = loop_service
+            .pending_inference()
+            .cloned()
+            .ok_or(LiveAgentLoopError::ResumeStateInvalid)?;
+        let run = RunAggregate::recover(&EventJournal::open(&self.database_path)?, &run_id_text)?;
+        let compilation = {
+            let journal = EventJournal::open(&self.database_path)?;
+            recover_compilation_receipt(&journal, &run_id_text, dispatch.context_compilation_id)?
+        };
+        let execution = ProviderInferenceExecution {
+            run_id: run_id_text,
+            attempt_id: dispatch.attempt_id.to_string(),
+            inference_id: dispatch.inference_id.to_string(),
+            invocation_id: invocation_id.to_owned(),
+            inference_idempotency_key: dispatch.inference_idempotency_key,
+            attempt_number: dispatch.attempt_number,
+            provider: run.pinned_identity().provider.clone(),
+            request: crate::provider_gateway::ProviderInferenceRequest {
+                compilation,
+                messages: vec![],
+                tools: vec![],
+            },
+        };
+        self.run(execution, None, progress, cancelled).await
+    }
+
     pub fn assist_ready(
         &self,
         run_id: Uuid,
@@ -175,7 +224,7 @@ impl LiveAgentLoopRunner {
                 policy_sha256: pinned.tool_policy.sha256.clone(),
             },
         };
-        let proposed = AgentLoopService::new(identity, self.policy)?;
+        let dispatch = dispatch_identity(&execution)?;
         let mut loop_service;
         {
             let mut journal = EventJournal::open(&self.database_path)?;
@@ -186,6 +235,7 @@ impl LiveAgentLoopRunner {
                 0,
             )?;
             if events.is_empty() {
+                let proposed = AgentLoopService::new(identity, self.policy, dispatch)?;
                 let message_id = Uuid::new_v4().to_string();
                 let created_at = timestamp()?;
                 AgentLoopJournalRepository::new(&mut journal).create(
@@ -201,9 +251,10 @@ impl LiveAgentLoopRunner {
                 loop_service = AgentLoopJournalRepository::new(&mut journal)
                     .recover(&execution.run_id, &execution.invocation_id)?
                     .service;
-                if !same_resumable_identity(loop_service.identity(), proposed.identity())
+                if !same_resumable_identity(loop_service.identity(), &identity)
                     || loop_service.phase()
                         != crate::agent_loop_service::LoopPhase::AwaitingProvider
+                    || loop_service.pending_inference() != Some(&dispatch)
                 {
                     return Err(LiveAgentLoopError::ResumeStateInvalid);
                 }
@@ -337,9 +388,6 @@ impl LiveAgentLoopRunner {
                     let AgentLoopDirective::StartInference(next) = directive else {
                         return Err(LiveAgentLoopError::DirectiveInvalid);
                     };
-                    let previous = loop_service.clone();
-                    loop_service.acknowledge_inference_started(next.request_number)?;
-                    self.append_inference_started(&previous, &loop_service, next.request_number)?;
                     execution.attempt_id = Uuid::new_v4().to_string();
                     execution.inference_id = Uuid::new_v4().to_string();
                     execution.inference_idempotency_key = format!(
@@ -348,6 +396,9 @@ impl LiveAgentLoopRunner {
                     );
                     execution.attempt_number = 1;
                     execution.request.compilation = receipt;
+                    let previous = loop_service.clone();
+                    loop_service.acknowledge_inference_started(dispatch_identity(&execution)?)?;
+                    self.append_inference_started(&previous, &loop_service, next.request_number)?;
                     progress(LiveAgentLoopProgress::InferenceStarted(next)).await?;
                 }
                 _ => return Err(LiveAgentLoopError::DirectiveInvalid),
@@ -463,10 +514,6 @@ impl LiveAgentLoopRunner {
         let AgentLoopDirective::StartInference(next) = directive else {
             return Err(LiveAgentLoopError::DirectiveInvalid);
         };
-        let previous = loop_service.clone();
-        loop_service.acknowledge_inference_started(next.request_number)?;
-        self.append_inference_started(&previous, &loop_service, next.request_number)?;
-        progress(LiveAgentLoopProgress::InferenceStarted(next)).await?;
         let execution = ProviderInferenceExecution {
             run_id: run_id_text,
             attempt_id: Uuid::new_v4().to_string(),
@@ -484,6 +531,10 @@ impl LiveAgentLoopRunner {
                 tools: vec![],
             },
         };
+        let previous = loop_service.clone();
+        loop_service.acknowledge_inference_started(dispatch_identity(&execution)?)?;
+        self.append_inference_started(&previous, &loop_service, next.request_number)?;
+        progress(LiveAgentLoopProgress::InferenceStarted(next)).await?;
         self.run(execution, None, progress, cancelled).await
     }
 
@@ -537,6 +588,21 @@ impl LiveAgentLoopRunner {
         )?;
         Ok(())
     }
+}
+
+fn dispatch_identity(
+    execution: &ProviderInferenceExecution,
+) -> Result<InferenceDispatchIdentity, LiveAgentLoopError> {
+    Ok(InferenceDispatchIdentity {
+        inference_id: Uuid::parse_str(&execution.inference_id)
+            .map_err(|_| LiveAgentLoopError::IdentityInvalid)?,
+        attempt_id: Uuid::parse_str(&execution.attempt_id)
+            .map_err(|_| LiveAgentLoopError::IdentityInvalid)?,
+        request_number: execution.request.compilation.request_number,
+        context_compilation_id: execution.request.compilation.compilation_id,
+        attempt_number: execution.attempt_number,
+        inference_idempotency_key: execution.inference_idempotency_key.clone(),
+    })
 }
 
 fn completed(
@@ -673,6 +739,8 @@ pub enum LiveAgentLoopError {
     Materializer(#[from] ProviderToolMaterializerError),
     #[error(transparent)]
     Continuation(#[from] ContinuationContextServiceError),
+    #[error(transparent)]
+    Context(#[from] crate::context_compile_service::ContextCompileServiceError),
     #[error(transparent)]
     Provider(#[from] ProviderInferenceServiceError),
     #[error(transparent)]

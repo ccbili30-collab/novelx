@@ -11,7 +11,9 @@ use novelx_runtime::{
     agent_loop_service::AgentLoopPolicy,
     context_compile_service::ContextCompileService,
     event_journal::EventJournal,
-    live_agent_loop_runner::{LiveAgentLoopOutcome, LiveAgentLoopProgress, LiveAgentLoopRunner},
+    live_agent_loop_runner::{
+        LiveAgentLoopError, LiveAgentLoopOutcome, LiveAgentLoopProgress, LiveAgentLoopRunner,
+    },
     project_path::ProjectRoot,
     project_tool_execution_service::ProjectToolExecutionService,
     provider_gateway::{
@@ -131,6 +133,69 @@ async fn free_live_loop_executes_read_and_stat_then_sends_results_to_second_infe
     assert!(bodies[1].contains("provider-stat-1"));
     assert!(bodies[1].contains("银湾海岸向北延伸"));
     assert!(bodies[1].contains("tool"));
+}
+
+#[tokio::test]
+async fn awaiting_provider_resume_reuses_the_persisted_dispatch_identity() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.project.path().join("世界.md"), "银湾海岸向北延伸。").unwrap();
+    let (base_url, bodies, server) = spawn_two_round_server().await;
+    let (providers, provider) = registry(base_url);
+    let (run_id, receipt) = fixture.seed(&providers, provider.clone(), RunPermissionMode::Free);
+    let invocation_id = "steward-1";
+    let execution = ProviderInferenceExecution {
+        run_id: run_id.to_string(),
+        attempt_id: Uuid::new_v4().to_string(),
+        inference_id: Uuid::new_v4().to_string(),
+        invocation_id: invocation_id.to_owned(),
+        inference_idempotency_key: "resume-dispatch-1".to_owned(),
+        attempt_number: 1,
+        provider,
+        request: ProviderInferenceRequest {
+            compilation: receipt,
+            messages: vec![],
+            tools: vec![],
+        },
+    };
+    let runner = LiveAgentLoopRunner::open(
+        &fixture.database,
+        ProjectRoot::open(fixture.project.path().to_str().unwrap()).unwrap(),
+        "project-1".to_owned(),
+        providers,
+        ProviderGateway::new().unwrap(),
+        AgentLoopPolicy {
+            maximum_tool_rounds: 4,
+            tool_schema_version: 1,
+        },
+    )
+    .unwrap();
+
+    let interrupted = runner
+        .run(
+            execution,
+            None,
+            |event| async move {
+                if matches!(event, LiveAgentLoopProgress::InferenceStarted(_)) {
+                    return Err(LiveAgentLoopError::Progress(
+                        "simulated process interruption".to_owned(),
+                    ));
+                }
+                Ok(())
+            },
+            || false,
+        )
+        .await;
+    assert!(matches!(interrupted, Err(LiveAgentLoopError::Progress(_))));
+
+    let resumed = runner
+        .resume_awaiting_provider(run_id, invocation_id, |_| async { Ok(()) }, || false)
+        .await
+        .unwrap();
+    assert!(
+        matches!(resumed, LiveAgentLoopOutcome::Completed { ref output, .. } if output == "银湾资料核对完成。")
+    );
+    server.await.unwrap();
+    assert_eq!(bodies.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]

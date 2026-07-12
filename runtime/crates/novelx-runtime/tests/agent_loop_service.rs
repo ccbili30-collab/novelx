@@ -5,7 +5,7 @@ use novelx_protocol::{
 };
 use novelx_runtime::agent_loop_service::{
     AgentLoopDirective, AgentLoopError, AgentLoopIdentity, AgentLoopPolicy, AgentLoopService,
-    AssistToolDecision, FinalizedToolResult, LoopPhase,
+    AssistToolDecision, FinalizedToolResult, InferenceDispatchIdentity, LoopPhase,
 };
 use novelx_runtime::provider_tool_materializer::MaterializedProviderToolCall;
 use serde_json::json;
@@ -22,6 +22,31 @@ fn no_tool_provider_output_completes_without_another_inference() {
         AgentLoopDirective::Completed { ref output } if output == "正文完成"
     ));
     assert_eq!(service.phase(), LoopPhase::Completed);
+}
+
+#[test]
+fn provider_completion_must_match_the_persisted_dispatch_identity() {
+    let service = service(RunPermissionMode::Free, 4);
+    assert_eq!(service.pending_inference(), Some(&dispatch_identity(1)));
+    let checkpoint = service.checkpoint().unwrap();
+    let mut recovered = AgentLoopService::restore(checkpoint).unwrap();
+    assert_eq!(recovered.pending_inference(), Some(&dispatch_identity(1)));
+
+    let mut mismatched = completion(1, vec![], Some("不应接受"));
+    mismatched.identity.attempt_id = Uuid::new_v4();
+    assert_eq!(
+        recovered
+            .accept_provider_outcome(mismatched, vec![])
+            .unwrap_err(),
+        AgentLoopError::ProviderIdentityMismatch
+    );
+    assert_eq!(recovered.phase(), LoopPhase::AwaitingProvider);
+
+    recovered
+        .accept_provider_outcome(completion(1, vec![], Some("已恢复")), vec![])
+        .unwrap();
+    assert_eq!(recovered.phase(), LoopPhase::Completed);
+    assert_eq!(recovered.pending_inference(), None);
 }
 
 #[test]
@@ -67,7 +92,9 @@ fn free_mode_batches_multiple_calls_and_continues_after_success_and_failure_resu
         AgentLoopDirective::StartInference(ref intent)
             if intent.context_compilation_id == compilation_id && intent.round == 2
     ));
-    service.acknowledge_inference_started(2).unwrap();
+    service
+        .acknowledge_inference_started(dispatch_identity_for(2, compilation_id))
+        .unwrap();
     assert_eq!(service.phase(), LoopPhase::AwaitingProvider);
 }
 
@@ -128,7 +155,9 @@ fn enforces_maximum_tool_rounds_before_scheduling_more_work() {
         )])
         .unwrap();
     service.accept_context_compiled(context_id(2)).unwrap();
-    service.acknowledge_inference_started(2).unwrap();
+    service
+        .acknowledge_inference_started(dispatch_identity(2))
+        .unwrap();
 
     let second_calls = vec![provider_calls().remove(0)];
     let error = service
@@ -182,6 +211,7 @@ fn service(mode: RunPermissionMode, maximum_tool_rounds: u32) -> AgentLoopServic
             maximum_tool_rounds,
             tool_schema_version: 1,
         },
+        dispatch_identity(1),
     )
     .unwrap()
 }
@@ -195,7 +225,7 @@ fn completion(
         identity: ProviderInferenceIdentity {
             run_id: run_id(),
             inference_id: inference_id(request_number),
-            attempt_id: Uuid::new_v4(),
+            attempt_id: attempt_id(request_number),
             context_compilation_id: context_id(request_number),
             request_number,
             attempt_number: 1,
@@ -294,6 +324,28 @@ fn inference_id(request_number: u64) -> Uuid {
 
 fn context_id(request_number: u64) -> Uuid {
     Uuid::parse_str(&format!("33333333-3333-4333-8333-{request_number:012}")).unwrap()
+}
+
+fn attempt_id(request_number: u64) -> Uuid {
+    Uuid::parse_str(&format!("44444444-4444-4444-8444-{request_number:012}")).unwrap()
+}
+
+fn dispatch_identity(request_number: u64) -> InferenceDispatchIdentity {
+    dispatch_identity_for(request_number, context_id(request_number))
+}
+
+fn dispatch_identity_for(
+    request_number: u64,
+    context_compilation_id: Uuid,
+) -> InferenceDispatchIdentity {
+    InferenceDispatchIdentity {
+        inference_id: inference_id(request_number),
+        attempt_id: attempt_id(request_number),
+        request_number,
+        context_compilation_id,
+        attempt_number: 1,
+        inference_idempotency_key: format!("inference-{request_number}"),
+    }
 }
 
 fn sha(bytes: &[u8]) -> String {

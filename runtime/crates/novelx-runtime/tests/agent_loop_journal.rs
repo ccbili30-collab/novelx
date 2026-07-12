@@ -10,7 +10,7 @@ use novelx_runtime::{
     },
     agent_loop_service::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, AssistToolDecision,
-        FinalizedToolResult, LoopPhase,
+        FinalizedToolResult, InferenceDispatchIdentity, LoopPhase,
     },
     event_journal::EventJournal,
     provider_tool_materializer::MaterializedProviderToolCall,
@@ -151,7 +151,8 @@ fn persists_inference_started_without_fabricating_a_directive() {
         )
         .unwrap();
     let previous = current.clone();
-    let directive = current.accept_context_compiled(Uuid::new_v4()).unwrap();
+    let compilation_id = Uuid::new_v4();
+    let directive = current.accept_context_compiled(compilation_id).unwrap();
     repository
         .append_transition(
             &previous,
@@ -162,7 +163,9 @@ fn persists_inference_started_without_fabricating_a_directive() {
         )
         .unwrap();
     let previous = current.clone();
-    current.acknowledge_inference_started(2).unwrap();
+    current
+        .acknowledge_inference_started(dispatch_identity(2, compilation_id))
+        .unwrap();
     let first = repository
         .append_inference_started(&previous, &current, "started-ack", metadata("ack-6"))
         .unwrap();
@@ -466,6 +469,7 @@ fn service(invocation_id: &str) -> AgentLoopService {
             maximum_tool_rounds: 4,
             tool_schema_version: 1,
         },
+        dispatch_identity(1, context_id()),
     )
     .unwrap()
 }
@@ -474,8 +478,8 @@ fn completion(call: ProviderInferenceToolCall) -> ProviderInferenceCompleted {
     ProviderInferenceCompleted {
         identity: ProviderInferenceIdentity {
             run_id: run_id(),
-            inference_id: Uuid::new_v4(),
-            attempt_id: Uuid::new_v4(),
+            inference_id: inference_id(1),
+            attempt_id: attempt_id(1),
             context_compilation_id: context_id(),
             request_number: 1,
             attempt_number: 1,
@@ -550,6 +554,28 @@ fn run_id() -> Uuid {
 
 fn context_id() -> Uuid {
     Uuid::parse_str("33333333-3333-4333-8333-000000000001").unwrap()
+}
+
+fn inference_id(request_number: u64) -> Uuid {
+    Uuid::parse_str(&format!("22222222-2222-4222-8222-{request_number:012}")).unwrap()
+}
+
+fn attempt_id(request_number: u64) -> Uuid {
+    Uuid::parse_str(&format!("44444444-4444-4444-8444-{request_number:012}")).unwrap()
+}
+
+fn dispatch_identity(
+    request_number: u64,
+    context_compilation_id: Uuid,
+) -> InferenceDispatchIdentity {
+    InferenceDispatchIdentity {
+        inference_id: inference_id(request_number),
+        attempt_id: attempt_id(request_number),
+        request_number,
+        context_compilation_id,
+        attempt_number: 1,
+        inference_idempotency_key: format!("inference-{request_number}"),
+    }
 }
 
 fn sha(bytes: &[u8]) -> String {

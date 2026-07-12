@@ -90,6 +90,17 @@ pub struct NextInferenceIntent {
     pub context_compilation_id: Uuid,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InferenceDispatchIdentity {
+    pub inference_id: Uuid,
+    pub attempt_id: Uuid,
+    pub request_number: u64,
+    pub context_compilation_id: Uuid,
+    pub attempt_number: u16,
+    pub inference_idempotency_key: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssistToolDecision {
     pub provider_tool_call_id: String,
@@ -131,6 +142,8 @@ pub struct AgentLoopService {
     expected_context_compilation_id: Uuid,
     completed_tool_rounds: u32,
     pending: Option<PendingToolRound>,
+    #[serde(default)]
+    pending_inference: Option<InferenceDispatchIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -145,6 +158,7 @@ impl AgentLoopService {
     pub fn new(
         identity: AgentLoopIdentity,
         policy: AgentLoopPolicy,
+        initial_inference: InferenceDispatchIdentity,
     ) -> Result<Self, AgentLoopError> {
         if identity.project_id.trim().is_empty()
             || identity.invocation_id.trim().is_empty()
@@ -155,6 +169,9 @@ impl AgentLoopService {
             || identity.permission.policy_sha256.trim().is_empty()
             || policy.maximum_tool_rounds == 0
             || policy.tool_schema_version == 0
+            || !valid_inference_dispatch(&initial_inference)
+            || initial_inference.request_number != 1
+            || initial_inference.context_compilation_id != identity.initial_context_compilation_id
         {
             return Err(AgentLoopError::IdentityInvalid);
         }
@@ -167,6 +184,7 @@ impl AgentLoopService {
             expected_context_compilation_id,
             completed_tool_rounds: 0,
             pending: None,
+            pending_inference: Some(initial_inference),
         })
     }
 
@@ -192,6 +210,10 @@ impl AgentLoopService {
 
     pub fn pending_completion(&self) -> Option<&ProviderInferenceCompleted> {
         self.pending.as_ref().map(|pending| &pending.completion)
+    }
+
+    pub const fn pending_inference(&self) -> Option<&InferenceDispatchIdentity> {
+        self.pending_inference.as_ref()
     }
 
     pub const fn is_active(&self) -> bool {
@@ -227,12 +249,22 @@ impl AgentLoopService {
         materialized: Vec<MaterializedProviderToolCall>,
     ) -> Result<AgentLoopDirective, AgentLoopError> {
         self.require_phase(LoopPhase::AwaitingProvider)?;
+        let dispatch = self
+            .pending_inference
+            .as_ref()
+            .ok_or(AgentLoopError::InferenceDispatchMissing)?;
         if completion.identity.run_id != self.identity.run_id
             || completion.identity.request_number != self.expected_request_number
             || completion.identity.context_compilation_id != self.expected_context_compilation_id
+            || completion.identity.inference_id != dispatch.inference_id
+            || completion.identity.attempt_id != dispatch.attempt_id
+            || completion.identity.request_number != dispatch.request_number
+            || completion.identity.context_compilation_id != dispatch.context_compilation_id
+            || completion.identity.attempt_number != u64::from(dispatch.attempt_number)
         {
             return Err(AgentLoopError::ProviderIdentityMismatch);
         }
+        self.pending_inference = None;
         if completion.tool_calls.is_empty() {
             if !materialized.is_empty() {
                 return Err(AgentLoopError::MaterializedCallsMismatch);
@@ -416,13 +448,17 @@ impl AgentLoopService {
 
     pub fn acknowledge_inference_started(
         &mut self,
-        request_number: u64,
+        dispatch: InferenceDispatchIdentity,
     ) -> Result<(), AgentLoopError> {
         self.require_phase(LoopPhase::AwaitingInferenceStart)?;
-        if request_number != self.expected_request_number {
+        if !valid_inference_dispatch(&dispatch)
+            || dispatch.request_number != self.expected_request_number
+            || dispatch.context_compilation_id != self.expected_context_compilation_id
+        {
             return Err(AgentLoopError::ProviderIdentityMismatch);
         }
         self.pending = None;
+        self.pending_inference = Some(dispatch);
         self.phase = LoopPhase::AwaitingProvider;
         Ok(())
     }
@@ -436,6 +472,7 @@ impl AgentLoopService {
             return Err(AgentLoopError::PhaseInvalid);
         }
         self.pending = None;
+        self.pending_inference = None;
         self.phase = LoopPhase::Cancelled;
         Ok(AgentLoopDirective::Cancelled {
             reason: reason.to_owned(),
@@ -523,16 +560,26 @@ impl AgentLoopService {
                 && self.identity.permission.mode != RunPermissionMode::Assist)
             || (matches!(
                 self.phase,
-                LoopPhase::AwaitingProvider
-                    | LoopPhase::Completed
-                    | LoopPhase::Cancelled
-                    | LoopPhase::Failed
+                LoopPhase::Completed | LoopPhase::Cancelled | LoopPhase::Failed
             ) && self.pending.is_some())
+            || (self.phase == LoopPhase::AwaitingProvider
+                && self.pending_inference.as_ref().is_some_and(|dispatch| {
+                    !valid_inference_dispatch(dispatch)
+                        || dispatch.request_number != self.expected_request_number
+                        || dispatch.context_compilation_id != self.expected_context_compilation_id
+                }))
+            || (self.phase != LoopPhase::AwaitingProvider && self.pending_inference.is_some())
         {
             return Err(AgentLoopError::CheckpointInvalid);
         }
         Ok(())
     }
+}
+
+fn valid_inference_dispatch(dispatch: &InferenceDispatchIdentity) -> bool {
+    dispatch.request_number > 0
+        && dispatch.attempt_number > 0
+        && !dispatch.inference_idempotency_key.trim().is_empty()
 }
 
 fn exchange(
@@ -560,6 +607,8 @@ pub enum AgentLoopError {
     PhaseInvalid,
     #[error("Provider completion identity does not match the scheduled inference")]
     ProviderIdentityMismatch,
+    #[error("scheduled Provider inference identity is missing from the AgentLoop checkpoint")]
+    InferenceDispatchMissing,
     #[error("Provider terminal output is missing")]
     ProviderTerminalOutputMissing,
     #[error("materialized Provider calls do not match the finalized outcome")]
