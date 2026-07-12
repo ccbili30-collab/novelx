@@ -1,15 +1,24 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { RuntimeV2ProcessSupervisor } from "../../src/main/runtimeV2ProcessSupervisor";
-import { RuntimeV2SupervisorError } from "../../src/main/runtimeV2ProcessSupervisor";
+import {
+  RuntimeV2ProcessSupervisor,
+  RuntimeV2SupervisorError,
+  type RuntimeV2RuntimeEvent,
+} from "../../src/main/runtimeV2ProcessSupervisor";
 import { RUNTIME_V2_PROTOCOL_VERSION } from "../../src/shared/runtimeV2Protocol";
-import type { RuntimeV2ContextCompilePayload, RuntimeV2RunStartPayload } from "../../src/shared/runtimeV2Protocol";
+import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
+import type {
+  RuntimeV2ContextCompilePayload,
+  RuntimeV2ProviderInferenceStartPayload,
+  RuntimeV2RunStartPayload,
+} from "../../src/shared/runtimeV2Protocol";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const runtimeRoot = path.join(appRoot, "runtime");
@@ -22,6 +31,7 @@ const runtimeExecutable = path.join(
 
 let supervisor: RuntimeV2ProcessSupervisor | null = null;
 const tempRoots: string[] = [];
+const providerServers: ControlledProviderServer[] = [];
 
 beforeAll(() => {
   const build = spawnSync("cargo", [
@@ -44,6 +54,7 @@ beforeAll(() => {
 afterEach(async () => {
   await supervisor?.stop();
   supervisor = null;
+  await Promise.all(providerServers.splice(0).map((server) => server.close()));
   for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -270,6 +281,61 @@ describe("Runtime V2 real Rust handshake", () => {
     await expect(supervisor.compileContext(runId, compile)).resolves.toEqual(first);
     expect(countRuntimeEvents(databasePath, runId)).toBe(3);
   }, 30_000);
+
+  it("answers status while real Provider inference is held behind an HTTP barrier, then emits completion", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-runtime-v2-inference-actor-"));
+    tempRoots.push(root);
+    const databasePath = path.join(root, "runtime.db");
+    const runId = "bdcbf1ca-7b5d-4204-9804-f7857d846baf";
+    const providerServer = await ControlledProviderServer.start();
+    providerServers.push(providerServer);
+    const providerConfig = runtimeProviderConfig(providerServer.baseUrl);
+    const configSha256 = canonicalAuditHash(providerConfig);
+    const start = runStartPayload();
+    start.pinnedIdentity.provider.profileId = providerConfig.profileId;
+    start.pinnedIdentity.provider.configSha256 = configSha256;
+    const compile = contextCompilePayload(start);
+    const terminal = deferred<RuntimeV2RuntimeEvent>();
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor.subscribeRuntimeEvents((event) => {
+      if (event.name.startsWith("provider.inference.")) terminal.resolve(event);
+    });
+    await supervisor.start();
+    await supervisor.bindProvider(providerConfig, configSha256, "actor-integration-secret");
+    await supervisor.startRun(runId, start);
+    await supervisor.prepareRun(runId, { prepareIdempotencyKey: "integration-inference-prepare-1" });
+    const compilation = await supervisor.compileContext(runId, compile);
+    const inference = inferenceStartPayload(compilation.compilationId);
+
+    const accepted = await supervisor.startProviderInference(runId, inference);
+    expect(accepted).toMatchObject({
+      runId,
+      inferenceId: inference.inferenceId,
+      attemptId: inference.attemptId,
+      contextCompilationId: compilation.compilationId,
+    });
+    const providerRequest = await providerServer.waitForRequest();
+    expect(providerRequest.method).toBe("POST");
+    expect(providerRequest.url).toBe("/v1/chat/completions");
+    expect(terminal.settled()).toBe(false);
+
+    await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
+    expect(terminal.settled()).toBe(false);
+
+    providerServer.releaseSuccess("潮声越过银湾旧港。 ");
+    const completed = await terminal.promise;
+    expect(completed).toMatchObject({
+      name: "provider.inference.completed",
+      correlationId: expect.any(String),
+      runId,
+      payload: {
+        inferenceId: inference.inferenceId,
+        attemptId: inference.attemptId,
+        output: { text: "潮声越过银湾旧港。 " },
+      },
+    });
+  }, 45_000);
 });
 
 function createWorkspaceSupervisor(databasePath: string): RuntimeV2ProcessSupervisor {
@@ -325,13 +391,13 @@ function runStartPayload(): RuntimeV2RunStartPayload {
   };
 }
 
-function runtimeProviderConfig() {
+function runtimeProviderConfig(baseUrl = "https://api.deepseek.com/v1") {
   return {
     schemaVersion: 1 as const,
     profileId: "profile-1",
     providerId: "deepseek",
     displayName: "DeepSeek",
-    baseUrl: "https://api.deepseek.com/v1",
+    baseUrl,
     modelId: "deepseek-chat",
     apiFlavor: "open_ai_chat_completions" as const,
     authScheme: "bearer" as const,
@@ -342,6 +408,18 @@ function runtimeProviderConfig() {
     requestTimeoutMs: 30_000,
     totalDeadlineMs: 120_000,
     retryPolicy: { maxAttempts: 3, maxTotalDelayMs: 30_000 },
+  };
+}
+
+function inferenceStartPayload(contextCompilationId: string): RuntimeV2ProviderInferenceStartPayload {
+  return {
+    inferenceId: "a5a491e2-ae65-4939-9f71-3f10f32104cb",
+    attemptId: "f6add75e-ea2e-41c7-aa84-25fbbb94f380",
+    invocationId: "steward-invocation-1",
+    contextCompilationId,
+    requestNumber: 1,
+    attemptNumber: 1,
+    inferenceIdempotencyKey: "integration-inference-start-1",
   };
 }
 
@@ -405,4 +483,91 @@ function countRuntimeEvents(databasePath: string, runId: string): number {
   } finally {
     database.close();
   }
+}
+
+interface CapturedProviderRequest {
+  method: string | undefined;
+  url: string | undefined;
+  body: string;
+}
+
+class ControlledProviderServer {
+  readonly #request = deferred<CapturedProviderRequest>();
+  readonly #release = deferred<{ status: number; body: string }>();
+  #closed = false;
+
+  private constructor(
+    readonly baseUrl: string,
+    private readonly server: http.Server,
+  ) {}
+
+  static async start(): Promise<ControlledProviderServer> {
+    let fixture: ControlledProviderServer;
+    const server = http.createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        fixture.#request.resolve({
+          method: request.method,
+          url: request.url,
+          body: Buffer.concat(chunks).toString("utf8"),
+        });
+        void fixture.#release.promise.then(({ status, body }) => {
+          if (response.destroyed) return;
+          response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+          response.end(body);
+        });
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Loopback Provider did not expose a TCP address.");
+    fixture = new ControlledProviderServer(`http://127.0.0.1:${address.port}/v1`, server);
+    return fixture;
+  }
+
+  waitForRequest(): Promise<CapturedProviderRequest> {
+    return this.#request.promise;
+  }
+
+  releaseSuccess(text: string): void {
+    const body = JSON.stringify({
+      id: "actor-response-1",
+      model: "deepseek-chat",
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: text } }],
+      usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+    });
+    this.#release.resolve({ status: 200, body });
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#release.resolve({ status: 503, body: JSON.stringify({ error: "test cleanup" }) });
+    this.server.closeAllConnections();
+    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+}
+
+function deferred<T>() {
+  let resolved = false;
+  let resolvePromise!: (value: T) => void;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = (value) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(value);
+    };
+  });
+  return {
+    promise,
+    resolve: resolvePromise,
+    settled: () => resolved,
+  };
 }

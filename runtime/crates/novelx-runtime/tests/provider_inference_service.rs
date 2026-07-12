@@ -441,6 +441,7 @@ fn execution(provider: ProviderRunIdentity) -> ProviderInferenceExecution {
         attempt_id: ATTEMPT_ID.to_owned(),
         inference_id: "inference-provider-service-1".to_owned(),
         invocation_id: "run-provider-service-1:steward".to_owned(),
+        inference_idempotency_key: "inference-key-provider-service-1".to_owned(),
         attempt_number: 1,
         provider,
         request: ProviderInferenceRequest {

@@ -1,17 +1,29 @@
 use std::io;
+use std::sync::Arc;
 
 use novelx_protocol::{
-    ContextCompilationReceipt, ContextCompile, Envelope, MessageType, PROTOCOL_VERSION, RunCancel,
-    RunPrepare, RunSnapshot, RunStart, RuntimeBuild, RuntimeError, RuntimeErrorClass, RuntimeHello,
-    RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
+    ContextCompilationReceipt, ContextCompile, Envelope, MessageType, PROTOCOL_VERSION,
+    ProviderInferenceStart, RunCancel, RunPrepare, RunSnapshot, RunStart, RuntimeBuild,
+    RuntimeError, RuntimeErrorClass, RuntimeHello, RuntimeIdentity, RuntimeInitialize,
+    RuntimeReady, RuntimeStatus, RuntimeStopped,
 };
-use novelx_runtime::context_compile_service::{ContextCompileService, ContextCompileServiceError};
+use novelx_runtime::context_compile_service::{
+    ContextCompileService, ContextCompileServiceError, recover_compilation_receipt,
+};
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
 use novelx_runtime::provider_gateway::{
-    ProviderBindSensitiveEnvelope, ProviderGatewayError, ProviderRegistry,
+    ProviderBindSensitiveEnvelope, ProviderGateway, ProviderGatewayError, ProviderInferenceRequest,
+    ProviderRegistry,
+};
+use novelx_runtime::provider_inference_protocol::ProviderInferenceProtocolMapper;
+use novelx_runtime::provider_inference_service::{
+    PreparedProviderAttempt, ProviderInferenceExecution, ProviderInferenceService,
+    ProviderInferenceServiceError,
 };
 use novelx_runtime::recovery::{RecoveryCoordinator, RecoveryError};
+use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::run_command_service::{RunCommandFailure, RunCommandService, WorkspaceBinding};
+use novelx_runtime::run_state::RunState;
 use novelx_runtime::runtime_actor::{RuntimeActor, RuntimeActorHandle, RuntimeOutputDraft};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -28,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "runtime_control".to_owned(),
             "runs_v1".to_owned(),
             "contexts_v1".to_owned(),
+            "provider_inference_v1".to_owned(),
         ],
         build: RuntimeBuild {
             commit: option_env!("NOVELX_BUILD_COMMIT")
@@ -138,18 +151,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     write_handshake_envelope(&mut output, &ready_envelope).await?;
 
     let mut provider_registry = ProviderRegistry::default();
+    let provider_gateway = Arc::new(ProviderGateway::new()?);
     let (actor, actor_handle) = RuntimeActor::new(output, 2, 64);
     let actor_task = tokio::spawn(actor.run());
-    let loop_result = run_command_loop(
-        &mut lines,
-        &actor_handle,
-        initialize.workspace_database_path.is_some(),
+    let mut command_context = RuntimeCommandContext {
+        workspace_database_path: initialize.workspace_database_path.as_deref(),
         recovered_run_count,
-        &mut journal,
-        workspace_binding.as_ref(),
-        &mut provider_registry,
-    )
-    .await;
+        journal: &mut journal,
+        workspace_binding: workspace_binding.as_ref(),
+        provider_registry: &mut provider_registry,
+        provider_gateway: &provider_gateway,
+    };
+    let loop_result = run_command_loop(&mut lines, &actor_handle, &mut command_context).await;
     drop(actor_handle);
     let actor_result = actor_task.await?;
     loop_result?;
@@ -185,11 +198,7 @@ fn validate_initialize_envelope(envelope: &Envelope) -> Result<(), String> {
 async fn run_command_loop(
     lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
     output: &RuntimeActorHandle,
-    workspace_database_configured: bool,
-    recovered_run_count: u64,
-    journal: &mut Option<EventJournal>,
-    workspace_binding: Option<&WorkspaceBinding>,
-    provider_registry: &mut ProviderRegistry,
+    context: &mut RuntimeCommandContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut expected_host_sequence = 2_u64;
     while let Some(line) = lines.next_line().await? {
@@ -207,7 +216,7 @@ async fn run_command_loop(
                 return Err(io::Error::new(io::ErrorKind::InvalidData, error.to_string()).into());
             }
             output
-                .emit(handle_provider_bind(sensitive, provider_registry)?)
+                .emit(handle_provider_bind(sensitive, context.provider_registry)?)
                 .await?;
             expected_host_sequence += 1;
             continue;
@@ -226,8 +235,8 @@ async fn run_command_loop(
                 "runtime.status",
                 RuntimeStatus {
                     initialized: true,
-                    workspace_database_configured,
-                    recovered_run_count,
+                    workspace_database_configured: context.workspace_database_path.is_some(),
+                    recovered_run_count: context.recovered_run_count,
                     protocol_version: PROTOCOL_VERSION,
                     runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
                 },
@@ -244,11 +253,28 @@ async fn run_command_loop(
                     .await?;
                 return Ok(());
             }
-            "run.start" => handle_run_start(&command, journal, workspace_binding)?,
-            "run.get" => handle_run_get(&command, journal)?,
-            "run.cancel" => handle_run_cancel(&command, journal)?,
-            "run.prepare" => handle_run_prepare(&command, journal, provider_registry)?,
-            "context.compile" => handle_context_compile(&command, journal, provider_registry)?,
+            "run.start" => handle_run_start(&command, context.journal, context.workspace_binding)?,
+            "run.get" => handle_run_get(&command, context.journal)?,
+            "run.cancel" => handle_run_cancel(&command, context.journal)?,
+            "run.prepare" => {
+                handle_run_prepare(&command, context.journal, context.provider_registry)?
+            }
+            "context.compile" => {
+                handle_context_compile(&command, context.journal, context.provider_registry)?
+            }
+            "provider.inference.start" => {
+                handle_provider_inference_start(
+                    output,
+                    &command,
+                    context.journal,
+                    context.workspace_database_path,
+                    context.provider_registry,
+                    context.provider_gateway,
+                )
+                .await?;
+                expected_host_sequence += 1;
+                continue;
+            }
             _ => unreachable!("validated command name"),
         };
         output.emit(routed.output).await?;
@@ -259,6 +285,15 @@ async fn run_command_loop(
     }
 
     Ok(())
+}
+
+struct RuntimeCommandContext<'a> {
+    workspace_database_path: Option<&'a str>,
+    recovered_run_count: u64,
+    journal: &'a mut Option<EventJournal>,
+    workspace_binding: Option<&'a WorkspaceBinding>,
+    provider_registry: &'a mut ProviderRegistry,
+    provider_gateway: &'a Arc<ProviderGateway>,
 }
 
 fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), String> {
@@ -317,6 +352,21 @@ fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), St
             }
             serde_json::from_value::<ContextCompile>(command.payload.clone())
                 .map_err(|error| format!("invalid context.compile payload: {error}"))?;
+        }
+        "provider.inference.start" => {
+            if command.run_id.is_none() {
+                return Err("provider.inference.start requires runId".to_owned());
+            }
+            let start = serde_json::from_value::<ProviderInferenceStart>(command.payload.clone())
+                .map_err(|error| {
+                format!("invalid provider.inference.start payload: {error}")
+            })?;
+            start
+                .validate()
+                .map_err(|error| format!("invalid provider.inference.start payload: {error}"))?;
+            u16::try_from(start.attempt_number).map_err(|_| {
+                "invalid provider.inference.start payload: attemptNumber exceeds u16".to_owned()
+            })?;
         }
         _ => return Err(format!("unknown runtime command: {}", command.name)),
     }
@@ -437,6 +487,268 @@ fn handle_run_prepare(
     }
 }
 
+async fn handle_provider_inference_start(
+    output: &RuntimeActorHandle,
+    command: &Envelope,
+    journal: &mut Option<EventJournal>,
+    workspace_database_path: Option<&str>,
+    providers: &ProviderRegistry,
+    gateway: &Arc<ProviderGateway>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run_id = command
+        .run_id
+        .expect("validated provider.inference.start runId");
+    let start: ProviderInferenceStart = serde_json::from_value(command.payload.clone())?;
+    start.validate()?;
+    let attempt_number = u16::try_from(start.attempt_number)?;
+    let Some(database_path) = workspace_database_path else {
+        output
+            .emit(inference_runtime_error_draft(
+                command.message_id,
+                run_id,
+                runtime_inference_error(
+                    "RUNTIME_STORAGE_REQUIRED",
+                    RuntimeErrorClass::Storage,
+                    "Runtime storage is required for Provider inference.",
+                    start.attempt_number,
+                ),
+            )?)
+            .await?;
+        return Ok(());
+    };
+    let Some(journal) = journal.as_mut() else {
+        output
+            .emit(inference_runtime_error_draft(
+                command.message_id,
+                run_id,
+                runtime_inference_error(
+                    "RUNTIME_STORAGE_REQUIRED",
+                    RuntimeErrorClass::Storage,
+                    "Runtime storage is required for Provider inference.",
+                    start.attempt_number,
+                ),
+            )?)
+            .await?;
+        return Ok(());
+    };
+    let receipt = match recover_compilation_receipt(
+        journal,
+        &run_id.to_string(),
+        start.context_compilation_id,
+    ) {
+        Ok(receipt) if receipt.request_number == start.request_number => receipt,
+        Ok(_) | Err(ContextCompileServiceError::CompilationNotFound) => {
+            output
+                .emit(inference_runtime_error_draft(
+                    command.message_id,
+                    run_id,
+                    runtime_inference_error(
+                        "CONTEXT_RECEIPT_NOT_PERSISTED",
+                        RuntimeErrorClass::Validation,
+                        "The accepted Context Compilation is unavailable.",
+                        start.attempt_number,
+                    ),
+                )?)
+                .await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut run = match RunAggregate::recover(journal, &run_id.to_string()) {
+        Ok(run) => run,
+        Err(novelx_runtime::run_aggregate::RunAggregateError::NotFound(_)) => {
+            output
+                .emit(inference_runtime_error_draft(
+                    command.message_id,
+                    run_id,
+                    runtime_inference_error(
+                        "RUN_NOT_FOUND",
+                        RuntimeErrorClass::Validation,
+                        "The Run for Provider inference was not found.",
+                        start.attempt_number,
+                    ),
+                )?)
+                .await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if run.state() == RunState::Preparing {
+        let message_id = Uuid::new_v4().to_string();
+        let idempotency_key = format!("{}:run-running", start.inference_idempotency_key);
+        let created_at = current_timestamp()?;
+        run.start(
+            journal,
+            EventMetadata {
+                message_id: &message_id,
+                idempotency_key: &idempotency_key,
+                created_at: &created_at,
+                reason: Some("provider_inference_accepted"),
+            },
+        )?;
+    }
+    let execution = ProviderInferenceExecution {
+        run_id: run_id.to_string(),
+        attempt_id: start.attempt_id.to_string(),
+        inference_id: start.inference_id.to_string(),
+        invocation_id: start.invocation_id.clone(),
+        inference_idempotency_key: start.inference_idempotency_key.clone(),
+        attempt_number,
+        provider: run.pinned_identity().provider.clone(),
+        request: ProviderInferenceRequest {
+            compilation: receipt,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        },
+    };
+    let provider = match providers.resolve_owned(&execution.provider) {
+        Ok(provider) => provider,
+        Err(error) => {
+            let service_error = ProviderInferenceServiceError::Gateway(error);
+            let mapper =
+                ProviderInferenceProtocolMapper::new(command.message_id, current_timestamp()?);
+            output
+                .emit(mapper.rejected(&execution, &service_error)?)
+                .await?;
+            return Ok(());
+        }
+    };
+    let prepared = match ProviderInferenceService::new(journal, providers, gateway)
+        .prepare_attempt(execution.clone())
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let mapper =
+                ProviderInferenceProtocolMapper::new(command.message_id, current_timestamp()?);
+            output.emit(mapper.rejected(&execution, &error)?).await?;
+            return Ok(());
+        }
+    };
+    let accepted = ProviderInferenceProtocolMapper::new(command.message_id, current_timestamp()?)
+        .accepted(&execution)?;
+    let database_path = database_path.to_owned();
+    let gateway = Arc::clone(gateway);
+    let correlation_id = command.message_id;
+    let task_failure = inference_runtime_error_draft(
+        correlation_id,
+        run_id,
+        runtime_inference_error(
+            "PROVIDER_TERMINAL_MAPPING_FAILED",
+            RuntimeErrorClass::RuntimeCrash,
+            "Provider inference completed, but its terminal event could not be produced.",
+            start.attempt_number,
+        ),
+    )?;
+    output
+        .start_task(
+            accepted,
+            task_failure,
+            Box::pin(async move {
+                let result = match prepared {
+                    PreparedProviderAttempt::Recovered(outcome) => Ok(*outcome),
+                    PreparedProviderAttempt::Dispatch(dispatch) => {
+                        let dispatched = ProviderInferenceService::dispatch_attempt(
+                            &gateway, &provider, *dispatch,
+                        )
+                        .await;
+                        match EventJournal::open(&database_path) {
+                            Ok(mut journal) => {
+                                let finalized = ProviderInferenceService::finalize_attempt_in(
+                                    &mut journal,
+                                    dispatched,
+                                );
+                                match finalized {
+                                    Ok(outcome) => match RunAggregate::recover(
+                                        &journal,
+                                        &execution.run_id,
+                                    ) {
+                                        Ok(run) if run.state() == RunState::Cancelled => Err(
+                                            ProviderInferenceServiceError::RunNotRunning(
+                                                RunState::Cancelled,
+                                            ),
+                                        ),
+                                        Ok(_) => Ok(outcome),
+                                        Err(_) => Err(
+                                            ProviderInferenceServiceError::FinalizationOutcomeUnknown,
+                                        ),
+                                    },
+                                    Err(error @ ProviderInferenceServiceError::Gateway(_))
+                                    | Err(error @ ProviderInferenceServiceError::DeliveryUnknown(_)) => {
+                                        Err(error)
+                                    }
+                                    Err(_) => Err(
+                                        ProviderInferenceServiceError::FinalizationOutcomeUnknown,
+                                    ),
+                                }
+                            }
+                            Err(_) => Err(
+                                ProviderInferenceServiceError::FinalizationOutcomeUnknown,
+                            ),
+                        }
+                    }
+                };
+                let mapper = ProviderInferenceProtocolMapper::new(
+                    correlation_id,
+                    current_timestamp().map_err(|error| error.to_string())?,
+                );
+                match result {
+                    Ok(outcome) => mapper.completed(&execution, &outcome),
+                    Err(error) if inference_outcome_unknown(&error) => {
+                        mapper.reconciliation_required(&execution, &error)
+                    }
+                    Err(error) => mapper.failed(&execution, &error),
+                }
+                .map_err(|error| error.to_string())
+            }),
+        )
+        .await?;
+    Ok(())
+}
+
+fn inference_outcome_unknown(error: &ProviderInferenceServiceError) -> bool {
+    matches!(
+        error,
+        ProviderInferenceServiceError::OutcomeUnknown
+            | ProviderInferenceServiceError::FinalizationOutcomeUnknown
+            | ProviderInferenceServiceError::DeliveryUnknown(_)
+            | ProviderInferenceServiceError::ExistingTerminal(
+                novelx_runtime::provider_attempt::ProviderAttemptRecovery::OutcomeUnknown
+            )
+    )
+}
+
+fn inference_runtime_error_draft(
+    correlation_id: Uuid,
+    run_id: Uuid,
+    error: RuntimeError,
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut draft = output_draft(MessageType::Event, "runtime.error", error)?;
+    draft.correlation_id = Some(correlation_id);
+    draft.run_id = Some(run_id);
+    Ok(draft)
+}
+
+fn runtime_inference_error(
+    code: &str,
+    class: RuntimeErrorClass,
+    public_message: &str,
+    attempt: u64,
+) -> RuntimeError {
+    RuntimeError {
+        code: code.to_owned(),
+        class,
+        retryable: false,
+        public_message: public_message.to_owned(),
+        stage: "provider.inference".to_owned(),
+        attempt,
+        diagnostic_id: Uuid::new_v4(),
+    }
+}
+
+fn current_timestamp() -> Result<String, time::error::Format> {
+    OffsetDateTime::now_utc().format(&Rfc3339)
+}
+
 fn handle_context_compile(
     command: &Envelope,
     journal: &mut Option<EventJournal>,
@@ -553,7 +865,8 @@ fn context_service_error(error: &ContextCompileServiceError) -> RuntimeError {
         | ContextCompileServiceError::Journal(_)
         | ContextCompileServiceError::Json(_)
         | ContextCompileServiceError::Time(_)
-        | ContextCompileServiceError::InvalidHistory => context_error(
+        | ContextCompileServiceError::InvalidHistory
+        | ContextCompileServiceError::CompilationNotFound => context_error(
             "CONTEXT_COMPILE_RUNTIME_FAILED",
             RuntimeErrorClass::Storage,
             "The context compilation could not be persisted or recovered.",

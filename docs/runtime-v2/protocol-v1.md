@@ -328,7 +328,9 @@ The completed output is nonempty, limited to 1 MiB of UTF-8, and identified by a
 
 Rust consumers must call the payload's public `validate()` after strict deserialization. Structural Serde validation alone does not enforce positive counters, nonempty identities, hash content, usage arithmetic, output bounds or reconciliation retry policy; failures use the stable public `ProviderInferenceValidationError` type.
 
-This section defines and validates the protocol only. `main.rs`, the Electron Supervisor, UI and production scheduler do not dispatch or consume these messages yet, so this exchange is **not live functionality**.
+The Rust Runtime provides an independent `ProviderInferenceProtocolMapper` that converts a `ProviderInferenceExecution` plus an accepted outcome or service error into the corresponding payload and `RuntimeOutputDraft`. It preserves the original command correlation and inference identity, recomputes output text hash and UTF-8 byte length, rejects mismatched Context/model identities, and maps service error variants explicitly. Known 429 and 5xx responses carry the same retryable failure declaration as the attempt ledger; this declaration does not bypass retry budget, deadline, cancellation or reconciliation policy.
+
+The Rust Runtime now accepts this exchange after `runtime.ready`. It validates and persists preparation before `provider.inference.accepted`, dispatches through the single Runtime Actor writer, reopens the workspace journal for finalization and emits exactly one mapped terminal event. Electron/UI orchestration remains separate work.
 
 ## 8. Error Contract
 

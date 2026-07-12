@@ -29,6 +29,7 @@ pub struct ProviderInferenceExecution {
     pub attempt_id: String,
     pub inference_id: String,
     pub invocation_id: String,
+    pub inference_idempotency_key: String,
     pub attempt_number: u16,
     pub provider: ProviderRunIdentity,
     pub request: ProviderInferenceRequest,
@@ -157,7 +158,7 @@ impl<'a> ProviderInferenceService<'a> {
             max_total_delay_ms: provider.config().retry_policy.max_total_delay_ms,
         };
         let requested_message_id = Uuid::new_v4().to_string();
-        let requested_key = format!("{}:requested", execution.attempt_id);
+        let requested_key = execution.inference_idempotency_key.clone();
         let requested_at = timestamp()?;
         let mut attempt = ProviderAttemptAggregate::create(
             self.journal,
@@ -221,6 +222,13 @@ impl<'a> ProviderInferenceService<'a> {
         &mut self,
         dispatched: DispatchedProviderAttempt,
     ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
+        Self::finalize_attempt_in(self.journal, dispatched)
+    }
+
+    pub fn finalize_attempt_in(
+        journal: &mut EventJournal,
+        dispatched: DispatchedProviderAttempt,
+    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
         let DispatchedProviderAttempt {
             execution,
             mut attempt,
@@ -233,8 +241,8 @@ impl<'a> ProviderInferenceService<'a> {
                 let responded_key = format!("{}:responded", execution.attempt_id);
                 let responded_at = timestamp()?;
                 attempt.respond_with_output(
-                    self.journal,
-                    current_run_sequence(self.journal, &execution.run_id)?,
+                    journal,
+                    current_run_sequence(journal, &execution.run_id)?,
                     response,
                     outcome.text.clone(),
                     metadata(&responded_message_id, &responded_key, &responded_at),
@@ -247,8 +255,8 @@ impl<'a> ProviderInferenceService<'a> {
                 let failed_key = format!("{}:failed", execution.attempt_id);
                 let failed_at = timestamp()?;
                 attempt.fail(
-                    self.journal,
-                    current_run_sequence(self.journal, &execution.run_id)?,
+                    journal,
+                    current_run_sequence(journal, &execution.run_id)?,
                     failure,
                     metadata(&failed_message_id, &failed_key, &failed_at),
                 )?;
@@ -259,16 +267,16 @@ impl<'a> ProviderInferenceService<'a> {
                 let unknown_key = format!("{}:outcome-unknown", execution.attempt_id);
                 let unknown_at = timestamp()?;
                 attempt.mark_outcome_unknown(
-                    self.journal,
-                    current_run_sequence(self.journal, &execution.run_id)?,
+                    journal,
+                    current_run_sequence(journal, &execution.run_id)?,
                     Uuid::new_v4(),
                     metadata(&unknown_message_id, &unknown_key, &unknown_at),
                 )?;
-                let mut run = RunAggregate::recover(self.journal, &execution.run_id)?;
+                let mut run = RunAggregate::recover(journal, &execution.run_id)?;
                 let reconciliation_message_id = Uuid::new_v4().to_string();
                 let reconciliation_key = format!("{}:run-reconciliation", execution.attempt_id);
                 run.wait_for_reconciliation(
-                    self.journal,
+                    journal,
                     EventMetadata {
                         message_id: &reconciliation_message_id,
                         idempotency_key: &reconciliation_key,
@@ -300,6 +308,8 @@ pub enum ProviderInferenceServiceError {
     ContextNormalizedInputHashMismatch,
     #[error("Provider inference outcome is unknown and cannot be auto-retried")]
     OutcomeUnknown,
+    #[error("Provider inference was dispatched but its terminal journal result is unknown")]
+    FinalizationOutcomeUnknown,
     #[error("Provider attempt already ended with {0:?}")]
     ExistingTerminal(ProviderAttemptRecovery),
     #[error("Provider delivery became uncertain: {0}")]
@@ -323,6 +333,7 @@ fn validate_execution(
         || execution.attempt_id.trim().is_empty()
         || execution.inference_id.trim().is_empty()
         || execution.invocation_id.trim().is_empty()
+        || execution.inference_idempotency_key.trim().is_empty()
         || execution.attempt_number == 0
     {
         return Err(ProviderInferenceServiceError::InvalidExecution);
@@ -401,9 +412,9 @@ fn response_receipt(
 fn response_was_received(error: &ProviderGatewayError) -> bool {
     matches!(
         error,
-        ProviderGatewayError::AuthenticationRejected
-            | ProviderGatewayError::RateLimited
-            | ProviderGatewayError::RedirectRejected
+        ProviderGatewayError::AuthenticationRejected(_)
+            | ProviderGatewayError::RateLimited(_)
+            | ProviderGatewayError::RedirectRejected(_)
             | ProviderGatewayError::HttpRejected(_)
             | ProviderGatewayError::ResponseMalformed
             | ProviderGatewayError::ResponseTooLarge
@@ -414,12 +425,14 @@ fn response_was_received(error: &ProviderGatewayError) -> bool {
 
 fn definitive_failure(error: &ProviderGatewayError) -> ProviderAttemptFailure {
     let (code, retryable, retry_after_ms, http_status) = match error {
-        ProviderGatewayError::AuthenticationRejected => {
-            ("PROVIDER_AUTH_REJECTED", false, None, Some(401))
+        ProviderGatewayError::AuthenticationRejected(status) => {
+            ("PROVIDER_AUTH_REJECTED", false, None, Some(*status))
         }
-        ProviderGatewayError::RateLimited => ("PROVIDER_RATE_LIMITED", true, None, Some(429)),
-        ProviderGatewayError::RedirectRejected => {
-            ("PROVIDER_REDIRECT_REJECTED", false, None, Some(302))
+        ProviderGatewayError::RateLimited(status) => {
+            ("PROVIDER_RATE_LIMITED", true, None, Some(*status))
+        }
+        ProviderGatewayError::RedirectRejected(status) => {
+            ("PROVIDER_REDIRECT_REJECTED", false, None, Some(*status))
         }
         ProviderGatewayError::HttpRejected(status) => (
             "PROVIDER_HTTP_REJECTED",

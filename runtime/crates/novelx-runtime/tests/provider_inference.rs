@@ -121,11 +121,11 @@ async fn classifies_auth_rate_limit_and_invalid_json_without_retrying_them_as_su
     for (reply, expected) in [
         (
             ServerReply::Immediate(json_response(401, r#"{"error":"bad key"}"#)),
-            ProviderGatewayError::AuthenticationRejected,
+            ProviderGatewayError::AuthenticationRejected(401),
         ),
         (
             ServerReply::Immediate(json_response(429, r#"{"error":"slow down"}"#)),
-            ProviderGatewayError::RateLimited,
+            ProviderGatewayError::RateLimited(429),
         ),
         (
             ServerReply::Immediate(json_response(200, "{not-json")),
@@ -146,6 +146,36 @@ async fn classifies_auth_rate_limit_and_invalid_json_without_retrying_them_as_su
             std::mem::discriminant(&error),
             std::mem::discriminant(&expected)
         );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn preserves_the_actual_auth_and_redirect_http_status_for_audit() {
+    for (status, expected) in [(403, "auth"), (307, "redirect")] {
+        let (base_url, _, server) = spawn_http_server(vec![ServerReply::Immediate(json_response(
+            status,
+            r#"{"error":"rejected"}"#,
+        ))])
+        .await;
+        let (registry, identity) = bound_registry(base_url, 2_000);
+        let error = ProviderGateway::new()
+            .unwrap()
+            .infer(
+                registry.resolve(&identity).unwrap(),
+                inference_request(compilation_receipt()),
+            )
+            .await
+            .unwrap_err();
+        match (expected, error) {
+            ("auth", ProviderGatewayError::AuthenticationRejected(actual)) => {
+                assert_eq!(actual, status);
+            }
+            ("redirect", ProviderGatewayError::RedirectRejected(actual)) => {
+                assert_eq!(actual, status);
+            }
+            (_, other) => panic!("unexpected Provider error: {other}"),
+        }
         server.await.unwrap();
     }
 }

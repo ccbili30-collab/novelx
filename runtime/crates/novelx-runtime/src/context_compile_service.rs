@@ -112,6 +112,27 @@ impl<'a> ContextCompileService<'a> {
     }
 }
 
+pub fn recover_compilation_receipt(
+    journal: &EventJournal,
+    run_id: &str,
+    compilation_id: Uuid,
+) -> Result<ContextCompilationReceipt, ContextCompileServiceError> {
+    let mut found = None;
+    for event in journal.read_run(run_id, 0)? {
+        if event.event_type != EVENT_TYPE || event.event_version != EVENT_VERSION {
+            continue;
+        }
+        let record: ContextCompiledRecord = serde_json::from_value(event.payload)
+            .map_err(|_| ContextCompileServiceError::InvalidHistory)?;
+        if record.receipt.compilation_id == compilation_id
+            && found.replace(record.receipt).is_some()
+        {
+            return Err(ContextCompileServiceError::InvalidHistory);
+        }
+    }
+    found.ok_or(ContextCompileServiceError::CompilationNotFound)
+}
+
 #[derive(Debug, Error)]
 pub enum ContextCompileServiceError {
     #[error("context compile input is invalid: {0}")]
@@ -126,6 +147,8 @@ pub enum ContextCompileServiceError {
     IdempotencyConflict,
     #[error("context compilation history is invalid")]
     InvalidHistory,
+    #[error("context compilation was not found for this Run")]
+    CompilationNotFound,
     #[error(transparent)]
     Compiler(#[from] ContextCompilerError),
     #[error(transparent)]

@@ -9,7 +9,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-pub type RuntimeTask = Pin<Box<dyn Future<Output = RuntimeOutputDraft> + Send + 'static>>;
+pub type RuntimeTask =
+    Pin<Box<dyn Future<Output = Result<RuntimeOutputDraft, String>> + Send + 'static>>;
+
+struct RuntimeTaskCompletion {
+    result: Result<RuntimeOutputDraft, String>,
+    failure: RuntimeOutputDraft,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeOutputDraft {
@@ -25,7 +31,7 @@ pub struct RuntimeActor<W> {
     writer: W,
     next_sequence: u64,
     commands: mpsc::Receiver<RuntimeActorCommand>,
-    tasks: JoinSet<RuntimeOutputDraft>,
+    tasks: JoinSet<RuntimeTaskCompletion>,
 }
 
 #[derive(Clone)]
@@ -37,6 +43,7 @@ enum RuntimeActorCommand {
     Emit(RuntimeOutputDraft),
     StartTask {
         accepted: RuntimeOutputDraft,
+        failure: RuntimeOutputDraft,
         task: RuntimeTask,
     },
     Shutdown(RuntimeOutputDraft),
@@ -70,9 +77,14 @@ where
                 command = self.commands.recv() => {
                     match command {
                         Some(RuntimeActorCommand::Emit(output)) => self.write(output).await?,
-                        Some(RuntimeActorCommand::StartTask { accepted, task }) => {
+                        Some(RuntimeActorCommand::StartTask { accepted, failure, task }) => {
                             self.write(accepted).await?;
-                            self.tasks.spawn(task);
+                            self.tasks.spawn(async move {
+                                RuntimeTaskCompletion {
+                                    result: task.await,
+                                    failure,
+                                }
+                            });
                         }
                         Some(RuntimeActorCommand::Shutdown(output)) => {
                             self.write(output).await?;
@@ -86,9 +98,10 @@ where
                     }
                 }
                 completed = self.tasks.join_next(), if !self.tasks.is_empty() => {
-                    let output = completed
+                    let completion = completed
                         .ok_or(RuntimeActorError::TaskSetEmpty)?
                         .map_err(RuntimeActorError::TaskJoin)?;
+                    let output = completion.result.unwrap_or(completion.failure);
                     self.write(output).await?;
                 }
             }
@@ -133,10 +146,15 @@ impl RuntimeActorHandle {
     pub async fn start_task(
         &self,
         accepted: RuntimeOutputDraft,
+        failure: RuntimeOutputDraft,
         task: RuntimeTask,
     ) -> Result<(), RuntimeActorError> {
         self.commands
-            .send(RuntimeActorCommand::StartTask { accepted, task })
+            .send(RuntimeActorCommand::StartTask {
+                accepted,
+                failure,
+                task,
+            })
             .await
             .map_err(|_| RuntimeActorError::Closed)
     }

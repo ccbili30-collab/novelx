@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use novelx_protocol::{ContextCompilationReceipt, ProviderRunIdentity};
 use secrecy::{ExposeSecret, SecretString};
@@ -233,7 +234,7 @@ impl BoundProvider {
 
 #[derive(Default)]
 pub struct ProviderRegistry {
-    providers: BTreeMap<String, BoundProvider>,
+    providers: BTreeMap<String, Arc<BoundProvider>>,
 }
 
 impl ProviderRegistry {
@@ -258,7 +259,7 @@ impl ProviderRegistry {
             credential: SecretString::from(credential),
         };
         let receipt = bound.receipt();
-        self.providers.insert(profile_id, bound);
+        self.providers.insert(profile_id, Arc::new(bound));
         Ok(receipt)
     }
 
@@ -276,7 +277,18 @@ impl ProviderRegistry {
         {
             return Err(ProviderGatewayError::ProfileMismatch);
         }
-        Ok(provider)
+        Ok(provider.as_ref())
+    }
+
+    pub fn resolve_owned(
+        &self,
+        identity: &ProviderRunIdentity,
+    ) -> Result<Arc<BoundProvider>, ProviderGatewayError> {
+        self.resolve(identity)?;
+        self.providers
+            .get(&identity.profile_id)
+            .cloned()
+            .ok_or(ProviderGatewayError::CredentialRequired)
     }
 
     pub fn remove(&mut self, profile_id: &str) -> bool {
@@ -398,10 +410,14 @@ impl ProviderGateway {
                 if response.status() == reqwest::StatusCode::UNAUTHORIZED
                     || response.status() == reqwest::StatusCode::FORBIDDEN =>
             {
-                return Err(ProviderGatewayError::AuthenticationRejected);
+                return Err(ProviderGatewayError::AuthenticationRejected(
+                    response.status().as_u16(),
+                ));
             }
             Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                return Err(ProviderGatewayError::RateLimited);
+                return Err(ProviderGatewayError::RateLimited(
+                    response.status().as_u16(),
+                ));
             }
             Ok(_) => None,
             Err(error) if error.is_timeout() => return Err(ProviderGatewayError::Timeout),
@@ -753,11 +769,15 @@ fn classify_transport_error(error: reqwest::Error) -> ProviderGatewayError {
 fn classify_status(status: reqwest::StatusCode) -> Result<(), ProviderGatewayError> {
     match status {
         status if status.is_success() => Ok(()),
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-            Err(ProviderGatewayError::AuthenticationRejected)
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(
+            ProviderGatewayError::AuthenticationRejected(status.as_u16()),
+        ),
+        reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            Err(ProviderGatewayError::RateLimited(status.as_u16()))
         }
-        reqwest::StatusCode::TOO_MANY_REQUESTS => Err(ProviderGatewayError::RateLimited),
-        status if status.is_redirection() => Err(ProviderGatewayError::RedirectRejected),
+        status if status.is_redirection() => {
+            Err(ProviderGatewayError::RedirectRejected(status.as_u16()))
+        }
         status => Err(ProviderGatewayError::HttpRejected(status.as_u16())),
     }
 }
@@ -795,9 +815,9 @@ pub enum ProviderGatewayError {
     #[error("Provider HTTP client could not be created: {0}")]
     ClientBuild(reqwest::Error),
     #[error("Provider authentication was rejected")]
-    AuthenticationRejected,
+    AuthenticationRejected(u16),
     #[error("Provider rate limit was reached")]
-    RateLimited,
+    RateLimited(u16),
     #[error("Provider request timed out")]
     Timeout,
     #[error("Provider connection failed")]
@@ -805,7 +825,7 @@ pub enum ProviderGatewayError {
     #[error("Provider request failed")]
     RequestFailed,
     #[error("Provider redirect was rejected")]
-    RedirectRejected,
+    RedirectRejected(u16),
     #[error("Provider returned HTTP {0}")]
     HttpRejected(u16),
     #[error("Provider model was not found")]

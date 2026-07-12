@@ -14,9 +14,10 @@ async fn pending_long_task_does_not_block_status_or_shutdown_and_one_writer_orde
     handle
         .start_task(
             draft("task.accepted", MessageType::Response),
+            draft("runtime.error", MessageType::Event),
             Box::pin(async move {
                 release_rx.await.unwrap();
-                draft("task.completed", MessageType::Event)
+                Ok(draft("task.completed", MessageType::Event))
             }),
         )
         .await
@@ -58,6 +59,7 @@ async fn shutdown_aborts_a_still_pending_task_and_emits_no_fake_terminal_output(
     handle
         .start_task(
             draft("task.accepted", MessageType::Response),
+            draft("runtime.error", MessageType::Event),
             Box::pin(std::future::pending()),
         )
         .await
@@ -73,6 +75,31 @@ async fn shutdown_aborts_a_still_pending_task_and_emits_no_fake_terminal_output(
     assert_eq!(stopped.sequence, 22);
     assert!(actor_task.await.unwrap().is_ok());
     assert!(lines.next_line().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn task_mapping_failure_emits_the_declared_runtime_error_without_panicking() {
+    let (writer, reader) = tokio::io::duplex(16 * 1024);
+    let (actor, handle) = RuntimeActor::new(writer, 30, 4);
+    let actor_task = tokio::spawn(actor.run());
+    let mut lines = BufReader::new(reader).lines();
+    handle
+        .start_task(
+            draft("task.accepted", MessageType::Response),
+            draft("runtime.error", MessageType::Event),
+            Box::pin(async { Err("terminal mapping failed".to_owned()) }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next_envelope(&mut lines).await.name, "task.accepted");
+    let failure = next_envelope(&mut lines).await;
+    assert_eq!(failure.name, "runtime.error");
+    assert_eq!(failure.sequence, 32);
+    handle
+        .shutdown(draft("runtime.stopped", MessageType::Control))
+        .await
+        .unwrap();
+    assert!(actor_task.await.unwrap().is_ok());
 }
 
 fn draft(name: &str, message_type: MessageType) -> RuntimeOutputDraft {
