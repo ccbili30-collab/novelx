@@ -12,6 +12,9 @@ import {
   parseRuntimeV2StatusEnvelope,
   parseRuntimeV2StatusGetEnvelope,
   parseRuntimeV2StoppedEnvelope,
+  parseRuntimeV2RunGetEnvelope,
+  parseRuntimeV2RunSnapshotEnvelope,
+  parseRuntimeV2RunStartEnvelope,
   runtimeV2EnvelopeSchema,
 } from "../../src/shared/runtimeV2Protocol";
 
@@ -50,7 +53,7 @@ function initializeEnvelope(overrides: Record<string, unknown> = {}) {
     sentAt: "2026-07-12T00:00:01Z",
     correlationId: null,
     runId: null,
-    sequence: 2,
+    sequence: 1,
     payload: {
       selectedProtocolVersion: 1,
       application: {
@@ -59,6 +62,8 @@ function initializeEnvelope(overrides: Record<string, unknown> = {}) {
         commit: "desktop-development",
       },
       workspaceDatabasePath: "C:\\NovelX\\Project\\.novax\\workspace.db",
+      projectId: "project-1",
+      workspaceId: "workspace-1",
       featureFlags: {
         runtime_v2: true,
         recovery: false,
@@ -209,6 +214,49 @@ function stoppedEnvelope(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function runPinnedIdentity() {
+  const policy = (id: string, digit: string) => ({ id, version: "1.0.0", sha256: digit.repeat(64) });
+  return {
+    projectId: "project-1", workspaceId: "workspace-1", sessionId: "session-1",
+    sessionBranchId: "session-branch-1", userMessageId: "user-message-1", projectBranchId: "project-branch-1",
+    goal: null, plan: null,
+    provider: { profileId: "profile-1", providerId: "deepseek", modelId: "deepseek-chat", configSha256: "a".repeat(64) },
+    promptBundle: policy("novelx.steward", "b"), agentProfile: policy("novelx.agent.steward", "c"),
+    toolPolicy: policy("novelx.tools", "d"), contextPolicy: policy("novelx.context", "e"),
+    runtimePolicy: policy("novelx.runtime", "f"), runtimeContractVersion: "1.0.0", mode: "assist",
+    sourceCheckpointId: "checkpoint-1", scopeResourceIds: ["resource-1", "resource-2"],
+    resourceScopeSha256: "1".repeat(64), userInputSha256: "2".repeat(64),
+  };
+}
+
+function runStartEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1, messageId: "7f56e8cb-c0b4-46fc-91f8-15bb057c9323", messageType: "command",
+    name: "run.start", sentAt: "2026-07-12T00:00:08Z", correlationId: null,
+    runId: "f25772f3-b0aa-4449-92eb-8ddf611a810d", sequence: 5,
+    payload: { startIdempotencyKey: "stable-start-1", pinnedIdentity: runPinnedIdentity() }, ...overrides,
+  };
+}
+
+function runGetEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    ...runStartEnvelope(), messageId: "68af36c1-b51d-4e18-80ac-a20bcc7d2b37", name: "run.get", sequence: 6,
+    payload: {}, ...overrides,
+  };
+}
+
+function runSnapshotEnvelope(overrides: Record<string, unknown> = {}) {
+  const runId = "f25772f3-b0aa-4449-92eb-8ddf611a810d";
+  return {
+    ...runStartEnvelope(), messageId: "4bb471b3-dc35-4cd0-9f98-f908ffb9db8d", messageType: "response",
+    name: "run.snapshot", correlationId: runStartEnvelope().messageId, sequence: 5,
+    payload: {
+      runId, pinnedIdentity: runPinnedIdentity(), state: "created", recoveryClassification: "resumable",
+      runSequence: 1, aggregateSequence: 1, createdAt: "2026-07-12T00:00:09Z", updatedAt: "2026-07-12T00:00:09Z",
+    }, ...overrides,
+  };
+}
+
 describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
   it("accepts the Rust runtime.hello envelope", () => {
     expect(parseRuntimeV2HelloEnvelope(helloEnvelope())).toEqual(helloEnvelope());
@@ -283,6 +331,8 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
       payload: {
         ...initializeEnvelope().payload,
         workspaceDatabasePath: null,
+        projectId: null,
+        workspaceId: null,
       },
     })).payload.workspaceDatabasePath).toBeNull();
   });
@@ -441,5 +491,33 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ runId: MESSAGE_ID }))).toThrow();
     expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ payload: { reason: "crashed" } }))).toThrow();
     expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ payload: { reason: "requested", extra: true } }))).toThrow();
+  });
+
+  it("accepts strict run.start, run.get and correlated run.snapshot messages", () => {
+    expect(parseRuntimeV2RunStartEnvelope(runStartEnvelope())).toEqual(runStartEnvelope());
+    expect(parseRuntimeV2RunGetEnvelope(runGetEnvelope())).toEqual(runGetEnvelope());
+    expect(parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope())).toEqual(runSnapshotEnvelope());
+  });
+
+  it("rejects changed, secret-bearing or noncanonical Run identities", () => {
+    expect(() => parseRuntimeV2RunStartEnvelope(runStartEnvelope({ runId: null }))).toThrow();
+    expect(() => parseRuntimeV2RunStartEnvelope(runStartEnvelope({
+      payload: { ...runStartEnvelope().payload, apiKey: "must-not-cross-runtime" },
+    }))).toThrow();
+    expect(() => parseRuntimeV2RunStartEnvelope(runStartEnvelope({
+      payload: {
+        ...runStartEnvelope().payload,
+        pinnedIdentity: { ...runPinnedIdentity(), scopeResourceIds: ["resource-2", "resource-1"] },
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2RunStartEnvelope(runStartEnvelope({
+      payload: {
+        ...runStartEnvelope().payload,
+        pinnedIdentity: { ...runPinnedIdentity(), userInputSha256: "A".repeat(64) },
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope({
+      runId: "0c49e78c-3a5c-45b5-a1ca-af61173f35a6",
+    }))).toThrow();
   });
 });

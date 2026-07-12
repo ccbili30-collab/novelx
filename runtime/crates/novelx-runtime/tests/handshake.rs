@@ -3,8 +3,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
 use novelx_protocol::{
-    Envelope, MessageType, PROTOCOL_VERSION, RuntimeApplicationIdentity, RuntimeError,
-    RuntimeErrorClass, RuntimeHello, RuntimeInitialize, RuntimeReady, RuntimeStatus,
+    Envelope, MessageType, PROTOCOL_VERSION, RunSnapshot, RunStart, RuntimeApplicationIdentity,
+    RuntimeError, RuntimeErrorClass, RuntimeHello, RuntimeInitialize, RuntimeReady, RuntimeStatus,
     RuntimeStopped,
 };
 use novelx_runtime::event_journal::EventJournal;
@@ -23,6 +23,8 @@ fn completes_one_correlated_initialize_and_waits_for_eof() {
             "selectedProtocolVersion": 1,
             "application": { "id": "novelx.desktop", "version": "0.2.7", "commit": "desktop-development" },
             "workspaceDatabasePath": null,
+            "projectId": null,
+            "workspaceId": null,
             "featureFlags": { "recovery": false, "runtime_v2": true },
             "hostCapabilityVersions": { "change_set": "2.0.0", "project_tools": "1.0.0" }
         })
@@ -168,6 +170,70 @@ fn serves_multiple_status_requests_and_shutdown_with_continuous_sequences() {
     assert_eq!(stopped_payload.reason, "requested");
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn persists_gets_and_idempotently_retries_a_run_over_the_real_protocol() {
+    let fixture = Fixture::new();
+    let (mut child, _hello) = spawn_and_read_hello();
+    let initialize = initialize_envelope_with_path(
+        PROTOCOL_VERSION,
+        "runtime.initialize",
+        Some(fixture.database_path.to_string_lossy().into_owned()),
+    );
+    write_envelope(&mut child, &initialize);
+    assert_eq!(read_next_envelope(&mut child).name, "runtime.ready");
+
+    let run_id = uuid::Uuid::new_v4();
+    let start_payload = RunStart {
+        start_idempotency_key: "stable-start-1".to_owned(),
+        pinned_identity: pinned_identity(),
+    };
+    let mut start = command_envelope(
+        "run.start",
+        2,
+        serde_json::to_value(&start_payload).unwrap(),
+    );
+    start.run_id = Some(run_id);
+    write_envelope(&mut child, &start);
+    let started = read_next_envelope(&mut child);
+    assert_response(&started, &start, "run.snapshot", 3);
+    assert_eq!(started.run_id, Some(run_id));
+    let started_snapshot: RunSnapshot = serde_json::from_value(started.payload).unwrap();
+    assert_eq!(started_snapshot.run_id, run_id);
+    assert_eq!(started_snapshot.aggregate_sequence, 1);
+    assert_eq!(started_snapshot.pinned_identity, pinned_identity());
+
+    let mut get = command_envelope("run.get", 3, serde_json::json!({}));
+    get.run_id = Some(run_id);
+    write_envelope(&mut child, &get);
+    let fetched = read_next_envelope(&mut child);
+    assert_response(&fetched, &get, "run.snapshot", 4);
+    let fetched_snapshot: RunSnapshot = serde_json::from_value(fetched.payload).unwrap();
+    assert_eq!(fetched_snapshot, started_snapshot);
+
+    let mut retry = command_envelope("run.start", 4, serde_json::to_value(start_payload).unwrap());
+    retry.run_id = Some(run_id);
+    write_envelope(&mut child, &retry);
+    let retried = read_next_envelope(&mut child);
+    assert_response(&retried, &retry, "run.snapshot", 5);
+    assert_eq!(
+        serde_json::from_value::<RunSnapshot>(retried.payload).unwrap(),
+        started_snapshot
+    );
+
+    let shutdown = command_envelope("runtime.shutdown", 5, serde_json::json!({}));
+    write_envelope(&mut child, &shutdown);
+    assert_response(
+        &read_next_envelope(&mut child),
+        &shutdown,
+        "runtime.stopped",
+        6,
+    );
+    assert!(child.wait().unwrap().success());
+
+    let journal = EventJournal::open(&fixture.database_path).unwrap();
+    assert_eq!(journal.read_run(&run_id.to_string(), 0).unwrap().len(), 1);
 }
 
 #[test]
@@ -358,6 +424,7 @@ fn initialize_envelope_with_path(
     name: &str,
     workspace_database_path: Option<String>,
 ) -> Envelope {
+    let has_workspace = workspace_database_path.is_some();
     let mut envelope = Envelope::new(
         MessageType::Command,
         name,
@@ -371,6 +438,8 @@ fn initialize_envelope_with_path(
                 commit: "desktop-development".to_owned(),
             },
             workspace_database_path,
+            project_id: has_workspace.then(|| "project-1".to_owned()),
+            workspace_id: has_workspace.then(|| "workspace-1".to_owned()),
             feature_flags: BTreeMap::from([
                 ("recovery".to_owned(), false),
                 ("runtime_v2".to_owned(), true),
@@ -407,7 +476,7 @@ fn assert_response(
     assert_eq!(response.message_type, MessageType::Response);
     assert_eq!(response.name, expected_name);
     assert_eq!(response.correlation_id, Some(command.message_id));
-    assert_eq!(response.run_id, None);
+    assert_eq!(response.run_id, command.run_id);
     assert_eq!(response.sequence, expected_sequence);
 }
 

@@ -28,6 +28,8 @@ describe("RuntimeV2ProcessSupervisor", () => {
       payload: {
         application: { id: "novelx.desktop", version: "0.2.7", commit: "desktop-test" },
         workspaceDatabasePath: null,
+        projectId: null,
+        workspaceId: null,
         featureFlags: { runtime_v2: true },
         hostCapabilityVersions: { project_tools: "1.0.0" },
       },
@@ -174,6 +176,8 @@ function createSupervisor(
     executableArgs: [fixture.scriptPath, fixture.scenario, fixture.capturePath],
     application: { id: "novelx.desktop", version: "0.2.7", commit: "desktop-test" },
     workspaceDatabasePath: null,
+    projectId: null,
+    workspaceId: null,
     featureFlags: { runtime_v2: true },
     hostCapabilityVersions: { project_tools: "1.0.0" },
     startupTimeoutMs: 1_000,

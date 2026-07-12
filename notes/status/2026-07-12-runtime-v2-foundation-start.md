@@ -32,22 +32,26 @@
 - Accepted ADR-0005 and added strict event-version-2 Run pinned identity covering project/workspace, session and project branches, user message, source checkpoint, Goal/Plan revisions, effective scope, Provider/model, Prompt/Agent/tool/context/runtime policies and input hashes.
 - Separated Run start business idempotency from transport message identity; a retry after restart returns the journal-recovered current state, while changed identity under the same key fails without writing.
 - Added fail-closed recovery for unknown Run event versions and validation for canonical sorted resource scopes and lowercase SHA-256 identities.
+- Added real `run.start`, `run.get`, `run.snapshot` and typed `run.rejected` protocol paths backed by the retained SQLite Event Journal.
+- Added project/workspace binding to initialization so a Run cannot be accepted into another workspace's runtime process.
+- Extended the Electron Supervisor with typed Run start/get APIs and verified that domain rejection leaves the valid runtime connection usable.
+- Added a real cross-process restart test: create a pinned Run, stop Rust, reopen the same database, recover one nonterminal Run and retrieve the identical snapshot.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 46 tests.
+- Rust workspace tests pass: 47 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 42 tests, including fatal timeout cleanup and post-ready crash rejection.
+- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 45 tests, including Run schema strictness, fatal timeout cleanup, post-ready crash rejection and real restart recovery.
 - `git diff --check` passes.
-- Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and the `handshake` capability.
+- Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and explicit `handshake`, `runtime_control` and `runs_v1` capabilities.
 
 ## Not Completed
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor is a continuously connected, independently tested module but is not part of production startup.
-- The runtime opens and recovers the supplied workspace database and processes status/shutdown control commands after readiness, but it still does not process durable Run commands.
-- The Run pinned identity is persisted and recoverable inside the aggregate, but `run.start`/`run.get` transport commands and their TypeScript mirror are not implemented yet.
+- The runtime opens and recovers the supplied workspace database and processes durable Run acceptance/query plus status/shutdown controls, but it does not yet schedule Provider or tool execution.
+- `run.start` currently stops at durable `created`; Preparing/Provider/context/tool scheduling and cancellation commands are not connected.
 - The ToolCall state machine and event-backed aggregate exist, but the real tool executor, Provider call, context compiler, recovery execution policy and domain tools are not implemented.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.

@@ -124,6 +124,8 @@ pub struct RuntimeInitialize {
     pub selected_protocol_version: u16,
     pub application: RuntimeApplicationIdentity,
     pub workspace_database_path: Option<String>,
+    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
     pub feature_flags: BTreeMap<String, bool>,
     pub host_capability_versions: BTreeMap<String, String>,
 }
@@ -213,6 +215,50 @@ pub struct RunPinnedIdentity {
     pub scope_resource_ids: Vec<String>,
     pub resource_scope_sha256: String,
     pub user_input_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunStart {
+    pub start_idempotency_key: String,
+    pub pinned_identity: RunPinnedIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunLifecycleState {
+    Created,
+    Preparing,
+    Running,
+    WaitingForApproval,
+    Committing,
+    Retrying,
+    Blocked,
+    Cancelled,
+    Failed,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunRecoveryClassification {
+    Resumable,
+    WaitingForApproval,
+    CommitUncertain,
+    Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunSnapshot {
+    pub run_id: Uuid,
+    pub pinned_identity: RunPinnedIdentity,
+    pub state: RunLifecycleState,
+    pub recovery_classification: RunRecoveryClassification,
+    pub run_sequence: u64,
+    pub aggregate_sequence: u64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

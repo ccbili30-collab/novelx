@@ -156,6 +156,8 @@ The strict stopped response payload is:
 
 Command and response payloads reject unknown fields. Host command sequence and runtime response sequence are independently monotonic for the lifetime of the connection; matching numeric values across directions do not imply shared ownership.
 
+When `workspaceDatabasePath` is configured, `runtime.initialize` also requires non-empty `projectId` and `workspaceId`. When no workspace database is configured, all three fields are null. A Run whose pinned project/workspace identity does not match initialization is rejected without a journal write.
+
 ## 4. Run Commands
 
 Baseline commands:
@@ -176,6 +178,15 @@ Baseline commands:
 `run.start` pins project, session branch, Goal/Plan revision, Provider profile identity, Prompt/runtime policy identities, Free/Assist mode and source checkpoint. A running Run cannot silently change these identities. Changes produce a new Run or an explicit persisted revision event.
 
 The durable `run.created` version-2 payload carries the complete secret-free pinned identity defined by ADR-0005. The stable start idempotency key is distinct from the envelope `messageId`. A retry with the same Run/key/identity returns the current recovered snapshot; a changed identity conflicts and writes nothing. Experimental version-1 creation events do not qualify as live Runs because they lack sufficient provenance.
+
+The current foundation implements:
+
+- `run.start`: command with required envelope `runId` and strict `{ startIdempotencyKey, pinnedIdentity }` payload. It durably accepts the Run and returns `run.snapshot`; it does not claim that Provider execution has started.
+- `run.get`: command with required envelope `runId` and strict empty payload. It replays the journal and returns `run.snapshot` without changing state.
+- `run.snapshot`: correlated response whose envelope and payload `runId` match. It includes pinned identity, lifecycle state, recovery classification, Run/aggregate sequences and creation/update timestamps.
+- `run.rejected`: correlated, Run-scoped response carrying a typed Runtime error. Domain rejection does not terminate an otherwise valid protocol connection.
+
+`WaitingForApproval` projects as `waiting_for_approval` and remains nonterminal. `Committing` recovers as `commit_uncertain`; queries never auto-repeat a commit or external side effect.
 
 ## 5. Durable Events
 

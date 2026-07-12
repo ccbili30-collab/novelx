@@ -12,6 +12,8 @@ pub struct RunAggregate {
     machine: RunStateMachine,
     last_run_sequence: u64,
     last_aggregate_sequence: u64,
+    created_at: String,
+    updated_at: String,
 }
 
 pub struct EventMetadata<'a> {
@@ -61,6 +63,14 @@ impl RunAggregate {
 
     pub const fn last_run_sequence(&self) -> u64 {
         self.last_run_sequence
+    }
+
+    pub fn created_at(&self) -> &str {
+        &self.created_at
+    }
+
+    pub fn updated_at(&self) -> &str {
+        &self.updated_at
     }
 
     pub fn prepare(
@@ -158,6 +168,7 @@ impl RunAggregate {
         self.machine = candidate;
         self.last_run_sequence = stored.run_sequence;
         self.last_aggregate_sequence = stored.aggregate_sequence;
+        self.updated_at = stored.created_at;
         Ok(())
     }
 }
@@ -217,6 +228,8 @@ fn replay(
         machine: RunStateMachine::new(),
         last_run_sequence,
         last_aggregate_sequence: 1,
+        created_at: first.created_at.clone(),
+        updated_at: first.created_at.clone(),
     };
     for event in &events[1..] {
         let expected = aggregate.last_aggregate_sequence + 1;
@@ -242,6 +255,7 @@ fn replay(
         }
         transition_machine(&mut aggregate.machine, target)?;
         aggregate.last_aggregate_sequence = event.aggregate_sequence;
+        aggregate.updated_at = event.created_at.clone();
     }
     Ok(aggregate)
 }

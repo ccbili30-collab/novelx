@@ -1,9 +1,13 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { RuntimeV2ProcessSupervisor } from "../../src/main/runtimeV2ProcessSupervisor";
+import { RuntimeV2SupervisorError } from "../../src/main/runtimeV2ProcessSupervisor";
 import { RUNTIME_V2_PROTOCOL_VERSION } from "../../src/shared/runtimeV2Protocol";
+import type { RuntimeV2RunStartPayload } from "../../src/shared/runtimeV2Protocol";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const runtimeRoot = path.join(appRoot, "runtime");
@@ -15,6 +19,7 @@ const runtimeExecutable = path.join(
 );
 
 let supervisor: RuntimeV2ProcessSupervisor | null = null;
+const tempRoots: string[] = [];
 
 beforeAll(() => {
   const build = spawnSync("cargo", [
@@ -37,6 +42,7 @@ beforeAll(() => {
 afterEach(async () => {
   await supervisor?.stop();
   supervisor = null;
+  for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe("Runtime V2 real Rust handshake", () => {
@@ -49,6 +55,8 @@ describe("Runtime V2 real Rust handshake", () => {
         commit: "runtime-v2-real-handshake-test",
       },
       workspaceDatabasePath: null,
+      projectId: null,
+      workspaceId: null,
       featureFlags: { runtime_v2: true },
       hostCapabilityVersions: {
         project_tools: "1.0.0",
@@ -64,6 +72,7 @@ describe("Runtime V2 real Rust handshake", () => {
     expect(ownedPid).toEqual(expect.any(Number));
     expect(handshake.hello.protocolVersion).toBe(RUNTIME_V2_PROTOCOL_VERSION);
     expect(handshake.hello.payload.protocolVersions).toContain(RUNTIME_V2_PROTOCOL_VERSION);
+    expect(handshake.hello.payload.capabilities).toEqual(expect.arrayContaining(["runtime_control", "runs_v1"]));
     expect(handshake.ready.protocolVersion).toBe(RUNTIME_V2_PROTOCOL_VERSION);
     expect(handshake.ready.payload.selectedProtocolVersion).toBe(RUNTIME_V2_PROTOCOL_VERSION);
     expect(handshake.ready.correlationId).not.toBeNull();
@@ -85,7 +94,96 @@ describe("Runtime V2 real Rust handshake", () => {
     expect(supervisor.pid).toBeNull();
     expect(isProcessAlive(ownedPid!)).toBe(false);
   }, 30_000);
+
+  it("persists a pinned Run and recovers the same snapshot after a real process restart", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-runtime-v2-run-"));
+    tempRoots.push(root);
+    const databasePath = path.join(root, "runtime.db");
+    const runId = "f25772f3-b0aa-4449-92eb-8ddf611a810d";
+    const payload = runStartPayload();
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    await supervisor.start();
+    const mismatched = runStartPayload();
+    mismatched.pinnedIdentity.projectId = "another-project";
+    const rejection = await supervisor.startRun("447d5fb8-bfc0-4565-bb32-a87afce72224", mismatched)
+      .catch((error: unknown) => error);
+    expect(rejection).toBeInstanceOf(RuntimeV2SupervisorError);
+    expect(rejection).toMatchObject({
+      code: "RUNTIME_V2_RUN_REJECTED",
+      publicPayload: { code: "RUN_WORKSPACE_BINDING_CONFLICT", class: "source_conflict", retryable: false },
+    });
+    await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
+
+    const created = await supervisor.startRun(runId, payload);
+    expect(created).toMatchObject({
+      runId,
+      state: "created",
+      recoveryClassification: "resumable",
+      aggregateSequence: 1,
+      pinnedIdentity: payload.pinnedIdentity,
+    });
+    await supervisor.stop();
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    const restarted = await supervisor.start();
+    expect(restarted.ready.payload.recoveredRunCount).toBe(1);
+    await expect(supervisor.getRun(runId)).resolves.toEqual(created);
+  }, 30_000);
 });
+
+function createWorkspaceSupervisor(databasePath: string): RuntimeV2ProcessSupervisor {
+  return new RuntimeV2ProcessSupervisor({
+    executablePath: runtimeExecutable,
+    application: {
+      id: "novelx.desktop.integration_test",
+      version: "0.2.7",
+      commit: "runtime-v2-real-run-test",
+    },
+    workspaceDatabasePath: databasePath,
+    projectId: "project-1",
+    workspaceId: "workspace-1",
+    featureFlags: { runtime_v2: true },
+    hostCapabilityVersions: { runtime_supervisor: "1.0.0" },
+    startupTimeoutMs: 10_000,
+    commandTimeoutMs: 10_000,
+    stopTimeoutMs: 2_000,
+  });
+}
+
+function runStartPayload(): RuntimeV2RunStartPayload {
+  const policy = (id: string, digit: string) => ({ id, version: "1.0.0", sha256: digit.repeat(64) });
+  return {
+    startIdempotencyKey: "integration-start-1",
+    pinnedIdentity: {
+      projectId: "project-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      sessionBranchId: "session-branch-1",
+      userMessageId: "user-message-1",
+      projectBranchId: "project-branch-1",
+      goal: null,
+      plan: null,
+      provider: {
+        profileId: "provider-profile-1",
+        providerId: "deepseek",
+        modelId: "deepseek-chat",
+        configSha256: "a".repeat(64),
+      },
+      promptBundle: policy("novelx.steward", "b"),
+      agentProfile: policy("novelx.agent.steward", "c"),
+      toolPolicy: policy("novelx.tools", "d"),
+      contextPolicy: policy("novelx.context", "e"),
+      runtimePolicy: policy("novelx.runtime", "f"),
+      runtimeContractVersion: "1.0.0",
+      mode: "assist",
+      sourceCheckpointId: "checkpoint-1",
+      scopeResourceIds: ["resource-1", "resource-2"],
+      resourceScopeSha256: "1".repeat(64),
+      userInputSha256: "2".repeat(64),
+    },
+  };
+}
 
 function isProcessAlive(pid: number): boolean {
   try {

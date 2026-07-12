@@ -9,6 +9,8 @@ const runtimeV2BuildSchema = z.object({
   target: z.string().trim().min(1).max(240),
 }).strict();
 const emptyRuntimeV2PayloadSchema = z.object({}).strict();
+const identityStringSchema = z.string().trim().min(1).max(512);
+const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 
 export const runtimeV2MessageTypeSchema = z.enum([
   "command",
@@ -74,9 +76,19 @@ export const runtimeV2InitializePayloadSchema = z.object({
     commit: z.string().trim().min(1).max(160),
   }).strict(),
   workspaceDatabasePath: z.string().trim().min(1).max(32_767).nullable(),
+  projectId: identityStringSchema.nullable(),
+  workspaceId: identityStringSchema.nullable(),
   featureFlags: z.record(versionedCapabilityKeySchema, z.boolean()),
   hostCapabilityVersions: z.record(versionedCapabilityKeySchema, semanticVersionSchema),
-}).strict();
+}).strict().superRefine((payload, context) => {
+  const configured = payload.workspaceDatabasePath !== null;
+  if ((payload.projectId !== null) !== configured) {
+    context.addIssue({ code: "custom", path: ["projectId"], message: "projectId must match workspaceDatabasePath presence." });
+  }
+  if ((payload.workspaceId !== null) !== configured) {
+    context.addIssue({ code: "custom", path: ["workspaceId"], message: "workspaceId must match workspaceDatabasePath presence." });
+  }
+});
 
 export const runtimeV2InitializeEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   messageType: z.literal("command"),
@@ -191,6 +203,117 @@ export const runtimeV2StoppedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   payload: runtimeV2StoppedPayloadSchema,
 }).strict();
 
+const revisionReferenceSchema = z.object({
+  id: identityStringSchema,
+  revision: z.number().int().positive().safe(),
+}).strict();
+
+const versionedPolicyIdentitySchema = z.object({
+  id: identityStringSchema,
+  version: identityStringSchema,
+  sha256: sha256Schema,
+}).strict();
+
+const providerRunIdentitySchema = z.object({
+  profileId: identityStringSchema,
+  providerId: identityStringSchema,
+  modelId: identityStringSchema,
+  configSha256: sha256Schema,
+}).strict();
+
+export const runtimeV2RunPinnedIdentitySchema = z.object({
+  projectId: identityStringSchema,
+  workspaceId: identityStringSchema,
+  sessionId: identityStringSchema,
+  sessionBranchId: identityStringSchema,
+  userMessageId: identityStringSchema,
+  projectBranchId: identityStringSchema,
+  goal: revisionReferenceSchema.nullable(),
+  plan: revisionReferenceSchema.nullable(),
+  provider: providerRunIdentitySchema,
+  promptBundle: versionedPolicyIdentitySchema,
+  agentProfile: versionedPolicyIdentitySchema,
+  toolPolicy: versionedPolicyIdentitySchema,
+  contextPolicy: versionedPolicyIdentitySchema,
+  runtimePolicy: versionedPolicyIdentitySchema,
+  runtimeContractVersion: identityStringSchema,
+  mode: z.enum(["free", "assist"]),
+  sourceCheckpointId: identityStringSchema,
+  scopeResourceIds: z.array(identityStringSchema).min(1).max(10_000),
+  resourceScopeSha256: sha256Schema,
+  userInputSha256: sha256Schema,
+}).strict().superRefine((identity, context) => {
+  for (let index = 1; index < identity.scopeResourceIds.length; index += 1) {
+    if (identity.scopeResourceIds[index - 1] >= identity.scopeResourceIds[index]) {
+      context.addIssue({
+        code: "custom",
+        path: ["scopeResourceIds", index],
+        message: "scopeResourceIds must be sorted and unique.",
+      });
+      break;
+    }
+  }
+});
+
+export const runtimeV2RunStartPayloadSchema = z.object({
+  startIdempotencyKey: identityStringSchema,
+  pinnedIdentity: runtimeV2RunPinnedIdentitySchema,
+}).strict();
+
+export const runtimeV2RunStartEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("run.start"),
+  correlationId: z.null(),
+  runId: z.uuid(),
+  payload: runtimeV2RunStartPayloadSchema,
+}).strict();
+
+export const runtimeV2RunGetEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("run.get"),
+  correlationId: z.null(),
+  runId: z.uuid(),
+  payload: emptyRuntimeV2PayloadSchema,
+}).strict();
+
+export const runtimeV2RunSnapshotPayloadSchema = z.object({
+  runId: z.uuid(),
+  pinnedIdentity: runtimeV2RunPinnedIdentitySchema,
+  state: z.enum([
+    "created", "preparing", "running", "waiting_for_approval", "committing",
+    "retrying", "blocked", "cancelled", "failed", "completed",
+  ]),
+  recoveryClassification: z.enum(["resumable", "waiting_for_approval", "commit_uncertain", "terminal"]),
+  runSequence: z.number().int().positive().safe(),
+  aggregateSequence: z.number().int().positive().safe(),
+  createdAt: z.iso.datetime({ offset: true }),
+  updatedAt: z.iso.datetime({ offset: true }),
+}).strict().superRefine((snapshot, context) => {
+  if (snapshot.runSequence < snapshot.aggregateSequence) {
+    context.addIssue({ code: "custom", path: ["runSequence"], message: "runSequence cannot precede aggregateSequence." });
+  }
+});
+
+export const runtimeV2RunSnapshotEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("run.snapshot"),
+  correlationId: z.uuid(),
+  runId: z.uuid(),
+  payload: runtimeV2RunSnapshotPayloadSchema,
+}).strict().superRefine((envelope, context) => {
+  if (envelope.runId !== envelope.payload.runId) {
+    context.addIssue({ code: "custom", path: ["payload", "runId"], message: "payload runId must match envelope runId." });
+  }
+});
+
+export const runtimeV2RunRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("run.rejected"),
+  correlationId: z.uuid(),
+  runId: z.uuid(),
+  payload: runtimeV2ErrorSchema,
+}).strict();
+
 export type RuntimeV2MessageType = z.infer<typeof runtimeV2MessageTypeSchema>;
 export type RuntimeV2Envelope = z.infer<typeof runtimeV2EnvelopeSchema>;
 export type RuntimeV2HelloPayload = z.infer<typeof runtimeV2HelloPayloadSchema>;
@@ -209,6 +332,13 @@ export type RuntimeV2StatusEnvelope = z.infer<typeof runtimeV2StatusEnvelopeSche
 export type RuntimeV2ShutdownEnvelope = z.infer<typeof runtimeV2ShutdownEnvelopeSchema>;
 export type RuntimeV2StoppedPayload = z.infer<typeof runtimeV2StoppedPayloadSchema>;
 export type RuntimeV2StoppedEnvelope = z.infer<typeof runtimeV2StoppedEnvelopeSchema>;
+export type RuntimeV2RunPinnedIdentity = z.infer<typeof runtimeV2RunPinnedIdentitySchema>;
+export type RuntimeV2RunStartPayload = z.infer<typeof runtimeV2RunStartPayloadSchema>;
+export type RuntimeV2RunStartEnvelope = z.infer<typeof runtimeV2RunStartEnvelopeSchema>;
+export type RuntimeV2RunGetEnvelope = z.infer<typeof runtimeV2RunGetEnvelopeSchema>;
+export type RuntimeV2RunSnapshotPayload = z.infer<typeof runtimeV2RunSnapshotPayloadSchema>;
+export type RuntimeV2RunSnapshotEnvelope = z.infer<typeof runtimeV2RunSnapshotEnvelopeSchema>;
+export type RuntimeV2RunRejectedEnvelope = z.infer<typeof runtimeV2RunRejectedEnvelopeSchema>;
 
 export class RuntimeV2ProtocolVersionError extends Error {
   readonly code = "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED";
@@ -272,6 +402,22 @@ export function parseRuntimeV2ShutdownEnvelope(value: unknown): RuntimeV2Shutdow
 
 export function parseRuntimeV2StoppedEnvelope(value: unknown): RuntimeV2StoppedEnvelope {
   return parseVersionedEnvelope(value, runtimeV2StoppedEnvelopeSchema);
+}
+
+export function parseRuntimeV2RunStartEnvelope(value: unknown): RuntimeV2RunStartEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2RunStartEnvelopeSchema);
+}
+
+export function parseRuntimeV2RunGetEnvelope(value: unknown): RuntimeV2RunGetEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2RunGetEnvelopeSchema);
+}
+
+export function parseRuntimeV2RunSnapshotEnvelope(value: unknown): RuntimeV2RunSnapshotEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2RunSnapshotEnvelopeSchema);
+}
+
+export function parseRuntimeV2RunRejectedEnvelope(value: unknown): RuntimeV2RunRejectedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2RunRejectedEnvelopeSchema);
 }
 
 function parseVersionedEnvelope<T>(value: unknown, schema: z.ZodType<T>): T {

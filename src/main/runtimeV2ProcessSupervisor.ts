@@ -9,15 +9,21 @@ import {
   parseRuntimeV2ErrorEnvelope,
   parseRuntimeV2InitializationFailedEnvelope,
   parseRuntimeV2ReadyEnvelope,
+  parseRuntimeV2RunRejectedEnvelope,
+  parseRuntimeV2RunSnapshotEnvelope,
   parseRuntimeV2StatusEnvelope,
   parseRuntimeV2StoppedEnvelope,
   runtimeV2InitializeEnvelopeSchema,
+  runtimeV2RunGetEnvelopeSchema,
+  runtimeV2RunStartEnvelopeSchema,
   runtimeV2ShutdownEnvelopeSchema,
   runtimeV2StatusGetEnvelopeSchema,
   type RuntimeV2HelloEnvelope,
   type RuntimeV2Error,
   type RuntimeV2InitializeEnvelope,
   type RuntimeV2ReadyEnvelope,
+  type RuntimeV2RunSnapshotPayload,
+  type RuntimeV2RunStartPayload,
   type RuntimeV2StatusPayload,
 } from "../shared/runtimeV2Protocol";
 
@@ -34,6 +40,8 @@ export interface RuntimeV2ProcessSupervisorOptions {
   executableArgs?: string[];
   application: RuntimeV2ApplicationIdentity;
   workspaceDatabasePath: string | null;
+  projectId: string | null;
+  workspaceId: string | null;
   featureFlags: Record<string, boolean>;
   hostCapabilityVersions: Record<string, string>;
   startupTimeoutMs?: number;
@@ -60,6 +68,7 @@ export type RuntimeV2SupervisorErrorCode =
   | "RUNTIME_V2_NOT_READY"
   | "RUNTIME_V2_COMMAND_TIMEOUT"
   | "RUNTIME_V2_EXITED_AFTER_READY"
+  | "RUNTIME_V2_RUN_REJECTED"
   | "RUNTIME_V2_WRITE_FAILED";
 
 export class RuntimeV2SupervisorError extends Error {
@@ -144,8 +153,18 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   async status(): Promise<RuntimeV2StatusPayload> {
-    const response = await this.#sendCommand("runtime.status.get", "runtime.status");
+    const response = await this.#sendCommand("runtime.status.get", "runtime.status", null, {});
     return parseRuntimeV2StatusEnvelope(response).payload;
+  }
+
+  async startRun(runId: string, payload: RuntimeV2RunStartPayload): Promise<RuntimeV2RunSnapshotPayload> {
+    const response = await this.#sendCommand("run.start", "run.snapshot", runId, payload);
+    return parseRuntimeV2RunSnapshotEnvelope(response).payload;
+  }
+
+  async getRun(runId: string): Promise<RuntimeV2RunSnapshotPayload> {
+    const response = await this.#sendCommand("run.get", "run.snapshot", runId, {});
+    return parseRuntimeV2RunSnapshotEnvelope(response).payload;
   }
 
   async stop(): Promise<void> {
@@ -154,7 +173,7 @@ export class RuntimeV2ProcessSupervisor {
     this.#stopping = true;
     if (this.#ready) {
       try {
-        const response = await this.#sendCommand("runtime.shutdown", "runtime.stopped", this.#options.stopTimeoutMs);
+        const response = await this.#sendCommand("runtime.shutdown", "runtime.stopped", null, {}, this.#options.stopTimeoutMs);
         parseRuntimeV2StoppedEnvelope(response);
       } catch {
         // Cleanup must continue even when the runtime cannot complete protocol shutdown.
@@ -288,6 +307,10 @@ export class RuntimeV2ProcessSupervisor {
           ? parseRuntimeV2StoppedEnvelope(value)
           : name === "runtime.error"
             ? parseRuntimeV2ErrorEnvelope(value)
+            : name === "run.snapshot"
+              ? parseRuntimeV2RunSnapshotEnvelope(value)
+              : name === "run.rejected"
+                ? parseRuntimeV2RunRejectedEnvelope(value)
             : null;
       if (!response) throw new Error(`unexpected Runtime V2 message after ready: ${String(name)}.`);
       if (response.sequence !== this.#expectedRuntimeSequence) {
@@ -300,9 +323,9 @@ export class RuntimeV2ProcessSupervisor {
       if (!pending) throw new Error(`Runtime V2 response has no pending command: ${String(correlationId)}.`);
       this.#pending.delete(correlationId);
       clearTimeout(pending.timer);
-      if (response.name === "runtime.error") {
+      if (response.name === "runtime.error" || response.name === "run.rejected") {
         pending.reject(new RuntimeV2SupervisorError(
-          "RUNTIME_V2_PROTOCOL_INVALID",
+          response.name === "run.rejected" ? "RUNTIME_V2_RUN_REJECTED" : "RUNTIME_V2_PROTOCOL_INVALID",
           response.payload.publicMessage,
           { publicPayload: response.payload, stderr: this.#stderr },
         ));
@@ -318,8 +341,10 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   #sendCommand(
-    name: "runtime.status.get" | "runtime.shutdown",
-    expectedName: "runtime.status" | "runtime.stopped",
+    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get",
+    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot",
+    runId: string | null,
+    payload: object,
     timeoutMs = this.#options.commandTimeoutMs,
   ): Promise<unknown> {
     const child = this.#child;
@@ -335,13 +360,17 @@ export class RuntimeV2ProcessSupervisor {
       name,
       sentAt: new Date().toISOString(),
       correlationId: null,
-      runId: null,
+      runId,
       sequence,
-      payload: {},
+      payload,
     };
     const command = name === "runtime.status.get"
       ? runtimeV2StatusGetEnvelopeSchema.parse(base)
-      : runtimeV2ShutdownEnvelopeSchema.parse(base);
+      : name === "runtime.shutdown"
+        ? runtimeV2ShutdownEnvelopeSchema.parse(base)
+        : name === "run.start"
+          ? runtimeV2RunStartEnvelopeSchema.parse(base)
+          : runtimeV2RunGetEnvelopeSchema.parse(base);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(command.messageId);
@@ -397,7 +426,7 @@ export class RuntimeV2ProcessSupervisor {
 }
 
 interface PendingCommand {
-  expectedName: "runtime.status" | "runtime.stopped";
+  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot";
   resolve(value: unknown): void;
   reject(error: RuntimeV2SupervisorError): void;
   timer: NodeJS.Timeout;
@@ -419,6 +448,8 @@ function createInitializeEnvelope(
       selectedProtocolVersion: RUNTIME_V2_PROTOCOL_VERSION,
       application: options.application,
       workspaceDatabasePath: options.workspaceDatabasePath,
+      projectId: options.projectId,
+      workspaceId: options.workspaceId,
       featureFlags: options.featureFlags,
       hostCapabilityVersions: options.hostCapabilityVersions,
     },
