@@ -265,3 +265,100 @@ The following may build on Runtime V2 but are not required to call the baseline 
 - unrestricted code workspace mode.
 
 These extensions must reuse the kernel's project confinement, source, version, review, audit and fail-closed invariants. They may add capabilities; they may not bypass the baseline.
+
+## 15. Confirmed Codex-style product baseline
+
+The following direction was confirmed by the product owner on 2026-07-12. It is a committed product baseline, not evidence that the corresponding implementation is live:
+
+1. **Right-side sliding History（右侧滑动式历史/回溯）**: inspect real project changes and restore through an auditable new head or branch.
+2. **Automatic Agent allocation（智能体自动分配）**: the Steward（大管家）may create bounded child assignments under a durable Goal（目标）and Plan（计划）.
+3. **Lower-right model selector（右下角模型切换）**: select the Provider（模型服务）and model profile for the next Run（运行）.
+4. **Session branch（会话分支）**: editing or retrying earlier conversation creates an explicit alternative route without silently reverting committed project state.
+5. **Desktop Pet（桌面宠物）**: an allowlisted presentation extension that reacts to public runtime events but has no Agent or project-write authority.
+6. **Goal（目标）**: durable intent for long, delegated or resumable work, with acceptance criteria and evidence-backed completion.
+7. **Plan（计划）**: a versioned, inspectable execution structure under a Goal, without exposing private Chain of Thought（思维链）.
+8. **Handoff / Shared Memory（任务交接 / 共享记忆）**: explicit session-to-session and Agent-to-Agent communication with source identity and stale-source checks.
+9. **Comments / Annotations（批注 / 注释）**: version-anchored review threads that can be assigned to an Agent and resolved through a reviewable Change Set（变更集）.
+
+These capabilities are inspired by useful Codex product behavior, but NovelX does not commit to copying Codex internals or reproducing every Codex surface. NovelX owns the creative-domain semantics, permissions and presentation.
+
+### 15.1 Feasibility and reduction rules
+
+All nine capabilities are technically feasible within the accepted Rust Runtime V2（Rust 第二版运行时）+ Electron（桌面运行壳）architecture, but they do not have equal cost or dependency depth:
+
+| Capability | Feasibility constraint | Permitted first complete scope | Unacceptable shortcut |
+| --- | --- | --- | --- |
+| Goal / Plan | Requires durable events, immutable revisions, evidence references and restart recovery | One owner Steward（大管家）, bounded child assignments and visible progress | Prompt（提示词）-only Goal/Plan text or UI（用户界面）-only progress |
+| Automatic Agent allocation | Requires concurrency budget, cancellation, child scope, parent synthesis and write serialization | Independent bounded child Runs under one parent Goal | Unbounded swarm, hidden delegation or concurrent writes to one target |
+| Handoff / Shared Memory | Requires stable session identity, source checkpoint and recipient policy | Direct one-to-one handoff and selected shared facts | Copying private transcripts into another Agent's Prompt（提示词） |
+| Session branch | Requires immutable message ancestry and an explicit relation to project checkpoints | Conversation fork plus an explicit choice for already committed project effects | Destructive transcript rewrite or hidden project rollback |
+| Model selector | Requires published model profiles, Provider（模型服务）capability metadata and per-Run audit | Project default plus session override applied to the next Run | Cosmetic selector, mid-Run switching or permission changes through model choice |
+| History / rollback | Requires real checkpoints, diffs, leases and non-destructive restoration | Chronological committed-change drawer and restore-as-new-head | Fixture history, destructive reset or treating transcript rewind as project restore |
+| Comments / annotations | Requires stable version anchors and relocation/outdated rules | Documents, artifacts and Change Set items first; other resource anchors may follow | Plain Markdown comments that silently move after edits |
+| Desktop Pet | Requires a sanitized public event bus and resource limits | One packaged pet reacting to allowlisted status events | Raw Prompt（提示词）/file access, tool execution or arbitrary pet scripts |
+
+“Can be reduced” means narrowing the first supported object types or presentation, never replacing the authoritative runtime contract with fake data, deterministic Agent behavior or non-durable state.
+
+### 15.2 Implementation status at baseline freeze
+
+Status date: 2026-07-12. This table is intentionally conservative and must be updated only from code, tests and real runtime evidence.
+
+| Capability | Current evidence-backed status | Still required before product completion |
+| --- | --- | --- |
+| Goal / Plan | Rust workspace journal and aggregates exist; Runtime（运行时）commands and exact Run pin validation are in active integration and are not yet a complete desktop workflow | Finish compatibility/recovery gates, IPC（进程间通信）projection, desktop creation/inspection UI（用户界面）and real long-task acceptance |
+| Automatic Agent allocation | Product contract and Plan assignment fields exist | Real child Run coordinator, bounded concurrency, cancellation, synthesis, cost controls and cross-process acceptance |
+| Handoff / Shared Memory | Legacy application records and the V2 contract exist | V2 authoritative communication objects, stale-source enforcement, recovery and UI |
+| Session branch | Product semantics are defined | Durable branch aggregate, message ancestry, project-effect reconciliation and UI |
+| Model selector | Legacy Provider（旧模型服务）settings exist and the V2 contract is defined | V2 profile registry, next-Run binding, effective-profile audit, lower-right UI（用户界面）and unavailable-model behavior |
+| History / rollback | Existing project checkpoints/version services provide partial domain foundations | V2 event/diff projection, sliding drawer, lease-aware restore-as-new-head and end-to-end recovery evidence |
+| Comments / annotations | Product and anchor contracts are defined | Durable annotation aggregate, relocation rules, Agent assignment, Change Set workflow and UI |
+| Desktop Pet | Snow assets/background presentation exist separately from the Runtime V2 authority contract | Public sanitized event API, capability denial tests, resource/reduced-motion limits and packaged integration |
+
+No row in this table is “fully complete”. The Runtime V2 Goal remains active until the conformance gates and the relevant desktop workflows pass.
+
+## 16. Final Harness definition and staged connection boundary
+
+### 16.1 Target definition
+
+The NovelX Harness（运行框架）is the recoverable and auditable execution foundation between user intent and creative-domain side effects. Its final responsibility is to make real Provider（模型服务）-driven Agent（智能体）work controllable, resumable and verifiable across long tasks, multiple Agents and application restarts.
+
+The foundation is complete only when it provides all of the following as authoritative runtime behavior:
+
+- versioned Run, Goal, Plan, Step, ToolCall（工具调用）, Approval（批准）, Artifact（产物）and terminal-event identities;
+- strict ToolCall/result pairing and local protocol validation before every Provider request;
+- typed context compilation, real token budgeting, source receipts, compaction and retrieval without presenting partial reads as complete;
+- deterministic orchestration for offsets, retries, timeouts, cancellation, recovery and side-effect scheduling, leaving semantic judgment to real Agents;
+- Provider portability through published capability profiles and audited effective configuration;
+- durable permission leases, Free / Assist policy, Change Set staging and exactly-once canonical commits;
+- crash recovery from persisted events without replaying a completed external or project side effect;
+- bounded child-Agent allocation, Handoff, Shared Memory and parent synthesis;
+- structured errors and user-safe projections that preserve diagnostic evidence without exposing credentials, raw Prompt content, hidden GM facts or private reasoning;
+- conformance evidence across real Provider tasks, long context, cancellation, crashes, malformed tools, stale versions and restart recovery.
+
+Rust is the authoritative runtime implementation. Electron（桌面运行壳）+ React（用户界面框架）+ TypeScript（类型化脚本语言）remain the desktop host and presentation layer. Creative-domain modules remain responsible for worlds, OC（原创角色）, stories, documents, canon, graph facts, timelines, imports, playthroughs and checkpoints. The Harness coordinates those modules but does not invent or own their domain truth.
+
+### 16.2 Connection sequence after the foundation
+
+The product functions reconnect in dependency order. A later stage cannot compensate for an incomplete earlier contract:
+
+1. **Kernel foundation（内核地基）**: protocol, event journal, state machine, Provider gateway, ToolCall ledger, context compiler, cancellation and startup recovery.
+2. **Work control（工作控制）**: Goal, Plan, evidence, permissions, Free / Assist and Change Set transaction boundaries.
+3. **Project inspection and editing（项目检索与编辑）**: real list/stat/glob/search/range-read tools, versioned writes and file/domain adapters.
+4. **Long-term continuity（长期连续性）**: task memory, source receipts, project knowledge retrieval, Canonical Assertion（权威断言）, conflict detection and Checker（检查器）integration.
+5. **Multi-Agent coordination（多智能体协调）**: bounded child Runs, Agent allocation, cancellation, Handoff, Shared Memory and serialized project writes.
+6. **Desktop projections（桌面投影）**: Goal/Plan, model selector, activity/artifacts, session branches, comments and right-side History drawer backed only by authoritative state.
+7. **Creative and player domain reconnection（创作与玩家领域重接）**: Steward, Writer（写手）, Checker, GM（游戏主持人）, world-to-story, import/decomposition and playthrough reconciliation through the same runtime gates.
+8. **Extensions（扩展）**: Pet, images, maps, visual-book presentation, publishing, Android synchronization and later Mod/Plugin（模组/插件）work through allowlisted public capabilities.
+
+The Legacy Pi Agent（旧版 Pi 智能体）path may remain during migration, but it cannot be treated as equivalent to Runtime V2（第二版运行时）unless it passes the same conformance contract. Product UI（用户界面）may be implemented in parallel for design validation, but it must remain labelled incomplete until the authoritative dependency is live.
+
+### 16.3 Source and change control
+
+This definition is constrained by:
+
+- `docs/adr/ADR-0003-rust-runtime-v2-and-codex-reference.md` for the accepted Rust sidecar and selective Codex reference decision;
+- `docs/runtime-v2/codex-reference-audit.md` for the reviewed Codex CLI（Codex 命令行）patterns and non-portable code-domain assumptions;
+- `docs/runtime-v2/current-runtime-audit.md` for the legacy runtime's actual ownership, failure windows and migration seams;
+- `docs/plans/2026-07-12-runtime-v2-foundation.md` for the implementation gates and reconnection order.
+
+Any future change that moves Provider calls, permissions, canonical writes, recovery ownership or authoritative Run state outside the Rust Runtime V2 kernel requires a new ADR（架构决策记录）. Presentation changes and additional domain object types do not require redefining the Harness if they preserve these boundaries.

@@ -245,7 +245,7 @@ function runPinnedIdentity() {
     toolPolicy: policy("novelx.tools", "d"), contextPolicy: policy("novelx.context", "e"),
     runtimePolicy: policy("novelx.runtime", "f"), runtimeContractVersion: "1.0.0", mode: "assist",
     sourceCheckpointId: "checkpoint-1", scopeResourceIds: ["resource-1", "resource-2"],
-    resourceScopeSha256: "1".repeat(64), userInputSha256: "2".repeat(64),
+    resourceScopeSha256: createHash("sha256").update(JSON.stringify(["resource-1", "resource-2"]), "utf8").digest("hex"), userInputSha256: "2".repeat(64),
   };
 }
 
@@ -712,6 +712,22 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(parseRuntimeV2RunPrepareEnvelope(runPrepareEnvelope())).toEqual(runPrepareEnvelope());
     expect(parseRuntimeV2RunCancelEnvelope(runCancelEnvelope())).toEqual(runCancelEnvelope());
     expect(parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope())).toEqual(runSnapshotEnvelope());
+  });
+
+  it("requires revision hashes for new runs while accepting legacy snapshots without them", () => {
+    const legacyGoal = { id: "goal-legacy", revision: 1 };
+    expect(() => parseRuntimeV2RunStartEnvelope(runStartEnvelope({
+      payload: {
+        ...runStartEnvelope().payload,
+        pinnedIdentity: { ...runPinnedIdentity(), goal: legacyGoal },
+      },
+    }))).toThrow();
+    expect(() => parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope({
+      payload: {
+        ...runSnapshotEnvelope().payload,
+        pinnedIdentity: { ...runPinnedIdentity(), goal: legacyGoal },
+      },
+    }))).not.toThrow();
   });
 
   it("accepts waiting_for_reconciliation only with its nonterminal recovery classification", () => {

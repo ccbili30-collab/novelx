@@ -9,6 +9,7 @@ use novelx_runtime::{
     workspace_event_journal::{NewWorkspaceEvent, WorkspaceEventJournal},
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 #[test]
 fn chinese_goal_round_trips_after_restart_with_all_identity_and_definition_fields() {
@@ -28,6 +29,14 @@ fn chinese_goal_round_trips_after_restart_with_all_identity_and_definition_field
 
     let reopened = fixture.open();
     assert_eq!(reopened.load("工作区-一", "目标-一").unwrap(), created);
+    assert_eq!(
+        reopened.load_revision("工作区-一", "目标-一", 1).unwrap(),
+        created
+    );
+    assert!(matches!(
+        reopened.load_revision("工作区-一", "目标-一", 2),
+        Err(GoalAggregateError::RevisionNotFound(2))
+    ));
 }
 
 #[test]
@@ -268,9 +277,13 @@ fn identity() -> GoalIdentity {
 }
 
 fn completed_definition() -> GoalDefinition {
+    let resource_ids = vec!["世界观".into(), "角色关系".into()];
     GoalDefinition {
         objective: "完成银湾世界观的可审计整理".into(),
-        scope: vec!["世界观".into(), "角色关系".into()],
+        scope: novelx_runtime::goal_aggregate::GoalScope {
+            scope_sha256: sha(&serde_json::to_vec(&resource_ids).unwrap()),
+            resource_ids,
+        },
         acceptance_criteria: vec![AcceptanceCriterion {
             criterion_id: "标准-1".into(),
             description: "真实回放通过".into(),
@@ -334,6 +347,10 @@ fn raw_event(
         payload,
         created_at: timestamp().into(),
     }
+}
+
+fn sha(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 struct Fixture {

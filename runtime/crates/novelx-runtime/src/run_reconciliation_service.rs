@@ -102,6 +102,7 @@ mod tests {
     use novelx_protocol::{
         ProviderRunIdentity, RunPermissionMode, RunPinnedIdentity, VersionedPolicyIdentity,
     };
+    use sha2::Digest;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -282,6 +283,7 @@ mod tests {
             version: "1.0.0".to_owned(),
             sha256: hash.to_string().repeat(64),
         };
+        let scope_resource_ids = vec!["resource".to_owned()];
         RunPinnedIdentity {
             project_id: "project".to_owned(),
             workspace_id: "workspace".to_owned(),
@@ -305,8 +307,11 @@ mod tests {
             runtime_contract_version: "1.0.0".to_owned(),
             mode: RunPermissionMode::Assist,
             source_checkpoint_id: "checkpoint".to_owned(),
-            scope_resource_ids: vec!["resource".to_owned()],
-            resource_scope_sha256: "3".repeat(64),
+            resource_scope_sha256: format!(
+                "{:x}",
+                sha2::Sha256::digest(serde_json::to_vec(&scope_resource_ids).unwrap())
+            ),
+            scope_resource_ids,
             user_input_sha256: "4".repeat(64),
         }
     }

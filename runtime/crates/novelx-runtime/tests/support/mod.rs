@@ -1,6 +1,7 @@
 use novelx_protocol::{
     ProviderRunIdentity, RunPermissionMode, RunPinnedIdentity, VersionedPolicyIdentity,
 };
+use sha2::{Digest, Sha256};
 
 pub fn pinned_identity() -> RunPinnedIdentity {
     let policy = |id: &str, hash: char| VersionedPolicyIdentity {
@@ -8,6 +9,7 @@ pub fn pinned_identity() -> RunPinnedIdentity {
         version: "1.0.0".to_owned(),
         sha256: hash.to_string().repeat(64),
     };
+    let scope_resource_ids = vec!["resource-1".to_owned(), "resource-2".to_owned()];
     RunPinnedIdentity {
         project_id: "project-1".to_owned(),
         workspace_id: "workspace-1".to_owned(),
@@ -31,8 +33,11 @@ pub fn pinned_identity() -> RunPinnedIdentity {
         runtime_contract_version: "1.0.0".to_owned(),
         mode: RunPermissionMode::Assist,
         source_checkpoint_id: "checkpoint-1".to_owned(),
-        scope_resource_ids: vec!["resource-1".to_owned(), "resource-2".to_owned()],
-        resource_scope_sha256: "1".repeat(64),
+        resource_scope_sha256: format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&scope_resource_ids).unwrap())
+        ),
+        scope_resource_ids,
         user_input_sha256: "2".repeat(64),
     }
 }

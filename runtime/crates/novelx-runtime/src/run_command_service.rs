@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::event_journal::{EventJournal, EventJournalError};
 use crate::provider_gateway::{ProviderGatewayError, ProviderRegistry};
 use crate::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
+use crate::run_pin_validator::{RunPinValidationError, RunPinValidator};
 use crate::run_state::RunState;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +20,7 @@ pub struct WorkspaceBinding {
 pub struct RunCommandService<'a> {
     journal: &'a mut Option<EventJournal>,
     workspace_binding: Option<&'a WorkspaceBinding>,
+    pin_validator: Option<&'a RunPinValidator>,
 }
 
 impl<'a> RunCommandService<'a> {
@@ -29,7 +31,13 @@ impl<'a> RunCommandService<'a> {
         Self {
             journal,
             workspace_binding,
+            pin_validator: None,
         }
+    }
+
+    pub fn with_pin_validator(mut self, validator: &'a RunPinValidator) -> Self {
+        self.pin_validator = Some(validator);
+        self
     }
 
     pub fn start(
@@ -68,13 +76,35 @@ impl<'a> RunCommandService<'a> {
             ));
         }
 
+        let run_id_text = run_id.to_string();
+        match RunAggregate::recover(journal, &run_id_text) {
+            Ok(_) => {}
+            Err(RunAggregateError::NotFound(_)) => {
+                if start.pinned_identity.goal.is_some() || start.pinned_identity.plan.is_some() {
+                    self.pin_validator
+                        .ok_or_else(|| {
+                            failure(
+                                "RUN_PIN_VALIDATOR_REQUIRED",
+                                RuntimeErrorClass::SourceConflict,
+                                "任务引用了目标或计划，但当前运行时无法验证这些引用。",
+                                "run.start.pin",
+                                false,
+                            )
+                        })?
+                        .validate(&start.pinned_identity)
+                        .map_err(pin_failure)?;
+                }
+            }
+            Err(error) => return Err(aggregate_failure("run.start.recover", error)),
+        }
+
         let created_at = OffsetDateTime::now_utc()
             .format(&Rfc3339)
             .map_err(|error| internal_failure("run.start.timestamp", error.to_string()))?;
         let message_id = command_message_id.to_string();
         RunAggregate::create(
             journal,
-            &run_id.to_string(),
+            &run_id_text,
             start.pinned_identity,
             EventMetadata {
                 message_id: &message_id,
@@ -219,6 +249,84 @@ impl<'a> RunCommandService<'a> {
             .map(|run| snapshot(&run))
             .map_err(|error| aggregate_failure("run.prepare.snapshot", error))
     }
+}
+
+fn pin_failure(error: RunPinValidationError) -> RunCommandFailure {
+    let (code, class, message) = match error {
+        RunPinValidationError::PlanWithoutGoal => (
+            "RUN_PLAN_WITHOUT_GOAL",
+            RuntimeErrorClass::SourceConflict,
+            "计划引用必须同时固定其所属目标。",
+        ),
+        RunPinValidationError::GoalReferenceInvalid => (
+            "RUN_GOAL_PIN_INVALID",
+            RuntimeErrorClass::Validation,
+            "目标引用格式无效。",
+        ),
+        RunPinValidationError::GoalNotFound => (
+            "RUN_GOAL_PIN_NOT_FOUND",
+            RuntimeErrorClass::SourceConflict,
+            "没有找到任务固定的目标。",
+        ),
+        RunPinValidationError::GoalRevisionNotFound => (
+            "RUN_GOAL_PIN_REVISION_NOT_FOUND",
+            RuntimeErrorClass::StaleVersion,
+            "没有找到任务固定的目标修订。",
+        ),
+        RunPinValidationError::GoalHashMismatch => (
+            "RUN_GOAL_PIN_HASH_MISMATCH",
+            RuntimeErrorClass::SourceConflict,
+            "目标修订哈希与持久记录不一致。",
+        ),
+        RunPinValidationError::GoalScopeConflict => (
+            "RUN_GOAL_PIN_SCOPE_CONFLICT",
+            RuntimeErrorClass::SourceConflict,
+            "目标没有覆盖任务需要的项目或资源范围。",
+        ),
+        RunPinValidationError::GoalTerminal => (
+            "RUN_GOAL_PIN_TERMINAL",
+            RuntimeErrorClass::SourceConflict,
+            "目标修订处于阻塞或终态，不能启动新的创作任务。",
+        ),
+        RunPinValidationError::PlanReferenceInvalid => (
+            "RUN_PLAN_PIN_INVALID",
+            RuntimeErrorClass::Validation,
+            "计划引用格式无效。",
+        ),
+        RunPinValidationError::PlanNotFound => (
+            "RUN_PLAN_PIN_NOT_FOUND",
+            RuntimeErrorClass::SourceConflict,
+            "没有找到任务固定的计划。",
+        ),
+        RunPinValidationError::PlanRevisionNotFound => (
+            "RUN_PLAN_PIN_REVISION_NOT_FOUND",
+            RuntimeErrorClass::StaleVersion,
+            "没有找到任务固定的计划修订。",
+        ),
+        RunPinValidationError::PlanHashMismatch => (
+            "RUN_PLAN_PIN_HASH_MISMATCH",
+            RuntimeErrorClass::SourceConflict,
+            "计划修订哈希与持久记录不一致。",
+        ),
+        RunPinValidationError::PlanGoalBindingConflict => (
+            "RUN_PLAN_GOAL_BINDING_CONFLICT",
+            RuntimeErrorClass::SourceConflict,
+            "计划不属于任务固定的目标。",
+        ),
+        RunPinValidationError::PlanGoalRevisionConflict => (
+            "RUN_PLAN_GOAL_REVISION_CONFLICT",
+            RuntimeErrorClass::StaleVersion,
+            "计划与任务固定的目标修订不一致。",
+        ),
+        RunPinValidationError::GoalIntegrity(_)
+        | RunPinValidationError::PlanIntegrity(_)
+        | RunPinValidationError::WorkspaceJournal(_) => (
+            "RUN_PIN_JOURNAL_INTEGRITY_FAILED",
+            RuntimeErrorClass::Storage,
+            "目标或计划记录无法通过完整性校验。",
+        ),
+    };
+    failure(code, class, message, "run.start.pin", false)
 }
 
 #[derive(Debug)]

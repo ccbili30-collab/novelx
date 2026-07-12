@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { RuntimeV2ProcessSupervisor, RuntimeV2SupervisorError } from "../../src/main/runtimeV2ProcessSupervisor";
 
@@ -428,7 +429,7 @@ const pinnedIdentity = () => {
     promptBundle: policy("prompt", "b"), agentProfile: policy("agent", "c"), toolPolicy: policy("tool", "d"),
     contextPolicy: policy("context", "e"), runtimePolicy: policy("runtime", "f"), runtimeContractVersion: "1.0.0",
     mode: "assist", sourceCheckpointId: "checkpoint-1", scopeResourceIds: ["resource-1"],
-    resourceScopeSha256: "1".repeat(64), userInputSha256: "2".repeat(64),
+    resourceScopeSha256: createHash("sha256").update(JSON.stringify(["resource-1", "resource-2"]), "utf8").digest("hex"), userInputSha256: "2".repeat(64),
   };
 };
 if (scenario === "invalid-json") { process.stdout.write("not-json\n"); return; }

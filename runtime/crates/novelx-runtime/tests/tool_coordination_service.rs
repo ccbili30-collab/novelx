@@ -359,7 +359,7 @@ fn recovery_calibrates_persisted_lease_and_completion_manifest_without_redispatc
         policy_id: "novelx.tools".to_owned(),
         policy_version: "1.0.0".to_owned(),
         policy_sha256: "d".repeat(64),
-        source_scope_sha256: "1".repeat(64),
+        source_scope_sha256: request.source_scope.scope_sha256.clone(),
         granted_at: "2026-07-12T00:00:00Z".to_owned(),
         expires_at: None,
     };
@@ -573,7 +573,7 @@ impl Fixture {
             source_scope: ToolSourceScope {
                 source_checkpoint_id: "checkpoint-1".to_owned(),
                 resource_ids: vec!["resource-1".to_owned(), "resource-2".to_owned()],
-                scope_sha256: "1".repeat(64),
+                scope_sha256: support::pinned_identity().resource_scope_sha256,
             },
             permission: ToolPermissionPolicy {
                 mode: self.mode,

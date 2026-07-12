@@ -2,10 +2,12 @@ use std::io;
 use std::sync::Arc;
 
 use novelx_protocol::{
-    ContextCompilationReceipt, ContextCompile, Envelope, MessageType, PROTOCOL_VERSION,
-    ProviderInferenceCompleted, ProviderInferenceStart, RunCancel, RunPrepare, RunReconcile,
-    RunReconciliationReceipt, RunSnapshot, RunStart, RuntimeBuild, RuntimeError, RuntimeErrorClass,
-    RuntimeHello, RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
+    ContextCompilationReceipt, ContextCompile, Envelope, GoalComplete, GoalCompletionPropose,
+    GoalCreate, GoalGet, GoalRevise, MessageType, PROTOCOL_VERSION, PlanCreate, PlanGet,
+    PlanRevise, PlanStepComplete, PlanStepStart, ProviderInferenceCompleted,
+    ProviderInferenceStart, RunCancel, RunPrepare, RunReconcile, RunReconciliationReceipt,
+    RunSnapshot, RunStart, RuntimeBuild, RuntimeError, RuntimeErrorClass, RuntimeHello,
+    RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
     ToolAuthorizationResolve, ToolAuthorizationResolved, ToolAuthorizationResolvedStatus,
     ToolRequest,
 };
@@ -14,6 +16,7 @@ use novelx_runtime::context_compile_service::{
     ContextCompileService, ContextCompileServiceError, recover_compilation_receipt,
 };
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
+use novelx_runtime::goal_plan_command_service::{GoalPlanCommandFailure, GoalPlanCommandService};
 use novelx_runtime::live_agent_loop_runner::{
     LiveAgentLoopOutcome, LiveAgentLoopProgress, LiveAgentLoopRunner,
 };
@@ -33,6 +36,7 @@ use novelx_runtime::provider_inference_service::{
 use novelx_runtime::recovery::{RecoveryCoordinator, RecoveryError};
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use novelx_runtime::run_command_service::{RunCommandFailure, RunCommandService, WorkspaceBinding};
+use novelx_runtime::run_pin_validator::RunPinValidator;
 use novelx_runtime::run_reconciliation_service::{
     RunReconciliationService, RunReconciliationServiceError,
 };
@@ -64,6 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "run_reconciliation_v1".to_owned(),
             "contexts_v1".to_owned(),
             "provider_inference_v1".to_owned(),
+            "goals_v1".to_owned(),
+            "plans_v1".to_owned(),
         ],
         build: RuntimeBuild {
             commit: option_env!("NOVELX_BUILD_COMMIT")
@@ -279,6 +285,20 @@ async fn run_command_loop(
                     runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
                 },
             )?),
+            "goal.create"
+            | "goal.get"
+            | "goal.revise"
+            | "goal.completion.propose"
+            | "goal.complete"
+            | "plan.create"
+            | "plan.get"
+            | "plan.revise"
+            | "plan.step.start"
+            | "plan.step.complete" => handle_goal_plan_command(
+                &command,
+                context.workspace_database_path,
+                context.workspace_binding,
+            )?,
             "runtime.shutdown" => {
                 output
                     .shutdown(response_draft(
@@ -291,7 +311,12 @@ async fn run_command_loop(
                     .await?;
                 return Ok(());
             }
-            "run.start" => handle_run_start(&command, context.journal, context.workspace_binding)?,
+            "run.start" => handle_run_start(
+                &command,
+                context.journal,
+                context.workspace_binding,
+                context.workspace_database_path,
+            )?,
             "run.get" => handle_run_get(&command, context.journal)?,
             "run.cancel" => {
                 let run_id = command.run_id.expect("validated run.cancel runId");
@@ -381,6 +406,56 @@ fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), St
             }
             require_empty_payload(command)?;
         }
+        "goal.create" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<GoalCreate>(command.payload.clone())
+                .map_err(|error| format!("invalid goal.create payload: {error}"))?;
+        }
+        "goal.get" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<GoalGet>(command.payload.clone())
+                .map_err(|error| format!("invalid goal.get payload: {error}"))?;
+        }
+        "goal.revise" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<GoalRevise>(command.payload.clone())
+                .map_err(|error| format!("invalid goal.revise payload: {error}"))?;
+        }
+        "goal.completion.propose" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<GoalCompletionPropose>(command.payload.clone())
+                .map_err(|error| format!("invalid goal.completion.propose payload: {error}"))?;
+        }
+        "goal.complete" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<GoalComplete>(command.payload.clone())
+                .map_err(|error| format!("invalid goal.complete payload: {error}"))?;
+        }
+        "plan.create" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<PlanCreate>(command.payload.clone())
+                .map_err(|error| format!("invalid plan.create payload: {error}"))?;
+        }
+        "plan.get" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<PlanGet>(command.payload.clone())
+                .map_err(|error| format!("invalid plan.get payload: {error}"))?;
+        }
+        "plan.revise" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<PlanRevise>(command.payload.clone())
+                .map_err(|error| format!("invalid plan.revise payload: {error}"))?;
+        }
+        "plan.step.start" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<PlanStepStart>(command.payload.clone())
+                .map_err(|error| format!("invalid plan.step.start payload: {error}"))?;
+        }
+        "plan.step.complete" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<PlanStepComplete>(command.payload.clone())
+                .map_err(|error| format!("invalid plan.step.complete payload: {error}"))?;
+        }
         "run.start" => {
             if command.run_id.is_none() {
                 return Err("run.start requires runId".to_owned());
@@ -452,6 +527,13 @@ fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), St
     Ok(())
 }
 
+fn require_workspace_command(command: &Envelope) -> Result<(), String> {
+    if command.run_id.is_some() {
+        return Err(format!("{} must not include runId", command.name));
+    }
+    Ok(())
+}
+
 fn require_empty_payload(command: &Envelope) -> Result<(), String> {
     if matches!(command.payload.as_object(), Some(payload) if payload.is_empty()) {
         Ok(())
@@ -508,18 +590,173 @@ fn provider_binding_error(error: &ProviderGatewayError) -> RuntimeError {
     }
 }
 
+fn handle_goal_plan_command(
+    command: &Envelope,
+    workspace_database_path: Option<&str>,
+    workspace_binding: Option<&WorkspaceBinding>,
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
+    let Some(database_path) = workspace_database_path else {
+        return goal_plan_command_failure(
+            command,
+            GoalPlanCommandFailure {
+                error: Box::new(runtime_domain_error(
+                    "RUNTIME_STORAGE_REQUIRED",
+                    RuntimeErrorClass::Storage,
+                    "当前运行时没有绑定工作区存储。",
+                    "goal_plan.storage",
+                )),
+                internal_message: "Goal/Plan command requires workspace storage".to_owned(),
+            },
+        );
+    };
+    let Some(binding) = workspace_binding else {
+        return goal_plan_command_failure(
+            command,
+            GoalPlanCommandFailure {
+                error: Box::new(runtime_domain_error(
+                    "RUNTIME_WORKSPACE_BINDING_REQUIRED",
+                    RuntimeErrorClass::Validation,
+                    "当前运行时缺少工作区和项目身份绑定。",
+                    "goal_plan.binding",
+                )),
+                internal_message: "Goal/Plan command requires workspace binding".to_owned(),
+            },
+        );
+    };
+    let service = GoalPlanCommandService::new(database_path, binding);
+    let result: Result<(&str, serde_json::Value), GoalPlanCommandFailure> =
+        match command.name.as_str() {
+            "goal.create" => service
+                .create_goal(
+                    command.message_id,
+                    serde_json::from_value(command.payload.clone())?,
+                )
+                .and_then(|snapshot| serialized_domain_snapshot("goal.snapshot", snapshot)),
+            "goal.get" => service
+                .get_goal(serde_json::from_value(command.payload.clone())?)
+                .and_then(|snapshot| serialized_domain_snapshot("goal.snapshot", snapshot)),
+            "goal.revise" => service
+                .revise_goal(
+                    command.message_id,
+                    serde_json::from_value(command.payload.clone())?,
+                )
+                .and_then(|snapshot| serialized_domain_snapshot("goal.snapshot", snapshot)),
+            "goal.completion.propose" => service
+                .propose_goal_completion(
+                    command.message_id,
+                    serde_json::from_value(command.payload.clone())?,
+                )
+                .and_then(|snapshot| serialized_domain_snapshot("goal.snapshot", snapshot)),
+            "goal.complete" => service
+                .complete_goal(
+                    command.message_id,
+                    serde_json::from_value(command.payload.clone())?,
+                )
+                .and_then(|snapshot| serialized_domain_snapshot("goal.snapshot", snapshot)),
+            "plan.create" => service
+                .create_plan(
+                    command.message_id,
+                    serde_json::from_value(command.payload.clone())?,
+                )
+                .and_then(|snapshot| serialized_domain_snapshot("plan.snapshot", snapshot)),
+            "plan.get" => service
+                .get_plan(serde_json::from_value(command.payload.clone())?)
+                .and_then(|snapshot| serialized_domain_snapshot("plan.snapshot", snapshot)),
+            "plan.revise" => service
+                .revise_plan(
+                    command.message_id,
+                    serde_json::from_value(command.payload.clone())?,
+                )
+                .and_then(|snapshot| serialized_domain_snapshot("plan.snapshot", snapshot)),
+            "plan.step.start" => service
+                .start_plan_step(
+                    command.message_id,
+                    serde_json::from_value(command.payload.clone())?,
+                )
+                .and_then(|snapshot| serialized_domain_snapshot("plan.snapshot", snapshot)),
+            "plan.step.complete" => service
+                .complete_plan_step(
+                    command.message_id,
+                    serde_json::from_value(command.payload.clone())?,
+                )
+                .and_then(|snapshot| serialized_domain_snapshot("plan.snapshot", snapshot)),
+            _ => unreachable!("validated Goal/Plan command"),
+        };
+    match result {
+        Ok((name, payload)) => {
+            let mut response = response_draft(command, name, payload)?;
+            response.run_id = None;
+            Ok(RoutedOutput::normal(response))
+        }
+        Err(failure) => goal_plan_command_failure(command, failure),
+    }
+}
+
+fn serialized_domain_snapshot<T: serde::Serialize>(
+    name: &'static str,
+    snapshot: T,
+) -> Result<(&'static str, serde_json::Value), GoalPlanCommandFailure> {
+    serde_json::to_value(snapshot)
+        .map(|payload| (name, payload))
+        .map_err(|error| GoalPlanCommandFailure {
+            error: Box::new(runtime_domain_error(
+                "GOAL_PLAN_SNAPSHOT_SERIALIZATION_FAILED",
+                RuntimeErrorClass::RuntimeCrash,
+                "目标或计划状态无法序列化。",
+                "goal_plan.snapshot",
+            )),
+            internal_message: error.to_string(),
+        })
+}
+
+fn goal_plan_command_failure(
+    command: &Envelope,
+    failure: GoalPlanCommandFailure,
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
+    eprintln!("Goal/Plan command rejected: {}", failure.internal_message);
+    let name = if command.name.starts_with("goal.") {
+        "goal.rejected"
+    } else {
+        "plan.rejected"
+    };
+    Ok(RoutedOutput::normal(response_draft(
+        command,
+        name,
+        *failure.error,
+    )?))
+}
+
+fn runtime_domain_error(
+    code: &str,
+    class: RuntimeErrorClass,
+    public_message: &str,
+    stage: &str,
+) -> RuntimeError {
+    RuntimeError {
+        code: code.to_owned(),
+        class,
+        retryable: false,
+        public_message: public_message.to_owned(),
+        stage: stage.to_owned(),
+        attempt: 0,
+        diagnostic_id: Uuid::new_v4(),
+    }
+}
+
 fn handle_run_start(
     command: &Envelope,
     journal: &mut Option<EventJournal>,
     workspace_binding: Option<&WorkspaceBinding>,
+    workspace_database_path: Option<&str>,
 ) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated run.start runId");
     let start: RunStart = serde_json::from_value(command.payload.clone())?;
-    match RunCommandService::new(journal, workspace_binding).start(
-        run_id,
-        command.message_id,
-        start,
-    ) {
+    let pin_validator = workspace_database_path.map(RunPinValidator::new);
+    let mut service = RunCommandService::new(journal, workspace_binding);
+    if let Some(validator) = pin_validator.as_ref() {
+        service = service.with_pin_validator(validator);
+    }
+    match service.start(run_id, command.message_id, start) {
         Ok(snapshot) => Ok(RoutedOutput::normal(run_snapshot_draft(command, snapshot)?)),
         Err(failure) => run_command_failure(command, run_id, failure),
     }

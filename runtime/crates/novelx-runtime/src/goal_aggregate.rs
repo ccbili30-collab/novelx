@@ -44,9 +44,16 @@ pub struct AcceptanceCriterion {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalScope {
+    pub resource_ids: Vec<String>,
+    pub scope_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GoalDefinition {
     pub objective: String,
-    pub scope: Vec<String>,
+    pub scope: GoalScope,
     pub acceptance_criteria: Vec<AcceptanceCriterion>,
     pub constraints: Vec<String>,
     pub permission_mode: GoalPermissionMode,
@@ -194,7 +201,36 @@ impl GoalAggregateRepository {
         let events = self
             .journal
             .read_stream(workspace_id, STREAM_TYPE, goal_id, 0)?;
+        if events.is_empty() {
+            return Err(GoalAggregateError::NotFound);
+        }
         replay(None, &events)?.ok_or(GoalAggregateError::NotFound)
+    }
+
+    pub fn load_revision(
+        &self,
+        workspace_id: &str,
+        goal_id: &str,
+        revision: u64,
+    ) -> Result<GoalAggregate, GoalAggregateError> {
+        if revision == 0 {
+            return Err(GoalAggregateError::RevisionNotFound(revision));
+        }
+        let events = self
+            .journal
+            .read_stream(workspace_id, STREAM_TYPE, goal_id, 0)?;
+        if events.is_empty() {
+            return Err(GoalAggregateError::NotFound);
+        }
+        let length = usize::try_from(revision)
+            .ok()
+            .filter(|length| *length <= events.len())
+            .ok_or(GoalAggregateError::RevisionNotFound(revision))?;
+        let aggregate = replay(None, &events[..length])?.ok_or(GoalAggregateError::NotFound)?;
+        if aggregate.revision != revision {
+            return Err(GoalAggregateError::RevisionNotFound(revision));
+        }
+        Ok(aggregate)
     }
 
     pub fn revise(
@@ -635,10 +671,31 @@ fn validate_identity(identity: &GoalIdentity) -> Result<(), GoalAggregateError> 
 
 fn validate_definition(definition: &GoalDefinition) -> Result<(), GoalAggregateError> {
     require_text("objective", &definition.objective)?;
-    if definition.scope.is_empty() || definition.acceptance_criteria.is_empty() {
+    if definition.scope.resource_ids.is_empty()
+        || definition.acceptance_criteria.is_empty()
+        || definition
+            .scope
+            .resource_ids
+            .iter()
+            .any(|value| value.trim().is_empty())
+        || definition
+            .scope
+            .resource_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || !is_sha256(&definition.scope.scope_sha256)
+        || definition.scope.scope_sha256
+            != format!(
+                "{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&definition.scope.resource_ids)
+                        .map_err(|_| GoalAggregateError::CorruptEventPayload)?
+                )
+            )
+    {
         return Err(GoalAggregateError::InvalidDefinition);
     }
-    for value in definition.scope.iter().chain(definition.constraints.iter()) {
+    for value in &definition.constraints {
         require_text("definition_item", value)?;
     }
     for criterion in &definition.acceptance_criteria {
@@ -669,6 +726,13 @@ fn require_text(field: &'static str, value: &str) -> Result<(), GoalAggregateErr
     }
 }
 
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn require_active_or_proposed(status: &GoalStatus) -> Result<(), GoalAggregateError> {
     if matches!(status, GoalStatus::Active | GoalStatus::CompletionProposed) {
         Ok(())
@@ -689,6 +753,8 @@ pub enum GoalAggregateError {
     AlreadyExists,
     #[error("goal was not found")]
     NotFound,
+    #[error("goal revision {0} was not found")]
+    RevisionNotFound(u64),
     #[error("goal revision conflict: expected {expected}, actual {actual}")]
     RevisionConflict { expected: u64, actual: u64 },
     #[error("goal revision is outside the supported range")]

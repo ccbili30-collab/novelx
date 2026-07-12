@@ -1,5 +1,6 @@
 use novelx_protocol::{RunPinnedIdentity, RunReconciliationDecision, RuntimeError};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent, RuntimeEvent};
@@ -441,7 +442,7 @@ fn replay(
     {
         return Err(RunAggregateError::InvalidPayload);
     }
-    validate_pinned_identity(&creation.pinned_identity)?;
+    validate_replayed_pinned_identity(&creation.pinned_identity)?;
     let mut aggregate = RunAggregate {
         run_id: run_id.to_owned(),
         pinned_identity: creation.pinned_identity,
@@ -806,6 +807,13 @@ fn failure_event(
 }
 
 fn validate_pinned_identity(identity: &RunPinnedIdentity) -> Result<(), RunAggregateError> {
+    validate_pinned_identity_common(identity, true)
+}
+
+fn validate_pinned_identity_common(
+    identity: &RunPinnedIdentity,
+    require_revision_hashes: bool,
+) -> Result<(), RunAggregateError> {
     for (name, value) in [
         ("projectId", identity.project_id.as_str()),
         ("workspaceId", identity.workspace_id.as_str()),
@@ -886,14 +894,14 @@ fn validate_pinned_identity(identity: &RunPinnedIdentity) -> Result<(), RunAggre
     if identity
         .goal
         .as_ref()
-        .is_some_and(invalid_revision_reference)
+        .is_some_and(|reference| invalid_revision_reference(reference, require_revision_hashes))
     {
         return Err(RunAggregateError::InvalidPinnedIdentity("goal"));
     }
     if identity
         .plan
         .as_ref()
-        .is_some_and(invalid_revision_reference)
+        .is_some_and(|reference| invalid_revision_reference(reference, require_revision_hashes))
     {
         return Err(RunAggregateError::InvalidPinnedIdentity("plan"));
     }
@@ -909,11 +917,31 @@ fn validate_pinned_identity(identity: &RunPinnedIdentity) -> Result<(), RunAggre
     {
         return Err(RunAggregateError::InvalidPinnedIdentity("scopeResourceIds"));
     }
+    let canonical_scope = serde_json::to_vec(&identity.scope_resource_ids)
+        .map_err(|_| RunAggregateError::InvalidPinnedIdentity("scopeResourceIds"))?;
+    if identity.resource_scope_sha256 != format!("{:x}", Sha256::digest(canonical_scope)) {
+        return Err(RunAggregateError::InvalidPinnedIdentity(
+            "resourceScopeSha256",
+        ));
+    }
     Ok(())
 }
 
-fn invalid_revision_reference(reference: &novelx_protocol::RevisionReference) -> bool {
-    reference.id.trim().is_empty() || reference.revision == 0
+fn invalid_revision_reference(
+    reference: &novelx_protocol::RevisionReference,
+    require_hash: bool,
+) -> bool {
+    if require_hash {
+        reference.validate().is_err()
+    } else {
+        reference.validate_legacy_replay().is_err()
+    }
+}
+
+fn validate_replayed_pinned_identity(
+    identity: &RunPinnedIdentity,
+) -> Result<(), RunAggregateError> {
+    validate_pinned_identity_common(identity, false)
 }
 
 fn is_lowercase_sha256(value: &str) -> bool {

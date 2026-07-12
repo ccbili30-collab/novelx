@@ -507,6 +507,86 @@ describe("Runtime V2 real Rust handshake", () => {
     ]);
     expect(providerServer.requestCount).toBe(1);
   }, 45_000);
+
+  it("persists Goal and Plan revisions across restart and rejects invalid Run pins without stopping Runtime", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-goal-plan-live-"));
+    tempRoots.push(root);
+    const databasePath = path.join(root, "runtime.db");
+    supervisor = createWorkspaceSupervisor(databasePath, root);
+    const handshake = await supervisor.start();
+    expect(handshake.hello.payload.capabilities).toEqual(expect.arrayContaining(["goals_v1", "plans_v1"]));
+    const resourceIds = ["resource-1", "resource-2"];
+    const definition = {
+      objective: "整理银湾世界观并保留可审计来源",
+      scope: { resourceIds, scopeSha256: sha256Text(JSON.stringify(resourceIds)) },
+      acceptanceCriteria: [{
+        criterionId: "criterion-source",
+        description: "所有事实都有来源",
+        required: true,
+        satisfied: false,
+        evidenceRefs: [],
+      }],
+      constraints: ["不得伪造资料"],
+      permissionMode: "assist" as const,
+    };
+    const createdGoal = await supervisor.createGoal({
+      createIdempotencyKey: "goal-create-live-1",
+      goalId: "goal-live-1",
+      sessionId: "session-1",
+      ownerAgentId: "steward",
+      definition,
+    });
+    expect(createdGoal).toMatchObject({ revision: 1, definition: { objective: definition.objective } });
+    const revisedGoal = await supervisor.reviseGoal({
+      reviseIdempotencyKey: "goal-revise-live-1",
+      goalId: "goal-live-1",
+      expectedRevision: 1,
+      definition: { ...definition, objective: "整理银湾世界观、角色与来源" },
+    });
+    expect(revisedGoal.revision).toBe(2);
+    await expect(supervisor.getGoal({ goalId: "goal-live-1", revision: 1 })).resolves.toEqual(createdGoal);
+
+    const createdPlan = await supervisor.createPlan({
+      createIdempotencyKey: "plan-create-live-1",
+      planId: "plan-live-1",
+      goalId: "goal-live-1",
+      goalRevision: revisedGoal.revision,
+      steps: [{
+        stepId: "step-read",
+        purpose: "读取项目资料",
+        dependencies: [],
+        assignedAgent: "steward",
+        capabilities: ["project.read"],
+        expectedArtifact: "source-report",
+        requiredEvidence: ["artifact"],
+        status: "pending",
+        completionEvidence: [],
+      }],
+    });
+    expect(createdPlan.currentRevision).toMatchObject({ revision: 1, goalRevision: 2 });
+
+    await supervisor.stop();
+    supervisor = createWorkspaceSupervisor(databasePath, root);
+    await supervisor.start();
+    await expect(supervisor.getGoal({ goalId: "goal-live-1" })).resolves.toEqual(revisedGoal);
+    await expect(supervisor.getPlan({ planId: "plan-live-1", revision: 1 })).resolves.toEqual(createdPlan);
+
+    const invalidStart = runStartPayload();
+    invalidStart.startIdempotencyKey = "invalid-goal-pin-live-1";
+    invalidStart.pinnedIdentity.goal = { id: "goal-live-1", revision: 2, sha256: "0".repeat(64) };
+    invalidStart.pinnedIdentity.plan = { id: "plan-live-1", revision: 1, sha256: createdPlan.currentRevision.revisionSha256 };
+    await expect(supervisor.startRun(randomUUID(), invalidStart)).rejects.toMatchObject({
+      code: "RUNTIME_V2_RUN_REJECTED",
+      publicPayload: { code: "RUN_GOAL_PIN_HASH_MISMATCH" },
+    });
+    await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
+
+    const validStart = runStartPayload();
+    validStart.startIdempotencyKey = "valid-goal-pin-live-1";
+    validStart.pinnedIdentity.goal = { id: "goal-live-1", revision: 2, sha256: revisedGoal.lastEventHash };
+    validStart.pinnedIdentity.plan = { id: "plan-live-1", revision: 1, sha256: createdPlan.currentRevision.revisionSha256 };
+    await expect(supervisor.startRun(randomUUID(), validStart)).resolves.toMatchObject({ state: "created" });
+  }, 45_000);
 });
 
 async function createOutcomeUnknownRun(runId: string): Promise<{
@@ -615,7 +695,7 @@ function runStartPayload(): RuntimeV2RunStartPayload {
       mode: "assist",
       sourceCheckpointId: "checkpoint-1",
       scopeResourceIds: ["resource-1", "resource-2"],
-      resourceScopeSha256: "1".repeat(64),
+      resourceScopeSha256: sha256Text(JSON.stringify(["resource-1", "resource-2"])),
       userInputSha256: "2".repeat(64),
     },
   };

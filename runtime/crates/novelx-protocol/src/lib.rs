@@ -175,6 +175,617 @@ pub enum RunPermissionMode {
 pub struct RevisionReference {
     pub id: String,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalPermissionMode {
+    Free,
+    Assist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalEvidenceReference {
+    pub kind: String,
+    pub reference: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalAcceptanceCriterion {
+    pub criterion_id: String,
+    pub description: String,
+    pub required: bool,
+    pub satisfied: bool,
+    pub evidence_refs: Vec<GoalEvidenceReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalDefinition {
+    pub objective: String,
+    pub scope: GoalScope,
+    pub acceptance_criteria: Vec<GoalAcceptanceCriterion>,
+    pub constraints: Vec<String>,
+    pub permission_mode: GoalPermissionMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalScope {
+    pub resource_ids: Vec<String>,
+    pub scope_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalIdentity {
+    pub workspace_id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub goal_id: String,
+    pub owner_agent_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalBlocker {
+    pub blocker_id: String,
+    pub description: String,
+    pub evidence_refs: Vec<GoalEvidenceReference>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    Active,
+    CompletionProposed,
+    Completed,
+    Blocked,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalSnapshot {
+    pub identity: GoalIdentity,
+    pub definition: GoalDefinition,
+    pub definition_revision: u64,
+    pub revision: u64,
+    pub status: GoalStatus,
+    pub evidence_refs: Vec<GoalEvidenceReference>,
+    pub blockers: Vec<GoalBlocker>,
+    pub last_event_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalActor {
+    pub agent_id: String,
+    pub is_child_agent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalCreate {
+    pub create_idempotency_key: String,
+    pub goal_id: String,
+    pub session_id: String,
+    pub owner_agent_id: String,
+    pub definition: GoalDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalGet {
+    pub goal_id: String,
+    pub revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalRevise {
+    pub revise_idempotency_key: String,
+    pub goal_id: String,
+    pub expected_revision: u64,
+    pub definition: GoalDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalCompletionPropose {
+    pub propose_idempotency_key: String,
+    pub goal_id: String,
+    pub expected_revision: u64,
+    pub evidence_refs: Vec<GoalEvidenceReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalComplete {
+    pub complete_idempotency_key: String,
+    pub goal_id: String,
+    pub expected_revision: u64,
+    pub actor: GoalActor,
+    pub evidence_refs: Vec<GoalEvidenceReference>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanEvidence {
+    pub evidence_type: String,
+    pub reference_id: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanStep {
+    pub step_id: String,
+    pub purpose: String,
+    pub dependencies: Vec<String>,
+    pub assigned_agent: Option<String>,
+    pub capabilities: Vec<String>,
+    pub expected_artifact: String,
+    pub required_evidence: Vec<String>,
+    pub status: PlanStepStatus,
+    #[serde(default)]
+    pub completion_evidence: Vec<PlanEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanRevision {
+    pub revision: u64,
+    pub goal_revision: u64,
+    pub steps: Vec<PlanStep>,
+    pub previous_revision_sha256: Option<String>,
+    pub revision_sha256: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanSnapshot {
+    pub workspace_id: String,
+    pub plan_id: String,
+    pub goal_id: String,
+    pub current_revision: PlanRevision,
+    pub last_stream_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanCreate {
+    pub create_idempotency_key: String,
+    pub plan_id: String,
+    pub goal_id: String,
+    pub goal_revision: u64,
+    pub steps: Vec<PlanStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanGet {
+    pub plan_id: String,
+    pub revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanRevise {
+    pub revise_idempotency_key: String,
+    pub plan_id: String,
+    pub expected_revision: u64,
+    pub goal_revision: u64,
+    pub steps: Vec<PlanStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanStepStart {
+    pub start_idempotency_key: String,
+    pub plan_id: String,
+    pub expected_revision: u64,
+    pub step_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanStepComplete {
+    pub complete_idempotency_key: String,
+    pub plan_id: String,
+    pub expected_revision: u64,
+    pub step_id: String,
+    pub evidence: Vec<PlanEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalPlanValidationError {
+    EmptyField { field: &'static str },
+    NumberMustBePositive { field: &'static str },
+    CollectionMustNotBeEmpty { field: &'static str },
+    InvalidSha256 { field: &'static str },
+    SatisfiedCriterionNeedsEvidence { criterion_id: String },
+    DuplicateIdentifier { field: &'static str, value: String },
+    InvalidPlanStepState { step_id: String },
+}
+
+impl std::fmt::Display for GoalPlanValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyField { field } => write!(formatter, "{field} must not be empty"),
+            Self::NumberMustBePositive { field } => write!(formatter, "{field} must be positive"),
+            Self::CollectionMustNotBeEmpty { field } => {
+                write!(formatter, "{field} must not be empty")
+            }
+            Self::InvalidSha256 { field } => {
+                write!(formatter, "{field} must be a lowercase SHA-256")
+            }
+            Self::SatisfiedCriterionNeedsEvidence { criterion_id } => write!(
+                formatter,
+                "satisfied criterion {criterion_id} requires evidence"
+            ),
+            Self::DuplicateIdentifier { field, value } => {
+                write!(formatter, "duplicate {field}: {value}")
+            }
+            Self::InvalidPlanStepState { step_id } => write!(
+                formatter,
+                "plan step {step_id} has an invalid authoring state"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GoalPlanValidationError {}
+
+impl RevisionReference {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("id", &self.id)?;
+        gp_require_positive("revision", self.revision)?;
+        let sha256 = self
+            .sha256
+            .as_deref()
+            .ok_or(GoalPlanValidationError::EmptyField { field: "sha256" })?;
+        gp_require_sha256("sha256", sha256)
+    }
+
+    pub fn validate_legacy_replay(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("id", &self.id)?;
+        gp_require_positive("revision", self.revision)?;
+        if let Some(sha256) = self.sha256.as_deref() {
+            gp_require_sha256("sha256", sha256)?;
+        }
+        Ok(())
+    }
+}
+
+impl GoalEvidenceReference {
+    fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("evidence.kind", &self.kind)?;
+        gp_require_text("evidence.reference", &self.reference)?;
+        gp_require_text("evidence.description", &self.description)
+    }
+}
+
+impl GoalDefinition {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("objective", &self.objective)?;
+        self.scope.validate()?;
+        gp_require_nonempty("acceptanceCriteria", &self.acceptance_criteria)?;
+        let mut criterion_ids = std::collections::BTreeSet::new();
+        for criterion in &self.acceptance_criteria {
+            gp_require_text("criterionId", &criterion.criterion_id)?;
+            gp_require_text("criterion.description", &criterion.description)?;
+            if !criterion_ids.insert(criterion.criterion_id.as_str()) {
+                return Err(GoalPlanValidationError::DuplicateIdentifier {
+                    field: "criterionId",
+                    value: criterion.criterion_id.clone(),
+                });
+            }
+            gp_validate_goal_evidence(&criterion.evidence_refs)?;
+            if criterion.satisfied && criterion.evidence_refs.is_empty() {
+                return Err(GoalPlanValidationError::SatisfiedCriterionNeedsEvidence {
+                    criterion_id: criterion.criterion_id.clone(),
+                });
+            }
+        }
+        for constraint in &self.constraints {
+            gp_require_text("constraint", constraint)?;
+        }
+        Ok(())
+    }
+}
+
+impl GoalScope {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_nonempty("scope.resourceIds", &self.resource_ids)?;
+        let mut previous: Option<&str> = None;
+        for resource_id in &self.resource_ids {
+            gp_require_text("scope.resourceId", resource_id)?;
+            if previous.is_some_and(|value| value >= resource_id.as_str()) {
+                return Err(GoalPlanValidationError::DuplicateIdentifier {
+                    field: "scope.resourceIds",
+                    value: resource_id.clone(),
+                });
+            }
+            previous = Some(resource_id);
+        }
+        gp_require_sha256("scope.scopeSha256", &self.scope_sha256)
+    }
+}
+
+impl GoalSnapshot {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        for (field, value) in [
+            ("identity.workspaceId", &self.identity.workspace_id),
+            ("identity.projectId", &self.identity.project_id),
+            ("identity.sessionId", &self.identity.session_id),
+            ("identity.goalId", &self.identity.goal_id),
+            ("identity.ownerAgentId", &self.identity.owner_agent_id),
+        ] {
+            gp_require_text(field, value)?;
+        }
+        self.definition.validate()?;
+        gp_require_positive("definitionRevision", self.definition_revision)?;
+        gp_require_positive("revision", self.revision)?;
+        gp_validate_goal_evidence(&self.evidence_refs)?;
+        for blocker in &self.blockers {
+            gp_require_text("blockerId", &blocker.blocker_id)?;
+            gp_require_text("blocker.description", &blocker.description)?;
+            gp_validate_goal_evidence(&blocker.evidence_refs)?;
+        }
+        gp_require_sha256("lastEventHash", &self.last_event_hash)
+    }
+}
+
+impl GoalCreate {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("createIdempotencyKey", &self.create_idempotency_key)?;
+        gp_require_text("goalId", &self.goal_id)?;
+        gp_require_text("sessionId", &self.session_id)?;
+        gp_require_text("ownerAgentId", &self.owner_agent_id)?;
+        self.definition.validate()
+    }
+}
+
+impl GoalGet {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("goalId", &self.goal_id)?;
+        if let Some(revision) = self.revision {
+            gp_require_positive("revision", revision)?;
+        }
+        Ok(())
+    }
+}
+
+impl GoalRevise {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("reviseIdempotencyKey", &self.revise_idempotency_key)?;
+        gp_require_text("goalId", &self.goal_id)?;
+        gp_require_positive("expectedRevision", self.expected_revision)?;
+        self.definition.validate()
+    }
+}
+
+impl GoalCompletionPropose {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("proposeIdempotencyKey", &self.propose_idempotency_key)?;
+        gp_require_text("goalId", &self.goal_id)?;
+        gp_require_positive("expectedRevision", self.expected_revision)?;
+        gp_require_nonempty("evidenceRefs", &self.evidence_refs)?;
+        gp_validate_goal_evidence(&self.evidence_refs)
+    }
+}
+
+impl GoalComplete {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("completeIdempotencyKey", &self.complete_idempotency_key)?;
+        gp_require_text("goalId", &self.goal_id)?;
+        gp_require_positive("expectedRevision", self.expected_revision)?;
+        gp_require_text("actor.agentId", &self.actor.agent_id)?;
+        gp_require_nonempty("evidenceRefs", &self.evidence_refs)?;
+        gp_validate_goal_evidence(&self.evidence_refs)
+    }
+}
+
+impl PlanEvidence {
+    fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("evidenceType", &self.evidence_type)?;
+        gp_require_text("referenceId", &self.reference_id)?;
+        gp_require_sha256("evidence.sha256", &self.sha256)
+    }
+}
+
+impl PlanRevision {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_positive("revision", self.revision)?;
+        gp_require_positive("goalRevision", self.goal_revision)?;
+        gp_validate_plan_steps(&self.steps, false)?;
+        if let Some(previous) = &self.previous_revision_sha256 {
+            gp_require_sha256("previousRevisionSha256", previous)?;
+        }
+        gp_require_sha256("revisionSha256", &self.revision_sha256)?;
+        gp_require_text("createdAt", &self.created_at)
+    }
+}
+
+impl PlanSnapshot {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("workspaceId", &self.workspace_id)?;
+        gp_require_text("planId", &self.plan_id)?;
+        gp_require_text("goalId", &self.goal_id)?;
+        self.current_revision.validate()?;
+        gp_require_positive("lastStreamSequence", self.last_stream_sequence)
+    }
+}
+
+impl PlanCreate {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("createIdempotencyKey", &self.create_idempotency_key)?;
+        gp_require_text("planId", &self.plan_id)?;
+        gp_require_text("goalId", &self.goal_id)?;
+        gp_require_positive("goalRevision", self.goal_revision)?;
+        gp_validate_plan_steps(&self.steps, true)
+    }
+}
+
+impl PlanGet {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("planId", &self.plan_id)?;
+        if let Some(revision) = self.revision {
+            gp_require_positive("revision", revision)?;
+        }
+        Ok(())
+    }
+}
+
+impl PlanRevise {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("reviseIdempotencyKey", &self.revise_idempotency_key)?;
+        gp_require_text("planId", &self.plan_id)?;
+        gp_require_positive("expectedRevision", self.expected_revision)?;
+        gp_require_positive("goalRevision", self.goal_revision)?;
+        gp_validate_plan_steps(&self.steps, true)
+    }
+}
+
+impl PlanStepStart {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("startIdempotencyKey", &self.start_idempotency_key)?;
+        gp_require_text("planId", &self.plan_id)?;
+        gp_require_positive("expectedRevision", self.expected_revision)?;
+        gp_require_text("stepId", &self.step_id)
+    }
+}
+
+impl PlanStepComplete {
+    pub fn validate(&self) -> Result<(), GoalPlanValidationError> {
+        gp_require_text("completeIdempotencyKey", &self.complete_idempotency_key)?;
+        gp_require_text("planId", &self.plan_id)?;
+        gp_require_positive("expectedRevision", self.expected_revision)?;
+        gp_require_text("stepId", &self.step_id)?;
+        gp_require_nonempty("evidence", &self.evidence)?;
+        for item in &self.evidence {
+            item.validate()?;
+        }
+        Ok(())
+    }
+}
+
+fn gp_validate_goal_evidence(
+    evidence: &[GoalEvidenceReference],
+) -> Result<(), GoalPlanValidationError> {
+    for item in evidence {
+        item.validate()?;
+    }
+    Ok(())
+}
+
+fn gp_validate_plan_steps(
+    steps: &[PlanStep],
+    authoring: bool,
+) -> Result<(), GoalPlanValidationError> {
+    gp_require_nonempty("steps", steps)?;
+    let mut ids = std::collections::BTreeSet::new();
+    for step in steps {
+        gp_require_text("stepId", &step.step_id)?;
+        gp_require_text("step.purpose", &step.purpose)?;
+        gp_require_text("expectedArtifact", &step.expected_artifact)?;
+        gp_require_nonempty("capabilities", &step.capabilities)?;
+        gp_require_nonempty("requiredEvidence", &step.required_evidence)?;
+        for value in step.capabilities.iter().chain(&step.required_evidence) {
+            gp_require_text("step.listItem", value)?;
+        }
+        if let Some(agent) = &step.assigned_agent {
+            gp_require_text("assignedAgent", agent)?;
+        }
+        if !ids.insert(step.step_id.as_str()) {
+            return Err(GoalPlanValidationError::DuplicateIdentifier {
+                field: "stepId",
+                value: step.step_id.clone(),
+            });
+        }
+        if authoring
+            && (step.status != PlanStepStatus::Pending || !step.completion_evidence.is_empty())
+        {
+            return Err(GoalPlanValidationError::InvalidPlanStepState {
+                step_id: step.step_id.clone(),
+            });
+        }
+        for evidence in &step.completion_evidence {
+            evidence.validate()?;
+        }
+    }
+    for (index, step) in steps.iter().enumerate() {
+        let mut dependencies = std::collections::BTreeSet::new();
+        for dependency in &step.dependencies {
+            gp_require_text("dependency", dependency)?;
+            if !dependencies.insert(dependency.as_str())
+                || !steps[..index]
+                    .iter()
+                    .any(|candidate| candidate.step_id == *dependency)
+            {
+                return Err(GoalPlanValidationError::DuplicateIdentifier {
+                    field: "dependency",
+                    value: dependency.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn gp_require_text(field: &'static str, value: &str) -> Result<(), GoalPlanValidationError> {
+    if value.trim().is_empty() {
+        Err(GoalPlanValidationError::EmptyField { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn gp_require_positive(field: &'static str, value: u64) -> Result<(), GoalPlanValidationError> {
+    if value == 0 {
+        Err(GoalPlanValidationError::NumberMustBePositive { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn gp_require_nonempty<T>(
+    field: &'static str,
+    values: &[T],
+) -> Result<(), GoalPlanValidationError> {
+    if values.is_empty() {
+        Err(GoalPlanValidationError::CollectionMustNotBeEmpty { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn gp_require_sha256(field: &'static str, value: &str) -> Result<(), GoalPlanValidationError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(GoalPlanValidationError::InvalidSha256 { field })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1789,6 +2400,310 @@ mod tests {
         assert_eq!(
             bad.validate(),
             Err(ToolProtocolValidationError::SourceScopeNotCanonical)
+        );
+    }
+
+    fn goal_definition() -> GoalDefinition {
+        GoalDefinition {
+            objective: "Finish the world package".to_owned(),
+            scope: GoalScope {
+                resource_ids: vec!["resource-a".to_owned(), "resource-b".to_owned()],
+                scope_sha256: "a".repeat(64),
+            },
+            acceptance_criteria: vec![GoalAcceptanceCriterion {
+                criterion_id: "criterion-1".to_owned(),
+                description: "The package is verified".to_owned(),
+                required: true,
+                satisfied: false,
+                evidence_refs: vec![],
+            }],
+            constraints: vec!["Use real provider evidence".to_owned()],
+            permission_mode: GoalPermissionMode::Assist,
+        }
+    }
+
+    fn plan_step() -> PlanStep {
+        PlanStep {
+            step_id: "step-1".to_owned(),
+            purpose: "Verify the package".to_owned(),
+            dependencies: vec![],
+            assigned_agent: Some("checker".to_owned()),
+            capabilities: vec!["project.read".to_owned()],
+            expected_artifact: "verification-report".to_owned(),
+            required_evidence: vec!["test".to_owned()],
+            status: PlanStepStatus::Pending,
+            completion_evidence: vec![],
+        }
+    }
+
+    fn goal_evidence() -> GoalEvidenceReference {
+        GoalEvidenceReference {
+            kind: "test".to_owned(),
+            reference: "tests/goal.rs".to_owned(),
+            description: "Goal contract passed".to_owned(),
+        }
+    }
+
+    #[test]
+    fn goal_command_payloads_are_strict_camel_case_and_validate() {
+        let create = GoalCreate {
+            create_idempotency_key: "goal-create-1".to_owned(),
+            goal_id: "goal-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            owner_agent_id: "steward".to_owned(),
+            definition: goal_definition(),
+        };
+        let get = GoalGet {
+            goal_id: "goal-1".to_owned(),
+            revision: None,
+        };
+        let revise = GoalRevise {
+            revise_idempotency_key: "goal-revise-1".to_owned(),
+            goal_id: "goal-1".to_owned(),
+            expected_revision: 1,
+            definition: goal_definition(),
+        };
+        let propose = GoalCompletionPropose {
+            propose_idempotency_key: "goal-propose-1".to_owned(),
+            goal_id: "goal-1".to_owned(),
+            expected_revision: 2,
+            evidence_refs: vec![goal_evidence()],
+        };
+        let complete = GoalComplete {
+            complete_idempotency_key: "goal-complete-1".to_owned(),
+            goal_id: "goal-1".to_owned(),
+            expected_revision: 3,
+            actor: GoalActor {
+                agent_id: "steward".to_owned(),
+                is_child_agent: false,
+            },
+            evidence_refs: vec![goal_evidence()],
+        };
+
+        assert_eq!(create.validate(), Ok(()));
+        assert_eq!(get.validate(), Ok(()));
+        assert_eq!(revise.validate(), Ok(()));
+        assert_eq!(propose.validate(), Ok(()));
+        assert_eq!(complete.validate(), Ok(()));
+        let encoded = serde_json::to_value(&create).unwrap();
+        assert!(encoded.get("createIdempotencyKey").is_some());
+        assert!(encoded["definition"]["scope"].get("scopeSha256").is_some());
+        assert_eq!(
+            serde_json::from_value::<GoalCreate>(encoded).unwrap(),
+            create
+        );
+        assert!(
+            serde_json::from_value::<GoalGet>(serde_json::json!({
+                "goalId": "goal-1", "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_value::<GoalCreate>(serde_json::json!({
+            "createIdempotencyKey": "key",
+            "goalId": "goal-1",
+            "sessionId": "session-1",
+            "ownerAgentId": "steward",
+            "definition": {
+                "objective": "objective",
+                "scope": { "resourceIds": ["resource-1"], "scopeSha256": "a".repeat(64), "extra": true },
+                "acceptanceCriteria": [],
+                "constraints": [],
+                "permissionMode": "assist"
+            }
+        })).is_err());
+    }
+
+    #[test]
+    fn plan_command_payloads_are_strict_camel_case_and_validate() {
+        let create = PlanCreate {
+            create_idempotency_key: "plan-create-1".to_owned(),
+            plan_id: "plan-1".to_owned(),
+            goal_id: "goal-1".to_owned(),
+            goal_revision: 1,
+            steps: vec![plan_step()],
+        };
+        let get = PlanGet {
+            plan_id: "plan-1".to_owned(),
+            revision: None,
+        };
+        let revise = PlanRevise {
+            revise_idempotency_key: "plan-revise-1".to_owned(),
+            plan_id: "plan-1".to_owned(),
+            expected_revision: 1,
+            goal_revision: 2,
+            steps: vec![plan_step()],
+        };
+        let start = PlanStepStart {
+            start_idempotency_key: "plan-start-1".to_owned(),
+            plan_id: "plan-1".to_owned(),
+            expected_revision: 2,
+            step_id: "step-1".to_owned(),
+        };
+        let complete = PlanStepComplete {
+            complete_idempotency_key: "plan-complete-1".to_owned(),
+            plan_id: "plan-1".to_owned(),
+            expected_revision: 3,
+            step_id: "step-1".to_owned(),
+            evidence: vec![PlanEvidence {
+                evidence_type: "test".to_owned(),
+                reference_id: "test-1".to_owned(),
+                sha256: "b".repeat(64),
+            }],
+        };
+
+        assert_eq!(create.validate(), Ok(()));
+        assert_eq!(get.validate(), Ok(()));
+        assert_eq!(revise.validate(), Ok(()));
+        assert_eq!(start.validate(), Ok(()));
+        assert_eq!(complete.validate(), Ok(()));
+        let encoded = serde_json::to_value(&complete).unwrap();
+        assert!(encoded.get("completeIdempotencyKey").is_some());
+        assert_eq!(
+            serde_json::from_value::<PlanStepComplete>(encoded).unwrap(),
+            complete
+        );
+        assert!(
+            serde_json::from_value::<PlanGet>(serde_json::json!({
+                "planId": "plan-1", "unexpected": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn goal_plan_snapshots_and_revision_references_require_real_revisions_and_hashes() {
+        let revision_reference = RevisionReference {
+            id: "goal-1".to_owned(),
+            revision: 3,
+            sha256: Some("c".repeat(64)),
+        };
+        assert_eq!(revision_reference.validate(), Ok(()));
+        assert!(
+            serde_json::to_string(&revision_reference)
+                .unwrap()
+                .contains("\"sha256\"")
+        );
+
+        let goal = GoalSnapshot {
+            identity: GoalIdentity {
+                workspace_id: "workspace-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                goal_id: "goal-1".to_owned(),
+                owner_agent_id: "steward".to_owned(),
+            },
+            definition: goal_definition(),
+            definition_revision: 1,
+            revision: 1,
+            status: GoalStatus::Active,
+            evidence_refs: vec![],
+            blockers: vec![],
+            last_event_hash: "d".repeat(64),
+        };
+        let plan = PlanSnapshot {
+            workspace_id: "workspace-1".to_owned(),
+            plan_id: "plan-1".to_owned(),
+            goal_id: "goal-1".to_owned(),
+            current_revision: PlanRevision {
+                revision: 1,
+                goal_revision: 1,
+                steps: vec![plan_step()],
+                previous_revision_sha256: None,
+                revision_sha256: "e".repeat(64),
+                created_at: "2026-07-12T00:00:00Z".to_owned(),
+            },
+            last_stream_sequence: 1,
+        };
+        assert_eq!(goal.validate(), Ok(()));
+        assert_eq!(plan.validate(), Ok(()));
+        assert_eq!(
+            serde_json::from_value::<GoalSnapshot>(serde_json::to_value(&goal).unwrap()).unwrap(),
+            goal
+        );
+        assert_eq!(
+            serde_json::from_value::<PlanSnapshot>(serde_json::to_value(&plan).unwrap()).unwrap(),
+            plan
+        );
+
+        let mut invalid_reference = revision_reference;
+        invalid_reference.revision = 0;
+        assert_eq!(
+            invalid_reference.validate(),
+            Err(GoalPlanValidationError::NumberMustBePositive { field: "revision" })
+        );
+        invalid_reference.revision = 1;
+        invalid_reference.sha256 = Some("A".repeat(64));
+        assert_eq!(
+            invalid_reference.validate(),
+            Err(GoalPlanValidationError::InvalidSha256 { field: "sha256" })
+        );
+        invalid_reference.sha256 = None;
+        assert_eq!(
+            invalid_reference.validate(),
+            Err(GoalPlanValidationError::EmptyField { field: "sha256" })
+        );
+        assert_eq!(invalid_reference.validate_legacy_replay(), Ok(()));
+    }
+
+    #[test]
+    fn goal_plan_validation_rejects_empty_fields_unsorted_scope_and_invalid_evidence_hashes() {
+        let mut create = GoalCreate {
+            create_idempotency_key: " ".to_owned(),
+            goal_id: "goal-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            owner_agent_id: "steward".to_owned(),
+            definition: goal_definition(),
+        };
+        assert_eq!(
+            create.validate(),
+            Err(GoalPlanValidationError::EmptyField {
+                field: "createIdempotencyKey"
+            })
+        );
+        create.create_idempotency_key = "key".to_owned();
+        create.definition.scope.resource_ids.reverse();
+        assert!(matches!(
+            create.validate(),
+            Err(GoalPlanValidationError::DuplicateIdentifier {
+                field: "scope.resourceIds",
+                ..
+            })
+        ));
+        create.definition.scope.resource_ids.reverse();
+        create.definition.scope.scope_sha256 = "A".repeat(64);
+        assert_eq!(
+            create.validate(),
+            Err(GoalPlanValidationError::InvalidSha256 {
+                field: "scope.scopeSha256"
+            })
+        );
+
+        let complete = PlanStepComplete {
+            complete_idempotency_key: "key".to_owned(),
+            plan_id: "plan-1".to_owned(),
+            expected_revision: 0,
+            step_id: "step-1".to_owned(),
+            evidence: vec![PlanEvidence {
+                evidence_type: "test".to_owned(),
+                reference_id: "test-1".to_owned(),
+                sha256: "bad".to_owned(),
+            }],
+        };
+        assert_eq!(
+            complete.validate(),
+            Err(GoalPlanValidationError::NumberMustBePositive {
+                field: "expectedRevision"
+            })
+        );
+        let complete = PlanStepComplete {
+            expected_revision: 1,
+            ..complete
+        };
+        assert_eq!(
+            complete.validate(),
+            Err(GoalPlanValidationError::InvalidSha256 {
+                field: "evidence.sha256"
+            })
         );
     }
 }

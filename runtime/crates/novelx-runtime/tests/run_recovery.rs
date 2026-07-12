@@ -1,11 +1,63 @@
 mod support;
 
+use novelx_protocol::RevisionReference;
 use novelx_runtime::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent};
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use novelx_runtime::run_state::{RunState, TransitionError};
 use serde_json::json;
 use support::pinned_identity;
 use tempfile::TempDir;
+
+#[test]
+fn new_runs_require_revision_hashes_but_legacy_events_without_them_still_recover() {
+    let fixture = Fixture::new();
+    let mut strict_identity = pinned_identity();
+    strict_identity.goal = Some(RevisionReference {
+        id: "goal-legacy".to_owned(),
+        revision: 1,
+        sha256: None,
+    });
+    let mut journal = fixture.open();
+    assert!(matches!(
+        RunAggregate::create(
+            &mut journal,
+            "run-new-without-hash",
+            strict_identity.clone(),
+            metadata("message-new-without-hash", None),
+        ),
+        Err(RunAggregateError::InvalidPinnedIdentity("goal"))
+    ));
+
+    journal
+        .append(
+            NewRuntimeEvent {
+                run_id: "run-legacy-without-hash".to_owned(),
+                aggregate_type: "run".to_owned(),
+                aggregate_id: "run-legacy-without-hash".to_owned(),
+                message_id: "message-legacy-without-hash".to_owned(),
+                idempotency_key: "legacy-without-hash".to_owned(),
+                event_type: "run.created".to_owned(),
+                event_version: 2,
+                payload: json!({
+                    "previousState": null,
+                    "currentState": "created",
+                    "reason": null,
+                    "pinnedIdentity": strict_identity,
+                }),
+                created_at: "2026-07-12T00:00:00Z".to_owned(),
+            },
+            0,
+            0,
+        )
+        .unwrap();
+
+    let recovered = RunAggregate::recover(&journal, "run-legacy-without-hash").unwrap();
+    assert_eq!(recovered.state(), RunState::Created);
+    assert_eq!(
+        recovered.pinned_identity().goal.as_ref().unwrap().sha256,
+        None
+    );
+}
 
 #[test]
 fn persists_transitions_and_recovers_after_reopening_sqlite() {

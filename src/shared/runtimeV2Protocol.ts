@@ -209,9 +209,14 @@ export const runtimeV2StoppedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   payload: runtimeV2StoppedPayloadSchema,
 }).strict();
 
-const revisionReferenceSchema = z.object({
+const legacyRevisionReferenceSchema = z.object({
   id: identityStringSchema,
   revision: z.number().int().positive().safe(),
+  sha256: sha256Schema.optional(),
+}).strict();
+
+const strictRevisionReferenceSchema = legacyRevisionReferenceSchema.extend({
+  sha256: sha256Schema,
 }).strict();
 
 const versionedPolicyIdentitySchema = z.object({
@@ -234,8 +239,8 @@ export const runtimeV2RunPinnedIdentitySchema = z.object({
   sessionBranchId: identityStringSchema,
   userMessageId: identityStringSchema,
   projectBranchId: identityStringSchema,
-  goal: revisionReferenceSchema.nullable(),
-  plan: revisionReferenceSchema.nullable(),
+  goal: legacyRevisionReferenceSchema.nullable(),
+  plan: legacyRevisionReferenceSchema.nullable(),
   provider: providerRunIdentitySchema,
   promptBundle: versionedPolicyIdentitySchema,
   agentProfile: versionedPolicyIdentitySchema,
@@ -263,7 +268,10 @@ export const runtimeV2RunPinnedIdentitySchema = z.object({
 
 export const runtimeV2RunStartPayloadSchema = z.object({
   startIdempotencyKey: identityStringSchema,
-  pinnedIdentity: runtimeV2RunPinnedIdentitySchema,
+  pinnedIdentity: runtimeV2RunPinnedIdentitySchema.safeExtend({
+    goal: strictRevisionReferenceSchema.nullable(),
+    plan: strictRevisionReferenceSchema.nullable(),
+  }).strict(),
 }).strict();
 
 export const runtimeV2RunStartEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
@@ -405,6 +413,103 @@ export const runtimeV2RunRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend
   runId: z.uuid(),
   payload: runtimeV2ErrorSchema,
 }).strict();
+
+export const runtimeV2GoalEvidenceReferenceSchema = z.object({
+  kind: identityStringSchema,
+  reference: identityStringSchema,
+  description: z.string().trim().min(1).max(4_000),
+}).strict();
+
+export const runtimeV2GoalScopeSchema = z.object({
+  resourceIds: z.array(identityStringSchema).min(1).max(10_000),
+  scopeSha256: sha256Schema,
+}).strict().superRefine((scope, context) => {
+  for (let index = 1; index < scope.resourceIds.length; index += 1) {
+    if (scope.resourceIds[index - 1] >= scope.resourceIds[index]) {
+      context.addIssue({ code: "custom", path: ["resourceIds", index], message: "resourceIds must be sorted and unique." });
+      break;
+    }
+  }
+});
+
+export const runtimeV2GoalAcceptanceCriterionSchema = z.object({
+  criterionId: identityStringSchema,
+  description: z.string().trim().min(1).max(4_000),
+  required: z.boolean(),
+  satisfied: z.boolean(),
+  evidenceRefs: z.array(runtimeV2GoalEvidenceReferenceSchema).max(10_000),
+}).strict().superRefine((criterion, context) => {
+  if (criterion.satisfied && criterion.evidenceRefs.length === 0) {
+    context.addIssue({ code: "custom", path: ["evidenceRefs"], message: "Satisfied criteria require evidence." });
+  }
+});
+
+export const runtimeV2GoalDefinitionSchema = z.object({
+  objective: z.string().trim().min(1).max(20_000),
+  scope: runtimeV2GoalScopeSchema,
+  acceptanceCriteria: z.array(runtimeV2GoalAcceptanceCriterionSchema).min(1).max(10_000),
+  constraints: z.array(z.string().trim().min(1).max(4_000)).max(10_000),
+  permissionMode: z.enum(["free", "assist"]),
+}).strict();
+
+export const runtimeV2GoalCreatePayloadSchema = z.object({
+  createIdempotencyKey: identityStringSchema,
+  goalId: identityStringSchema,
+  sessionId: identityStringSchema,
+  ownerAgentId: identityStringSchema,
+  definition: runtimeV2GoalDefinitionSchema,
+}).strict();
+export const runtimeV2GoalGetPayloadSchema = z.object({ goalId: identityStringSchema, revision: z.number().int().positive().safe().optional() }).strict();
+export const runtimeV2GoalRevisePayloadSchema = z.object({ reviseIdempotencyKey: identityStringSchema, goalId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), definition: runtimeV2GoalDefinitionSchema }).strict();
+export const runtimeV2GoalCompletionProposePayloadSchema = z.object({ proposeIdempotencyKey: identityStringSchema, goalId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), evidenceRefs: z.array(runtimeV2GoalEvidenceReferenceSchema).min(1).max(10_000) }).strict();
+export const runtimeV2GoalCompletePayloadSchema = z.object({ completeIdempotencyKey: identityStringSchema, goalId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), actor: z.object({ agentId: identityStringSchema, isChildAgent: z.boolean() }).strict(), evidenceRefs: z.array(runtimeV2GoalEvidenceReferenceSchema).min(1).max(10_000) }).strict();
+
+const workspaceCommandEnvelope = (name: string, payload: z.ZodType) => runtimeV2EnvelopeSchema.extend({ messageType: z.literal("command"), name: z.literal(name), correlationId: z.null(), runId: z.null(), payload }).strict();
+export const runtimeV2GoalCreateEnvelopeSchema = workspaceCommandEnvelope("goal.create", runtimeV2GoalCreatePayloadSchema);
+export const runtimeV2GoalGetEnvelopeSchema = workspaceCommandEnvelope("goal.get", runtimeV2GoalGetPayloadSchema);
+export const runtimeV2GoalReviseEnvelopeSchema = workspaceCommandEnvelope("goal.revise", runtimeV2GoalRevisePayloadSchema);
+export const runtimeV2GoalCompletionProposeEnvelopeSchema = workspaceCommandEnvelope("goal.completion.propose", runtimeV2GoalCompletionProposePayloadSchema);
+export const runtimeV2GoalCompleteEnvelopeSchema = workspaceCommandEnvelope("goal.complete", runtimeV2GoalCompletePayloadSchema);
+
+export const runtimeV2GoalSnapshotPayloadSchema = z.object({
+  identity: z.object({ workspaceId: identityStringSchema, projectId: identityStringSchema, sessionId: identityStringSchema, goalId: identityStringSchema, ownerAgentId: identityStringSchema }).strict(),
+  definition: runtimeV2GoalDefinitionSchema,
+  definitionRevision: z.number().int().positive().safe(),
+  revision: z.number().int().positive().safe(),
+  status: z.enum(["active", "completion_proposed", "completed", "blocked", "cancelled"]),
+  evidenceRefs: z.array(runtimeV2GoalEvidenceReferenceSchema),
+  blockers: z.array(z.object({ blockerId: identityStringSchema, description: z.string().trim().min(1), evidenceRefs: z.array(runtimeV2GoalEvidenceReferenceSchema) }).strict()),
+  lastEventHash: sha256Schema,
+}).strict();
+export const runtimeV2GoalSnapshotEnvelopeSchema = runtimeV2EnvelopeSchema.extend({ messageType: z.literal("response"), name: z.literal("goal.snapshot"), correlationId: z.uuid(), runId: z.null(), payload: runtimeV2GoalSnapshotPayloadSchema }).strict();
+export const runtimeV2GoalRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({ messageType: z.literal("response"), name: z.literal("goal.rejected"), correlationId: z.uuid(), runId: z.null(), payload: runtimeV2ErrorSchema }).strict();
+
+export const runtimeV2PlanEvidenceSchema = z.object({ evidenceType: identityStringSchema, referenceId: identityStringSchema, sha256: sha256Schema }).strict();
+export const runtimeV2PlanStepSchema = z.object({
+  stepId: identityStringSchema,
+  purpose: z.string().trim().min(1).max(10_000),
+  dependencies: z.array(identityStringSchema).max(10_000),
+  assignedAgent: identityStringSchema.nullable(),
+  capabilities: z.array(identityStringSchema).min(1).max(10_000),
+  expectedArtifact: identityStringSchema,
+  requiredEvidence: z.array(identityStringSchema).min(1).max(10_000),
+  status: z.enum(["pending", "in_progress", "completed", "blocked"]),
+  completionEvidence: z.array(runtimeV2PlanEvidenceSchema),
+}).strict();
+export const runtimeV2PlanCreatePayloadSchema = z.object({ createIdempotencyKey: identityStringSchema, planId: identityStringSchema, goalId: identityStringSchema, goalRevision: z.number().int().positive().safe(), steps: z.array(runtimeV2PlanStepSchema).min(1).max(10_000) }).strict();
+export const runtimeV2PlanGetPayloadSchema = z.object({ planId: identityStringSchema, revision: z.number().int().positive().safe().optional() }).strict();
+export const runtimeV2PlanRevisePayloadSchema = z.object({ reviseIdempotencyKey: identityStringSchema, planId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), goalRevision: z.number().int().positive().safe(), steps: z.array(runtimeV2PlanStepSchema).min(1).max(10_000) }).strict();
+export const runtimeV2PlanStepStartPayloadSchema = z.object({ startIdempotencyKey: identityStringSchema, planId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), stepId: identityStringSchema }).strict();
+export const runtimeV2PlanStepCompletePayloadSchema = z.object({ completeIdempotencyKey: identityStringSchema, planId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), stepId: identityStringSchema, evidence: z.array(runtimeV2PlanEvidenceSchema).min(1).max(10_000) }).strict();
+export const runtimeV2PlanCreateEnvelopeSchema = workspaceCommandEnvelope("plan.create", runtimeV2PlanCreatePayloadSchema);
+export const runtimeV2PlanGetEnvelopeSchema = workspaceCommandEnvelope("plan.get", runtimeV2PlanGetPayloadSchema);
+export const runtimeV2PlanReviseEnvelopeSchema = workspaceCommandEnvelope("plan.revise", runtimeV2PlanRevisePayloadSchema);
+export const runtimeV2PlanStepStartEnvelopeSchema = workspaceCommandEnvelope("plan.step.start", runtimeV2PlanStepStartPayloadSchema);
+export const runtimeV2PlanStepCompleteEnvelopeSchema = workspaceCommandEnvelope("plan.step.complete", runtimeV2PlanStepCompletePayloadSchema);
+export const runtimeV2PlanRevisionSchema = z.object({ revision: z.number().int().positive().safe(), goalRevision: z.number().int().positive().safe(), steps: z.array(runtimeV2PlanStepSchema).min(1), previousRevisionSha256: sha256Schema.nullable(), revisionSha256: sha256Schema, createdAt: z.iso.datetime({ offset: true }) }).strict();
+export const runtimeV2PlanSnapshotPayloadSchema = z.object({ workspaceId: identityStringSchema, planId: identityStringSchema, goalId: identityStringSchema, currentRevision: runtimeV2PlanRevisionSchema, lastStreamSequence: z.number().int().positive().safe() }).strict();
+export const runtimeV2PlanSnapshotEnvelopeSchema = runtimeV2EnvelopeSchema.extend({ messageType: z.literal("response"), name: z.literal("plan.snapshot"), correlationId: z.uuid(), runId: z.null(), payload: runtimeV2PlanSnapshotPayloadSchema }).strict();
+export const runtimeV2PlanRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({ messageType: z.literal("response"), name: z.literal("plan.rejected"), correlationId: z.uuid(), runId: z.null(), payload: runtimeV2ErrorSchema }).strict();
 
 export const runtimeV2ContextDisclosureSchema = z.enum([
   "public", "project_private", "agent_internal", "player_hidden",
@@ -936,6 +1041,24 @@ export type RuntimeV2RunReconciledEnvelope = z.infer<typeof runtimeV2RunReconcil
 export type RuntimeV2RunSnapshotPayload = z.infer<typeof runtimeV2RunSnapshotPayloadSchema>;
 export type RuntimeV2RunSnapshotEnvelope = z.infer<typeof runtimeV2RunSnapshotEnvelopeSchema>;
 export type RuntimeV2RunRejectedEnvelope = z.infer<typeof runtimeV2RunRejectedEnvelopeSchema>;
+export type RuntimeV2GoalDefinition = z.infer<typeof runtimeV2GoalDefinitionSchema>;
+export type RuntimeV2GoalCreatePayload = z.infer<typeof runtimeV2GoalCreatePayloadSchema>;
+export type RuntimeV2GoalGetPayload = z.infer<typeof runtimeV2GoalGetPayloadSchema>;
+export type RuntimeV2GoalRevisePayload = z.infer<typeof runtimeV2GoalRevisePayloadSchema>;
+export type RuntimeV2GoalCompletionProposePayload = z.infer<typeof runtimeV2GoalCompletionProposePayloadSchema>;
+export type RuntimeV2GoalCompletePayload = z.infer<typeof runtimeV2GoalCompletePayloadSchema>;
+export type RuntimeV2GoalSnapshotPayload = z.infer<typeof runtimeV2GoalSnapshotPayloadSchema>;
+export type RuntimeV2GoalSnapshotEnvelope = z.infer<typeof runtimeV2GoalSnapshotEnvelopeSchema>;
+export type RuntimeV2GoalRejectedEnvelope = z.infer<typeof runtimeV2GoalRejectedEnvelopeSchema>;
+export type RuntimeV2PlanStep = z.infer<typeof runtimeV2PlanStepSchema>;
+export type RuntimeV2PlanCreatePayload = z.infer<typeof runtimeV2PlanCreatePayloadSchema>;
+export type RuntimeV2PlanGetPayload = z.infer<typeof runtimeV2PlanGetPayloadSchema>;
+export type RuntimeV2PlanRevisePayload = z.infer<typeof runtimeV2PlanRevisePayloadSchema>;
+export type RuntimeV2PlanStepStartPayload = z.infer<typeof runtimeV2PlanStepStartPayloadSchema>;
+export type RuntimeV2PlanStepCompletePayload = z.infer<typeof runtimeV2PlanStepCompletePayloadSchema>;
+export type RuntimeV2PlanSnapshotPayload = z.infer<typeof runtimeV2PlanSnapshotPayloadSchema>;
+export type RuntimeV2PlanSnapshotEnvelope = z.infer<typeof runtimeV2PlanSnapshotEnvelopeSchema>;
+export type RuntimeV2PlanRejectedEnvelope = z.infer<typeof runtimeV2PlanRejectedEnvelopeSchema>;
 export type RuntimeV2ContextDisclosure = z.infer<typeof runtimeV2ContextDisclosureSchema>;
 export type RuntimeV2ContextItem = z.infer<typeof runtimeV2ContextItemSchema>;
 export type RuntimeV2ContextCompilePayload = z.infer<typeof runtimeV2ContextCompilePayloadSchema>;
@@ -1065,6 +1188,19 @@ export function parseRuntimeV2RunSnapshotEnvelope(value: unknown): RuntimeV2RunS
 
 export function parseRuntimeV2RunRejectedEnvelope(value: unknown): RuntimeV2RunRejectedEnvelope {
   return parseVersionedEnvelope(value, runtimeV2RunRejectedEnvelopeSchema);
+}
+
+export function parseRuntimeV2GoalSnapshotEnvelope(value: unknown): RuntimeV2GoalSnapshotEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2GoalSnapshotEnvelopeSchema);
+}
+export function parseRuntimeV2GoalRejectedEnvelope(value: unknown): RuntimeV2GoalRejectedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2GoalRejectedEnvelopeSchema);
+}
+export function parseRuntimeV2PlanSnapshotEnvelope(value: unknown): RuntimeV2PlanSnapshotEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2PlanSnapshotEnvelopeSchema);
+}
+export function parseRuntimeV2PlanRejectedEnvelope(value: unknown): RuntimeV2PlanRejectedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2PlanRejectedEnvelopeSchema);
 }
 
 export function parseRuntimeV2ContextCompileEnvelope(value: unknown): RuntimeV2ContextCompileEnvelope {

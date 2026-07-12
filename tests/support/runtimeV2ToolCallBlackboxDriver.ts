@@ -183,7 +183,7 @@ function runStartPayload(mode: "free" | "assist", configSha256: string): Runtime
     promptBundle: policy("novelx.steward", "b"), agentProfile: policy("novelx.agent.steward", "c"),
     toolPolicy: policy("novelx.tools", "d"), contextPolicy: policy("novelx.context", "e"), runtimePolicy: policy("novelx.runtime", "f"),
     runtimeContractVersion: "1.0.0", mode, sourceCheckpointId: "checkpoint-1",
-    scopeResourceIds: ["resource-1", "resource-2"], resourceScopeSha256: "1".repeat(64), userInputSha256: "2".repeat(64),
+    scopeResourceIds: ["resource-1", "resource-2"], resourceScopeSha256: sha256(JSON.stringify(["resource-1", "resource-2"])), userInputSha256: "2".repeat(64),
   } };
 }
 

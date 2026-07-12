@@ -20,6 +20,10 @@ import {
   parseRuntimeV2RunRejectedEnvelope,
   parseRuntimeV2RunReconciledEnvelope,
   parseRuntimeV2RunSnapshotEnvelope,
+  parseRuntimeV2GoalSnapshotEnvelope,
+  parseRuntimeV2GoalRejectedEnvelope,
+  parseRuntimeV2PlanSnapshotEnvelope,
+  parseRuntimeV2PlanRejectedEnvelope,
   parseRuntimeV2StatusEnvelope,
   parseRuntimeV2StoppedEnvelope,
   parseRuntimeV2ToolAuthorizationResolvedEnvelope,
@@ -38,6 +42,16 @@ import {
   runtimeV2RunReconcileEnvelopeSchema,
   runtimeV2RunPrepareEnvelopeSchema,
   runtimeV2RunStartEnvelopeSchema,
+  runtimeV2GoalCreateEnvelopeSchema,
+  runtimeV2GoalGetEnvelopeSchema,
+  runtimeV2GoalReviseEnvelopeSchema,
+  runtimeV2GoalCompletionProposeEnvelopeSchema,
+  runtimeV2GoalCompleteEnvelopeSchema,
+  runtimeV2PlanCreateEnvelopeSchema,
+  runtimeV2PlanGetEnvelopeSchema,
+  runtimeV2PlanReviseEnvelopeSchema,
+  runtimeV2PlanStepStartEnvelopeSchema,
+  runtimeV2PlanStepCompleteEnvelopeSchema,
   runtimeV2ShutdownEnvelopeSchema,
   runtimeV2StatusGetEnvelopeSchema,
   runtimeV2ToolAuthorizationResolveEnvelopeSchema,
@@ -61,6 +75,18 @@ import {
   type RuntimeV2RunReconciliationReceipt,
   type RuntimeV2RunPreparePayload,
   type RuntimeV2RunStartPayload,
+  type RuntimeV2GoalCreatePayload,
+  type RuntimeV2GoalGetPayload,
+  type RuntimeV2GoalRevisePayload,
+  type RuntimeV2GoalCompletionProposePayload,
+  type RuntimeV2GoalCompletePayload,
+  type RuntimeV2GoalSnapshotPayload,
+  type RuntimeV2PlanCreatePayload,
+  type RuntimeV2PlanGetPayload,
+  type RuntimeV2PlanRevisePayload,
+  type RuntimeV2PlanStepStartPayload,
+  type RuntimeV2PlanStepCompletePayload,
+  type RuntimeV2PlanSnapshotPayload,
   type RuntimeV2StatusPayload,
   type RuntimeV2ToolAuthorizationResolvePayload,
   type RuntimeV2ToolAuthorizationResolvedPayload,
@@ -122,6 +148,8 @@ export type RuntimeV2SupervisorErrorCode =
   | "RUNTIME_V2_COMMAND_TIMEOUT"
   | "RUNTIME_V2_EXITED_AFTER_READY"
   | "RUNTIME_V2_RUN_REJECTED"
+  | "RUNTIME_V2_GOAL_REJECTED"
+  | "RUNTIME_V2_PLAN_REJECTED"
   | "RUNTIME_V2_CONTEXT_REJECTED"
   | "RUNTIME_V2_PROVIDER_REJECTED"
   | "RUNTIME_V2_WRITE_FAILED";
@@ -218,6 +246,66 @@ export class RuntimeV2ProcessSupervisor {
   async status(): Promise<RuntimeV2StatusPayload> {
     const response = await this.#sendCommand("runtime.status.get", "runtime.status", null, {});
     return parseRuntimeV2StatusEnvelope(response).payload;
+  }
+
+  async createGoal(payload: RuntimeV2GoalCreatePayload): Promise<RuntimeV2GoalSnapshotPayload> {
+    return parseRuntimeV2GoalSnapshotEnvelope(
+      await this.#sendCommand("goal.create", "goal.snapshot", null, payload),
+    ).payload;
+  }
+
+  async getGoal(payload: RuntimeV2GoalGetPayload): Promise<RuntimeV2GoalSnapshotPayload> {
+    return parseRuntimeV2GoalSnapshotEnvelope(
+      await this.#sendCommand("goal.get", "goal.snapshot", null, payload),
+    ).payload;
+  }
+
+  async reviseGoal(payload: RuntimeV2GoalRevisePayload): Promise<RuntimeV2GoalSnapshotPayload> {
+    return parseRuntimeV2GoalSnapshotEnvelope(
+      await this.#sendCommand("goal.revise", "goal.snapshot", null, payload),
+    ).payload;
+  }
+
+  async proposeGoalCompletion(payload: RuntimeV2GoalCompletionProposePayload): Promise<RuntimeV2GoalSnapshotPayload> {
+    return parseRuntimeV2GoalSnapshotEnvelope(
+      await this.#sendCommand("goal.completion.propose", "goal.snapshot", null, payload),
+    ).payload;
+  }
+
+  async completeGoal(payload: RuntimeV2GoalCompletePayload): Promise<RuntimeV2GoalSnapshotPayload> {
+    return parseRuntimeV2GoalSnapshotEnvelope(
+      await this.#sendCommand("goal.complete", "goal.snapshot", null, payload),
+    ).payload;
+  }
+
+  async createPlan(payload: RuntimeV2PlanCreatePayload): Promise<RuntimeV2PlanSnapshotPayload> {
+    return parseRuntimeV2PlanSnapshotEnvelope(
+      await this.#sendCommand("plan.create", "plan.snapshot", null, payload),
+    ).payload;
+  }
+
+  async getPlan(payload: RuntimeV2PlanGetPayload): Promise<RuntimeV2PlanSnapshotPayload> {
+    return parseRuntimeV2PlanSnapshotEnvelope(
+      await this.#sendCommand("plan.get", "plan.snapshot", null, payload),
+    ).payload;
+  }
+
+  async revisePlan(payload: RuntimeV2PlanRevisePayload): Promise<RuntimeV2PlanSnapshotPayload> {
+    return parseRuntimeV2PlanSnapshotEnvelope(
+      await this.#sendCommand("plan.revise", "plan.snapshot", null, payload),
+    ).payload;
+  }
+
+  async startPlanStep(payload: RuntimeV2PlanStepStartPayload): Promise<RuntimeV2PlanSnapshotPayload> {
+    return parseRuntimeV2PlanSnapshotEnvelope(
+      await this.#sendCommand("plan.step.start", "plan.snapshot", null, payload),
+    ).payload;
+  }
+
+  async completePlanStep(payload: RuntimeV2PlanStepCompletePayload): Promise<RuntimeV2PlanSnapshotPayload> {
+    return parseRuntimeV2PlanSnapshotEnvelope(
+      await this.#sendCommand("plan.step.complete", "plan.snapshot", null, payload),
+    ).payload;
   }
 
   async startRun(runId: string, payload: RuntimeV2RunStartPayload): Promise<RuntimeV2RunSnapshotPayload> {
@@ -446,6 +534,14 @@ export class RuntimeV2ProcessSupervisor {
                 ? parseRuntimeV2RunReconciledEnvelope(value)
               : name === "run.rejected"
                 ? parseRuntimeV2RunRejectedEnvelope(value)
+                : name === "goal.snapshot"
+                  ? parseRuntimeV2GoalSnapshotEnvelope(value)
+                  : name === "goal.rejected"
+                    ? parseRuntimeV2GoalRejectedEnvelope(value)
+                    : name === "plan.snapshot"
+                      ? parseRuntimeV2PlanSnapshotEnvelope(value)
+                      : name === "plan.rejected"
+                        ? parseRuntimeV2PlanRejectedEnvelope(value)
                 : name === "context.compilation"
                   ? parseRuntimeV2ContextCompilationEnvelope(value)
                   : name === "context.rejected"
@@ -500,6 +596,8 @@ export class RuntimeV2ProcessSupervisor {
       if (
         response.name === "runtime.error"
         || response.name === "run.rejected"
+        || response.name === "goal.rejected"
+        || response.name === "plan.rejected"
         || response.name === "context.rejected"
         || response.name === "provider.rejected"
       ) {
@@ -508,6 +606,10 @@ export class RuntimeV2ProcessSupervisor {
         pending.reject(new RuntimeV2SupervisorError(
           response.name === "run.rejected"
             ? "RUNTIME_V2_RUN_REJECTED"
+            : response.name === "goal.rejected"
+              ? "RUNTIME_V2_GOAL_REJECTED"
+              : response.name === "plan.rejected"
+                ? "RUNTIME_V2_PLAN_REJECTED"
             : response.name === "context.rejected"
               ? "RUNTIME_V2_CONTEXT_REJECTED"
             : response.name === "provider.rejected"
@@ -614,8 +716,8 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   #sendCommand(
-    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "run.reconcile" | "context.compile" | "provider.inference.start" | "tool.authorization.resolve",
-    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "context.compilation" | "provider.inference.accepted" | "tool.authorization.resolved",
+    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "run.reconcile" | "goal.create" | "goal.get" | "goal.revise" | "goal.completion.propose" | "goal.complete" | "plan.create" | "plan.get" | "plan.revise" | "plan.step.start" | "plan.step.complete" | "context.compile" | "provider.inference.start" | "tool.authorization.resolve",
+    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "context.compilation" | "provider.inference.accepted" | "tool.authorization.resolved",
     runId: string | null,
     payload: object,
     timeoutMs = this.#options.commandTimeoutMs,
@@ -652,8 +754,28 @@ export class RuntimeV2ProcessSupervisor {
               ? runtimeV2RunPrepareEnvelopeSchema.parse(base)
             : name === "run.cancel"
               ? runtimeV2RunCancelEnvelopeSchema.parse(base)
-              : name === "run.reconcile"
+            : name === "run.reconcile"
                 ? runtimeV2RunReconcileEnvelopeSchema.parse(base)
+                : name === "goal.create"
+                  ? runtimeV2GoalCreateEnvelopeSchema.parse(base)
+                  : name === "goal.get"
+                    ? runtimeV2GoalGetEnvelopeSchema.parse(base)
+                    : name === "goal.revise"
+                      ? runtimeV2GoalReviseEnvelopeSchema.parse(base)
+                      : name === "goal.completion.propose"
+                        ? runtimeV2GoalCompletionProposeEnvelopeSchema.parse(base)
+                        : name === "goal.complete"
+                          ? runtimeV2GoalCompleteEnvelopeSchema.parse(base)
+                          : name === "plan.create"
+                            ? runtimeV2PlanCreateEnvelopeSchema.parse(base)
+                            : name === "plan.get"
+                              ? runtimeV2PlanGetEnvelopeSchema.parse(base)
+                              : name === "plan.revise"
+                                ? runtimeV2PlanReviseEnvelopeSchema.parse(base)
+                                : name === "plan.step.start"
+                                  ? runtimeV2PlanStepStartEnvelopeSchema.parse(base)
+                                  : name === "plan.step.complete"
+                                    ? runtimeV2PlanStepCompleteEnvelopeSchema.parse(base)
                 : name === "tool.authorization.resolve"
                   ? runtimeV2ToolAuthorizationResolveEnvelopeSchema.parse(base)
                 : name === "context.compile"
@@ -716,7 +838,7 @@ export class RuntimeV2ProcessSupervisor {
 }
 
 interface PendingCommand {
-  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "context.compilation" | "provider.bound" | "provider.inference.accepted" | "tool.authorization.resolved";
+  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "context.compilation" | "provider.bound" | "provider.inference.accepted" | "tool.authorization.resolved";
   resolve(value: unknown): void;
   reject(error: RuntimeV2SupervisorError): void;
   timer: NodeJS.Timeout;
