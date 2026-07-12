@@ -276,6 +276,19 @@ export const runtimeV2RunGetEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   payload: emptyRuntimeV2PayloadSchema,
 }).strict();
 
+export const runtimeV2RunCancelPayloadSchema = z.object({
+  cancelIdempotencyKey: identityStringSchema,
+  reason: z.string().trim().min(1).max(2_000),
+}).strict();
+
+export const runtimeV2RunCancelEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("run.cancel"),
+  correlationId: z.null(),
+  runId: z.uuid(),
+  payload: runtimeV2RunCancelPayloadSchema,
+}).strict();
+
 export const runtimeV2RunSnapshotPayloadSchema = z.object({
   runId: z.uuid(),
   pinnedIdentity: runtimeV2RunPinnedIdentitySchema,
@@ -336,6 +349,8 @@ export type RuntimeV2RunPinnedIdentity = z.infer<typeof runtimeV2RunPinnedIdenti
 export type RuntimeV2RunStartPayload = z.infer<typeof runtimeV2RunStartPayloadSchema>;
 export type RuntimeV2RunStartEnvelope = z.infer<typeof runtimeV2RunStartEnvelopeSchema>;
 export type RuntimeV2RunGetEnvelope = z.infer<typeof runtimeV2RunGetEnvelopeSchema>;
+export type RuntimeV2RunCancelPayload = z.infer<typeof runtimeV2RunCancelPayloadSchema>;
+export type RuntimeV2RunCancelEnvelope = z.infer<typeof runtimeV2RunCancelEnvelopeSchema>;
 export type RuntimeV2RunSnapshotPayload = z.infer<typeof runtimeV2RunSnapshotPayloadSchema>;
 export type RuntimeV2RunSnapshotEnvelope = z.infer<typeof runtimeV2RunSnapshotEnvelopeSchema>;
 export type RuntimeV2RunRejectedEnvelope = z.infer<typeof runtimeV2RunRejectedEnvelopeSchema>;
@@ -410,6 +425,10 @@ export function parseRuntimeV2RunStartEnvelope(value: unknown): RuntimeV2RunStar
 
 export function parseRuntimeV2RunGetEnvelope(value: unknown): RuntimeV2RunGetEnvelope {
   return parseVersionedEnvelope(value, runtimeV2RunGetEnvelopeSchema);
+}
+
+export function parseRuntimeV2RunCancelEnvelope(value: unknown): RuntimeV2RunCancelEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2RunCancelEnvelopeSchema);
 }
 
 export function parseRuntimeV2RunSnapshotEnvelope(value: unknown): RuntimeV2RunSnapshotEnvelope {

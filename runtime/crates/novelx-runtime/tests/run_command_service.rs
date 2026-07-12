@@ -1,6 +1,6 @@
 mod support;
 
-use novelx_protocol::RunStart;
+use novelx_protocol::{RunCancel, RunStart};
 use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::run_command_service::{RunCommandService, WorkspaceBinding};
@@ -98,6 +98,45 @@ fn corrupted_run_history_returns_a_fatal_failure() {
 
     assert_eq!(error.error.code, "RUN_JOURNAL_INTEGRITY_FAILED");
     assert!(error.fatal);
+}
+
+#[test]
+fn cancellation_is_persisted_and_idempotent_across_transport_retries() {
+    let fixture = Fixture::new();
+    let run_id = Uuid::new_v4();
+    let mut journal = Some(fixture.open());
+    let workspace_binding = binding();
+    let (first, retried) = {
+        let mut service = RunCommandService::new(&mut journal, Some(&workspace_binding));
+        service
+            .start(run_id, Uuid::new_v4(), start_payload())
+            .unwrap();
+        let cancel = RunCancel {
+            cancel_idempotency_key: "cancel-key-1".to_owned(),
+            reason: "用户停止任务".to_owned(),
+        };
+        let first = service
+            .cancel(run_id, Uuid::new_v4(), cancel.clone())
+            .unwrap();
+        let retried = service.cancel(run_id, Uuid::new_v4(), cancel).unwrap();
+        (first, retried)
+    };
+
+    assert_eq!(first.state, novelx_protocol::RunLifecycleState::Cancelled);
+    assert_eq!(
+        first.recovery_classification,
+        novelx_protocol::RunRecoveryClassification::Terminal
+    );
+    assert_eq!(retried, first);
+    assert_eq!(
+        journal
+            .as_ref()
+            .unwrap()
+            .read_run(&run_id.to_string(), 0)
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 fn start_payload() -> RunStart {

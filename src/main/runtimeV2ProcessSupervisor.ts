@@ -15,6 +15,7 @@ import {
   parseRuntimeV2StoppedEnvelope,
   runtimeV2InitializeEnvelopeSchema,
   runtimeV2RunGetEnvelopeSchema,
+  runtimeV2RunCancelEnvelopeSchema,
   runtimeV2RunStartEnvelopeSchema,
   runtimeV2ShutdownEnvelopeSchema,
   runtimeV2StatusGetEnvelopeSchema,
@@ -23,6 +24,7 @@ import {
   type RuntimeV2InitializeEnvelope,
   type RuntimeV2ReadyEnvelope,
   type RuntimeV2RunSnapshotPayload,
+  type RuntimeV2RunCancelPayload,
   type RuntimeV2RunStartPayload,
   type RuntimeV2StatusPayload,
 } from "../shared/runtimeV2Protocol";
@@ -164,6 +166,11 @@ export class RuntimeV2ProcessSupervisor {
 
   async getRun(runId: string): Promise<RuntimeV2RunSnapshotPayload> {
     const response = await this.#sendCommand("run.get", "run.snapshot", runId, {});
+    return parseRuntimeV2RunSnapshotEnvelope(response).payload;
+  }
+
+  async cancelRun(runId: string, payload: RuntimeV2RunCancelPayload): Promise<RuntimeV2RunSnapshotPayload> {
+    const response = await this.#sendCommand("run.cancel", "run.snapshot", runId, payload);
     return parseRuntimeV2RunSnapshotEnvelope(response).payload;
   }
 
@@ -341,7 +348,7 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   #sendCommand(
-    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get",
+    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.cancel",
     expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot",
     runId: string | null,
     payload: object,
@@ -370,7 +377,9 @@ export class RuntimeV2ProcessSupervisor {
         ? runtimeV2ShutdownEnvelopeSchema.parse(base)
         : name === "run.start"
           ? runtimeV2RunStartEnvelopeSchema.parse(base)
-          : runtimeV2RunGetEnvelopeSchema.parse(base);
+          : name === "run.get"
+            ? runtimeV2RunGetEnvelopeSchema.parse(base)
+            : runtimeV2RunCancelEnvelopeSchema.parse(base);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(command.messageId);

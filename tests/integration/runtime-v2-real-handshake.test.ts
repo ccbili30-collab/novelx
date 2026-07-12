@@ -129,6 +129,22 @@ describe("Runtime V2 real Rust handshake", () => {
     const restarted = await supervisor.start();
     expect(restarted.ready.payload.recoveredRunCount).toBe(1);
     await expect(supervisor.getRun(runId)).resolves.toEqual(created);
+
+    const cancelled = await supervisor.cancelRun(runId, {
+      cancelIdempotencyKey: "integration-cancel-1",
+      reason: "集成测试取消",
+    });
+    expect(cancelled).toMatchObject({ state: "cancelled", recoveryClassification: "terminal", aggregateSequence: 2 });
+    await expect(supervisor.cancelRun(runId, {
+      cancelIdempotencyKey: "integration-cancel-1",
+      reason: "集成测试取消",
+    })).resolves.toEqual(cancelled);
+    await supervisor.stop();
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    const terminalRestart = await supervisor.start();
+    expect(terminalRestart.ready.payload.recoveredRunCount).toBe(0);
+    await expect(supervisor.getRun(runId)).resolves.toEqual(cancelled);
   }, 30_000);
 });
 

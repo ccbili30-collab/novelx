@@ -126,6 +126,28 @@ impl RunAggregate {
         journal: &mut EventJournal,
         metadata: EventMetadata<'_>,
     ) -> Result<(), RunAggregateError> {
+        if self.machine.state() == RunState::Cancelled {
+            let events = journal.read_aggregate(&self.run_id, "run", &self.run_id, 0)?;
+            if let Some(existing) = events
+                .iter()
+                .find(|event| event.idempotency_key == metadata.idempotency_key)
+            {
+                if existing.event_type == "run.cancelled"
+                    && existing.payload.get("reason")
+                        == Some(
+                            &metadata
+                                .reason
+                                .map_or(Value::Null, |value| Value::String(value.to_owned())),
+                        )
+                {
+                    return Ok(());
+                }
+                return Err(EventJournalError::IdempotencyConflict {
+                    idempotency_key: metadata.idempotency_key.to_owned(),
+                }
+                .into());
+            }
+        }
         self.apply(journal, metadata, RunState::Cancelled)
     }
 

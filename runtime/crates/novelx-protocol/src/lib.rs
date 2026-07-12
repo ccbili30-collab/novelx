@@ -224,6 +224,13 @@ pub struct RunStart {
     pub pinned_identity: RunPinnedIdentity,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunCancel {
+    pub cancel_idempotency_key: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunLifecycleState {

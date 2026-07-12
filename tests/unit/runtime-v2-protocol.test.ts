@@ -13,6 +13,7 @@ import {
   parseRuntimeV2StatusGetEnvelope,
   parseRuntimeV2StoppedEnvelope,
   parseRuntimeV2RunGetEnvelope,
+  parseRuntimeV2RunCancelEnvelope,
   parseRuntimeV2RunSnapshotEnvelope,
   parseRuntimeV2RunStartEnvelope,
   runtimeV2EnvelopeSchema,
@@ -242,6 +243,13 @@ function runGetEnvelope(overrides: Record<string, unknown> = {}) {
   return {
     ...runStartEnvelope(), messageId: "68af36c1-b51d-4e18-80ac-a20bcc7d2b37", name: "run.get", sequence: 6,
     payload: {}, ...overrides,
+  };
+}
+
+function runCancelEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    ...runStartEnvelope(), messageId: "9de9695a-ed59-4c14-92d7-cfd9dfd5df6d", name: "run.cancel", sequence: 7,
+    payload: { cancelIdempotencyKey: "cancel-key-1", reason: "用户停止任务" }, ...overrides,
   };
 }
 
@@ -496,6 +504,7 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
   it("accepts strict run.start, run.get and correlated run.snapshot messages", () => {
     expect(parseRuntimeV2RunStartEnvelope(runStartEnvelope())).toEqual(runStartEnvelope());
     expect(parseRuntimeV2RunGetEnvelope(runGetEnvelope())).toEqual(runGetEnvelope());
+    expect(parseRuntimeV2RunCancelEnvelope(runCancelEnvelope())).toEqual(runCancelEnvelope());
     expect(parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope())).toEqual(runSnapshotEnvelope());
   });
 
@@ -519,5 +528,6 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(() => parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope({
       runId: "0c49e78c-3a5c-45b5-a1ca-af61173f35a6",
     }))).toThrow();
+    expect(() => parseRuntimeV2RunCancelEnvelope(runCancelEnvelope({ payload: { cancelIdempotencyKey: "", reason: "" } }))).toThrow();
   });
 });

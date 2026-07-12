@@ -1,5 +1,5 @@
 use novelx_protocol::{
-    RunLifecycleState, RunRecoveryClassification, RunSnapshot, RunStart, RuntimeError,
+    RunCancel, RunLifecycleState, RunRecoveryClassification, RunSnapshot, RunStart, RuntimeError,
     RuntimeErrorClass,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -107,6 +107,53 @@ impl<'a> RunCommandService<'a> {
             )),
             Err(error) => Err(aggregate_failure("run.get.recover", error)),
         }
+    }
+
+    pub fn cancel(
+        &mut self,
+        run_id: Uuid,
+        command_message_id: Uuid,
+        cancel: RunCancel,
+    ) -> Result<RunSnapshot, RunCommandFailure> {
+        let journal = self.journal.as_mut().ok_or_else(|| {
+            failure(
+                "RUNTIME_STORAGE_REQUIRED",
+                RuntimeErrorClass::Storage,
+                "当前运行时没有绑定项目存储，无法取消任务。",
+                "run.cancel.storage",
+                false,
+            )
+        })?;
+        let mut run = match RunAggregate::recover(journal, &run_id.to_string()) {
+            Ok(run) => run,
+            Err(RunAggregateError::NotFound(_)) => {
+                return Err(failure(
+                    "RUN_NOT_FOUND",
+                    RuntimeErrorClass::Validation,
+                    "没有找到这个任务。",
+                    "run.cancel.recover",
+                    false,
+                ));
+            }
+            Err(error) => return Err(aggregate_failure("run.cancel.recover", error)),
+        };
+        let cancelled_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|error| internal_failure("run.cancel.timestamp", error.to_string()))?;
+        let message_id = command_message_id.to_string();
+        run.cancel(
+            journal,
+            EventMetadata {
+                message_id: &message_id,
+                idempotency_key: &cancel.cancel_idempotency_key,
+                created_at: &cancelled_at,
+                reason: Some(&cancel.reason),
+            },
+        )
+        .map_err(|error| aggregate_failure("run.cancel.persist", error))?;
+        RunAggregate::recover(journal, &run_id.to_string())
+            .map(|run| snapshot(&run))
+            .map_err(|error| aggregate_failure("run.cancel.snapshot", error))
     }
 }
 

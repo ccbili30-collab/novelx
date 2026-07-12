@@ -183,10 +183,13 @@ The current foundation implements:
 
 - `run.start`: command with required envelope `runId` and strict `{ startIdempotencyKey, pinnedIdentity }` payload. It durably accepts the Run and returns `run.snapshot`; it does not claim that Provider execution has started.
 - `run.get`: command with required envelope `runId` and strict empty payload. It replays the journal and returns `run.snapshot` without changing state.
+- `run.cancel`: command with required envelope `runId` and strict `{ cancelIdempotencyKey, reason }` payload. It persists `run.cancelled`, returns the terminal snapshot and is idempotent across transport retries.
 - `run.snapshot`: correlated response whose envelope and payload `runId` match. It includes pinned identity, lifecycle state, recovery classification, Run/aggregate sequences and creation/update timestamps.
 - `run.rejected`: correlated, Run-scoped response carrying a typed Runtime error. Domain rejection does not terminate an otherwise valid protocol connection.
 
 `WaitingForApproval` projects as `waiting_for_approval` and remains nonterminal. `Committing` recovers as `commit_uncertain`; queries never auto-repeat a commit or external side effect.
+
+Cancellation is a journaled state transition, not process termination. Cancelling a Run does not stop the Runtime sidecar or discard unrelated Runs.
 
 ## 5. Durable Events
 
