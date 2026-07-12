@@ -5,9 +5,18 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+runtime-test-failpoints = []
+
 [[bin]]
 name = "novelx-runtime"
 path = "src/main.rs"
+
+[[test]]
+name = "provider_recovery_killpoints"
+path = "tests/provider_recovery_killpoints.rs"
+required-features = ["runtime-test-failpoints"]
 
 [dependencies]
 novelx-protocol = { path = "../novelx-protocol" }

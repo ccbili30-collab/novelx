@@ -345,6 +345,8 @@ impl ProviderDispatchRecoverySupervisor {
             ))?
             .execution_id
             .clone();
+        #[cfg(feature = "runtime-test-failpoints")]
+        crate::runtime_test_failpoint::hit("provider_dispatch.execution_started");
         self.execute_as_current_owner(
             workspace_id,
             run_id,

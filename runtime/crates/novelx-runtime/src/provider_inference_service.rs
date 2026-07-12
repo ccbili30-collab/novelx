@@ -374,6 +374,8 @@ impl<'a> ProviderInferenceService<'a> {
             &dispatch_id,
             metadata(&sent_message_id, &sent_key, &sent_at),
         )?;
+        #[cfg(feature = "runtime-test-failpoints")]
+        crate::runtime_test_failpoint::hit("provider_attempt.sent_before_http");
 
         Ok(PreparedProviderAttempt::Dispatch(Box::new(
             ProviderAttemptDispatch {
@@ -397,6 +399,8 @@ impl<'a> ProviderInferenceService<'a> {
             execution_guard,
         } = dispatch;
         let result = gateway.infer_prepared(provider, prepared).await;
+        #[cfg(feature = "runtime-test-failpoints")]
+        crate::runtime_test_failpoint::hit("provider_attempt.response_before_terminal");
         DispatchedProviderAttempt {
             execution,
             attempt,

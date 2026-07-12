@@ -809,11 +809,15 @@ impl OperationalRecoveryRepository {
         workspace_id: &str,
         run_id: &str,
         claim: OperationalRecoveryClaim,
+        exclusive_lease: &WorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
         validate_claim(&claim)?;
         validate_initial_lease_policy(&claim)?;
+        if !exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) {
+            return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
+        }
         let current = self.load(workspace_id, run_id)?;
         if current.operations.iter().any(|(operation_id, operation)| {
             operation_id != &claim.operation_id
@@ -989,6 +993,7 @@ impl OperationalRecoveryRepository {
         claim_id: &str,
         owner_instance_id: &str,
         fencing_token: u64,
+        exclusive_lease: &WorkspaceRuntimeLease,
         renewed_at: String,
         lease_expires_at: String,
         expected_global_sequence: u64,
@@ -1000,6 +1005,9 @@ impl OperationalRecoveryRepository {
             .get(operation_id)
             .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
         let claim = require_current_claim(operation, claim_id, owner_instance_id, fencing_token)?;
+        if !exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) {
+            return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
+        }
         if operation.outcome.is_some() || operation.stale.is_some() {
             return Err(OperationalRecoveryAggregateError::OperationTerminal);
         }
@@ -1029,12 +1037,14 @@ impl OperationalRecoveryRepository {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn start_execution(
         &mut self,
         workspace_id: &str,
         run_id: &str,
         operation_id: &str,
         execution: OperationalRecoveryExecution,
+        exclusive_lease: &WorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
@@ -1050,6 +1060,9 @@ impl OperationalRecoveryRepository {
             &execution.owner_instance_id,
             execution.fencing_token,
         )?;
+        if !exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) {
+            return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
+        }
         if execution.source_fingerprint != claim.source_fingerprint
             || execution.action_spec_sha256 != claim.action_spec_sha256
         {
@@ -1076,12 +1089,14 @@ impl OperationalRecoveryRepository {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn finish_execution(
         &mut self,
         workspace_id: &str,
         run_id: &str,
         operation_id: &str,
         outcome: OperationalRecoveryOutcome,
+        exclusive_lease: &WorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
@@ -1096,6 +1111,9 @@ impl OperationalRecoveryRepository {
             .as_ref()
             .ok_or(OperationalRecoveryAggregateError::ExecutionRequired)?;
         validate_outcome_matches_execution(&outcome, execution)?;
+        if !execution_finish_is_authorized(operation, execution, exclusive_lease) {
+            return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
+        }
         if let Some(existing) = &operation.outcome {
             return if existing == &outcome {
                 Ok(current)
@@ -2157,6 +2175,38 @@ fn validate_outcome_matches_execution(
         Ok(())
     } else {
         Err(OperationalRecoveryAggregateError::FenceMismatch)
+    }
+}
+
+fn execution_finish_is_authorized(
+    operation: &OperationalRecoveryOperation,
+    execution: &OperationalRecoveryExecution,
+    exclusive_lease: &WorkspaceRuntimeLease,
+) -> bool {
+    if exclusive_lease.proves_exclusive_owner(&execution.owner_instance_id) {
+        return true;
+    }
+    match execution.effect_class {
+        OperationalRecoveryEffectClass::PersistedProviderResultProjection => {
+            operation.resumes.last().is_some_and(|resume| {
+                resume.execution_id == execution.execution_id
+                    && resume.original_owner_instance_id == execution.owner_instance_id
+                    && resume.fencing_token == execution.fencing_token
+                    && exclusive_lease.proves_exclusive_owner(&resume.resumer_instance_id)
+            })
+        }
+        OperationalRecoveryEffectClass::ProviderDispatch => operation
+            .latest_provider_dispatch_resume()
+            .is_some_and(|authorization| {
+                authorization.execution_id == execution.execution_id
+                    && authorization.claim_id == execution.claim_id
+                    && authorization.original_owner_instance_id == execution.owner_instance_id
+                    && authorization.fencing_token == execution.fencing_token
+                    && authorization.action_spec_sha256 == execution.action_spec_sha256
+                    && exclusive_lease.proves_exclusive_owner(&authorization.resumer_instance_id)
+            }),
+        OperationalRecoveryEffectClass::LocalDeterministic
+        | OperationalRecoveryEffectClass::VerifiedToolResultProjection => false,
     }
 }
 

@@ -54,7 +54,7 @@ fn claim_service_rescans_and_claims_the_recorded_ready_operation() {
         .unwrap();
     let operation = &aggregate.operations[&operation_id];
     let claim = operation.claim.as_ref().unwrap();
-    assert_eq!(claim.owner_instance_id, "runtime-instance-1");
+    assert_eq!(claim.owner_instance_id, lease.instance_id());
     assert_eq!(claim.fencing_token, 1);
     assert_eq!(
         claim.source_fingerprint,
@@ -210,7 +210,7 @@ fn supervisor_resumes_projection_committed_before_the_previous_process_crashed()
     assert!(operation.outcome.is_some());
     assert_eq!(
         operation.resumes.last().unwrap().resumer_instance_id,
-        "new-runtime"
+        new_lease.instance_id()
     );
 }
 
@@ -267,7 +267,7 @@ fn supervisor_resumes_an_execution_that_crashed_before_local_projection() {
     assert!(operation.outcome.is_some());
     assert_eq!(
         operation.resumes.last().unwrap().resumer_instance_id,
-        "new-runtime-before-projection"
+        new_lease.instance_id()
     );
 }
 
@@ -465,7 +465,7 @@ fn execution_start_uses_fresh_scan_and_exact_fence() {
         .clone();
     let resume = OperationalRecoveryResume::derive(
         &execution,
-        "runtime-instance-2".to_owned(),
+        resumed_lease.instance_id().to_owned(),
         "2026-07-13T00:10:00Z".to_owned(),
     )
     .unwrap();
@@ -615,7 +615,7 @@ fn expired_unstarted_claim_transfers_only_to_exclusive_runtime_owner() {
         .claim
         .as_ref()
         .unwrap();
-    assert_eq!(current.owner_instance_id, "new-runtime");
+    assert_eq!(current.owner_instance_id, exclusive.instance_id());
     assert_eq!(current.fencing_token, 2);
 }
 

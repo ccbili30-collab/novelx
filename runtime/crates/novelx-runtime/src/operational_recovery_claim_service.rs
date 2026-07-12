@@ -157,6 +157,7 @@ impl OperationalRecoveryClaimService {
                 &request.workspace_id,
                 &request.run_id,
                 claim,
+                exclusive_lease,
                 after,
                 OperationalRecoveryEventMetadata {
                     created_at: claimed_at,
@@ -232,6 +233,7 @@ impl OperationalRecoveryClaimService {
                 &request.run_id,
                 &observation.operation_id,
                 execution,
+                exclusive_lease,
                 after,
                 OperationalRecoveryEventMetadata {
                     created_at: started_at,

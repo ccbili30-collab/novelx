@@ -798,6 +798,10 @@ async fn handle_provider_bind(
     {
         Ok(receipt) => {
             refresh_operational_recovery(context).await?;
+            #[cfg(feature = "runtime-test-failpoints")]
+            novelx_runtime::runtime_test_failpoint::hit(
+                "provider_bind.recovery_persisted_before_response",
+            );
             correlated_response_draft(correlation_id, "provider.bound", receipt)
         }
         Err(error) => {

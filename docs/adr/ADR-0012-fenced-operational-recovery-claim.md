@@ -25,6 +25,8 @@ Recovery evidence spans both `runtime_events` and `workspace_events`. A Claim wr
 12. Transfer is allowed only after the old lease expires and only when no execution ever started. It preserves source/executor/action identities and increments the fencing token by exactly one.
 13. If a fresh scan changes the operation ID or source fingerprint before execution starts, the old operation receives an immutable `Stale` terminal record containing expected/actual evidence, current Claim fence, detector instance and scan clock. Stale operations cannot be claimed, renewed, transferred or started.
 14. Evidence changes after `ExecutionStarted` cannot be classified as Stale because execution may itself mutate evidence or cross a side-effect boundary; those cases require terminal effect evidence or reconciliation.
+15. The caller-supplied Runtime instance string is a diagnostic label only. Every successful operating-system lock acquisition generates a fresh UUID lease epoch; `WorkspaceRuntimeLease::instance_id()` exposes that non-reusable owner ID, and Claim/Execution/Resume/Authorization hashes bind it. Reacquiring the same label can never prove ownership of an older Claim.
+16. Claim, lease renewal, execution start and execution finish require the live `WorkspaceRuntimeLease` at the repository mutation boundary. Supplying the persisted owner ID as ordinary data is insufficient authority. A resumed finish is accepted only from the exact latest effect-specific Resume or Provider-dispatch authorization owner.
 
 ## Consequences
 

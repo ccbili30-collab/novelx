@@ -100,6 +100,7 @@ impl OperationalRecoveryCompletionService {
                 &request.run_id,
                 &request.operation_id,
                 outcome,
+                exclusive_lease,
                 clock,
                 OperationalRecoveryEventMetadata {
                     created_at: completed_at,

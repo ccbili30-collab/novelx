@@ -29,6 +29,8 @@ Within one process, the normal Provider path, Live Agent Loop（实时智能体�
 10. Cross-process exclusivity continues to rely on the operating-system workspace lease plus durable event CAS. Process-local single-flight is not presented as a distributed lock.
 11. Provider dispatch Supervisor execution is separate from local projection execution. It may claim/start `ProviderDispatchReady`, authorize a new Runtime, wait for a current Attempt owner, or consume terminal Attempt evidence. It does not execute local projection or Tool effects.
 12. Temporary missing Provider binding leaves `Requested` and its recovery execution unfinished. It must not create `Requested + FailedSafe` or mark the reusable deterministic operation stale.
+13. Provider recovery crash tests use a debug-only `runtime-test-failpoints` feature. Release builds reject that feature at compile time, so a test pause point cannot enter a distributable Runtime.
+14. The crash matrix kills the exact Runtime child process after ExecutionStarted/Requested, after durable `provider.sent` but before HTTP, after a real HTTP response but before terminal evidence, and after all recovery writes but before the Host receives `provider.bound`.
 
 ## Consequences
 
@@ -42,8 +44,6 @@ Within one process, the normal Provider path, Live Agent Loop（实时智能体�
 
 - `Failed(retryable=true)` durable backoff and new Attempt creation.
 - Provider-specific external idempotency and result lookup capability registry.
-- Real process kill-point tests at Requested, Sent, response-received and terminal-write boundaries.
-- A non-reusable workspace lease epoch in every persisted Claim/Execution/authorization identity.
 - Tool dispatch ownership and recovery.
 
 ## Rejected Alternatives

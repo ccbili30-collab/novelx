@@ -1,6 +1,9 @@
 #[cfg(test)]
 extern crate self as novelx_runtime;
 
+#[cfg(all(feature = "runtime-test-failpoints", not(debug_assertions)))]
+compile_error!("runtime-test-failpoints must never be enabled in release builds");
+
 pub mod agent_assignment_aggregate;
 pub mod agent_assignment_command_service;
 pub mod agent_assignment_recovery;
@@ -43,6 +46,9 @@ pub mod run_pin_validator;
 pub mod run_reconciliation_service;
 pub mod run_state;
 pub mod runtime_actor;
+#[cfg(feature = "runtime-test-failpoints")]
+#[doc(hidden)]
+pub mod runtime_test_failpoint;
 pub mod tool_aggregate;
 pub mod tool_coordination_service;
 pub mod tool_protocol_mapper;

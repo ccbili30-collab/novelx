@@ -9,18 +9,24 @@ use fs2::FileExt;
 use serde::Serialize;
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct WorkspaceRuntimeLease {
     file: File,
     lock_path: PathBuf,
-    instance_id: String,
+    instance_label: String,
+    lease_epoch: String,
+    owner_id: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LeaseOwner<'a> {
+    schema_version: u32,
     instance_id: &'a str,
+    instance_label: &'a str,
+    lease_epoch: &'a str,
     process_id: u32,
     acquired_at: &'a str,
 }
@@ -31,8 +37,8 @@ impl WorkspaceRuntimeLease {
         instance_id: impl Into<String>,
     ) -> Result<Self, WorkspaceRuntimeLeaseError> {
         let database_path = database_path.as_ref();
-        let instance_id = instance_id.into();
-        if instance_id.trim().is_empty() {
+        let instance_label = instance_id.into();
+        if instance_label.trim().is_empty() {
             return Err(WorkspaceRuntimeLeaseError::InstanceIdRequired);
         }
         let parent = database_path
@@ -53,9 +59,14 @@ impl WorkspaceRuntimeLease {
             .open(&lock_path)?;
         file.try_lock_exclusive()
             .map_err(|source| WorkspaceRuntimeLeaseError::AlreadyHeld { source })?;
+        let lease_epoch = Uuid::new_v4().to_string();
+        let owner_id = lease_epoch.clone();
         let acquired_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
         let payload = serde_json::to_vec(&LeaseOwner {
-            instance_id: &instance_id,
+            schema_version: 2,
+            instance_id: &owner_id,
+            instance_label: &instance_label,
+            lease_epoch: &lease_epoch,
             process_id: std::process::id(),
             acquired_at: &acquired_at,
         })?;
@@ -67,12 +78,22 @@ impl WorkspaceRuntimeLease {
         Ok(Self {
             file,
             lock_path,
-            instance_id,
+            instance_label,
+            lease_epoch,
+            owner_id,
         })
     }
 
     pub fn instance_id(&self) -> &str {
-        &self.instance_id
+        &self.owner_id
+    }
+
+    pub fn instance_label(&self) -> &str {
+        &self.instance_label
+    }
+
+    pub fn lease_epoch(&self) -> &str {
+        &self.lease_epoch
     }
 
     pub fn lock_path(&self) -> &Path {
@@ -80,7 +101,7 @@ impl WorkspaceRuntimeLease {
     }
 
     pub fn proves_exclusive_owner(&self, instance_id: &str) -> bool {
-        self.instance_id == instance_id
+        self.owner_id == instance_id
     }
 
     pub fn protects_database(&self, database_path: impl AsRef<Path>) -> bool {
