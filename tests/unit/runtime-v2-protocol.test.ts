@@ -26,6 +26,7 @@ import {
   parseRuntimeV2SensitiveProviderBindEnvelope,
   parseRuntimeV2ProviderBoundEnvelope,
   parseRuntimeV2ToolRequestEnvelope,
+  parseRuntimeV2ToolAuthorizationResolvedEnvelope,
   parseRuntimeV2ToolRequestedEnvelope,
   parseRuntimeV2ToolOutcomeUnknownEnvelope,
   parseRuntimeV2ProviderInferenceAcceptedEnvelope,
@@ -954,5 +955,18 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(parseRuntimeV2ToolOutcomeUnknownEnvelope(unknown)).toEqual(unknown);
     expect(() => parseRuntimeV2ToolOutcomeUnknownEnvelope({ ...unknown, payload: { ...unknown.payload, error: { ...unknown.payload.error, retryable: true } } })).toThrow();
     expect(() => parseRuntimeV2ToolRequestedEnvelope({ ...requested, payload: { ...requested.payload, authorization: "allowed" } })).toThrow();
+  });
+
+  it("strictly binds ToolCall authorization decisions to status and lease", () => {
+    const toolCallId = "84bd8b4b-6ca3-4ac2-ad3d-12780d816c11";
+    const lease = { leaseId: "24897032-f6f8-4b22-bc17-141987f5807c", toolCallId, mode: "assist", decision: "allowed",
+      policyId: "tools", policyVersion: "1.0.0", policySha256: "c".repeat(64), sourceScopeSha256: "b".repeat(64),
+      grantedAt: "2026-07-12T00:00:00Z", expiresAt: null };
+    const envelope = { protocolVersion: 1, messageId: MESSAGE_ID, messageType: "response", name: "tool.authorization.resolved",
+      sentAt: "2026-07-12T00:00:00Z", correlationId: INITIALIZE_MESSAGE_ID, runId: INFERENCE_RUN_ID, sequence: 1,
+      payload: { toolCallId, decision: "approve", status: "authorized", lease } };
+    expect(parseRuntimeV2ToolAuthorizationResolvedEnvelope(envelope)).toEqual(envelope);
+    expect(() => parseRuntimeV2ToolAuthorizationResolvedEnvelope({ ...envelope, payload: { ...envelope.payload, status: "denied" } })).toThrow();
+    expect(() => parseRuntimeV2ToolAuthorizationResolvedEnvelope({ ...envelope, payload: { ...envelope.payload, lease: { ...lease, toolCallId: ATTEMPT_ID } } })).toThrow();
   });
 });

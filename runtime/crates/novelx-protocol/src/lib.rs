@@ -734,6 +734,44 @@ pub struct ToolAuthorizationResolve {
     pub decision: ToolAuthorizationResolutionDecision,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAuthorizationResolvedStatus {
+    Authorized,
+    Denied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolAuthorizationResolved {
+    pub tool_call_id: Uuid,
+    pub decision: ToolAuthorizationResolutionDecision,
+    pub status: ToolAuthorizationResolvedStatus,
+    pub lease: Option<ToolPermissionLease>,
+}
+
+impl ToolAuthorizationResolved {
+    pub fn validate(&self) -> Result<(), ToolProtocolValidationError> {
+        match (&self.decision, &self.status, &self.lease) {
+            (
+                ToolAuthorizationResolutionDecision::Approve,
+                ToolAuthorizationResolvedStatus::Authorized,
+                Some(lease),
+            ) if lease.tool_call_id == self.tool_call_id
+                && lease.decision == ToolPermissionDecision::Allowed =>
+            {
+                Ok(())
+            }
+            (
+                ToolAuthorizationResolutionDecision::Deny,
+                ToolAuthorizationResolvedStatus::Denied,
+                None,
+            ) => Ok(()),
+            _ => Err(ToolProtocolValidationError::PermissionModeMismatch),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolEventIdentity {

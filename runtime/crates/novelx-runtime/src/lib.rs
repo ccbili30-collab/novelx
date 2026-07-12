@@ -1,6 +1,7 @@
 #[cfg(test)]
 extern crate self as novelx_runtime;
 
+pub mod agent_loop_service;
 pub mod artifact_store;
 pub mod context_compile_service;
 pub mod context_compiler;
@@ -9,6 +10,7 @@ pub mod project_file_tools;
 pub mod project_path;
 pub mod project_search_tools;
 pub mod project_tool_dispatcher;
+pub mod project_tool_execution_service;
 pub mod provider_attempt;
 pub mod provider_gateway;
 pub mod provider_inference_protocol;
@@ -22,4 +24,5 @@ pub mod run_state;
 pub mod runtime_actor;
 pub mod tool_aggregate;
 pub mod tool_coordination_service;
+pub mod tool_protocol_mapper;
 pub mod tool_state;

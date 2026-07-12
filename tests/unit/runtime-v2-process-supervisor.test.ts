@@ -69,6 +69,29 @@ describe("RuntimeV2ProcessSupervisor", () => {
     await expect(supervisor.start()).rejects.toMatchObject({ code });
   });
 
+  it("resolves Assist authorization and delivers correlated ToolCall lifecycle events to subscribers", async () => {
+    const events: string[] = [];
+    const failures: RuntimeV2SupervisorError[] = [];
+    const supervisor = createSupervisor(createFixture("tool-authorization-success"), { onRuntimeFailure: (error) => failures.push(error) });
+    supervisor.subscribeRuntimeEvents((event) => events.push(event.name));
+    await supervisor.start();
+    const result = await supervisor.resolveToolAuthorization(INFERENCE_RUN_ID, {
+      authorizationIdempotencyKey: "authorize-1", toolCallId: INFERENCE_ATTEMPT_ID, decision: "approve",
+    });
+    await waitUntil(() => events.length === 1 || failures.length === 1);
+    expect(failures).toEqual([]);
+    expect(result).toMatchObject({ toolCallId: INFERENCE_ATTEMPT_ID, decision: "approve", status: "authorized", lease: { decision: "allowed" } });
+    expect(events).toEqual(["tool.running"]);
+  });
+
+  it("fails closed when ToolCall authorization response identity differs from the host decision", async () => {
+    const supervisor = createSupervisor(createFixture("tool-authorization-mismatch"));
+    await supervisor.start();
+    await expect(supervisor.resolveToolAuthorization(INFERENCE_RUN_ID, {
+      authorizationIdempotencyKey: "authorize-1", toolCallId: INFERENCE_ATTEMPT_ID, decision: "approve",
+    })).rejects.toMatchObject({ code: "RUNTIME_V2_PROTOCOL_INVALID" });
+  });
+
   it("times out a runtime that produces no startup output", async () => {
     const supervisor = createSupervisor(createFixture("no-output"), { startupTimeoutMs: 200 });
     await expect(supervisor.start()).rejects.toMatchObject({ code: "RUNTIME_V2_START_TIMEOUT" });
@@ -487,6 +510,27 @@ input.on("line", (line) => {
       const response = envelope(1, "run.reconciled", receipt, command.messageId, runtimeSequence, "response");
       response.runId = command.runId;
       process.stdout.write(JSON.stringify(response) + "\n");
+      return;
+    }
+    if (command.name === "tool.authorization.resolve" && scenario.startsWith("tool-authorization-")) {
+      const toolCallId = scenario === "tool-authorization-mismatch" ? randomUUID() : command.payload.toolCallId;
+      const lease = { leaseId: randomUUID(), toolCallId, mode: "assist", decision: "allowed",
+        policyId: "tools", policyVersion: "1.0.0", policySha256: "c".repeat(64), sourceScopeSha256: "b".repeat(64),
+        grantedAt: now, expiresAt: null };
+      const resolved = envelope(1, "tool.authorization.resolved", {
+        toolCallId, decision: command.payload.decision, status: "authorized", lease,
+      }, command.messageId, runtimeSequence, "response");
+      resolved.runId = command.runId;
+      process.stdout.write(JSON.stringify(resolved) + "\n");
+      if (scenario === "tool-authorization-success") {
+        runtimeSequence += 1;
+        const identity = { runId: command.runId, toolCallId, providerToolCallId: "provider-call-1", invocationId: "invocation-1", toolName: "project.read",
+          schemaVersion: 1, attempt: 1, sideEffect: "none", parallel: false,
+          argumentsSha256: "a".repeat(64), sourceScopeSha256: "b".repeat(64) };
+        const running = envelope(1, "tool.running", { ...identity, lease }, command.messageId, runtimeSequence, "event");
+        running.runId = command.runId;
+        process.stdout.write(JSON.stringify(running) + "\n");
+      }
       return;
     }
     if (command.name === "run.get" && scenario === "reconcile-success") {

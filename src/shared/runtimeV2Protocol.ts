@@ -852,6 +852,23 @@ export const runtimeV2ToolAuthorizationResolveEnvelopeSchema = runtimeV2Envelope
   messageType: z.literal("command"), name: z.literal("tool.authorization.resolve"), correlationId: z.null(),
   runId: z.uuid(), payload: runtimeV2ToolAuthorizationResolvePayloadSchema,
 }).strict();
+export const runtimeV2ToolAuthorizationResolvedPayloadSchema = z.object({
+  toolCallId: z.uuid(), decision: z.enum(["approve", "deny"]),
+  status: z.enum(["authorized", "denied"]), lease: runtimeV2ToolPermissionLeaseSchema.nullable(),
+}).strict().superRefine((payload, context) => {
+  const approved = payload.decision === "approve";
+  if ((approved && (payload.status !== "authorized" || payload.lease === null))
+    || (!approved && (payload.status !== "denied" || payload.lease !== null))) {
+    context.addIssue({ code: "custom", path: ["status"], message: "Tool authorization result must match its decision and lease." });
+  }
+  if (payload.lease !== null && payload.lease.toolCallId !== payload.toolCallId) {
+    context.addIssue({ code: "custom", path: ["lease", "toolCallId"], message: "Tool authorization lease must match the resolved ToolCall." });
+  }
+});
+export const runtimeV2ToolAuthorizationResolvedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"), name: z.literal("tool.authorization.resolved"),
+  correlationId: z.uuid(), runId: z.uuid(), payload: runtimeV2ToolAuthorizationResolvedPayloadSchema,
+}).strict();
 const runtimeV2ToolEventIdentitySchema = z.object({
   runId: z.uuid(), toolCallId: z.uuid(), providerToolCallId: identityStringSchema, invocationId: identityStringSchema, toolName: identityStringSchema,
   schemaVersion: z.number().int().positive().max(65_535), attempt: z.number().int().positive().safe(),
@@ -945,6 +962,8 @@ export type RuntimeV2ToolRequestPayload = z.infer<typeof runtimeV2ToolRequestPay
 export type RuntimeV2ToolRequestEnvelope = z.infer<typeof runtimeV2ToolRequestEnvelopeSchema>;
 export type RuntimeV2ToolAuthorizationResolvePayload = z.infer<typeof runtimeV2ToolAuthorizationResolvePayloadSchema>;
 export type RuntimeV2ToolAuthorizationResolveEnvelope = z.infer<typeof runtimeV2ToolAuthorizationResolveEnvelopeSchema>;
+export type RuntimeV2ToolAuthorizationResolvedPayload = z.infer<typeof runtimeV2ToolAuthorizationResolvedPayloadSchema>;
+export type RuntimeV2ToolAuthorizationResolvedEnvelope = z.infer<typeof runtimeV2ToolAuthorizationResolvedEnvelopeSchema>;
 export type RuntimeV2ToolRequestedEnvelope = z.infer<typeof runtimeV2ToolRequestedEnvelopeSchema>;
 export type RuntimeV2ToolAuthorizedEnvelope = z.infer<typeof runtimeV2ToolAuthorizedEnvelopeSchema>;
 export type RuntimeV2ToolRunningEnvelope = z.infer<typeof runtimeV2ToolRunningEnvelopeSchema>;
@@ -1097,6 +1116,9 @@ export function parseRuntimeV2ToolRequestEnvelope(value: unknown): RuntimeV2Tool
 }
 export function parseRuntimeV2ToolAuthorizationResolveEnvelope(value: unknown): RuntimeV2ToolAuthorizationResolveEnvelope {
   return parseVersionedEnvelope(value, runtimeV2ToolAuthorizationResolveEnvelopeSchema);
+}
+export function parseRuntimeV2ToolAuthorizationResolvedEnvelope(value: unknown): RuntimeV2ToolAuthorizationResolvedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ToolAuthorizationResolvedEnvelopeSchema);
 }
 export function parseRuntimeV2ToolRequestedEnvelope(value: unknown): RuntimeV2ToolRequestedEnvelope {
   return parseVersionedEnvelope(value, runtimeV2ToolRequestedEnvelopeSchema);

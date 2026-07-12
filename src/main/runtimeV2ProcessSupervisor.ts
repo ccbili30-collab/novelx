@@ -22,6 +22,13 @@ import {
   parseRuntimeV2RunSnapshotEnvelope,
   parseRuntimeV2StatusEnvelope,
   parseRuntimeV2StoppedEnvelope,
+  parseRuntimeV2ToolAuthorizationResolvedEnvelope,
+  parseRuntimeV2ToolRequestedEnvelope,
+  parseRuntimeV2ToolAuthorizedEnvelope,
+  parseRuntimeV2ToolRunningEnvelope,
+  parseRuntimeV2ToolSucceededEnvelope,
+  parseRuntimeV2ToolFailedEnvelope,
+  parseRuntimeV2ToolOutcomeUnknownEnvelope,
   runtimeV2InitializeEnvelopeSchema,
   runtimeV2ContextCompileEnvelopeSchema,
   runtimeV2SensitiveProviderBindEnvelopeSchema,
@@ -33,6 +40,7 @@ import {
   runtimeV2RunStartEnvelopeSchema,
   runtimeV2ShutdownEnvelopeSchema,
   runtimeV2StatusGetEnvelopeSchema,
+  runtimeV2ToolAuthorizationResolveEnvelopeSchema,
   type RuntimeV2HelloEnvelope,
   type RuntimeV2Error,
   type RuntimeV2ErrorEnvelope,
@@ -54,6 +62,14 @@ import {
   type RuntimeV2RunPreparePayload,
   type RuntimeV2RunStartPayload,
   type RuntimeV2StatusPayload,
+  type RuntimeV2ToolAuthorizationResolvePayload,
+  type RuntimeV2ToolAuthorizationResolvedPayload,
+  type RuntimeV2ToolRequestedEnvelope,
+  type RuntimeV2ToolAuthorizedEnvelope,
+  type RuntimeV2ToolRunningEnvelope,
+  type RuntimeV2ToolSucceededEnvelope,
+  type RuntimeV2ToolFailedEnvelope,
+  type RuntimeV2ToolOutcomeUnknownEnvelope,
 } from "../shared/runtimeV2Protocol";
 
 const MAX_STDERR_CHARS = 16_000;
@@ -89,7 +105,9 @@ export interface RuntimeV2Handshake {
 export type RuntimeV2RuntimeEvent = RuntimeV2ErrorEnvelope
   | RuntimeV2ProviderInferenceCompletedEnvelope
   | RuntimeV2ProviderInferenceFailedEnvelope
-  | RuntimeV2ProviderInferenceReconciliationRequiredEnvelope;
+  | RuntimeV2ProviderInferenceReconciliationRequiredEnvelope
+  | RuntimeV2ToolRequestedEnvelope | RuntimeV2ToolAuthorizedEnvelope | RuntimeV2ToolRunningEnvelope
+  | RuntimeV2ToolSucceededEnvelope | RuntimeV2ToolFailedEnvelope | RuntimeV2ToolOutcomeUnknownEnvelope;
 
 export type RuntimeV2SupervisorErrorCode =
   | "RUNTIME_V2_ALREADY_STARTED"
@@ -245,6 +263,17 @@ export class RuntimeV2ProcessSupervisor {
     );
     const receipt = parseRuntimeV2RunReconciledEnvelope(response).payload;
     return { receipt, snapshot: await this.getRun(runId) };
+  }
+
+  async resolveToolAuthorization(
+    runId: string,
+    payload: RuntimeV2ToolAuthorizationResolvePayload,
+  ): Promise<RuntimeV2ToolAuthorizationResolvedPayload> {
+    const response = await this.#sendCommand(
+      "tool.authorization.resolve", "tool.authorization.resolved", runId, payload,
+      this.#options.commandTimeoutMs, undefined, undefined, { runId, payload },
+    );
+    return parseRuntimeV2ToolAuthorizationResolvedEnvelope(response).payload;
   }
 
   async bindProvider(
@@ -433,6 +462,14 @@ export class RuntimeV2ProcessSupervisor {
                               ? parseRuntimeV2ProviderInferenceFailedEnvelope(value)
                               : name === "provider.inference.reconciliation_required"
                                 ? parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope(value)
+                                : name === "tool.authorization.resolved"
+                                  ? parseRuntimeV2ToolAuthorizationResolvedEnvelope(value)
+                                  : name === "tool.requested" ? parseRuntimeV2ToolRequestedEnvelope(value)
+                                    : name === "tool.authorized" ? parseRuntimeV2ToolAuthorizedEnvelope(value)
+                                      : name === "tool.running" ? parseRuntimeV2ToolRunningEnvelope(value)
+                                        : name === "tool.succeeded" ? parseRuntimeV2ToolSucceededEnvelope(value)
+                                          : name === "tool.failed" ? parseRuntimeV2ToolFailedEnvelope(value)
+                                            : name === "tool.outcome_unknown" ? parseRuntimeV2ToolOutcomeUnknownEnvelope(value)
                         : null;
       if (!response) throw new Error(`unexpected Runtime V2 message after ready: ${String(name)}.`);
       if (response.sequence !== this.#expectedRuntimeSequence) {
@@ -446,6 +483,10 @@ export class RuntimeV2ProcessSupervisor {
         if (!active) throw new Error(`Provider inference terminal event has no active attempt: ${correlationId}.`);
         assertInferenceIdentity(response.payload, active);
         this.#activeInferences.delete(correlationId);
+        this.#emitRuntimeEvent(response);
+        return;
+      }
+      if (isToolLifecycleEvent(response)) {
         this.#emitRuntimeEvent(response);
         return;
       }
@@ -491,6 +532,14 @@ export class RuntimeV2ProcessSupervisor {
           || response.payload.attemptId !== pending.reconciliation.payload.attemptId
           || response.payload.decision !== pending.reconciliation.payload.decision) {
           throw new Error("Run reconciliation receipt does not match the pending decision.");
+        }
+      }
+      if (response.name === "tool.authorization.resolved") {
+        if (!pending.toolAuthorization) throw new Error("Tool authorization response has no pending host decision.");
+        if (response.runId !== pending.toolAuthorization.runId
+          || response.payload.toolCallId !== pending.toolAuthorization.payload.toolCallId
+          || response.payload.decision !== pending.toolAuthorization.payload.decision) {
+          throw new Error("Tool authorization response does not match the pending host decision.");
         }
       }
       this.#pending.delete(correlationId);
@@ -565,13 +614,14 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   #sendCommand(
-    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "run.reconcile" | "context.compile" | "provider.inference.start",
-    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "context.compilation" | "provider.inference.accepted",
+    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "run.reconcile" | "context.compile" | "provider.inference.start" | "tool.authorization.resolve",
+    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "context.compilation" | "provider.inference.accepted" | "tool.authorization.resolved",
     runId: string | null,
     payload: object,
     timeoutMs = this.#options.commandTimeoutMs,
     inference?: PendingProviderInference,
     reconciliation?: PendingRunReconciliation,
+    toolAuthorization?: PendingToolAuthorization,
   ): Promise<unknown> {
     const child = this.#child;
     if (!child || !this.#ready || child.stdin.destroyed) {
@@ -604,6 +654,8 @@ export class RuntimeV2ProcessSupervisor {
               ? runtimeV2RunCancelEnvelopeSchema.parse(base)
               : name === "run.reconcile"
                 ? runtimeV2RunReconcileEnvelopeSchema.parse(base)
+                : name === "tool.authorization.resolve"
+                  ? runtimeV2ToolAuthorizationResolveEnvelopeSchema.parse(base)
                 : name === "context.compile"
                   ? runtimeV2ContextCompileEnvelopeSchema.parse(base)
                   : runtimeV2ProviderInferenceStartEnvelopeSchema.parse(base);
@@ -618,7 +670,7 @@ export class RuntimeV2ProcessSupervisor {
         reject(error);
         this.#failRuntime(error);
       }, timeoutMs);
-      this.#pending.set(command.messageId, { expectedName, resolve, reject, timer, inference, reconciliation });
+      this.#pending.set(command.messageId, { expectedName, resolve, reject, timer, inference, reconciliation, toolAuthorization });
       child.stdin.write(`${JSON.stringify(command)}\n`, "utf8", (error) => {
         if (!error) return;
         const pending = this.#pending.get(command.messageId);
@@ -664,12 +716,13 @@ export class RuntimeV2ProcessSupervisor {
 }
 
 interface PendingCommand {
-  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "context.compilation" | "provider.bound" | "provider.inference.accepted";
+  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "context.compilation" | "provider.bound" | "provider.inference.accepted" | "tool.authorization.resolved";
   resolve(value: unknown): void;
   reject(error: RuntimeV2SupervisorError): void;
   timer: NodeJS.Timeout;
   inference?: PendingProviderInference;
   reconciliation?: PendingRunReconciliation;
+  toolAuthorization?: PendingToolAuthorization;
 }
 
 interface PendingProviderInference {
@@ -680,6 +733,11 @@ interface PendingProviderInference {
 interface PendingRunReconciliation {
   runId: string;
   payload: RuntimeV2RunReconcilePayload;
+}
+
+interface PendingToolAuthorization {
+  runId: string;
+  payload: RuntimeV2ToolAuthorizationResolvePayload;
 }
 
 type ActiveProviderInference = RuntimeV2ProviderInferenceAcceptedEnvelope["payload"];
@@ -694,6 +752,14 @@ function isProviderInferenceTerminalEvent(
     || event.name === "provider.inference.failed"
     || event.name === "provider.inference.reconciliation_required"
   );
+}
+
+function isToolLifecycleEvent(event: RuntimeV2RuntimeEvent | object): event is
+  RuntimeV2ToolRequestedEnvelope | RuntimeV2ToolAuthorizedEnvelope | RuntimeV2ToolRunningEnvelope
+  | RuntimeV2ToolSucceededEnvelope | RuntimeV2ToolFailedEnvelope | RuntimeV2ToolOutcomeUnknownEnvelope {
+  return "name" in event && typeof event.name === "string" && [
+    "tool.requested", "tool.authorized", "tool.running", "tool.succeeded", "tool.failed", "tool.outcome_unknown",
+  ].includes(event.name);
 }
 
 function assertInferenceIdentity(
