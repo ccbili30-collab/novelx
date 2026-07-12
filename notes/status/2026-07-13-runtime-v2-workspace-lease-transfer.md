@@ -27,7 +27,7 @@
 
 ## Not Complete
 
-- Evidence changes before execution return a typed stale error but are not yet persisted as a `Stale` terminal event.
+- Evidence changes before execution are now persisted separately as a `Stale` terminal event; execution-time uncertainty remains a reconciliation concern.
 - The retained lock metadata is diagnostic only; stale metadata must never be interpreted as a live owner.
 - No automatic Recovery Supervisor（恢复监督器）claims, renews, transfers or starts operations.
 - No local recovery executor consumes the execution lifecycle.

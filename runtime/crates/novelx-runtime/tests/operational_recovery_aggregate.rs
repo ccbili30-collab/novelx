@@ -3,7 +3,7 @@ use novelx_runtime::operational_recovery_aggregate::{
     OperationalRecoveryClaim, OperationalRecoveryDisposition, OperationalRecoveryEffectClass,
     OperationalRecoveryEventMetadata, OperationalRecoveryExecution, OperationalRecoveryObservation,
     OperationalRecoveryObservedGate, OperationalRecoveryOutcome, OperationalRecoveryRepository,
-    OperationalRecoverySubject, OperationalRecoveryWaitingReason,
+    OperationalRecoveryStale, OperationalRecoverySubject, OperationalRecoveryWaitingReason,
 };
 use novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease;
 use rusqlite::Connection;
@@ -559,6 +559,33 @@ fn terminal_outcome_rejects_conflicting_writeback_and_unverified_success() {
             metadata(),
         )
         .unwrap();
+    let exclusive = WorkspaceRuntimeLease::acquire(&fixture.path, "runtime-instance-2").unwrap();
+    let scan_sequence = fixture.clock();
+    let stale = OperationalRecoveryStale::derive(
+        observation.operation_id.clone(),
+        observation.source_fingerprint.clone(),
+        "8".repeat(64),
+        "9".repeat(64),
+        Some(first_claim.claim_id.clone()),
+        Some(first_claim.fencing_token),
+        exclusive.instance_id().to_owned(),
+        "2026-07-13T00:02:00Z".to_owned(),
+        scan_sequence,
+    )
+    .unwrap();
+    assert!(matches!(
+        repository.mark_stale(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            stale,
+            &exclusive,
+            scan_sequence,
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::StaleTransitionInvalid)
+    ));
+    drop(exclusive);
     assert!(
         OperationalRecoveryOutcome::succeeded(
             &execution,
@@ -712,6 +739,92 @@ fn expired_unstarted_claim_transfers_with_exclusive_owner_and_increments_fence()
             metadata(),
         ),
         Err(OperationalRecoveryAggregateError::ClaimTransferInvalid)
+    ));
+}
+
+#[test]
+fn changed_source_marks_claimed_unstarted_operation_stale_and_blocks_progress() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "5",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let first_claim = claim(&observation, "runtime-instance-1", 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            first_claim.clone(),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let exclusive = WorkspaceRuntimeLease::acquire(&fixture.path, "runtime-instance-2").unwrap();
+    let scan_sequence = fixture.clock();
+    let stale = OperationalRecoveryStale::derive(
+        observation.operation_id.clone(),
+        observation.source_fingerprint.clone(),
+        "6".repeat(64),
+        "7".repeat(64),
+        Some(first_claim.claim_id.clone()),
+        Some(first_claim.fencing_token),
+        exclusive.instance_id().to_owned(),
+        "2026-07-13T00:01:00Z".to_owned(),
+        scan_sequence,
+    )
+    .unwrap();
+    let marked = repository
+        .mark_stale(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            stale.clone(),
+            &exclusive,
+            scan_sequence,
+            event_metadata("2026-07-13T00:01:00Z"),
+        )
+        .unwrap();
+    assert_eq!(
+        marked.operations[&observation.operation_id].stale,
+        Some(stale.clone())
+    );
+    assert_eq!(
+        repository
+            .mark_stale(
+                &subject.workspace_id,
+                &subject.run_id,
+                &observation.operation_id,
+                stale,
+                &exclusive,
+                fixture.clock(),
+                event_metadata("2026-07-13T00:01:00Z"),
+            )
+            .unwrap()
+            .revision,
+        marked.revision
+    );
+    assert!(matches!(
+        repository.start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            OperationalRecoveryExecution::derive(
+                &first_claim,
+                OperationalRecoveryEffectClass::LocalDeterministic,
+                "2026-07-13T00:02:00Z".to_owned(),
+            )
+            .unwrap(),
+            fixture.clock(),
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::OperationTerminal)
     ));
 }
 

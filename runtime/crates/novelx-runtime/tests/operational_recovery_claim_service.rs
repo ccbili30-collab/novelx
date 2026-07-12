@@ -54,9 +54,25 @@ fn changed_provider_evidence_is_rejected_by_the_fresh_scan() {
             &[],
             &lease,
         ),
-        Err(OperationalRecoveryClaimError::RunNotReady {
-            gate: OperationalRecoveryGate::AwaitingProviderBinding
-        })
+        Err(OperationalRecoveryClaimError::OperationMarkedStale { .. })
+    ));
+    let persisted =
+        novelx_runtime::operational_recovery_aggregate::OperationalRecoveryRepository::open(
+            &fixture.path,
+        )
+        .unwrap()
+        .load("workspace-1", &run_id)
+        .unwrap();
+    assert!(persisted.operations[&operation_id].stale.is_some());
+    assert!(matches!(
+        OperationalRecoveryClaimService::new(&fixture.path).claim_ready(
+            claim_request(&run_id, &operation_id),
+            &[provider],
+            &lease,
+        ),
+        Err(OperationalRecoveryClaimError::Aggregate(
+            novelx_runtime::operational_recovery_aggregate::OperationalRecoveryAggregateError::OperationNotClaimable
+        ))
     ));
 }
 

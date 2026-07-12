@@ -12,10 +12,12 @@ use crate::{
         OperationalRecoveryAggregate, OperationalRecoveryAggregateError, OperationalRecoveryClaim,
         OperationalRecoveryEffectClass, OperationalRecoveryEventMetadata,
         OperationalRecoveryExecution, OperationalRecoveryObservation,
-        OperationalRecoveryObservedGate, OperationalRecoveryRepository, OperationalRecoverySubject,
+        OperationalRecoveryObservedGate, OperationalRecoveryRepository, OperationalRecoveryStale,
+        OperationalRecoverySubject,
     },
     operational_recovery_scanner::{
-        OperationalRecoveryGate, OperationalRecoveryScanError, OperationalRecoveryScanner,
+        OperationalRecoveryGate, OperationalRecoveryRun, OperationalRecoveryScanError,
+        OperationalRecoveryScanner,
     },
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
     workspace_runtime_lease::WorkspaceRuntimeLease,
@@ -80,7 +82,7 @@ impl OperationalRecoveryClaimService {
             .map_err(|_| OperationalRecoveryClaimError::LeaseDurationInvalid)?;
         let claimed_at = claimed.format(&Rfc3339)?;
         let lease_expires_at = (claimed + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
-        let (run, after) = self.scan_ready(
+        let (run, after) = self.scan_run(
             &request.workspace_id,
             &request.project_id,
             &request.run_id,
@@ -92,18 +94,13 @@ impl OperationalRecoveryClaimService {
             run_id: request.run_id.clone(),
             policy_version: OPERATIONAL_RECOVERY_POLICY_VERSION.to_owned(),
         };
-        let observation = OperationalRecoveryObservation::derive(
+        let observation = self.ensure_current_operation(
             &subject,
-            run.source_fingerprint.clone(),
-            OperationalRecoveryObservedGate::RecoveryReady,
-            run.reasons,
+            &request.expected_operation_id,
+            run,
+            after,
+            exclusive_lease,
         )?;
-        if observation.operation_id != request.expected_operation_id {
-            return Err(OperationalRecoveryClaimError::OperationStale {
-                expected: request.expected_operation_id,
-                actual: observation.operation_id,
-            });
-        }
         let claim = OperationalRecoveryClaim::derive(
             observation.operation_id.clone(),
             exclusive_lease.instance_id().to_owned(),
@@ -145,7 +142,7 @@ impl OperationalRecoveryClaimService {
         if !exclusive_lease.protects_database(&self.database_path) {
             return Err(OperationalRecoveryClaimError::WorkspaceLeaseMismatch);
         }
-        let (run, after) = self.scan_ready(
+        let (run, after) = self.scan_run(
             &request.workspace_id,
             &request.project_id,
             &request.run_id,
@@ -157,18 +154,13 @@ impl OperationalRecoveryClaimService {
             run_id: request.run_id.clone(),
             policy_version: OPERATIONAL_RECOVERY_POLICY_VERSION.to_owned(),
         };
-        let observation = OperationalRecoveryObservation::derive(
+        let observation = self.ensure_current_operation(
             &subject,
-            run.source_fingerprint,
-            OperationalRecoveryObservedGate::RecoveryReady,
-            run.reasons,
+            &request.operation_id,
+            run,
+            after,
+            exclusive_lease,
         )?;
-        if observation.operation_id != request.operation_id {
-            return Err(OperationalRecoveryClaimError::OperationStale {
-                expected: request.operation_id,
-                actual: observation.operation_id,
-            });
-        }
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
         let aggregate = repository.load(&request.workspace_id, &request.run_id)?;
         let operation = aggregate
@@ -212,7 +204,7 @@ impl OperationalRecoveryClaimService {
             return Err(OperationalRecoveryClaimError::WorkspaceLeaseMismatch);
         }
         validate_lease_duration(request.lease_duration_seconds)?;
-        let (run, after) = self.scan_ready(
+        let (run, after) = self.scan_run(
             &request.workspace_id,
             &request.project_id,
             &request.run_id,
@@ -224,18 +216,13 @@ impl OperationalRecoveryClaimService {
             run_id: request.run_id.clone(),
             policy_version: OPERATIONAL_RECOVERY_POLICY_VERSION.to_owned(),
         };
-        let observation = OperationalRecoveryObservation::derive(
+        let observation = self.ensure_current_operation(
             &subject,
-            run.source_fingerprint,
-            OperationalRecoveryObservedGate::RecoveryReady,
-            run.reasons,
+            &request.operation_id,
+            run,
+            after,
+            exclusive_lease,
         )?;
-        if observation.operation_id != request.operation_id {
-            return Err(OperationalRecoveryClaimError::OperationStale {
-                expected: request.operation_id,
-                actual: observation.operation_id,
-            });
-        }
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
         let aggregate = repository.load(&request.workspace_id, &request.run_id)?;
         let previous = aggregate.operations[&observation.operation_id]
@@ -275,19 +262,76 @@ impl OperationalRecoveryClaimService {
             .map_err(Into::into)
     }
 
-    fn scan_ready(
+    fn ensure_current_operation(
+        &self,
+        subject: &OperationalRecoverySubject,
+        expected_operation_id: &str,
+        run: OperationalRecoveryRun,
+        scan_global_sequence: u64,
+        exclusive_lease: &WorkspaceRuntimeLease,
+    ) -> Result<OperationalRecoveryObservation, OperationalRecoveryClaimError> {
+        let actual = OperationalRecoveryObservation::derive(
+            subject,
+            run.source_fingerprint,
+            observed_gate(run.gate),
+            run.reasons,
+        )?;
+        if actual.operation_id == expected_operation_id {
+            return if run.gate == OperationalRecoveryGate::RecoveryReady {
+                Ok(actual)
+            } else {
+                Err(OperationalRecoveryClaimError::RunNotReady { gate: run.gate })
+            };
+        }
+        let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
+        let aggregate = repository.load(&subject.workspace_id, &subject.run_id)?;
+        let expected = aggregate
+            .operations
+            .get(expected_operation_id)
+            .ok_or_else(|| OperationalRecoveryClaimError::OperationStale {
+                expected: expected_operation_id.to_owned(),
+                actual: actual.operation_id.clone(),
+            })?;
+        let (current_claim_id, current_fencing_token) =
+            expected.claim.as_ref().map_or((None, None), |claim| {
+                (Some(claim.claim_id.clone()), Some(claim.fencing_token))
+            });
+        let detected_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+        let stale = OperationalRecoveryStale::derive(
+            expected.observation.operation_id.clone(),
+            expected.observation.source_fingerprint.clone(),
+            actual.operation_id.clone(),
+            actual.source_fingerprint,
+            current_claim_id,
+            current_fencing_token,
+            exclusive_lease.instance_id().to_owned(),
+            detected_at.clone(),
+            scan_global_sequence,
+        )?;
+        repository.mark_stale(
+            &subject.workspace_id,
+            &subject.run_id,
+            expected_operation_id,
+            stale,
+            exclusive_lease,
+            scan_global_sequence,
+            OperationalRecoveryEventMetadata {
+                created_at: detected_at,
+            },
+        )?;
+        Err(OperationalRecoveryClaimError::OperationMarkedStale {
+            expected: expected_operation_id.to_owned(),
+            actual: actual.operation_id,
+        })
+    }
+
+    fn scan_run(
         &self,
         workspace_id: &str,
         project_id: &str,
         run_id: &str,
         bound_providers: &[ProviderRunIdentity],
-    ) -> Result<
-        (
-            crate::operational_recovery_scanner::OperationalRecoveryRun,
-            u64,
-        ),
-        OperationalRecoveryClaimError,
-    > {
+    ) -> Result<(OperationalRecoveryRun, u64), OperationalRecoveryClaimError> {
         let clock = WorkspaceEventJournal::open(&self.database_path)?;
         let before = clock.current_global_sequence()?;
         let assignments = recover_agent_assignments(&self.database_path, workspace_id, project_id)?;
@@ -304,10 +348,26 @@ impl OperationalRecoveryClaimService {
             .into_iter()
             .find(|run| run.run_id == run_id)
             .ok_or(OperationalRecoveryClaimError::RunNotFound)?;
-        if run.gate != OperationalRecoveryGate::RecoveryReady {
-            return Err(OperationalRecoveryClaimError::RunNotReady { gate: run.gate });
-        }
         Ok((run, after))
+    }
+}
+
+fn observed_gate(value: OperationalRecoveryGate) -> OperationalRecoveryObservedGate {
+    match value {
+        OperationalRecoveryGate::AwaitingProviderBinding => {
+            OperationalRecoveryObservedGate::AwaitingProviderBinding
+        }
+        OperationalRecoveryGate::WaitingForApproval => {
+            OperationalRecoveryObservedGate::WaitingForApproval
+        }
+        OperationalRecoveryGate::WaitingForReconciliation => {
+            OperationalRecoveryObservedGate::WaitingForReconciliation
+        }
+        OperationalRecoveryGate::RecoveryReady => OperationalRecoveryObservedGate::RecoveryReady,
+        OperationalRecoveryGate::Quarantined => OperationalRecoveryObservedGate::Quarantined,
+        OperationalRecoveryGate::TerminalProjectionOnly => {
+            OperationalRecoveryObservedGate::TerminalProjectionOnly
+        }
     }
 }
 
@@ -329,6 +389,10 @@ pub enum OperationalRecoveryClaimError {
     RunNotReady { gate: OperationalRecoveryGate },
     #[error("operational recovery operation is stale: expected {expected}, actual {actual}")]
     OperationStale { expected: String, actual: String },
+    #[error(
+        "operational recovery operation was persistently marked stale: expected {expected}, actual {actual}"
+    )]
+    OperationMarkedStale { expected: String, actual: String },
     #[error("operational recovery observation must be recorded before claim")]
     ObservationMissing,
     #[error("operational recovery claim must be persisted before execution")]

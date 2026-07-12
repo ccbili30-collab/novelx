@@ -108,6 +108,64 @@ pub struct OperationalRecoveryOperation {
     pub claim: Option<OperationalRecoveryClaim>,
     pub execution: Option<OperationalRecoveryExecution>,
     pub outcome: Option<OperationalRecoveryOutcome>,
+    pub stale: Option<OperationalRecoveryStale>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationalRecoveryStale {
+    pub expected_operation_id: String,
+    pub expected_source_fingerprint: String,
+    pub actual_operation_id: String,
+    pub actual_source_fingerprint: String,
+    pub current_claim_id: Option<String>,
+    pub current_fencing_token: Option<u64>,
+    pub detector_instance_id: String,
+    pub detected_at: String,
+    pub scan_global_sequence: u64,
+}
+
+impl OperationalRecoveryStale {
+    #[allow(clippy::too_many_arguments)]
+    pub fn derive(
+        expected_operation_id: String,
+        expected_source_fingerprint: String,
+        actual_operation_id: String,
+        actual_source_fingerprint: String,
+        current_claim_id: Option<String>,
+        current_fencing_token: Option<u64>,
+        detector_instance_id: String,
+        detected_at: String,
+        scan_global_sequence: u64,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        require_sha256("expected_operation_id", &expected_operation_id)?;
+        require_sha256("expected_source_fingerprint", &expected_source_fingerprint)?;
+        require_sha256("actual_operation_id", &actual_operation_id)?;
+        require_sha256("actual_source_fingerprint", &actual_source_fingerprint)?;
+        if expected_operation_id == actual_operation_id
+            && expected_source_fingerprint == actual_source_fingerprint
+        {
+            return Err(OperationalRecoveryAggregateError::StaleEvidenceUnchanged);
+        }
+        match (&current_claim_id, current_fencing_token) {
+            (Some(claim_id), Some(token)) if token > 0 => require_sha256("claim_id", claim_id)?,
+            (None, None) => {}
+            _ => return Err(OperationalRecoveryAggregateError::StaleClaimIdentityInvalid),
+        }
+        require_text("detector_instance_id", &detector_instance_id)?;
+        parse_time("detected_at", &detected_at)?;
+        Ok(Self {
+            expected_operation_id,
+            expected_source_fingerprint,
+            actual_operation_id,
+            actual_source_fingerprint,
+            current_claim_id,
+            current_fencing_token,
+            detector_instance_id,
+            detected_at,
+            scan_global_sequence,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -380,6 +438,10 @@ enum RecoveryEventData {
         operation_id: String,
         outcome: OperationalRecoveryOutcome,
     },
+    StaleMarked {
+        operation_id: String,
+        stale: OperationalRecoveryStale,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -561,6 +623,7 @@ impl OperationalRecoveryRepository {
             .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
         if operation.observation.gate != OperationalRecoveryObservedGate::RecoveryReady
             || operation.disposition.is_some()
+            || operation.stale.is_some()
             || operation.observation.source_fingerprint != claim.source_fingerprint
         {
             return Err(OperationalRecoveryAggregateError::OperationNotClaimable);
@@ -612,6 +675,7 @@ impl OperationalRecoveryRepository {
         if previous.claim_id != previous_claim_id
             || operation.execution.is_some()
             || operation.outcome.is_some()
+            || operation.stale.is_some()
             || claim.operation_id != previous.operation_id
             || claim.source_fingerprint != previous.source_fingerprint
             || claim.executor_version != previous.executor_version
@@ -643,6 +707,64 @@ impl OperationalRecoveryRepository {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn mark_stale(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        operation_id: &str,
+        stale: OperationalRecoveryStale,
+        exclusive_lease: &WorkspaceRuntimeLease,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        validate_stale(&stale)?;
+        if stale.detector_instance_id != exclusive_lease.instance_id() {
+            return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
+        }
+        let current = self.load(workspace_id, run_id)?;
+        let operation = current
+            .operations
+            .get(operation_id)
+            .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+        if stale.expected_operation_id != operation.observation.operation_id
+            || stale.expected_source_fingerprint != operation.observation.source_fingerprint
+            || operation.execution.is_some()
+            || operation.outcome.is_some()
+        {
+            return Err(OperationalRecoveryAggregateError::StaleTransitionInvalid);
+        }
+        match (
+            &operation.claim,
+            &stale.current_claim_id,
+            stale.current_fencing_token,
+        ) {
+            (None, None, None) => {}
+            (Some(claim), Some(claim_id), Some(token))
+                if claim.claim_id == *claim_id && claim.fencing_token == token => {}
+            _ => return Err(OperationalRecoveryAggregateError::StaleClaimIdentityInvalid),
+        }
+        if let Some(existing) = &operation.stale {
+            return if existing == &stale {
+                Ok(current)
+            } else {
+                Err(OperationalRecoveryAggregateError::OperationTerminal)
+            };
+        }
+        if stale.scan_global_sequence != expected_global_sequence {
+            return Err(OperationalRecoveryAggregateError::StaleTransitionInvalid);
+        }
+        self.append_at_global_sequence(
+            current,
+            RecoveryEventData::StaleMarked {
+                operation_id: operation_id.to_owned(),
+                stale,
+            },
+            expected_global_sequence,
+            metadata,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn renew_lease(
         &mut self,
         workspace_id: &str,
@@ -662,7 +784,7 @@ impl OperationalRecoveryRepository {
             .get(operation_id)
             .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
         let claim = require_current_claim(operation, claim_id, owner_instance_id, fencing_token)?;
-        if operation.outcome.is_some() {
+        if operation.outcome.is_some() || operation.stale.is_some() {
             return Err(OperationalRecoveryAggregateError::OperationTerminal);
         }
         let renewed = parse_time("renewed_at", &renewed_at)?;
@@ -724,7 +846,7 @@ impl OperationalRecoveryRepository {
                 Err(OperationalRecoveryAggregateError::ExecutionConflict)
             };
         }
-        if operation.outcome.is_some() {
+        if operation.outcome.is_some() || operation.stale.is_some() {
             return Err(OperationalRecoveryAggregateError::OperationTerminal);
         }
         self.append_at_global_sequence(
@@ -897,6 +1019,7 @@ fn apply_event(
                     claim: None,
                     execution: None,
                     outcome: None,
+                    stale: None,
                 },
             );
             aggregate.revision = event.aggregate_revision;
@@ -964,6 +1087,7 @@ fn apply_event(
             if operation.observation.gate != OperationalRecoveryObservedGate::RecoveryReady
                 || operation.disposition.is_some()
                 || operation.claim.is_some()
+                || operation.stale.is_some()
                 || operation.observation.source_fingerprint != claim.source_fingerprint
                 || claim.fencing_token != 1
             {
@@ -996,6 +1120,7 @@ fn apply_event(
                 || exclusive_owner_instance_id != claim.owner_instance_id
                 || operation.execution.is_some()
                 || operation.outcome.is_some()
+                || operation.stale.is_some()
                 || claim.operation_id != previous.operation_id
                 || claim.source_fingerprint != previous.source_fingerprint
                 || claim.executor_version != previous.executor_version
@@ -1030,7 +1155,7 @@ fn apply_event(
                 .operations
                 .get_mut(&operation_id)
                 .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
-            if operation.outcome.is_some() {
+            if operation.outcome.is_some() || operation.stale.is_some() {
                 return Err(OperationalRecoveryAggregateError::OperationTerminal);
             }
             let claim =
@@ -1071,6 +1196,7 @@ fn apply_event(
             )?;
             if operation.execution.is_some()
                 || operation.outcome.is_some()
+                || operation.stale.is_some()
                 || execution.source_fingerprint != claim.source_fingerprint
                 || execution.action_spec_sha256 != claim.action_spec_sha256
             {
@@ -1101,6 +1227,40 @@ fn apply_event(
             }
             validate_outcome_matches_execution(&outcome, execution)?;
             operation.outcome = Some(outcome);
+            aggregate.revision = event.aggregate_revision;
+            aggregate.last_event_hash = event.event_hash;
+        }
+        RecoveryEventData::StaleMarked {
+            operation_id,
+            stale,
+        } => {
+            validate_stale(&stale)?;
+            let aggregate = value
+                .as_mut()
+                .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            let operation = aggregate
+                .operations
+                .get_mut(&operation_id)
+                .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+            if stale.expected_operation_id != operation.observation.operation_id
+                || stale.expected_source_fingerprint != operation.observation.source_fingerprint
+                || operation.execution.is_some()
+                || operation.outcome.is_some()
+                || operation.stale.is_some()
+            {
+                return Err(OperationalRecoveryAggregateError::StaleTransitionInvalid);
+            }
+            match (
+                &operation.claim,
+                &stale.current_claim_id,
+                stale.current_fencing_token,
+            ) {
+                (None, None, None) => {}
+                (Some(claim), Some(claim_id), Some(token))
+                    if claim.claim_id == *claim_id && claim.fencing_token == token => {}
+                _ => return Err(OperationalRecoveryAggregateError::StaleClaimIdentityInvalid),
+            }
+            operation.stale = Some(stale);
             aggregate.revision = event.aggregate_revision;
             aggregate.last_event_hash = event.event_hash;
         }
@@ -1203,6 +1363,27 @@ fn validate_execution(
         Ok(())
     } else {
         Err(OperationalRecoveryAggregateError::ExecutionConflict)
+    }
+}
+
+fn validate_stale(
+    stale: &OperationalRecoveryStale,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    let derived = OperationalRecoveryStale::derive(
+        stale.expected_operation_id.clone(),
+        stale.expected_source_fingerprint.clone(),
+        stale.actual_operation_id.clone(),
+        stale.actual_source_fingerprint.clone(),
+        stale.current_claim_id.clone(),
+        stale.current_fencing_token,
+        stale.detector_instance_id.clone(),
+        stale.detected_at.clone(),
+        stale.scan_global_sequence,
+    )?;
+    if derived == *stale {
+        Ok(())
+    } else {
+        Err(OperationalRecoveryAggregateError::StaleTransitionInvalid)
     }
 }
 
@@ -1373,7 +1554,8 @@ fn event_operation_id(data: &RecoveryEventData) -> &str {
         RecoveryEventData::ClaimTransferred { operation_id, .. }
         | RecoveryEventData::LeaseRenewed { operation_id, .. }
         | RecoveryEventData::ExecutionStarted { operation_id, .. }
-        | RecoveryEventData::ExecutionFinished { operation_id, .. } => operation_id,
+        | RecoveryEventData::ExecutionFinished { operation_id, .. }
+        | RecoveryEventData::StaleMarked { operation_id, .. } => operation_id,
     }
 }
 
@@ -1408,6 +1590,9 @@ fn event_suffix(data: &RecoveryEventData) -> Result<String, OperationalRecoveryA
             "execution-finished:{}",
             canonical_sha256(&serde_json::to_value(outcome)?)?
         ),
+        RecoveryEventData::StaleMarked { stale, .. } => {
+            format!("stale:{}", canonical_sha256(&serde_json::to_value(stale)?)?)
+        }
     })
 }
 
@@ -1482,6 +1667,12 @@ pub enum OperationalRecoveryAggregateError {
     ExecutionRequired,
     #[error("operational recovery operation is terminal")]
     OperationTerminal,
+    #[error("operational recovery stale evidence did not change")]
+    StaleEvidenceUnchanged,
+    #[error("operational recovery stale claim identity is invalid")]
+    StaleClaimIdentityInvalid,
+    #[error("operational recovery stale transition is invalid")]
+    StaleTransitionInvalid,
     #[error("operational recovery aggregate was not found")]
     NotFound,
     #[error("operational recovery event envelope is invalid")]

@@ -23,6 +23,8 @@ Recovery evidence spans both `runtime_events` and `workspace_events`. A Claim wr
 10. `Succeeded`, `FailedSafe` and `OutcomeUnknown` are immutable terminal outcomes. Success requires result-manifest and final-checkpoint hashes; safe failure and unknown outcome require evidence hashes.
 11. A Runtime process must hold the exclusive database-adjacent workspace lock before initial Claim, execution start or Claim transfer. A second process fails initialization before `runtime.ready`.
 12. Transfer is allowed only after the old lease expires and only when no execution ever started. It preserves source/executor/action identities and increments the fencing token by exactly one.
+13. If a fresh scan changes the operation ID or source fingerprint before execution starts, the old operation receives an immutable `Stale` terminal record containing expected/actual evidence, current Claim fence, detector instance and scan clock. Stale operations cannot be claimed, renewed, transferred or started.
+14. Evidence changes after `ExecutionStarted` cannot be classified as Stale because execution may itself mutate evidence or cross a side-effect boundary; those cases require terminal effect evidence or reconciliation.
 
 ## Consequences
 
