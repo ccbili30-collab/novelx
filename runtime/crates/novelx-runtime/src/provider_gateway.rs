@@ -8,10 +8,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::watch;
 use url::Url;
 use uuid::Uuid;
 
+use crate::provider_effect_capability::{
+    ArmedProviderEffect, DispatchedProviderEffect, ProviderEffectGrantReceipt,
+};
 use crate::provider_retry_after::{ProviderRetryAfterReceipt, parse_provider_retry_after};
 
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
@@ -253,6 +257,7 @@ pub struct PreparedProviderHttpDispatch {
     transport_payload_sha256: String,
     transport_payload_bytes: u64,
     total_deadline_at: tokio::time::Instant,
+    authorized_effect_receipt: Option<ProviderEffectGrantReceipt>,
 }
 
 impl PreparedProviderHttpDispatch {
@@ -286,6 +291,35 @@ impl PreparedProviderHttpDispatch {
 
     pub fn total_deadline_at(&self) -> tokio::time::Instant {
         self.total_deadline_at
+    }
+}
+
+/// The outcome of crossing the authorized Provider HTTP boundary.
+///
+/// The move-only dispatched effect remains owned by this value for both successful and failed
+/// HTTP outcomes. The caller must keep it alive until the matching terminal Provider Attempt
+/// event has been persisted.
+pub struct AuthorizedProviderHttpDispatchResult {
+    outcome: Result<ProviderInferenceOutcome, ProviderGatewayError>,
+    dispatched_effect: DispatchedProviderEffect,
+}
+
+impl AuthorizedProviderHttpDispatchResult {
+    pub fn outcome(&self) -> Result<&ProviderInferenceOutcome, &ProviderGatewayError> {
+        self.outcome.as_ref()
+    }
+
+    pub fn dispatch_id(&self) -> Uuid {
+        self.dispatched_effect.receipt().dispatch_id()
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Result<ProviderInferenceOutcome, ProviderGatewayError>,
+        DispatchedProviderEffect,
+    ) {
+        (self.outcome, self.dispatched_effect)
     }
 }
 
@@ -431,6 +465,8 @@ impl ProviderGateway {
         provider: &BoundProvider,
         request: ProviderInferenceRequest,
     ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
+        // Compatibility-only unsealed path. Production Runtime execution must use
+        // `execute_authorized_http_dispatch` after durable `provider.sent` persistence.
         let prepared = self.prepare_inference(provider, request)?;
         self.infer_prepared(provider, prepared).await
     }
@@ -456,6 +492,27 @@ impl ProviderGateway {
         provider: &BoundProvider,
         prepared: PreparedProviderInference,
     ) -> Result<PreparedProviderHttpDispatch, ProviderGatewayError> {
+        self.prepare_http_dispatch_with_effect(provider, prepared, None)
+    }
+
+    pub(crate) fn prepare_authorized_http_dispatch(
+        &self,
+        provider: &BoundProvider,
+        prepared: PreparedProviderInference,
+        effect_receipt: &ProviderEffectGrantReceipt,
+    ) -> Result<PreparedProviderHttpDispatch, ProviderGatewayError> {
+        effect_receipt
+            .validate()
+            .map_err(|_| ProviderGatewayError::ProviderEffectAuthorizationMismatch)?;
+        self.prepare_http_dispatch_with_effect(provider, prepared, Some(effect_receipt))
+    }
+
+    fn prepare_http_dispatch_with_effect(
+        &self,
+        provider: &BoundProvider,
+        prepared: PreparedProviderInference,
+        effect_receipt: Option<&ProviderEffectGrantReceipt>,
+    ) -> Result<PreparedProviderHttpDispatch, ProviderGatewayError> {
         validate_inference_request(provider, &prepared.request)?;
         let actual_payload_sha256 = format!("{:x}", Sha256::digest(&prepared.transport_payload));
         if actual_payload_sha256 != prepared.transport_payload_sha256 {
@@ -463,7 +520,7 @@ impl ProviderGateway {
         }
         let endpoint = endpoint_url(&provider.config.base_url, "chat/completions")?;
         let request_timeout = Duration::from_millis(provider.config.request_timeout_ms);
-        let total_deadline_at =
+        let mut total_deadline_at =
             tokio::time::Instant::now() + Duration::from_millis(provider.config.total_deadline_ms);
         let provider_identity = ProviderRunIdentity {
             profile_id: provider.config.profile_id.clone(),
@@ -474,6 +531,15 @@ impl ProviderGateway {
         let compilation = prepared.request.compilation.clone();
         let transport_payload_bytes =
             u64::try_from(prepared.transport_payload.len()).unwrap_or(u64::MAX);
+        if let Some(receipt) = effect_receipt {
+            validate_effect_dispatch_evidence(
+                receipt,
+                &provider_identity,
+                &compilation,
+                &actual_payload_sha256,
+            )?;
+            total_deadline_at = authorized_dispatch_deadline(receipt, total_deadline_at)?;
+        }
         let request = self
             .client
             .post(endpoint)
@@ -490,6 +556,7 @@ impl ProviderGateway {
             transport_payload_sha256: actual_payload_sha256,
             transport_payload_bytes,
             total_deadline_at,
+            authorized_effect_receipt: effect_receipt.cloned(),
         })
     }
 
@@ -498,6 +565,8 @@ impl ProviderGateway {
         provider: &BoundProvider,
         prepared: PreparedProviderInference,
     ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
+        // Compatibility-only unsealed path. It will be removed once every live caller has been
+        // migrated to the durable Provider effect capability chain.
         let dispatch = self.prepare_http_dispatch(provider, prepared)?;
         self.execute_http_dispatch(dispatch).await
     }
@@ -508,6 +577,7 @@ impl ProviderGateway {
         prepared: PreparedProviderInference,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
+        // Compatibility-only unsealed path; see `infer_prepared`.
         if *cancellation.borrow() {
             return Err(ProviderGatewayError::Cancelled);
         }
@@ -525,6 +595,73 @@ impl ProviderGateway {
         }
     }
 
+    /// Executes the prebuilt request only when its complete non-secret evidence is bound to the
+    /// exact move-only effect that crossed durable `provider.sent` persistence.
+    ///
+    /// Evidence mismatch and pre-existing cancellation perform zero HTTP requests. Every return
+    /// path retains the dispatched effect guard so the workspace lease cannot be released before
+    /// the caller persists a terminal Provider Attempt event. Cancellation after the effect is
+    /// Armed is not safe-retry evidence: the caller must persist the appropriate cancelled or
+    /// OutcomeUnknown observation instead of sending the Attempt again.
+    pub(crate) async fn execute_authorized_http_dispatch(
+        &self,
+        dispatch: PreparedProviderHttpDispatch,
+        armed_effect: ArmedProviderEffect,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> AuthorizedProviderHttpDispatchResult {
+        let evidence_result = match dispatch.authorized_effect_receipt.as_ref() {
+            Some(bound_receipt) if bound_receipt == armed_effect.receipt() => {
+                validate_effect_dispatch_evidence(
+                    armed_effect.receipt(),
+                    &dispatch.provider,
+                    &dispatch.compilation,
+                    &dispatch.transport_payload_sha256,
+                )
+            }
+            _ => Err(ProviderGatewayError::ProviderEffectAuthorizationMismatch),
+        }
+        .and_then(|()| {
+            if dispatch.total_deadline_at <= tokio::time::Instant::now() {
+                Err(ProviderGatewayError::ProviderEffectAuthorizationExpired)
+            } else {
+                Ok(())
+            }
+        });
+        let dispatched_effect = armed_effect.into_dispatched();
+
+        if let Err(error) = evidence_result {
+            return AuthorizedProviderHttpDispatchResult {
+                outcome: Err(error),
+                dispatched_effect,
+            };
+        }
+        if *cancellation.borrow() {
+            return AuthorizedProviderHttpDispatchResult {
+                outcome: Err(ProviderGatewayError::Cancelled),
+                dispatched_effect,
+            };
+        }
+
+        let inference = self.execute_http_dispatch(dispatch);
+        tokio::pin!(inference);
+        let outcome = tokio::select! {
+            result = &mut inference => result,
+            changed = cancellation.changed() => {
+                if changed.is_ok() && *cancellation.borrow() {
+                    Err(ProviderGatewayError::Cancelled)
+                } else {
+                    inference.await
+                }
+            }
+        };
+        AuthorizedProviderHttpDispatchResult {
+            outcome,
+            dispatched_effect,
+        }
+    }
+
+    /// Unsealed compatibility kernel. Only `execute_authorized_http_dispatch` may call this from
+    /// the Runtime live path; direct compatibility callers remain until the next sealing batch.
     pub(crate) async fn execute_http_dispatch(
         &self,
         dispatch: PreparedProviderHttpDispatch,
@@ -536,6 +673,7 @@ impl ProviderGateway {
             total_deadline_at,
             transport_payload_sha256: _,
             transport_payload_bytes: _,
+            authorized_effect_receipt: _,
         } = dispatch;
         tokio::time::timeout_at(total_deadline_at, async move {
             let response = self
@@ -672,6 +810,47 @@ fn validate_inference_request(
     }
     validate_message_sequence(&request.messages)?;
     Ok(())
+}
+
+fn validate_effect_dispatch_evidence(
+    receipt: &ProviderEffectGrantReceipt,
+    provider: &ProviderRunIdentity,
+    compilation: &ContextCompilationReceipt,
+    transport_payload_sha256: &str,
+) -> Result<(), ProviderGatewayError> {
+    receipt
+        .validate()
+        .map_err(|_| ProviderGatewayError::ProviderEffectAuthorizationMismatch)?;
+    let material = receipt.material();
+    if &material.provider != provider
+        || material.context_compilation_id != compilation.compilation_id
+        || material.canonical_context_sha256 != compilation.canonical_context_sha256
+        || material.transport_payload_sha256 != transport_payload_sha256
+    {
+        return Err(ProviderGatewayError::ProviderEffectAuthorizationMismatch);
+    }
+    Ok(())
+}
+
+fn authorized_dispatch_deadline(
+    receipt: &ProviderEffectGrantReceipt,
+    configured_deadline_at: tokio::time::Instant,
+) -> Result<tokio::time::Instant, ProviderGatewayError> {
+    let now_wall = OffsetDateTime::now_utc();
+    let now_monotonic = tokio::time::Instant::now();
+    let material = receipt.material();
+    let attempt_deadline = OffsetDateTime::parse(&material.attempt_deadline_at, &Rfc3339)
+        .map_err(|_| ProviderGatewayError::ProviderEffectAuthorizationMismatch)?;
+    let inference_deadline = OffsetDateTime::parse(&material.inference_deadline_at, &Rfc3339)
+        .map_err(|_| ProviderGatewayError::ProviderEffectAuthorizationMismatch)?;
+    let durable_deadline = attempt_deadline.min(inference_deadline);
+    if durable_deadline <= now_wall {
+        return Err(ProviderGatewayError::ProviderEffectAuthorizationExpired);
+    }
+    let remaining: Duration = (durable_deadline - now_wall)
+        .try_into()
+        .map_err(|_| ProviderGatewayError::ProviderEffectAuthorizationMismatch)?;
+    Ok(configured_deadline_at.min(now_monotonic + remaining))
 }
 
 fn validate_message_sequence(
@@ -1135,6 +1314,10 @@ pub enum ProviderGatewayError {
     ContextReceiptMismatch,
     #[error("Prepared Provider transport payload hash does not match its body")]
     PreparedPayloadMismatch,
+    #[error("Provider effect authorization does not match the prepared HTTP dispatch")]
+    ProviderEffectAuthorizationMismatch,
+    #[error("Provider effect authorization expired before HTTP dispatch preparation")]
+    ProviderEffectAuthorizationExpired,
     #[error("Provider configuration serialization failed: {0}")]
     Serialize(serde_json::Error),
     #[error("Provider HTTP client could not be created: {0}")]
@@ -1147,7 +1330,9 @@ pub enum ProviderGatewayError {
     RateLimited(ProviderHttpFailureReceipt),
     #[error("Provider request timed out")]
     Timeout,
-    #[error("Provider request was cancelled after dispatch")]
+    #[error(
+        "Provider request was cancelled after durable send authorization; outcome may be unknown"
+    )]
     Cancelled,
     #[error("Provider connection failed")]
     ConnectionFailed,
@@ -1167,4 +1352,429 @@ pub enum ProviderGatewayError {
     OutputIncomplete,
     #[error("Provider response exceeded the size limit")]
     ResponseTooLarge,
+}
+
+#[cfg(test)]
+mod authorized_dispatch_tests {
+    use std::{
+        fs::File,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use novelx_protocol::{
+        ContextBudgetAllocation, ContextBudgetCategory, ContextDisclosure, ContextRepresentation,
+        TokenizerIdentity, TokenizerKind,
+    };
+    use tempfile::TempDir;
+    use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+    use crate::{
+        provider_effect_capability::{
+            InitialAgentLoopAuthorityBinding, ProviderEffectAuthorityBinding,
+            ProviderEffectCapability, ProviderEffectGrantMaterial, ProviderEffectGrantReceipt,
+            canonical_database_path_sha256,
+        },
+        workspace_runtime_lease::{WorkspaceRuntimeLease, WorkspaceRuntimeLeaseError},
+    };
+
+    const TEST_API_KEY: &str = "authorized-provider-sensitive-key";
+
+    macro_rules! assert_not_impl {
+        ($type:ty, $trait:path) => {
+            const _: fn() = || {
+                trait AmbiguousIfImpl<A> {
+                    fn marker() {}
+                }
+                impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+                struct Invalid;
+                impl<T: ?Sized + $trait> AmbiguousIfImpl<Invalid> for T {}
+                let _ = <$type as AmbiguousIfImpl<_>>::marker;
+            };
+        };
+    }
+
+    assert_not_impl!(AuthorizedProviderHttpDispatchResult, Clone);
+    assert_not_impl!(AuthorizedProviderHttpDispatchResult, std::fmt::Debug);
+    assert_not_impl!(AuthorizedProviderHttpDispatchResult, serde::Serialize);
+
+    #[tokio::test]
+    async fn mismatched_attempt_grant_performs_zero_http_requests() {
+        let (base_url, request_count, server) = spawn_counting_server().await;
+        let (registry, identity) = bound_registry(base_url);
+        let provider = registry.resolve(&identity).unwrap();
+        let gateway = ProviderGateway::new().unwrap();
+        let fixture = EffectFixture::new("mismatch");
+        let prepared = gateway
+            .prepare_inference(provider, inference_request())
+            .unwrap();
+        let payload_sha256 = prepared.transport_payload_sha256().to_owned();
+        let material = fixture.material(&identity, &prepared, &payload_sha256);
+        let receipt = ProviderEffectGrantReceipt::derive(material.clone()).unwrap();
+        let dispatch = gateway
+            .prepare_authorized_http_dispatch(provider, prepared, &receipt)
+            .unwrap();
+
+        let mut other_material = material;
+        other_material.attempt_id = Uuid::new_v4();
+        let other_receipt = ProviderEffectGrantReceipt::derive(other_material.clone()).unwrap();
+        let armed = fixture.arm(other_material, other_receipt);
+        let (_cancel_tx, mut cancellation) = watch::channel(false);
+        let result = gateway
+            .execute_authorized_http_dispatch(dispatch, armed, &mut cancellation)
+            .await;
+
+        assert!(matches!(
+            result.outcome(),
+            Err(ProviderGatewayError::ProviderEffectAuthorizationMismatch)
+        ));
+        assert_eq!(request_count.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_dispatch_performs_zero_http_requests() {
+        let (base_url, request_count, server) = spawn_counting_server().await;
+        let (registry, identity) = bound_registry(base_url);
+        let provider = registry.resolve(&identity).unwrap();
+        let gateway = ProviderGateway::new().unwrap();
+        let fixture = EffectFixture::new("cancelled");
+        let prepared = gateway
+            .prepare_inference(provider, inference_request())
+            .unwrap();
+        let payload_sha256 = prepared.transport_payload_sha256().to_owned();
+        let material = fixture.material(&identity, &prepared, &payload_sha256);
+        let receipt = ProviderEffectGrantReceipt::derive(material.clone()).unwrap();
+        let dispatch = gateway
+            .prepare_authorized_http_dispatch(provider, prepared, &receipt)
+            .unwrap();
+        let armed = fixture.arm(material, receipt);
+        let (_cancel_tx, mut cancellation) = watch::channel(true);
+
+        let result = gateway
+            .execute_authorized_http_dispatch(dispatch, armed, &mut cancellation)
+            .await;
+
+        assert!(matches!(
+            result.outcome(),
+            Err(ProviderGatewayError::Cancelled)
+        ));
+        assert_eq!(request_count.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn authorized_prebuild_uses_the_persisted_attempt_deadline_without_extension() {
+        let (base_url, request_count, server) = spawn_counting_server().await;
+        let (registry, identity) = bound_registry(base_url);
+        let provider = registry.resolve(&identity).unwrap();
+        let gateway = ProviderGateway::new().unwrap();
+        let fixture = EffectFixture::new("deadline-minimum");
+        let prepared = gateway
+            .prepare_inference(provider, inference_request())
+            .unwrap();
+        let payload_sha256 = prepared.transport_payload_sha256().to_owned();
+        let mut material = fixture.material(&identity, &prepared, &payload_sha256);
+        material.attempt_deadline_at = (OffsetDateTime::now_utc() + TimeDuration::seconds(2))
+            .format(&Rfc3339)
+            .unwrap();
+        let receipt = ProviderEffectGrantReceipt::derive(material).unwrap();
+        let before = tokio::time::Instant::now();
+
+        let dispatch = gateway
+            .prepare_authorized_http_dispatch(provider, prepared, &receipt)
+            .unwrap();
+
+        assert!(dispatch.total_deadline_at() > before);
+        assert!(dispatch.total_deadline_at() <= before + Duration::from_millis(2_200));
+        assert_eq!(request_count.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn expired_authorized_prebuild_fails_before_sent_or_http() {
+        let (base_url, request_count, server) = spawn_counting_server().await;
+        let (registry, identity) = bound_registry(base_url);
+        let provider = registry.resolve(&identity).unwrap();
+        let gateway = ProviderGateway::new().unwrap();
+        let fixture = EffectFixture::new("expired-prebuild");
+        let prepared = gateway
+            .prepare_inference(provider, inference_request())
+            .unwrap();
+        let payload_sha256 = prepared.transport_payload_sha256().to_owned();
+        let mut material = fixture.material(&identity, &prepared, &payload_sha256);
+        let issued_at = OffsetDateTime::parse(&material.issued_at, &Rfc3339).unwrap();
+        material.attempt_deadline_at = (issued_at + TimeDuration::milliseconds(100))
+            .format(&Rfc3339)
+            .unwrap();
+        let receipt = ProviderEffectGrantReceipt::derive(material).unwrap();
+
+        assert!(matches!(
+            gateway.prepare_authorized_http_dispatch(provider, prepared, &receipt),
+            Err(ProviderGatewayError::ProviderEffectAuthorizationExpired)
+        ));
+        assert_eq!(request_count.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matching_armed_effect_dispatches_exactly_once_and_holds_lease() {
+        let (base_url, request_count, server) = spawn_success_server().await;
+        let (registry, identity) = bound_registry(base_url);
+        let provider = registry.resolve(&identity).unwrap();
+        let gateway = ProviderGateway::new().unwrap();
+        let fixture = EffectFixture::new("successful");
+        let prepared = gateway
+            .prepare_inference(provider, inference_request())
+            .unwrap();
+        let payload_sha256 = prepared.transport_payload_sha256().to_owned();
+        let material = fixture.material(&identity, &prepared, &payload_sha256);
+        let receipt = ProviderEffectGrantReceipt::derive(material.clone()).unwrap();
+        let expected_dispatch_id = receipt.dispatch_id();
+        let dispatch = gateway
+            .prepare_authorized_http_dispatch(provider, prepared, &receipt)
+            .unwrap();
+        let armed = fixture.arm(material, receipt);
+        let EffectFixture {
+            _directory,
+            database,
+            lease,
+        } = fixture;
+        drop(lease);
+        let (_cancel_tx, mut cancellation) = watch::channel(false);
+
+        let result = gateway
+            .execute_authorized_http_dispatch(dispatch, armed, &mut cancellation)
+            .await;
+
+        assert_eq!(result.dispatch_id(), expected_dispatch_id);
+        assert_eq!(
+            result.outcome().unwrap().text.as_deref(),
+            Some("一次且仅一次")
+        );
+        server.await.unwrap();
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            WorkspaceRuntimeLease::acquire(&database, "successful"),
+            Err(WorkspaceRuntimeLeaseError::AlreadyHeld { .. })
+        ));
+        let (outcome, dispatched_effect) = result.into_parts();
+        assert!(outcome.is_ok());
+        assert!(matches!(
+            WorkspaceRuntimeLease::acquire(&database, "successful"),
+            Err(WorkspaceRuntimeLeaseError::AlreadyHeld { .. })
+        ));
+        drop(dispatched_effect);
+        WorkspaceRuntimeLease::acquire(&database, "successful").unwrap();
+    }
+
+    struct EffectFixture {
+        _directory: TempDir,
+        database: PathBuf,
+        lease: Arc<WorkspaceRuntimeLease>,
+    }
+
+    impl EffectFixture {
+        fn new(label: &str) -> Self {
+            let directory = TempDir::new().unwrap();
+            let database = directory.path().join("workspace.db");
+            File::create(&database).unwrap();
+            let lease = Arc::new(WorkspaceRuntimeLease::acquire(&database, label).unwrap());
+            Self {
+                _directory: directory,
+                database,
+                lease,
+            }
+        }
+
+        fn material(
+            &self,
+            provider: &ProviderRunIdentity,
+            prepared: &PreparedProviderInference,
+            transport_payload_sha256: &str,
+        ) -> ProviderEffectGrantMaterial {
+            let now = OffsetDateTime::now_utc() - TimeDuration::seconds(1);
+            let issued_at = now.format(&Rfc3339).unwrap();
+            ProviderEffectGrantMaterial {
+                schema_version: ProviderEffectGrantMaterial::schema_version(),
+                workspace_id: "workspace-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                database_canonical_path_sha256: canonical_database_path_sha256(&self.database)
+                    .unwrap(),
+                lease_epoch: self.lease.lease_epoch().to_owned(),
+                run_id: Uuid::new_v4(),
+                invocation_id: "invocation-1".to_owned(),
+                inference_id: Uuid::new_v4(),
+                attempt_id: Uuid::new_v4(),
+                request_number: 1,
+                attempt_number: 1,
+                attempt_aggregate_sequence: 1,
+                attempt_definition_sha256: hash('a'),
+                attempt_evidence_sha256: hash('b'),
+                context_compilation_id: prepared.compilation().compilation_id,
+                canonical_context_sha256: prepared.compilation().canonical_context_sha256.clone(),
+                transport_payload_sha256: transport_payload_sha256.to_owned(),
+                provider: provider.clone(),
+                inference_deadline_at: (now + TimeDuration::minutes(5)).format(&Rfc3339).unwrap(),
+                attempt_deadline_at: (now + TimeDuration::minutes(2)).format(&Rfc3339).unwrap(),
+                retry_schedule: None,
+                authority: ProviderEffectAuthorityBinding::InitialAgentLoop(
+                    InitialAgentLoopAuthorityBinding {
+                        requested_message_id: "attempt-requested-message".to_owned(),
+                        requested_idempotency_key_sha256: hash('c'),
+                        requested_at: issued_at.clone(),
+                        agent_loop_aggregate_sequence: 1,
+                        agent_loop_checkpoint_sha256: hash('d'),
+                        pending_inference_sha256: hash('e'),
+                    },
+                ),
+                issued_at,
+            }
+        }
+
+        fn arm(
+            &self,
+            material: ProviderEffectGrantMaterial,
+            receipt: ProviderEffectGrantReceipt,
+        ) -> ArmedProviderEffect {
+            ProviderEffectCapability::activate(
+                receipt.clone(),
+                &material,
+                &self.database,
+                Arc::clone(&self.lease),
+            )
+            .unwrap()
+            .consume(&material, &self.database)
+            .unwrap()
+            .arm(receipt)
+            .unwrap()
+        }
+    }
+
+    fn inference_request() -> ProviderInferenceRequest {
+        ProviderInferenceRequest {
+            compilation: compilation_receipt(),
+            messages: vec![ProviderInferenceMessage {
+                role: ProviderInferenceRole::User,
+                content: "只发送一次".to_owned(),
+                tool_calls: vec![],
+                tool_call_id: None,
+            }],
+            tools: vec![],
+        }
+    }
+
+    fn compilation_receipt() -> ContextCompilationReceipt {
+        ContextCompilationReceipt {
+            compilation_id: Uuid::new_v4(),
+            request_number: 1,
+            compiler_version: "1.0.0".to_owned(),
+            tokenizer: TokenizerIdentity {
+                kind: TokenizerKind::FallbackEstimate,
+                id: "unicode-mixed".to_owned(),
+                version: "1.0.0".to_owned(),
+                provider_id: Some("deepseek".to_owned()),
+                model_id: Some("deepseek-chat".to_owned()),
+            },
+            representation: ContextRepresentation::NormalizedMessages,
+            canonical_context_sha256: hash('1'),
+            serialized_input_bytes: 1_024,
+            estimated_input_tokens: 256,
+            exact_input_tokens: None,
+            context_window: 64_000,
+            safety_reserve_tokens: 6_400,
+            output_reserve_tokens: 8_000,
+            available_input_tokens: 49_600,
+            accepted: true,
+            incomplete: false,
+            budget: vec![ContextBudgetAllocation {
+                category: ContextBudgetCategory::SessionHistory,
+                estimated_tokens: 256,
+            }],
+            included_item_ids: vec!["current-user-turn".to_owned()],
+            omitted_item_ids: vec![],
+            disclosure: ContextDisclosure::AgentInternal,
+        }
+    }
+
+    fn bound_registry(base_url: String) -> (ProviderRegistry, ProviderRunIdentity) {
+        let config = ProviderConfig {
+            schema_version: 1,
+            profile_id: "profile-1".to_owned(),
+            provider_id: "deepseek".to_owned(),
+            display_name: "DeepSeek".to_owned(),
+            base_url,
+            model_id: "deepseek-chat".to_owned(),
+            api_flavor: ProviderApiFlavor::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
+            context_window: 64_000,
+            max_tokens: Some(8_000),
+            reasoning: false,
+            input: vec![ProviderInputCapability::Text],
+            request_timeout_ms: 2_000,
+            total_deadline_ms: 3_000,
+            retry_policy: ProviderRetryPolicy {
+                max_attempts: 1,
+                max_total_delay_ms: 0,
+            },
+        };
+        let config_sha256 = provider_config_sha256(&config).unwrap();
+        let identity = ProviderRunIdentity {
+            profile_id: config.profile_id.clone(),
+            provider_id: config.provider_id.clone(),
+            model_id: config.model_id.clone(),
+            config_sha256: config_sha256.clone(),
+        };
+        let mut registry = ProviderRegistry::default();
+        registry
+            .bind(config, &config_sha256, TEST_API_KEY.to_owned())
+            .unwrap();
+        (registry, identity)
+    }
+
+    async fn spawn_counting_server() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&count);
+        let server = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                observed.fetch_add(1, Ordering::SeqCst);
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://{address}/v1"), count, server)
+    }
+
+    async fn spawn_success_server() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&count);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            observed.fetch_add(1, Ordering::SeqCst);
+            let mut request = vec![0_u8; 65_536];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains(&format!("authorization: Bearer {TEST_API_KEY}")));
+            let body = r#"{"id":"response-1","model":"deepseek-chat","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"一次且仅一次"}}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        (format!("http://{address}/v1"), count, server)
+    }
+
+    fn hash(character: char) -> String {
+        character.to_string().repeat(64)
+    }
 }
