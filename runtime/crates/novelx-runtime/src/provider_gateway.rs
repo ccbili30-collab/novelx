@@ -11,6 +11,8 @@ use tokio::sync::watch;
 use url::Url;
 use uuid::Uuid;
 
+use crate::provider_retry_after::{ProviderRetryAfterReceipt, parse_provider_retry_after};
+
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Eq, PartialEq, Deserialize)]
@@ -453,7 +455,7 @@ impl ProviderGateway {
             .send()
             .await
             .map_err(classify_transport_error)?;
-        classify_status(response.status())?;
+        classify_response_status(&response)?;
         let payload = read_json_response(response).await?;
         parse_inference_response(provider, &prepared.request.compilation, &payload)
     }
@@ -485,9 +487,9 @@ impl ProviderGateway {
                 ));
             }
             Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                return Err(ProviderGatewayError::RateLimited(
-                    response.status().as_u16(),
-                ));
+                return Err(ProviderGatewayError::RateLimited(http_failure_receipt(
+                    &response,
+                )));
             }
             Ok(_) => None,
             Err(error) if error.is_timeout() => return Err(ProviderGatewayError::Timeout),
@@ -509,7 +511,7 @@ impl ProviderGateway {
             .send()
             .await
             .map_err(classify_transport_error)?;
-        classify_status(response.status())?;
+        classify_response_status(&response)?;
         let payload = read_json_response(response).await?;
         let actual_model_id = validate_ping_payload(&payload)?;
         Ok(ProviderConnectionReceipt {
@@ -952,20 +954,64 @@ fn classify_transport_error(error: reqwest::Error) -> ProviderGatewayError {
     }
 }
 
-fn classify_status(status: reqwest::StatusCode) -> Result<(), ProviderGatewayError> {
+fn classify_response_status(response: &reqwest::Response) -> Result<(), ProviderGatewayError> {
+    classify_status(
+        response.status(),
+        retry_after_receipt(response.headers(), std::time::SystemTime::now()),
+    )
+}
+
+fn http_failure_receipt(response: &reqwest::Response) -> ProviderHttpFailureReceipt {
+    ProviderHttpFailureReceipt {
+        status: response.status().as_u16(),
+        retry_after: retry_after_receipt(response.headers(), std::time::SystemTime::now()),
+    }
+}
+
+fn retry_after_receipt(
+    headers: &reqwest::header::HeaderMap,
+    observed_at: std::time::SystemTime,
+) -> Option<ProviderRetryAfterReceipt> {
+    let mut values = headers.get_all(reqwest::header::RETRY_AFTER).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    parse_provider_retry_after(value.as_bytes(), observed_at).ok()
+}
+
+fn classify_status(
+    status: reqwest::StatusCode,
+    retry_after: Option<ProviderRetryAfterReceipt>,
+) -> Result<(), ProviderGatewayError> {
     match status {
         status if status.is_success() => Ok(()),
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(
             ProviderGatewayError::AuthenticationRejected(status.as_u16()),
         ),
-        reqwest::StatusCode::TOO_MANY_REQUESTS => {
-            Err(ProviderGatewayError::RateLimited(status.as_u16()))
-        }
+        reqwest::StatusCode::TOO_MANY_REQUESTS => Err(ProviderGatewayError::RateLimited(
+            ProviderHttpFailureReceipt {
+                status: status.as_u16(),
+                retry_after,
+            },
+        )),
         status if status.is_redirection() => {
             Err(ProviderGatewayError::RedirectRejected(status.as_u16()))
         }
-        status => Err(ProviderGatewayError::HttpRejected(status.as_u16())),
+        status => Err(ProviderGatewayError::HttpRejected(
+            ProviderHttpFailureReceipt {
+                status: status.as_u16(),
+                retry_after,
+            },
+        )),
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderHttpFailureReceipt {
+    pub status: u16,
+    pub retry_after: Option<ProviderRetryAfterReceipt>,
 }
 
 #[derive(Debug, Error)]
@@ -1003,7 +1049,7 @@ pub enum ProviderGatewayError {
     #[error("Provider authentication was rejected")]
     AuthenticationRejected(u16),
     #[error("Provider rate limit was reached")]
-    RateLimited(u16),
+    RateLimited(ProviderHttpFailureReceipt),
     #[error("Provider request timed out")]
     Timeout,
     #[error("Provider request was cancelled after dispatch")]
@@ -1014,8 +1060,8 @@ pub enum ProviderGatewayError {
     RequestFailed,
     #[error("Provider redirect was rejected")]
     RedirectRejected(u16),
-    #[error("Provider returned HTTP {0}")]
-    HttpRejected(u16),
+    #[error("Provider returned a rejected HTTP response")]
+    HttpRejected(ProviderHttpFailureReceipt),
     #[error("Provider model was not found")]
     ModelNotFound,
     #[error("Provider response was malformed")]

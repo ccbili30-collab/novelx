@@ -344,10 +344,10 @@ fn classify_gateway_error(
             false,
             "Provider authentication failed.",
         ),
-        ProviderGatewayError::RateLimited(_) => (
+        ProviderGatewayError::RateLimited(receipt) => (
             "PROVIDER_RATE_LIMITED",
             RuntimeErrorClass::ProviderRateLimit,
-            true,
+            receipt.retry_after.is_some(),
             "The Provider rate limit was reached.",
         ),
         ProviderGatewayError::Timeout => (
@@ -356,10 +356,10 @@ fn classify_gateway_error(
             true,
             "The Provider request timed out.",
         ),
-        ProviderGatewayError::HttpRejected(status) => (
+        ProviderGatewayError::HttpRejected(receipt) => (
             "PROVIDER_HTTP_REJECTED",
             RuntimeErrorClass::ProviderRejected,
-            *status >= 500,
+            matches!(receipt.status, 500 | 502 | 503 | 504),
             "The Provider rejected the request.",
         ),
         ProviderGatewayError::ConnectionFailed | ProviderGatewayError::RequestFailed => (

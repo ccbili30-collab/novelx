@@ -13,6 +13,7 @@ use novelx_runtime::provider_inference_protocol::ProviderInferenceProtocolMapper
 use novelx_runtime::provider_inference_service::{
     ProviderInferenceExecution, ProviderInferenceServiceError,
 };
+use novelx_runtime::provider_retry_after::{ProviderRetryAfterKind, ProviderRetryAfterReceipt};
 use uuid::Uuid;
 
 #[test]
@@ -43,14 +44,46 @@ fn maps_acceptance_and_completion_with_identical_protocol_identity() {
 fn maps_known_failure_with_the_attempt_ledgers_retryability_declaration() {
     let execution = execution();
     let mapper = ProviderInferenceProtocolMapper::new(Uuid::new_v4(), "2026-07-12T00:00:00Z");
-    for status in [400, 503] {
-        let error =
-            ProviderInferenceServiceError::Gateway(ProviderGatewayError::HttpRejected(status));
+    for (status, expected_retryable) in [(400, false), (500, true), (501, false), (503, true)] {
+        let error = ProviderInferenceServiceError::Gateway(ProviderGatewayError::HttpRejected(
+            novelx_runtime::provider_gateway::ProviderHttpFailureReceipt {
+                status,
+                retry_after: None,
+            },
+        ));
         let draft = mapper.failed(&execution, &error).unwrap();
         let payload: ProviderInferenceFailed = serde_json::from_value(draft.payload).unwrap();
         assert_eq!(payload.error.class, RuntimeErrorClass::ProviderRejected);
-        assert_eq!(payload.error.retryable, status >= 500);
+        assert_eq!(payload.error.retryable, expected_retryable);
         assert_eq!(payload.error.code, "PROVIDER_HTTP_REJECTED");
+    }
+}
+
+#[test]
+fn rate_limit_is_retryable_only_with_a_valid_persisted_wait_receipt() {
+    let execution = execution();
+    let mapper = ProviderInferenceProtocolMapper::new(Uuid::new_v4(), "2026-07-12T00:00:00Z");
+    for (retry_after, expected_retryable) in [
+        (None, false),
+        (
+            Some(ProviderRetryAfterReceipt {
+                value_sha256: "a".repeat(64),
+                kind: ProviderRetryAfterKind::DeltaSeconds,
+                delay_ms: 0,
+            }),
+            true,
+        ),
+    ] {
+        let error = ProviderInferenceServiceError::Gateway(ProviderGatewayError::RateLimited(
+            novelx_runtime::provider_gateway::ProviderHttpFailureReceipt {
+                status: 429,
+                retry_after,
+            },
+        ));
+        let draft = mapper.failed(&execution, &error).unwrap();
+        let payload: ProviderInferenceFailed = serde_json::from_value(draft.payload).unwrap();
+        assert_eq!(payload.error.retryable, expected_retryable);
+        assert_eq!(payload.error.code, "PROVIDER_RATE_LIMITED");
     }
 }
 

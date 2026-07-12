@@ -101,6 +101,17 @@ pub struct InferenceDispatchIdentity {
     pub inference_idempotency_key: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderRetryBinding {
+    pub schedule_id: String,
+    pub schedule_sha256: String,
+    pub parent_attempt_evidence_sha256: String,
+    pub previous_attempt_id: Uuid,
+    pub previous_attempt_number: u16,
+    pub next: InferenceDispatchIdentity,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssistToolDecision {
     pub provider_tool_call_id: String,
@@ -463,6 +474,15 @@ impl AgentLoopService {
         Ok(())
     }
 
+    pub fn acknowledge_inference_retry(
+        &mut self,
+        binding: &ProviderRetryBinding,
+    ) -> Result<(), AgentLoopError> {
+        validate_inference_retry_transition(self, binding)?;
+        self.pending_inference = Some(binding.next.clone());
+        Ok(())
+    }
+
     pub fn cancel(&mut self, reason: &str) -> Result<AgentLoopDirective, AgentLoopError> {
         if matches!(
             self.phase,
@@ -582,6 +602,49 @@ fn valid_inference_dispatch(dispatch: &InferenceDispatchIdentity) -> bool {
         && !dispatch.inference_idempotency_key.trim().is_empty()
 }
 
+pub(crate) fn validate_inference_retry_transition(
+    service: &AgentLoopService,
+    binding: &ProviderRetryBinding,
+) -> Result<(), AgentLoopError> {
+    if service.phase != LoopPhase::AwaitingProvider {
+        return Err(AgentLoopError::PhaseInvalid);
+    }
+    if binding.schedule_id.trim().is_empty()
+        || !is_lowercase_sha256(&binding.schedule_sha256)
+        || !is_lowercase_sha256(&binding.parent_attempt_evidence_sha256)
+        || !valid_inference_dispatch(&binding.next)
+    {
+        return Err(AgentLoopError::RetryBindingInvalid);
+    }
+    let previous = service
+        .pending_inference
+        .as_ref()
+        .ok_or(AgentLoopError::InferenceDispatchMissing)?;
+    let Some(expected_attempt_number) = previous.attempt_number.checked_add(1) else {
+        return Err(AgentLoopError::RetryBindingInvalid);
+    };
+    if binding.previous_attempt_id != previous.attempt_id
+        || binding.previous_attempt_number != previous.attempt_number
+        || binding.next.inference_id != previous.inference_id
+        || binding.next.request_number != previous.request_number
+        || binding.next.context_compilation_id != previous.context_compilation_id
+        || binding.next.attempt_number != expected_attempt_number
+        || binding.next.attempt_id == previous.attempt_id
+        || binding.next.inference_idempotency_key == previous.inference_idempotency_key
+    {
+        return Err(AgentLoopError::RetryBindingInvalid);
+    }
+    Ok(())
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
 fn exchange(
     kind: ContextRuntimeExchangeKind,
     content: Value,
@@ -609,6 +672,8 @@ pub enum AgentLoopError {
     ProviderIdentityMismatch,
     #[error("scheduled Provider inference identity is missing from the AgentLoop checkpoint")]
     InferenceDispatchMissing,
+    #[error("Provider retry binding does not exactly replace the pending inference attempt")]
+    RetryBindingInvalid,
     #[error("Provider terminal output is missing")]
     ProviderTerminalOutputMissing,
     #[error("materialized Provider calls do not match the finalized outcome")]

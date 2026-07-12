@@ -962,6 +962,7 @@ impl Fixture {
                     code: "PROVIDER_AUTH_REJECTED".to_owned(),
                     retryable: false,
                     retry_after_ms: None,
+                    retry_after: None,
                     http_status: Some(401),
                     delivery_certainty: ProviderDeliveryCertainty::ResponseReceived,
                     diagnostic_id: Uuid::new_v4(),

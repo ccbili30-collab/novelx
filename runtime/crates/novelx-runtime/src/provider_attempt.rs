@@ -5,6 +5,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent, RuntimeEvent};
+use crate::provider_retry_after::ProviderRetryAfterReceipt;
 
 const AGGREGATE_TYPE: &str = "provider_attempt";
 const EVENT_VERSION: u32 = 1;
@@ -76,6 +77,8 @@ pub struct ProviderAttemptFailure {
     pub code: String,
     pub retryable: bool,
     pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<ProviderRetryAfterReceipt>,
     pub http_status: Option<u16>,
     pub delivery_certainty: ProviderDeliveryCertainty,
     pub diagnostic_id: Uuid,
@@ -607,9 +610,18 @@ fn validate_response_output(
 }
 
 fn validate_failure(failure: &ProviderAttemptFailure) -> Result<(), ProviderAttemptError> {
+    let retry_after_matches = match (&failure.retry_after, failure.retry_after_ms) {
+        (Some(receipt), Some(delay_ms)) => {
+            receipt.delay_ms == delay_ms && is_sha256(&receipt.value_sha256)
+        }
+        (None, None) => true,
+        _ => false,
+    };
     if failure.code.trim().is_empty()
         || failure.delivery_certainty == ProviderDeliveryCertainty::Unknown
-        || (!failure.retryable && failure.retry_after_ms.is_some())
+        || !retry_after_matches
+        || (!failure.retryable
+            && (failure.retry_after_ms.is_some() || failure.retry_after.is_some()))
     {
         return Err(ProviderAttemptError::FailureInvalid);
     }

@@ -5,6 +5,7 @@ use novelx_runtime::provider_attempt::{
     ProviderAttemptFailure, ProviderAttemptMetadata, ProviderAttemptRecovery, ProviderAttemptState,
     ProviderDeliveryCertainty, ProviderResponseReceipt,
 };
+use novelx_runtime::provider_retry_after::{ProviderRetryAfterKind, ProviderRetryAfterReceipt};
 use rusqlite::{Connection, params};
 use sha2::Digest;
 use tempfile::TempDir;
@@ -602,6 +603,11 @@ fn failure(certainty: ProviderDeliveryCertainty, retryable: bool) -> ProviderAtt
         code: "PROVIDER_RATE_LIMITED".to_owned(),
         retryable,
         retry_after_ms: retryable.then_some(1_000),
+        retry_after: retryable.then(|| ProviderRetryAfterReceipt {
+            value_sha256: "f".repeat(64),
+            kind: ProviderRetryAfterKind::DeltaSeconds,
+            delay_ms: 1_000,
+        }),
         http_status: (certainty == ProviderDeliveryCertainty::ResponseReceived).then_some(429),
         delivery_certainty: certainty,
         diagnostic_id: Uuid::new_v4(),

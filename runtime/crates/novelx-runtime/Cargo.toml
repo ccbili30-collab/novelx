@@ -22,6 +22,7 @@ required-features = ["runtime-test-failpoints"]
 novelx-protocol = { path = "../novelx-protocol" }
 rusqlite.workspace = true
 fs2.workspace = true
+httpdate.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -14,6 +14,7 @@ use novelx_runtime::provider_gateway::{
     ProviderInferenceRole, ProviderInferenceToolCall, ProviderInputCapability, ProviderRegistry,
     ProviderRetryPolicy, provider_config_sha256,
 };
+use novelx_runtime::provider_retry_after::ProviderRetryAfterKind;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
@@ -298,7 +299,12 @@ async fn classifies_auth_rate_limit_and_invalid_json_without_retrying_them_as_su
         ),
         (
             ServerReply::Immediate(json_response(429, r#"{"error":"slow down"}"#)),
-            ProviderGatewayError::RateLimited(429),
+            ProviderGatewayError::RateLimited(
+                novelx_runtime::provider_gateway::ProviderHttpFailureReceipt {
+                    status: 429,
+                    retry_after: None,
+                },
+            ),
         ),
         (
             ServerReply::Immediate(json_response(200, "{not-json")),
@@ -319,6 +325,56 @@ async fn classifies_auth_rate_limit_and_invalid_json_without_retrying_them_as_su
             std::mem::discriminant(&error),
             std::mem::discriminant(&expected)
         );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn captures_one_valid_retry_after_header_without_retaining_its_raw_value() {
+    let response =
+        json_response_with_headers(429, r#"{"error":"slow down"}"#, &["Retry-After: 120"]);
+    let (base_url, _, server) = spawn_http_server(vec![ServerReply::Immediate(response)]).await;
+    let (registry, identity) = bound_registry(base_url, 2_000);
+    let error = ProviderGateway::new()
+        .unwrap()
+        .infer(
+            registry.resolve(&identity).unwrap(),
+            inference_request(compilation_receipt()),
+        )
+        .await
+        .unwrap_err();
+    let ProviderGatewayError::RateLimited(receipt) = error else {
+        panic!("expected a typed rate-limit receipt");
+    };
+    assert_eq!(receipt.status, 429);
+    let retry_after = receipt.retry_after.unwrap();
+    assert_eq!(retry_after.kind, ProviderRetryAfterKind::DeltaSeconds);
+    assert_eq!(retry_after.delay_ms, 120_000);
+    assert_eq!(retry_after.value_sha256.len(), 64);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_or_invalid_retry_after_headers_never_authorize_a_retry_delay() {
+    for headers in [
+        vec!["Retry-After: tomorrow"],
+        vec!["Retry-After: 1", "Retry-After: 2"],
+    ] {
+        let response = json_response_with_headers(429, r#"{"error":"slow down"}"#, &headers);
+        let (base_url, _, server) = spawn_http_server(vec![ServerReply::Immediate(response)]).await;
+        let (registry, identity) = bound_registry(base_url, 2_000);
+        let error = ProviderGateway::new()
+            .unwrap()
+            .infer(
+                registry.resolve(&identity).unwrap(),
+                inference_request(compilation_receipt()),
+            )
+            .await
+            .unwrap_err();
+        let ProviderGatewayError::RateLimited(receipt) = error else {
+            panic!("expected a typed rate-limit receipt");
+        };
+        assert!(receipt.retry_after.is_none());
         server.await.unwrap();
     }
 }
@@ -627,14 +683,23 @@ fn successful_body() -> &'static str {
 }
 
 fn json_response(status: u16, body: &str) -> String {
+    json_response_with_headers(status, body, &[])
+}
+
+fn json_response_with_headers(status: u16, body: &str, headers: &[&str]) -> String {
     let reason = match status {
         200 => "OK",
         401 => "Unauthorized",
         429 => "Too Many Requests",
         _ => "Error",
     };
+    let extra_headers = if headers.is_empty() {
+        String::new()
+    } else {
+        format!("{}\r\n", headers.join("\r\n"))
+    };
     format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
 }

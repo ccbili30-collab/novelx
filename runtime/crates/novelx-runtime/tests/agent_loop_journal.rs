@@ -10,7 +10,7 @@ use novelx_runtime::{
     },
     agent_loop_service::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, AssistToolDecision,
-        FinalizedToolResult, InferenceDispatchIdentity, LoopPhase,
+        FinalizedToolResult, InferenceDispatchIdentity, LoopPhase, ProviderRetryBinding,
     },
     event_journal::EventJournal,
     provider_tool_materializer::MaterializedProviderToolCall,
@@ -190,6 +190,151 @@ fn persists_inference_started_without_fabricating_a_directive() {
 }
 
 #[test]
+fn persists_and_replays_the_only_allowed_same_phase_retry_transition() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    let mut repository = AgentLoopJournalRepository::new(&mut journal);
+    let previous = service("invocation-retry");
+    repository
+        .create(&previous, "create-retry", metadata("retry-1"))
+        .unwrap();
+    let binding = retry_binding(previous.pending_inference().unwrap());
+    let mut current = previous.clone();
+    current.acknowledge_inference_retry(&binding).unwrap();
+
+    let first = repository
+        .append_inference_retried(
+            &previous,
+            &current,
+            &binding,
+            "retry-attempt-2",
+            metadata("retry-2"),
+        )
+        .unwrap();
+    let idempotent = repository
+        .append_inference_retried(
+            &previous,
+            &current,
+            &binding,
+            "retry-attempt-2",
+            metadata("retry-2-again"),
+        )
+        .unwrap();
+    assert_eq!(first.aggregate_sequence, idempotent.aggregate_sequence);
+    drop(journal);
+
+    let mut journal = fixture.open();
+    let mut repository = AgentLoopJournalRepository::new(&mut journal);
+    let recovered = repository
+        .recover(&run_id().to_string(), "invocation-retry")
+        .unwrap();
+    assert_eq!(recovered.service, current);
+    assert_eq!(recovered.service.pending_inference(), Some(&binding.next));
+
+    assert!(matches!(
+        repository.append_state_transition(
+            &current,
+            &current,
+            StateTransitionKind::InferenceStarted,
+            "ordinary-same-phase",
+            metadata("retry-3"),
+        ),
+        Err(AgentLoopJournalError::TransitionInvalid)
+    ));
+    assert!(matches!(
+        repository.append_inference_retried(
+            &previous,
+            &current,
+            &binding,
+            "duplicate-under-new-key",
+            metadata("retry-4"),
+        ),
+        Err(AgentLoopJournalError::StaleCheckpoint)
+    ));
+}
+
+#[test]
+fn retry_command_key_conflict_is_rejected() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    let mut repository = AgentLoopJournalRepository::new(&mut journal);
+    let previous = service("invocation-retry-key");
+    repository
+        .create(&previous, "create-retry-key", metadata("retry-key-1"))
+        .unwrap();
+    let binding = retry_binding(previous.pending_inference().unwrap());
+    let mut current = previous.clone();
+    current.acknowledge_inference_retry(&binding).unwrap();
+    repository
+        .append_inference_retried(
+            &previous,
+            &current,
+            &binding,
+            "same-retry-key",
+            metadata("retry-key-2"),
+        )
+        .unwrap();
+
+    let mut conflicting_binding = binding.clone();
+    conflicting_binding.next.attempt_id = Uuid::new_v4();
+    conflicting_binding.next.inference_idempotency_key = "different-attempt-2".to_owned();
+    let mut conflicting_current = previous.clone();
+    conflicting_current
+        .acknowledge_inference_retry(&conflicting_binding)
+        .unwrap();
+    assert!(matches!(
+        repository.append_inference_retried(
+            &previous,
+            &conflicting_current,
+            &conflicting_binding,
+            "same-retry-key",
+            metadata("retry-key-3"),
+        ),
+        Err(AgentLoopJournalError::Journal(_))
+    ));
+}
+
+#[test]
+fn replay_rejects_missing_malformed_and_forged_retry_binding() {
+    for (case, mutation) in [
+        (
+            "missing",
+            "UPDATE runtime_events SET payload_json = json_remove(payload_json, '$.retryBinding') WHERE event_type = 'agent_loop.inference_retried'",
+        ),
+        (
+            "malformed-hash",
+            "UPDATE runtime_events SET payload_json = json_set(payload_json, '$.retryBinding.scheduleSha256', '0000000000000000000000000000000000000000000000000000000000000000') WHERE event_type = 'agent_loop.inference_retried'",
+        ),
+        (
+            "forged-next",
+            "UPDATE runtime_events SET payload_json = json_set(payload_json, '$.retryBinding.next.attemptId', '66666666-6666-4666-8666-000000000001') WHERE event_type = 'agent_loop.inference_retried'",
+        ),
+        (
+            "unknown-event",
+            "UPDATE runtime_events SET event_type = 'agent_loop.unknown_retry' WHERE event_type = 'agent_loop.inference_retried'",
+        ),
+        (
+            "unknown-version",
+            "UPDATE runtime_events SET event_version = 99 WHERE event_type = 'agent_loop.inference_retried'",
+        ),
+        (
+            "sequence-gap",
+            "UPDATE runtime_events SET aggregate_sequence = 3 WHERE event_type = 'agent_loop.inference_retried'",
+        ),
+    ] {
+        let fixture = retry_fixture(case);
+        fixture.mutate(mutation, &[]);
+        let mut journal = fixture.open();
+        assert!(
+            AgentLoopJournalRepository::new(&mut journal)
+                .recover(&run_id().to_string(), &format!("invocation-{case}"))
+                .is_err(),
+            "corrupted retry history unexpectedly recovered: {case}"
+        );
+    }
+}
+
+#[test]
 fn rejects_a_corrupted_checkpoint_hash() {
     let fixture = Fixture::new();
     {
@@ -212,6 +357,30 @@ fn rejects_a_corrupted_checkpoint_hash() {
             .recover(&run_id().to_string(), "invocation-hash"),
         Err(AgentLoopJournalError::CheckpointHashMismatch)
     ));
+}
+
+#[test]
+fn replays_legacy_events_without_the_optional_retry_binding_field() {
+    let fixture = Fixture::new();
+    {
+        let mut journal = fixture.open();
+        AgentLoopJournalRepository::new(&mut journal)
+            .create(
+                &service("invocation-legacy"),
+                "create-legacy",
+                metadata("legacy-1"),
+            )
+            .unwrap();
+    }
+    fixture.mutate(
+        "UPDATE runtime_events SET payload_json = json_remove(json_remove(payload_json, '$.retryBinding'), '$.retryBindingSha256') WHERE aggregate_type = 'agent_loop'",
+        &[],
+    );
+    let mut journal = fixture.open();
+    let recovered = AgentLoopJournalRepository::new(&mut journal)
+        .recover(&run_id().to_string(), "invocation-legacy")
+        .unwrap();
+    assert_eq!(recovered.service.phase(), LoopPhase::AwaitingProvider);
 }
 
 #[test]
@@ -474,6 +643,34 @@ fn service(invocation_id: &str) -> AgentLoopService {
     .unwrap()
 }
 
+fn retry_fixture(case: &str) -> Fixture {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    let mut repository = AgentLoopJournalRepository::new(&mut journal);
+    let previous = service(&format!("invocation-{case}"));
+    repository
+        .create(
+            &previous,
+            &format!("create-{case}"),
+            metadata(&format!("{case}-1")),
+        )
+        .unwrap();
+    let binding = retry_binding(previous.pending_inference().unwrap());
+    let mut current = previous.clone();
+    current.acknowledge_inference_retry(&binding).unwrap();
+    repository
+        .append_inference_retried(
+            &previous,
+            &current,
+            &binding,
+            &format!("retry-{case}"),
+            metadata(&format!("{case}-2")),
+        )
+        .unwrap();
+    drop(journal);
+    fixture
+}
+
 fn completion(call: ProviderInferenceToolCall) -> ProviderInferenceCompleted {
     ProviderInferenceCompleted {
         identity: ProviderInferenceIdentity {
@@ -575,6 +772,24 @@ fn dispatch_identity(
         context_compilation_id,
         attempt_number: 1,
         inference_idempotency_key: format!("inference-{request_number}"),
+    }
+}
+
+fn retry_binding(previous: &InferenceDispatchIdentity) -> ProviderRetryBinding {
+    ProviderRetryBinding {
+        schedule_id: "provider-retry-schedule-1".to_owned(),
+        schedule_sha256: "e".repeat(64),
+        parent_attempt_evidence_sha256: "f".repeat(64),
+        previous_attempt_id: previous.attempt_id,
+        previous_attempt_number: previous.attempt_number,
+        next: InferenceDispatchIdentity {
+            inference_id: previous.inference_id,
+            attempt_id: Uuid::parse_str("55555555-5555-4555-8555-000000000001").unwrap(),
+            request_number: previous.request_number,
+            context_compilation_id: previous.context_compilation_id,
+            attempt_number: previous.attempt_number + 1,
+            inference_idempotency_key: "inference-1-attempt-2".to_owned(),
+        },
     }
 }
 

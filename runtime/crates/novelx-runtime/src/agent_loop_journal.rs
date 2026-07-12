@@ -6,7 +6,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    agent_loop_service::{AgentLoopDirective, AgentLoopError, AgentLoopService, LoopPhase},
+    agent_loop_service::{
+        AgentLoopDirective, AgentLoopError, AgentLoopService, LoopPhase, ProviderRetryBinding,
+        validate_inference_retry_transition,
+    },
     event_journal::{EventJournal, EventJournalError, NewRuntimeEvent, RuntimeEvent},
 };
 
@@ -30,6 +33,7 @@ pub enum DirectiveKind {
     Completed,
     Cancelled,
     InferenceStarted,
+    InferenceRetried,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +162,79 @@ impl<'a> AgentLoopJournalRepository<'a> {
             command_key,
             metadata,
         )
+    }
+
+    pub fn append_inference_retried(
+        &mut self,
+        previous: &AgentLoopService,
+        current: &AgentLoopService,
+        binding: &ProviderRetryBinding,
+        command_key: &str,
+        metadata: AgentLoopEventMetadata<'_>,
+    ) -> Result<AgentLoopRecord, AgentLoopJournalError> {
+        require_metadata(command_key, metadata)?;
+        if previous.identity() != current.identity()
+            || previous.phase() != LoopPhase::AwaitingProvider
+            || current.phase() != LoopPhase::AwaitingProvider
+        {
+            return Err(AgentLoopJournalError::TransitionInvalid);
+        }
+        validate_inference_retry_transition(previous, binding)?;
+        let mut expected = previous.clone();
+        expected.acknowledge_inference_retry(binding)?;
+        if expected != *current {
+            return Err(AgentLoopJournalError::TransitionInvalid);
+        }
+
+        let identity = current.identity();
+        let run_id = identity.run_id.to_string();
+        let invocation_id = identity.invocation_id.as_str();
+        let events = self
+            .journal
+            .read_aggregate(&run_id, AGGREGATE_TYPE, invocation_id, 0)?;
+        let recovered = replay(&run_id, invocation_id, &events)?;
+        if let Some(existing) = events
+            .iter()
+            .find(|event| event.idempotency_key == command_key)
+        {
+            let existing_payload: EventPayload = serde_json::from_value(existing.payload.clone())?;
+            if existing_payload.checkpoint == current.checkpoint()?
+                && existing_payload.directive_kind == DirectiveKind::InferenceRetried
+                && existing_payload.retry_binding.as_ref() == Some(binding)
+            {
+                return Ok(recovered);
+            }
+            return Err(AgentLoopJournalError::Journal(
+                EventJournalError::IdempotencyConflict {
+                    idempotency_key: command_key.to_owned(),
+                },
+            ));
+        }
+        if recovered.service != *previous {
+            return Err(AgentLoopJournalError::StaleCheckpoint);
+        }
+        let checkpoint = current.checkpoint()?;
+        let payload = payload_with_retry_binding(
+            Some(previous.phase()),
+            current.phase(),
+            checkpoint,
+            DirectiveKind::InferenceRetried,
+            current,
+            Some(binding.clone()),
+        )?;
+        let stored = self.journal.append(
+            event(
+                &run_id,
+                invocation_id,
+                command_key,
+                metadata,
+                "agent_loop.inference_retried",
+                payload,
+            ),
+            current_run_sequence(self.journal, &run_id)?,
+            recovered.aggregate_sequence,
+        )?;
+        record_from_event(current.clone(), &stored)
     }
 
     fn append_with_kind(
@@ -348,6 +425,10 @@ struct EventPayload {
     checkpoint_sha256: String,
     directive_kind: DirectiveKind,
     pending_tool_call_ids: Vec<Uuid>,
+    #[serde(default)]
+    retry_binding: Option<ProviderRetryBinding>,
+    #[serde(default)]
+    retry_binding_sha256: Option<String>,
 }
 
 fn payload(
@@ -357,6 +438,25 @@ fn payload(
     directive_kind: DirectiveKind,
     service: &AgentLoopService,
 ) -> Result<EventPayload, AgentLoopJournalError> {
+    payload_with_retry_binding(
+        previous_phase,
+        current_phase,
+        checkpoint,
+        directive_kind,
+        service,
+        None,
+    )
+}
+
+fn payload_with_retry_binding(
+    previous_phase: Option<LoopPhase>,
+    current_phase: LoopPhase,
+    checkpoint: Value,
+    directive_kind: DirectiveKind,
+    service: &AgentLoopService,
+    retry_binding: Option<ProviderRetryBinding>,
+) -> Result<EventPayload, AgentLoopJournalError> {
+    let retry_binding_sha256 = retry_binding.as_ref().map(hash_retry_binding).transpose()?;
     Ok(EventPayload {
         previous_phase,
         current_phase,
@@ -368,6 +468,8 @@ fn payload(
             .iter()
             .map(|request| request.tool_call_id)
             .collect(),
+        retry_binding,
+        retry_binding_sha256,
     })
 }
 
@@ -416,6 +518,8 @@ fn replay(
             if event.event_type != "agent_loop.created"
                 || payload.previous_phase.is_some()
                 || payload.directive_kind != DirectiveKind::Created
+                || payload.retry_binding.is_some()
+                || payload.retry_binding_sha256.is_some()
                 || service.phase() != LoopPhase::AwaitingProvider
             {
                 return Err(AgentLoopJournalError::InvalidHistory);
@@ -424,7 +528,32 @@ fn replay(
             let previous = previous_service
                 .as_ref()
                 .ok_or(AgentLoopJournalError::InvalidHistory)?;
-            if event.event_type != "agent_loop.transitioned"
+            if payload.directive_kind == DirectiveKind::InferenceRetried {
+                let binding = payload
+                    .retry_binding
+                    .as_ref()
+                    .ok_or(AgentLoopJournalError::TransitionInvalid)?;
+                if payload.retry_binding_sha256.as_deref()
+                    != Some(hash_retry_binding(binding)?.as_str())
+                {
+                    return Err(AgentLoopJournalError::CheckpointHashMismatch);
+                }
+                if event.event_type != "agent_loop.inference_retried"
+                    || payload.previous_phase != Some(LoopPhase::AwaitingProvider)
+                    || previous.phase() != LoopPhase::AwaitingProvider
+                    || service.phase() != LoopPhase::AwaitingProvider
+                {
+                    return Err(AgentLoopJournalError::TransitionInvalid);
+                }
+                validate_inference_retry_transition(previous, binding)?;
+                let mut expected = previous.clone();
+                expected.acknowledge_inference_retry(binding)?;
+                if expected != service {
+                    return Err(AgentLoopJournalError::TransitionInvalid);
+                }
+            } else if event.event_type != "agent_loop.transitioned"
+                || payload.retry_binding.is_some()
+                || payload.retry_binding_sha256.is_some()
                 || payload.previous_phase != Some(previous.phase())
                 || previous.phase() == service.phase()
             {
@@ -470,6 +599,7 @@ fn directive_matches_phase(kind: DirectiveKind, phase: LoopPhase) -> bool {
             | (DirectiveKind::Completed, LoopPhase::Completed)
             | (DirectiveKind::Cancelled, LoopPhase::Cancelled)
             | (DirectiveKind::InferenceStarted, LoopPhase::AwaitingProvider)
+            | (DirectiveKind::InferenceRetried, LoopPhase::AwaitingProvider)
     )
 }
 
@@ -483,6 +613,10 @@ fn pending_ids(service: &AgentLoopService) -> Vec<Uuid> {
 
 fn hash_checkpoint(checkpoint: &Value) -> Result<String, serde_json::Error> {
     serde_json::to_vec(checkpoint).map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn hash_retry_binding(binding: &ProviderRetryBinding) -> Result<String, serde_json::Error> {
+    serde_json::to_vec(binding).map(|bytes| format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn current_run_sequence(journal: &EventJournal, run_id: &str) -> Result<u64, EventJournalError> {

@@ -38,6 +38,8 @@ pub mod provider_dispatch_resume_authorization_service;
 pub mod provider_gateway;
 pub mod provider_inference_protocol;
 pub mod provider_inference_service;
+pub mod provider_retry_after;
+pub mod provider_retry_aggregate;
 pub mod provider_tool_materializer;
 pub mod recovery;
 pub mod run_aggregate;

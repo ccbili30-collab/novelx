@@ -6,6 +6,7 @@ use novelx_protocol::{
 use novelx_runtime::agent_loop_service::{
     AgentLoopDirective, AgentLoopError, AgentLoopIdentity, AgentLoopPolicy, AgentLoopService,
     AssistToolDecision, FinalizedToolResult, InferenceDispatchIdentity, LoopPhase,
+    ProviderRetryBinding,
 };
 use novelx_runtime::provider_tool_materializer::MaterializedProviderToolCall;
 use serde_json::json;
@@ -47,6 +48,105 @@ fn provider_completion_must_match_the_persisted_dispatch_identity() {
         .unwrap();
     assert_eq!(recovered.phase(), LoopPhase::Completed);
     assert_eq!(recovered.pending_inference(), None);
+}
+
+#[test]
+fn retry_replaces_only_the_pending_attempt_and_survives_checkpoint_restore() {
+    let mut service = service(RunPermissionMode::Free, 4);
+    let previous = dispatch_identity(1);
+    let binding = retry_binding(&previous);
+
+    service.acknowledge_inference_retry(&binding).unwrap();
+    assert_eq!(service.phase(), LoopPhase::AwaitingProvider);
+    assert_eq!(service.pending_inference(), Some(&binding.next));
+
+    let checkpoint = service.checkpoint().unwrap();
+    let mut recovered = AgentLoopService::restore(checkpoint).unwrap();
+    assert_eq!(recovered.pending_inference(), Some(&binding.next));
+
+    let old_completion = completion_for_dispatch(&previous, "old attempt");
+    assert_eq!(
+        recovered
+            .accept_provider_outcome(old_completion, vec![])
+            .unwrap_err(),
+        AgentLoopError::ProviderIdentityMismatch
+    );
+    recovered
+        .accept_provider_outcome(
+            completion_for_dispatch(&binding.next, "new attempt"),
+            vec![],
+        )
+        .unwrap();
+    assert_eq!(recovered.phase(), LoopPhase::Completed);
+}
+
+#[test]
+fn retry_rejects_cross_identity_jump_same_attempt_and_malformed_evidence() {
+    let previous = dispatch_identity(1);
+    let valid = retry_binding(&previous);
+    let mut invalid = Vec::new();
+
+    let mut cross_inference = valid.clone();
+    cross_inference.next.inference_id = Uuid::new_v4();
+    invalid.push(cross_inference);
+
+    let mut cross_request = valid.clone();
+    cross_request.next.request_number += 1;
+    invalid.push(cross_request);
+
+    let mut cross_context = valid.clone();
+    cross_context.next.context_compilation_id = Uuid::new_v4();
+    invalid.push(cross_context);
+
+    let mut skipped_attempt = valid.clone();
+    skipped_attempt.next.attempt_number += 1;
+    invalid.push(skipped_attempt);
+
+    let mut same_attempt_id = valid.clone();
+    same_attempt_id.next.attempt_id = previous.attempt_id;
+    invalid.push(same_attempt_id);
+
+    let mut wrong_previous = valid.clone();
+    wrong_previous.previous_attempt_number += 1;
+    invalid.push(wrong_previous);
+
+    let mut wrong_previous_id = valid.clone();
+    wrong_previous_id.previous_attempt_id = Uuid::new_v4();
+    invalid.push(wrong_previous_id);
+
+    let mut malformed_hash = valid.clone();
+    malformed_hash.schedule_sha256 = "A".repeat(64);
+    invalid.push(malformed_hash);
+
+    let mut missing_schedule = valid.clone();
+    missing_schedule.schedule_id = " ".to_owned();
+    invalid.push(missing_schedule);
+
+    let mut empty_idempotency = valid;
+    empty_idempotency.next.inference_idempotency_key.clear();
+    invalid.push(empty_idempotency);
+
+    let mut reused_idempotency = retry_binding(&previous);
+    reused_idempotency.next.inference_idempotency_key = previous.inference_idempotency_key.clone();
+    invalid.push(reused_idempotency);
+
+    for binding in invalid {
+        let mut service = service(RunPermissionMode::Free, 4);
+        assert_eq!(
+            service.acknowledge_inference_retry(&binding).unwrap_err(),
+            AgentLoopError::RetryBindingInvalid
+        );
+        assert_eq!(service.pending_inference(), Some(&previous));
+    }
+
+    let mut terminal = service(RunPermissionMode::Free, 4);
+    terminal
+        .accept_provider_outcome(completion(1, vec![], Some("done")), vec![])
+        .unwrap();
+    assert_eq!(
+        terminal.acknowledge_inference_retry(&retry_binding(&previous)),
+        Err(AgentLoopError::PhaseInvalid)
+    );
 }
 
 #[test]
@@ -254,6 +354,18 @@ fn completion(
     }
 }
 
+fn completion_for_dispatch(
+    dispatch: &InferenceDispatchIdentity,
+    output: &str,
+) -> ProviderInferenceCompleted {
+    let mut completion = completion(dispatch.request_number, vec![], Some(output));
+    completion.identity.inference_id = dispatch.inference_id;
+    completion.identity.attempt_id = dispatch.attempt_id;
+    completion.identity.context_compilation_id = dispatch.context_compilation_id;
+    completion.identity.attempt_number = u64::from(dispatch.attempt_number);
+    completion
+}
+
 fn provider_calls() -> Vec<ProviderInferenceToolCall> {
     vec![
         call(
@@ -345,6 +457,24 @@ fn dispatch_identity_for(
         context_compilation_id,
         attempt_number: 1,
         inference_idempotency_key: format!("inference-{request_number}"),
+    }
+}
+
+fn retry_binding(previous: &InferenceDispatchIdentity) -> ProviderRetryBinding {
+    ProviderRetryBinding {
+        schedule_id: "provider-retry-schedule-1".to_owned(),
+        schedule_sha256: "e".repeat(64),
+        parent_attempt_evidence_sha256: "f".repeat(64),
+        previous_attempt_id: previous.attempt_id,
+        previous_attempt_number: previous.attempt_number,
+        next: InferenceDispatchIdentity {
+            inference_id: previous.inference_id,
+            attempt_id: Uuid::parse_str("55555555-5555-4555-8555-000000000001").unwrap(),
+            request_number: previous.request_number,
+            context_compilation_id: previous.context_compilation_id,
+            attempt_number: previous.attempt_number + 1,
+            inference_idempotency_key: "inference-1-attempt-2".to_owned(),
+        },
     }
 }
 

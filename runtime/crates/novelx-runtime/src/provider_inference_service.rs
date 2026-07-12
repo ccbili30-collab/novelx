@@ -673,24 +673,41 @@ fn response_was_received(error: &ProviderGatewayError) -> bool {
 }
 
 fn definitive_failure(error: &ProviderGatewayError) -> ProviderAttemptFailure {
-    let (code, retryable, retry_after_ms, http_status) = match error {
+    let (code, retryable, retry_after, http_status) = match error {
         ProviderGatewayError::AuthenticationRejected(status) => {
             ("PROVIDER_AUTH_REJECTED", false, None, Some(*status))
         }
-        ProviderGatewayError::RateLimited(status) => {
-            ("PROVIDER_RATE_LIMITED", true, None, Some(*status))
+        ProviderGatewayError::RateLimited(receipt) => {
+            let retry_after_ms = receipt
+                .retry_after
+                .as_ref()
+                .map(|retry_after| retry_after.delay_ms);
+            (
+                "PROVIDER_RATE_LIMITED",
+                retry_after_ms.is_some(),
+                receipt.retry_after.clone(),
+                Some(receipt.status),
+            )
         }
         ProviderGatewayError::RedirectRejected(status) => {
             ("PROVIDER_REDIRECT_REJECTED", false, None, Some(*status))
         }
-        ProviderGatewayError::HttpRejected(status) => (
-            "PROVIDER_HTTP_REJECTED",
-            *status >= 500,
-            None,
-            Some(*status),
-        ),
+        ProviderGatewayError::HttpRejected(receipt) => {
+            let retryable = matches!(receipt.status, 500 | 502 | 503 | 504);
+            let retry_after = if retryable {
+                receipt.retry_after.clone()
+            } else {
+                None
+            };
+            (
+                "PROVIDER_HTTP_REJECTED",
+                retryable,
+                retry_after,
+                Some(receipt.status),
+            )
+        }
         ProviderGatewayError::ResponseMalformed => {
-            ("PROVIDER_RESPONSE_MALFORMED", true, None, Some(200))
+            ("PROVIDER_RESPONSE_MALFORMED", false, None, Some(200))
         }
         ProviderGatewayError::ResponseTooLarge => {
             ("PROVIDER_RESPONSE_TOO_LARGE", false, None, Some(200))
@@ -706,7 +723,8 @@ fn definitive_failure(error: &ProviderGatewayError) -> ProviderAttemptFailure {
     ProviderAttemptFailure {
         code: code.to_owned(),
         retryable,
-        retry_after_ms,
+        retry_after_ms: retry_after.as_ref().map(|value| value.delay_ms),
+        retry_after,
         http_status,
         delivery_certainty: ProviderDeliveryCertainty::ResponseReceived,
         diagnostic_id: Uuid::new_v4(),

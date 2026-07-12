@@ -436,6 +436,49 @@ async fn authentication_rejection_persists_failed_with_response_received_certain
 }
 
 #[tokio::test]
+async fn only_allowlisted_definitive_http_failures_persist_retry_eligibility() {
+    for (status, headers, expected_retryable, expected_retry_after_ms) in [
+        (429, Vec::<&str>::new(), false, None),
+        (429, vec!["Retry-After: 0"], true, Some(0_u64)),
+        (500, Vec::<&str>::new(), true, None),
+        (501, Vec::<&str>::new(), false, None),
+        (503, vec!["Retry-After: 2"], true, Some(2_000_u64)),
+    ] {
+        let fixture = Fixture::new();
+        let response = json_response_with_headers(status, r#"{"error":"temporary"}"#, &headers);
+        let (base_url, _, _, server) = spawn_server(ServerReply::Immediate(response)).await;
+        let (providers, identity) = bound_registry(base_url, 2_000);
+        fixture.seed(&identity, false);
+        let gateway = ProviderGateway::new().unwrap();
+        let mut journal = fixture.open();
+
+        ProviderInferenceService::new(&mut journal, &providers, &gateway)
+            .execute(execution(identity))
+            .await
+            .unwrap_err();
+
+        server.await.unwrap();
+        let events = attempt_events(&journal);
+        let failure = &events.last().unwrap().payload["failure"];
+        assert_eq!(failure["retryable"], expected_retryable, "HTTP {status}");
+        match expected_retry_after_ms {
+            Some(delay) => {
+                assert_eq!(failure["retryAfterMs"], delay, "HTTP {status}");
+                assert_eq!(failure["retryAfter"]["delayMs"], delay, "HTTP {status}");
+                assert_eq!(
+                    failure["retryAfter"]["valueSha256"].as_str().unwrap().len(),
+                    64
+                );
+            }
+            None => {
+                assert!(failure["retryAfterMs"].is_null(), "HTTP {status}");
+                assert!(failure["retryAfter"].is_null(), "HTTP {status}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn requested_event_uses_the_exact_prepared_transport_payload_hash() {
     let fixture = Fixture::new();
     let (base_url, _, _, server) = spawn_server(ServerReply::Immediate(json_response(
@@ -724,14 +767,23 @@ fn successful_body(text: &str) -> String {
 }
 
 fn json_response(status: u16, body: impl AsRef<str>) -> String {
+    json_response_with_headers(status, body, &[])
+}
+
+fn json_response_with_headers(status: u16, body: impl AsRef<str>, headers: &[&str]) -> String {
     let body = body.as_ref();
     let reason = match status {
         200 => "OK",
         401 => "Unauthorized",
         _ => "Error",
     };
+    let extra_headers = if headers.is_empty() {
+        String::new()
+    } else {
+        format!("{}\r\n", headers.join("\r\n"))
+    };
     format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
 }
