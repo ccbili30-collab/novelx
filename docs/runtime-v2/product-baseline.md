@@ -431,3 +431,80 @@ mnemopi is only a candidate-memory layer. Raw sources, candidate facts, confirme
 oh-my-pi is preferred as a reference for Provider compatibility, feature-rich task coordination, experimental memory, tool breadth, Windows-aware native utilities and RPC embedding. Codex remains preferred for Run lifecycle, crash recovery, permission boundaries, side-effect safety, conservative protocol design and auditability.
 
 Neither project is a complete NovelX foundation. Upstream README performance claims are not accepted evidence. All adopted behavior must be re-measured with NovelX's real Provider configurations, DeepSeek, long Chinese documents, multi-Agent workloads, cancellation, network failure, process termination and source conflicts.
+
+## 18. Domain capability mapping
+
+Decision date: 2026-07-13.
+
+NovelX must not stop after reproducing generic Harness capabilities. Every adopted Agent capability requires a deliberate Domain Capability Mapping（领域能力映射） into a useful novel, world, OC or playthrough workflow. The mapping belongs in typed Runtime and domain services, not only in Prompt wording or renamed UI labels.
+
+```text
+Generic Agent capability
+  -> governed Runtime primitive
+  -> NovelX domain operation
+  -> creator-facing projection
+```
+
+For example, a generic Agent may know how to inspect a repository, search files, calculate a diff, create a branch and commit. NovelX must convert those primitives into inspecting a creative project, retrieving world evidence, previewing semantic changes, creating an alternative story route and recording an auditable creative checkpoint.
+
+### 18.1 Initial capability map
+
+| Generic capability | NovelX domain meaning | Creator-facing behavior |
+| --- | --- | --- |
+| Repository（仓库） | Creative Project / World Package（创作项目 / 世界包） | Open an empty project, an existing organized project or a loose source folder without exposing hidden runtime files by default. |
+| Working tree（工作区） | Current Draft Head（当前草稿头） | Show accepted content plus pending user or Agent edits against one exact source checkpoint. |
+| File and directory tools（文件与目录工具） | Document and Creative Object adapters（文档与创作对象适配器） | Inspect chapters, worlds, OC, locations, factions, rules, images and imported sources through domain views while retaining real filesystem inspection capability underneath. |
+| `status`（状态） | Project Change Status（项目变更状态） | Show changed objects, pending Change Sets, stale references, conflicts, background tasks and uncommitted manual edits. |
+| `diff`（差异） | Textual + Semantic Diff（文本差异 + 语义差异） | Show wording changes and meaning-level changes such as age, allegiance, world rule, event order or relationship changes. |
+| `commit`（提交） | Creative Checkpoint（创作检查点） | Accept one validated Change Set into a durable project version with author, source, reason and affected canon scope. |
+| `log`（历史） | Time Tree / Creative History（时间树 / 创作历史） | Browse how prose, worlds, OC and story state changed, including Agent and user contributions. |
+| `branch` / `worktree`（分支 / 独立工作区） | Story Route, World Variant or OC Variant（故事路线、世界变体或角色变体） | Explore alternatives without destroying the original route; one World Base may feed multiple Story Projects. |
+| `revert`（反向恢复） | Restore as New Head（恢复为新头） | Return to earlier content by creating an auditable new head or branch; never erase later history. |
+| `merge`（合并） | Canon Reconciliation（正史协调） | Compare incompatible facts and ask the user or Checker which assertion wins; never concatenate conflicting prose blindly. |
+| `blame` / provenance（归因 / 来源） | Source Lineage（来源谱系） | Explain who or which Agent introduced a fact, from which source/version, and which accepted change made it canon. |
+| `tag` / release（标签 / 发布） | Start Profile, Playable Release or Published World Package（起始模板、可玩版本或发布世界包） | Pin a stable combination of world, OC, story and assets for play, export or Android synchronization. |
+| Pull request / review（变更审查） | Assist Review + Change Set（协助审查 + 变更集） | Review proposed creative changes, comments, conflicts and validation evidence before acceptance. |
+| Hooks / CI（钩子 / 持续检查） | Checker + Validator Gates（检查器 + 校验门） | Run style, continuity, source, canon, permission and player-leak checks before a creative checkpoint becomes accepted. |
+| Full-text search / `rg`（全文检索） | Project Evidence Search（项目证据检索） | Search exact wording, names and source locations across real project material. |
+| Semantic retrieval（语义检索） | World and Story Recall（世界与故事召回） | Retrieve relevant facts, events and rules even when the wording differs from the current request. |
+| LSP-style navigation（语言服务式导航） | Creative Reference Navigation（创作引用导航） | Go to an entity definition, find all references, rename safely, detect broken references and surface consistency diagnostics. |
+| Artifact（产物） | Draft, graph view, report, image, map or Change Set（草稿、图谱视图、报告、图像、地图或变更集） | Render typed results rather than exposing raw tool JSON or claiming every output is accepted prose. |
+| Sub-Agent / Task（子智能体 / 子任务） | Writer, Researcher, Checker, Decomposer or GM Assignment（写手、研究员、检查器、拆解器或游戏主持任务） | Delegate bounded work with exact source scope and return a typed, reviewable result to the Steward. |
+| Sandbox / permission（沙箱 / 权限） | Creative Scope and Free / Assist Policy（创作范围与自由 / 协助策略） | Limit which objects and versions an Agent may read, propose or commit; model choice never expands authority. |
+
+### 18.2 Graph and document relationship
+
+The graph is the navigable knowledge and event index of a creative project. It is comparable to a repository-aware documentation and reference system for the Agent, but it is not an independent source of truth and it must not replace detailed source documents.
+
+The authoritative relationship is:
+
+```text
+Source document / accepted creative object
+  -> source version and stable location
+  -> candidate entity, event, relation or assertion
+  -> Checker and conflict processing
+  -> Canonical Assertion
+  -> graph projection and retrieval index
+```
+
+Every graph node or edge must retain a link to its source version and location. The creator can open a node to see the event or world fact and jump to its supporting document. The Agent can query the graph to locate relevant concepts, then read the linked source material before making a factual claim or proposing a change.
+
+Retrieval uses complementary paths:
+
+1. exact full-text and path search for names, quotations and concrete locations;
+2. graph traversal for entities, relationships, chronology, causality and world rules;
+3. semantic retrieval for conceptually related material;
+4. Canonical Assertion lookup for authoritative facts and explicit conflicts.
+
+No retrieval result silently becomes canon. A graph projection is rebuildable from durable sources and accepted assertions. If graph evidence and a newer source version disagree, the system reports a stale projection or conflict instead of letting the Agent guess.
+
+### 18.3 Mapping acceptance rule
+
+A generic capability is not complete for NovelX merely because its kernel API or upstream implementation works. It is complete only when all four layers pass:
+
+1. the Runtime primitive is durable, recoverable, permissioned and audited;
+2. a typed domain adapter defines its meaning for novels, worlds, OC or playthroughs;
+3. the desktop workbench exposes an understandable creator-facing operation;
+4. real end-to-end tests prove that the Agent can use it without bypassing source, version, Change Set, Free / Assist or canon rules.
+
+This mapping requirement applies to future capabilities discovered in Codex CLI, oh-my-pi or other Agent projects. NovelX may adopt the useful execution pattern, but it must redesign the semantics and presentation around creative work instead of shipping a code feature with renamed nouns.
