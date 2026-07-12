@@ -123,6 +123,7 @@ fn record_run(
             metadata(),
         )?,
         OperationalRecoveryGate::RecoveryReady
+        | OperationalRecoveryGate::ProviderDispatchReady
         | OperationalRecoveryGate::TerminalProjectionOnly => aggregate,
     };
     Ok(RecordedOperationalRecovery {
@@ -148,6 +149,9 @@ fn map_gate(value: OperationalRecoveryGate) -> OperationalRecoveryObservedGate {
             OperationalRecoveryObservedGate::WaitingForExplicitExecution
         }
         OperationalRecoveryGate::RecoveryReady => OperationalRecoveryObservedGate::RecoveryReady,
+        OperationalRecoveryGate::ProviderDispatchReady => {
+            OperationalRecoveryObservedGate::ProviderDispatchReady
+        }
         OperationalRecoveryGate::Quarantined => OperationalRecoveryObservedGate::Quarantined,
         OperationalRecoveryGate::TerminalProjectionOnly => {
             OperationalRecoveryObservedGate::TerminalProjectionOnly

@@ -35,6 +35,7 @@ pub enum OperationalRecoveryObservedGate {
     WaitingForApproval,
     WaitingForReconciliation,
     WaitingForExplicitExecution,
+    ProviderDispatchReady,
     RecoveryReady,
     Quarantined,
     TerminalProjectionOnly,
@@ -287,6 +288,7 @@ impl OperationalRecoveryClaim {
 pub enum OperationalRecoveryEffectClass {
     LocalDeterministic,
     PersistedProviderResultProjection,
+    ProviderDispatch,
     VerifiedToolResultProjection,
 }
 
@@ -684,7 +686,16 @@ impl OperationalRecoveryRepository {
             .operations
             .get(&claim.operation_id)
             .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
-        if operation.observation.gate != OperationalRecoveryObservedGate::RecoveryReady
+        let action_matches_gate = match (operation.observation.gate, claim.action_spec.as_ref()) {
+            (OperationalRecoveryObservedGate::RecoveryReady, Some(action)) => {
+                action.may_execute_without_new_external_effect()
+            }
+            (OperationalRecoveryObservedGate::ProviderDispatchReady, Some(action)) => {
+                action.is_persisted_provider_dispatch()
+            }
+            _ => false,
+        };
+        if !action_matches_gate
             || operation.disposition.is_some()
             || operation.stale.is_some()
             || operation.observation.source_fingerprint != claim.source_fingerprint
@@ -1221,7 +1232,17 @@ fn apply_event(
                 .operations
                 .get_mut(&claim.operation_id)
                 .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
-            if operation.observation.gate != OperationalRecoveryObservedGate::RecoveryReady
+            let action_matches_gate = match (operation.observation.gate, claim.action_spec.as_ref())
+            {
+                (OperationalRecoveryObservedGate::RecoveryReady, Some(action)) => {
+                    action.may_execute_without_new_external_effect()
+                }
+                (OperationalRecoveryObservedGate::ProviderDispatchReady, Some(action)) => {
+                    action.is_persisted_provider_dispatch()
+                }
+                _ => false,
+            };
+            if !action_matches_gate
                 || operation.disposition.is_some()
                 || operation.claim.is_some()
                 || operation.stale.is_some()

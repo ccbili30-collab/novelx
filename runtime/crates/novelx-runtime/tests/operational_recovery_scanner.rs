@@ -190,7 +190,7 @@ fn persisted_provider_response_is_evidence_first_without_provider_binding() {
 }
 
 #[test]
-fn requested_attempt_is_a_typed_external_dispatch_action_not_a_local_projection() {
+fn requested_attempt_is_a_typed_provider_dispatch_ready_action() {
     let fixture = Fixture::new();
     let run_id = Uuid::new_v4().to_string();
     let provider = create_running_run(&fixture, &run_id);
@@ -241,7 +241,7 @@ fn requested_attempt_is_a_typed_external_dispatch_action_not_a_local_projection(
     let recovered = fixture.recovered_run(std::slice::from_ref(&provider), &run_id);
     assert_eq!(
         recovered.gate,
-        OperationalRecoveryGate::WaitingForExplicitExecution
+        OperationalRecoveryGate::ProviderDispatchReady
     );
     assert!(matches!(
         recovered.action,

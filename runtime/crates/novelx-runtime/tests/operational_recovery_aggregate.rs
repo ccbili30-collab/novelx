@@ -1027,6 +1027,14 @@ fn claim(
     owner_instance_id: &str,
     fencing_token: u64,
 ) -> OperationalRecoveryClaim {
+    let action = OperationalRecoveryAction::PersistedProviderResultProjection {
+        invocation_id: "invocation-1".to_owned(),
+        attempt_id: "attempt-1".to_owned(),
+        expected_loop_checkpoint_sha256: "a".repeat(64),
+        expected_attempt_sequence: 1,
+        response_body_sha256: "c".repeat(64),
+    };
+    let action_sha256 = action.action_spec_sha256().unwrap();
     OperationalRecoveryClaim::derive(
         observation.operation_id.clone(),
         owner_instance_id.to_owned(),
@@ -1035,8 +1043,8 @@ fn claim(
         "2026-07-13T00:00:00Z".to_owned(),
         "2026-07-13T00:05:00Z".to_owned(),
         "recovery-executor-v1".to_owned(),
-        None,
-        "b".repeat(64),
+        Some(action),
+        action_sha256,
     )
     .unwrap()
 }

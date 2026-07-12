@@ -28,13 +28,14 @@
   - Agent Loop checkpoint hash
   - Provider Attempt aggregate sequence
 - `Requested` 只有在上述身份与当前 Agent Loop 和 Run 完全一致时才产生该动作。
-- 该动作仍进入 `WaitingForExplicitExecution`，现有 local-only Supervisor 不会发送它。
+- 该动作进入独立的 `ProviderDispatchReady` gate（模型分发就绪门），不会被 local-only Supervisor 当成本地投影。
+- Recovery Repository、Claim Service 和 Execution 已支持独立的 `ProviderDispatch` effect class（模型分发副作用等级）；只有完整动作规格与该 gate 匹配时才允许领取和启动。
 
 ## 下一执行协议
 
 Provider Dispatch Supervisor（模型分发监督器）必须：
 
-1. 为 `Requested` 建立独占 Claim、Execution 和 effect class。
+1. 使用已经建立的独占 Claim、Execution 和 `ProviderDispatch` effect class 驱动真实分发。
 2. 重启时再次核对 Attempt：
    - 仍是 Requested 才允许续发；
    - Sent/OutcomeUnknown 立即转入结果未知调和；

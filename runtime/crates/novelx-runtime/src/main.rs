@@ -506,6 +506,11 @@ fn operational_recovery_guard(
             RuntimeErrorClass::Protocol,
             false,
         ),
+        OperationalRecoveryGate::ProviderDispatchReady => (
+            "RUN_RECOVERY_PROVIDER_DISPATCH_READY",
+            RuntimeErrorClass::Protocol,
+            false,
+        ),
         OperationalRecoveryGate::Quarantined => (
             "RUN_RECOVERY_QUARANTINED",
             RuntimeErrorClass::SourceConflict,
@@ -555,6 +560,9 @@ fn operational_recovery_public_message(gate: OperationalRecoveryGate) -> &'stati
         }
         OperationalRecoveryGate::RecoveryReady => {
             "\u{8be5}\u{8fd0}\u{884c}\u{5df2}\u{5177}\u{5907}\u{6062}\u{590d}\u{6761}\u{4ef6}\u{ff0c}\u{4f46}\u{53ea}\u{80fd}\u{7531}\u{53d7}\u{5ba1}\u{8ba1}\u{7684}\u{6062}\u{590d}\u{64cd}\u{4f5c}\u{7ee7}\u{7eed}\u{3002}"
+        }
+        OperationalRecoveryGate::ProviderDispatchReady => {
+            "\u{8be5}\u{8fd0}\u{884c}\u{5df2}\u{51c6}\u{5907}\u{53d1}\u{9001}\u{6a21}\u{578b}\u{8bf7}\u{6c42}\u{ff0c}\u{53ea}\u{80fd}\u{7531}\u{53d7}\u{5ba1}\u{8ba1}\u{7684}\u{6a21}\u{578b}\u{5206}\u{53d1}\u{76d1}\u{7763}\u{5668}\u{7ee7}\u{7eed}\u{3002}"
         }
         OperationalRecoveryGate::Quarantined => {
             "\u{8be5}\u{8fd0}\u{884c}\u{7684}\u{6062}\u{590d}\u{8bc1}\u{636e}\u{5b58}\u{5728}\u{51b2}\u{7a81}\u{ff0c}\u{5df2}\u{88ab}\u{9694}\u{79bb}\u{3002}"

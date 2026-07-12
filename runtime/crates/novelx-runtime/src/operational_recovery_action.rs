@@ -70,4 +70,8 @@ impl OperationalRecoveryAction {
     pub const fn may_execute_without_new_external_effect(&self) -> bool {
         matches!(self, Self::PersistedProviderResultProjection { .. })
     }
+
+    pub const fn is_persisted_provider_dispatch(&self) -> bool {
+        matches!(self, Self::PersistedProviderAttemptDispatch { .. })
+    }
 }

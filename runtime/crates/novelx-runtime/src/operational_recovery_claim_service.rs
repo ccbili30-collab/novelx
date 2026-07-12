@@ -72,6 +72,35 @@ impl OperationalRecoveryClaimService {
         bound_providers: &[ProviderRunIdentity],
         exclusive_lease: &WorkspaceRuntimeLease,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryClaimError> {
+        self.claim_for_gate(
+            request,
+            bound_providers,
+            exclusive_lease,
+            OperationalRecoveryGate::RecoveryReady,
+        )
+    }
+
+    pub fn claim_provider_dispatch_ready(
+        &self,
+        request: OperationalRecoveryClaimRequest,
+        bound_providers: &[ProviderRunIdentity],
+        exclusive_lease: &WorkspaceRuntimeLease,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryClaimError> {
+        self.claim_for_gate(
+            request,
+            bound_providers,
+            exclusive_lease,
+            OperationalRecoveryGate::ProviderDispatchReady,
+        )
+    }
+
+    fn claim_for_gate(
+        &self,
+        request: OperationalRecoveryClaimRequest,
+        bound_providers: &[ProviderRunIdentity],
+        exclusive_lease: &WorkspaceRuntimeLease,
+        expected_gate: OperationalRecoveryGate,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryClaimError> {
         if !exclusive_lease.protects_database(&self.database_path) {
             return Err(OperationalRecoveryClaimError::WorkspaceLeaseMismatch);
         }
@@ -101,6 +130,7 @@ impl OperationalRecoveryClaimService {
             run,
             after,
             exclusive_lease,
+            std::slice::from_ref(&expected_gate),
         )?;
         let claim = OperationalRecoveryClaim::derive(
             observation.operation_id.clone(),
@@ -164,6 +194,10 @@ impl OperationalRecoveryClaimService {
             run,
             after,
             exclusive_lease,
+            &[
+                OperationalRecoveryGate::RecoveryReady,
+                OperationalRecoveryGate::ProviderDispatchReady,
+            ],
         )?;
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
         let aggregate = repository.load(&request.workspace_id, &request.run_id)?;
@@ -234,6 +268,10 @@ impl OperationalRecoveryClaimService {
             run,
             after,
             exclusive_lease,
+            &[
+                OperationalRecoveryGate::RecoveryReady,
+                OperationalRecoveryGate::ProviderDispatchReady,
+            ],
         )?;
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
         let aggregate = repository.load(&request.workspace_id, &request.run_id)?;
@@ -282,6 +320,7 @@ impl OperationalRecoveryClaimService {
         run: OperationalRecoveryRun,
         scan_global_sequence: u64,
         exclusive_lease: &WorkspaceRuntimeLease,
+        claimable_gates: &[OperationalRecoveryGate],
     ) -> Result<OperationalRecoveryObservation, OperationalRecoveryClaimError> {
         let actual = OperationalRecoveryObservation::derive(
             subject,
@@ -290,7 +329,7 @@ impl OperationalRecoveryClaimService {
             run.reasons,
         )?;
         if actual.operation_id == expected_operation_id {
-            return if run.gate == OperationalRecoveryGate::RecoveryReady {
+            return if claimable_gates.contains(&run.gate) {
                 Ok(actual)
             } else {
                 Err(OperationalRecoveryClaimError::RunNotReady { gate: run.gate })
@@ -386,6 +425,9 @@ fn effect_class_for_action(
         OperationalRecoveryAction::PersistedProviderResultProjection { .. } => {
             Ok(OperationalRecoveryEffectClass::PersistedProviderResultProjection)
         }
+        OperationalRecoveryAction::PersistedProviderAttemptDispatch { .. } => {
+            Ok(OperationalRecoveryEffectClass::ProviderDispatch)
+        }
         _ => Err(OperationalRecoveryClaimError::ActionNotLocallyExecutable),
     }
 }
@@ -405,6 +447,9 @@ fn observed_gate(value: OperationalRecoveryGate) -> OperationalRecoveryObservedG
             OperationalRecoveryObservedGate::WaitingForExplicitExecution
         }
         OperationalRecoveryGate::RecoveryReady => OperationalRecoveryObservedGate::RecoveryReady,
+        OperationalRecoveryGate::ProviderDispatchReady => {
+            OperationalRecoveryObservedGate::ProviderDispatchReady
+        }
         OperationalRecoveryGate::Quarantined => OperationalRecoveryObservedGate::Quarantined,
         OperationalRecoveryGate::TerminalProjectionOnly => {
             OperationalRecoveryObservedGate::TerminalProjectionOnly

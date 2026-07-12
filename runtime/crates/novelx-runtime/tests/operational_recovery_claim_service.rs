@@ -306,6 +306,56 @@ fn changed_provider_evidence_is_rejected_by_the_fresh_scan() {
 }
 
 #[test]
+fn provider_dispatch_ready_claim_starts_with_external_effect_class() {
+    let fixture = Fixture::new();
+    let (run_id, provider) = fixture.create_dispatchable_run();
+    let report = fixture.scan(std::slice::from_ref(&provider));
+    let scanned = report.runs.iter().find(|run| run.run_id == run_id).unwrap();
+    assert_eq!(scanned.gate, OperationalRecoveryGate::ProviderDispatchReady);
+    let recorded = OperationalRecoveryRecordingService::new(&fixture.path)
+        .record("workspace-1", "project-1", &report, "2026-07-13T00:00:00Z")
+        .unwrap();
+    let operation_id = recorded
+        .into_iter()
+        .find(|item| item.run_id == run_id)
+        .unwrap()
+        .operation_id;
+    let lease = fixture.lease("provider-dispatch-runtime");
+    let claims = OperationalRecoveryClaimService::new(&fixture.path);
+    let claimed = claims
+        .claim_provider_dispatch_ready(
+            claim_request(&run_id, &operation_id),
+            std::slice::from_ref(&provider),
+            &lease,
+        )
+        .unwrap();
+    let claim = claimed.operations[&operation_id].claim.as_ref().unwrap();
+    let started = claims
+        .start_claimed(
+            OperationalRecoveryStartRequest {
+                workspace_id: "workspace-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                run_id,
+                operation_id: operation_id.clone(),
+                claim_id: claim.claim_id.clone(),
+                owner_instance_id: claim.owner_instance_id.clone(),
+                fencing_token: claim.fencing_token,
+            },
+            std::slice::from_ref(&provider),
+            &lease,
+        )
+        .unwrap();
+    assert_eq!(
+        started.operations[&operation_id]
+            .execution
+            .as_ref()
+            .unwrap()
+            .effect_class,
+        novelx_runtime::operational_recovery_aggregate::OperationalRecoveryEffectClass::ProviderDispatch
+    );
+}
+
+#[test]
 fn unrecorded_ready_observation_cannot_be_claimed() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();
@@ -603,6 +653,14 @@ impl Fixture {
     }
 
     fn create_projectable_run(&self) -> (String, ProviderRunIdentity) {
+        self.create_provider_run(true)
+    }
+
+    fn create_dispatchable_run(&self) -> (String, ProviderRunIdentity) {
+        self.create_provider_run(false)
+    }
+
+    fn create_provider_run(&self, responded: bool) -> (String, ProviderRunIdentity) {
         let run_uuid = Uuid::new_v4();
         let run_id = run_uuid.to_string();
         let identity = support::pinned_identity();
@@ -691,6 +749,9 @@ impl Fixture {
             provider_metadata("provider-requested", "provider-requested-key"),
         )
         .unwrap();
+        if !responded {
+            return (run_id, provider);
+        }
         let sent_sequence = current_run_sequence(&journal, &run_id);
         attempt
             .mark_sent(

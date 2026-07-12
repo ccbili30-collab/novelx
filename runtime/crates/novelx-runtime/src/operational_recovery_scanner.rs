@@ -31,6 +31,7 @@ pub enum OperationalRecoveryGate {
     WaitingForApproval,
     WaitingForReconciliation,
     WaitingForExplicitExecution,
+    ProviderDispatchReady,
     RecoveryReady,
     Quarantined,
     TerminalProjectionOnly,
@@ -308,6 +309,10 @@ impl<'a> OperationalRecoveryScanner<'a> {
         ) {
             reasons.push("persisted_provider_evidence_conflict".to_owned());
             gate = OperationalRecoveryGate::Quarantined;
+        } else if gate == OperationalRecoveryGate::RecoveryReady
+            && action.is_persisted_provider_dispatch()
+        {
+            gate = OperationalRecoveryGate::ProviderDispatchReady;
         } else if gate == OperationalRecoveryGate::RecoveryReady
             && !action.may_execute_without_new_external_effect()
         {
