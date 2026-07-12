@@ -314,7 +314,21 @@ Provider attempt events are:
 
 On restart, `requested` is safe to send, `responded` is returned from the journal without another HTTP request, and `sent` without a terminal event is classified as `outcome_unknown`. Provider credentials and Authorization headers are not stored in these events. The accepted normalized Provider input is stored once in the authoritative `context.compiled` record, while attempt events retain only its receipt and transport hashes.
 
-No public `provider.infer` Runtime command is defined yet. The attempt ledger and inference coordinator are internal Rust services pending the `waiting_for_reconciliation` Run state, production scheduling, cancellation and desktop protocol integration.
+The public protocol reserves an asynchronous Provider inference exchange. It does not keep a command request open until the external model finishes:
+
+- `provider.inference.start`: Run-scoped `command`. Its strict payload identifies the inference, attempt, invocation, accepted Context Compilation, request/attempt numbers and inference idempotency key.
+- `provider.inference.accepted`: correlated Run-scoped `response`. It means the Runtime has accepted queue ownership for that attempt; it does **not** mean inference completed successfully.
+- `provider.inference.completed`: correlated Run-scoped terminal `event` containing actual Provider/model identities, response hashes, stop reason, token usage and the bounded output receipt.
+- `provider.inference.failed`: correlated Run-scoped terminal `event` containing a structured definitive failure.
+- `provider.inference.reconciliation_required`: correlated Run-scoped terminal `event` with reason `outcome_unknown`. It forbids misleading automatic retry claims and corresponds to the nonterminal Run state `waiting_for_reconciliation`.
+
+Every accepted or terminal payload repeats `runId`, `inferenceId`, `attemptId`, `contextCompilationId`, `requestNumber` and `attemptNumber`. The payload `runId` must equal the envelope `runId`. Accepted and all terminal messages correlate to the original `provider.inference.start` command message ID. For one accepted inference attempt, exactly one terminal inference event is allowed.
+
+The completed output is nonempty, limited to 1 MiB of UTF-8, and identified by a lowercase SHA-256 hash. Its recorded UTF-8 byte length must match the text. Input plus output tokens must equal total tokens.
+
+Rust consumers must call the payload's public `validate()` after strict deserialization. Structural Serde validation alone does not enforce positive counters, nonempty identities, hash content, usage arithmetic, output bounds or reconciliation retry policy; failures use the stable public `ProviderInferenceValidationError` type.
+
+This section defines and validates the protocol only. `main.rs`, the Electron Supervisor, UI and production scheduler do not dispatch or consume these messages yet, so this exchange is **not live functionality**.
 
 ## 8. Error Contract
 

@@ -50,6 +50,7 @@
     "@dagrejs/dagre": "^3.0.0",
     "@earendil-works/pi-agent-core": "0.80.6",
     "@earendil-works/pi-ai": "0.80.6",
+    "@noble/hashes": "^2.2.0",
     "@xyflow/react": "^12.11.2",
     "electron-updater": "^6.8.9",
     "fast-xml-parser": "^5.9.3",

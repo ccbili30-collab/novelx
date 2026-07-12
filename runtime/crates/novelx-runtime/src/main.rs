@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io;
 
 use novelx_protocol::{
     ContextCompilationReceipt, ContextCompile, Envelope, MessageType, PROTOCOL_VERSION, RunCancel,
@@ -12,10 +12,13 @@ use novelx_runtime::provider_gateway::{
 };
 use novelx_runtime::recovery::{RecoveryCoordinator, RecoveryError};
 use novelx_runtime::run_command_service::{RunCommandFailure, RunCommandService, WorkspaceBinding};
+use novelx_runtime::runtime_actor::{RuntimeActor, RuntimeActorHandle, RuntimeOutputDraft};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let hello = RuntimeHello {
         runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -37,20 +40,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let hello_envelope = Envelope::new(MessageType::Control, "runtime.hello", sent_at, 1, hello)?;
 
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    serde_json::to_writer(&mut output, &hello_envelope)?;
-    output.write_all(b"\n")?;
-    output.flush()?;
+    let mut output = tokio::io::stdout();
+    write_handshake_envelope(&mut output, &hello_envelope).await?;
 
-    let stdin = io::stdin();
-    let mut lines = stdin.lock().lines();
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let initialize_line = lines
-        .next()
-        .ok_or("runtime.initialize was not received")??;
+        .next_line()
+        .await?
+        .ok_or("runtime.initialize was not received")?;
     let initialize_envelope: Envelope = serde_json::from_str(&initialize_line)?;
     if let Err(error) = validate_initialize_envelope(&initialize_envelope) {
-        write_protocol_error(&mut output, initialize_envelope.message_id, 2, &error)?;
+        write_protocol_error(&mut output, initialize_envelope.message_id, 2, &error).await?;
         return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
     }
     let initialize: RuntimeInitialize =
@@ -58,7 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(initialize) => initialize,
             Err(error) => {
                 let error = format!("invalid runtime.initialize payload: {error}");
-                write_protocol_error(&mut output, initialize_envelope.message_id, 2, &error)?;
+                write_protocol_error(&mut output, initialize_envelope.message_id, 2, &error)
+                    .await?;
                 return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
             }
         };
@@ -67,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "runtime.initialize selected unsupported protocol version {}",
             initialize.selected_protocol_version
         );
-        write_protocol_error(&mut output, initialize_envelope.message_id, 2, &error)?;
+        write_protocol_error(&mut output, initialize_envelope.message_id, 2, &error).await?;
         return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
     }
     let workspace_binding = match (
@@ -86,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             let error = "runtime.initialize requires projectId and workspaceId exactly when workspaceDatabasePath is configured";
-            write_protocol_error(&mut output, initialize_envelope.message_id, 2, error)?;
+            write_protocol_error(&mut output, initialize_envelope.message_id, 2, error).await?;
             return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
         }
     };
@@ -102,7 +103,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     initialize_envelope.message_id,
                     diagnostic_id,
                     &error,
-                )?;
+                )
+                .await?;
                 return Err(
                     format!("runtime initialization failed [{diagnostic_id}]: {error}").into(),
                 );
@@ -133,20 +135,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     ready_envelope.correlation_id = Some(initialize_envelope.message_id);
-    serde_json::to_writer(&mut output, &ready_envelope)?;
-    output.write_all(b"\n")?;
-    output.flush()?;
+    write_handshake_envelope(&mut output, &ready_envelope).await?;
 
     let mut provider_registry = ProviderRegistry::default();
-    run_command_loop(
+    let (actor, actor_handle) = RuntimeActor::new(output, 2, 64);
+    let actor_task = tokio::spawn(actor.run());
+    let loop_result = run_command_loop(
         &mut lines,
-        &mut output,
+        &actor_handle,
         initialize.workspace_database_path.is_some(),
         recovered_run_count,
         &mut journal,
         workspace_binding.as_ref(),
         &mut provider_registry,
     )
+    .await;
+    drop(actor_handle);
+    let actor_result = actor_task.await?;
+    loop_result?;
+    actor_result?;
+    Ok(())
 }
 
 fn validate_initialize_envelope(envelope: &Envelope) -> Result<(), String> {
@@ -174,92 +182,80 @@ fn validate_initialize_envelope(envelope: &Envelope) -> Result<(), String> {
     Ok(())
 }
 
-fn run_command_loop(
-    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
-    output: &mut impl Write,
+async fn run_command_loop(
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+    output: &RuntimeActorHandle,
     workspace_database_configured: bool,
     recovered_run_count: u64,
     journal: &mut Option<EventJournal>,
     workspace_binding: Option<&WorkspaceBinding>,
     provider_registry: &mut ProviderRegistry,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for ((expected_host_sequence, runtime_sequence), line) in (2_u64..).zip(3_u64..).zip(lines) {
-        let line = line?;
+    let mut expected_host_sequence = 2_u64;
+    while let Some(line) = lines.next_line().await? {
         let value: serde_json::Value = serde_json::from_str(&line)?;
         if value.get("messageType").and_then(serde_json::Value::as_str) == Some("sensitive_command")
         {
             let sensitive: ProviderBindSensitiveEnvelope = serde_json::from_value(value)?;
             if let Err(error) = sensitive.validate(expected_host_sequence) {
-                write_protocol_error(
-                    output,
-                    sensitive.message_id,
-                    runtime_sequence,
-                    &error.to_string(),
-                )?;
+                output
+                    .emit(protocol_error_draft(
+                        sensitive.message_id,
+                        &error.to_string(),
+                    )?)
+                    .await?;
                 return Err(io::Error::new(io::ErrorKind::InvalidData, error.to_string()).into());
             }
-            handle_provider_bind(output, sensitive, runtime_sequence, provider_registry)?;
+            output
+                .emit(handle_provider_bind(sensitive, provider_registry)?)
+                .await?;
+            expected_host_sequence += 1;
             continue;
         }
         let command: Envelope = serde_json::from_value(value)?;
         if let Err(error) = validate_command(&command, expected_host_sequence) {
-            write_protocol_error(output, command.message_id, runtime_sequence, &error)?;
+            output
+                .emit(protocol_error_draft(command.message_id, &error)?)
+                .await?;
             return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
         }
 
-        match command.name.as_str() {
-            "runtime.status.get" => {
-                write_response(
-                    output,
-                    &command,
-                    runtime_sequence,
-                    "runtime.status",
-                    RuntimeStatus {
-                        initialized: true,
-                        workspace_database_configured,
-                        recovered_run_count,
-                        protocol_version: PROTOCOL_VERSION,
-                        runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
-                    },
-                )?;
-            }
+        let routed = match command.name.as_str() {
+            "runtime.status.get" => RoutedOutput::normal(response_draft(
+                &command,
+                "runtime.status",
+                RuntimeStatus {
+                    initialized: true,
+                    workspace_database_configured,
+                    recovered_run_count,
+                    protocol_version: PROTOCOL_VERSION,
+                    runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
+                },
+            )?),
             "runtime.shutdown" => {
-                write_response(
-                    output,
-                    &command,
-                    runtime_sequence,
-                    "runtime.stopped",
-                    RuntimeStopped {
-                        reason: "requested".to_owned(),
-                    },
-                )?;
+                output
+                    .shutdown(response_draft(
+                        &command,
+                        "runtime.stopped",
+                        RuntimeStopped {
+                            reason: "requested".to_owned(),
+                        },
+                    )?)
+                    .await?;
                 return Ok(());
             }
-            "run.start" => handle_run_start(
-                output,
-                &command,
-                runtime_sequence,
-                journal,
-                workspace_binding,
-            )?,
-            "run.get" => handle_run_get(output, &command, runtime_sequence, journal)?,
-            "run.cancel" => handle_run_cancel(output, &command, runtime_sequence, journal)?,
-            "run.prepare" => handle_run_prepare(
-                output,
-                &command,
-                runtime_sequence,
-                journal,
-                provider_registry,
-            )?,
-            "context.compile" => handle_context_compile(
-                output,
-                &command,
-                runtime_sequence,
-                journal,
-                provider_registry,
-            )?,
+            "run.start" => handle_run_start(&command, journal, workspace_binding)?,
+            "run.get" => handle_run_get(&command, journal)?,
+            "run.cancel" => handle_run_cancel(&command, journal)?,
+            "run.prepare" => handle_run_prepare(&command, journal, provider_registry)?,
+            "context.compile" => handle_context_compile(&command, journal, provider_registry)?,
             _ => unreachable!("validated command name"),
+        };
+        output.emit(routed.output).await?;
+        if routed.fatal {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, routed.fatal_message).into());
         }
+        expected_host_sequence += 1;
     }
 
     Ok(())
@@ -336,27 +332,17 @@ fn require_empty_payload(command: &Envelope) -> Result<(), String> {
 }
 
 fn handle_provider_bind(
-    output: &mut impl Write,
     command: ProviderBindSensitiveEnvelope,
-    runtime_sequence: u64,
     registry: &mut ProviderRegistry,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
     let correlation_id = command.message_id;
     let payload = command.payload;
     match registry.bind(payload.config, &payload.config_sha256, payload.credential) {
-        Ok(receipt) => write_correlated_response(
-            output,
-            correlation_id,
-            runtime_sequence,
-            "provider.bound",
-            receipt,
-        ),
+        Ok(receipt) => correlated_response_draft(correlation_id, "provider.bound", receipt),
         Err(error) => {
             eprintln!("provider.bind rejected: {error}");
-            write_correlated_response(
-                output,
+            correlated_response_draft(
                 correlation_id,
-                runtime_sequence,
                 "provider.rejected",
                 provider_binding_error(&error),
             )
@@ -394,12 +380,10 @@ fn provider_binding_error(error: &ProviderGatewayError) -> RuntimeError {
 }
 
 fn handle_run_start(
-    output: &mut impl Write,
     command: &Envelope,
-    runtime_sequence: u64,
     journal: &mut Option<EventJournal>,
     workspace_binding: Option<&WorkspaceBinding>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated run.start runId");
     let start: RunStart = serde_json::from_value(command.payload.clone())?;
     match RunCommandService::new(journal, workspace_binding).start(
@@ -407,51 +391,39 @@ fn handle_run_start(
         command.message_id,
         start,
     ) {
-        Ok(snapshot) => write_run_snapshot(output, command, runtime_sequence, snapshot),
-        Err(failure) => {
-            write_run_command_failure(output, command, runtime_sequence, run_id, failure)
-        }
+        Ok(snapshot) => Ok(RoutedOutput::normal(run_snapshot_draft(command, snapshot)?)),
+        Err(failure) => run_command_failure(command, run_id, failure),
     }
 }
 
 fn handle_run_get(
-    output: &mut impl Write,
     command: &Envelope,
-    runtime_sequence: u64,
     journal: &mut Option<EventJournal>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated run.get runId");
     match RunCommandService::new(journal, None).get(run_id) {
-        Ok(snapshot) => write_run_snapshot(output, command, runtime_sequence, snapshot),
-        Err(failure) => {
-            write_run_command_failure(output, command, runtime_sequence, run_id, failure)
-        }
+        Ok(snapshot) => Ok(RoutedOutput::normal(run_snapshot_draft(command, snapshot)?)),
+        Err(failure) => run_command_failure(command, run_id, failure),
     }
 }
 
 fn handle_run_cancel(
-    output: &mut impl Write,
     command: &Envelope,
-    runtime_sequence: u64,
     journal: &mut Option<EventJournal>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated run.cancel runId");
     let cancel: RunCancel = serde_json::from_value(command.payload.clone())?;
     match RunCommandService::new(journal, None).cancel(run_id, command.message_id, cancel) {
-        Ok(snapshot) => write_run_snapshot(output, command, runtime_sequence, snapshot),
-        Err(failure) => {
-            write_run_command_failure(output, command, runtime_sequence, run_id, failure)
-        }
+        Ok(snapshot) => Ok(RoutedOutput::normal(run_snapshot_draft(command, snapshot)?)),
+        Err(failure) => run_command_failure(command, run_id, failure),
     }
 }
 
 fn handle_run_prepare(
-    output: &mut impl Write,
     command: &Envelope,
-    runtime_sequence: u64,
     journal: &mut Option<EventJournal>,
     providers: &ProviderRegistry,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated run.prepare runId");
     let prepare: RunPrepare = serde_json::from_value(command.payload.clone())?;
     match RunCommandService::new(journal, None).prepare(
@@ -460,87 +432,70 @@ fn handle_run_prepare(
         prepare,
         providers,
     ) {
-        Ok(snapshot) => write_run_snapshot(output, command, runtime_sequence, snapshot),
-        Err(failure) => {
-            write_run_command_failure(output, command, runtime_sequence, run_id, failure)
-        }
+        Ok(snapshot) => Ok(RoutedOutput::normal(run_snapshot_draft(command, snapshot)?)),
+        Err(failure) => run_command_failure(command, run_id, failure),
     }
 }
 
 fn handle_context_compile(
-    output: &mut impl Write,
     command: &Envelope,
-    runtime_sequence: u64,
     journal: &mut Option<EventJournal>,
     providers: &ProviderRegistry,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated context.compile runId");
     let compile: ContextCompile = serde_json::from_value(command.payload.clone())?;
     let Some(journal) = journal.as_mut() else {
-        return write_context_rejected(
-            output,
+        return Ok(RoutedOutput::normal(context_rejected_draft(
             command,
-            runtime_sequence,
             run_id,
             context_error(
                 "RUNTIME_STORAGE_REQUIRED",
                 RuntimeErrorClass::Storage,
                 "Runtime storage is required to compile context.",
             ),
-        );
+        )?));
     };
     match ContextCompileService::new(journal, providers).compile(
         run_id,
         command.message_id,
         compile,
     ) {
-        Ok(receipt) => write_context_compilation(output, command, runtime_sequence, receipt),
+        Ok(receipt) => Ok(RoutedOutput::normal(context_compilation_draft(
+            command, receipt,
+        )?)),
         Err(error) => {
             let fatal = matches!(
                 error,
                 ContextCompileServiceError::InvalidHistory | ContextCompileServiceError::Journal(_)
             );
             eprintln!("context.compile rejected: {error}");
-            write_context_rejected(
-                output,
-                command,
-                runtime_sequence,
-                run_id,
-                context_service_error(&error),
-            )?;
-            if fatal {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "fatal Context Compiler failure",
-                )
-                .into());
-            }
-            Ok(())
+            let output = context_rejected_draft(command, run_id, context_service_error(&error))?;
+            Ok(if fatal {
+                RoutedOutput::fatal(output, "fatal Context Compiler failure")
+            } else {
+                RoutedOutput::normal(output)
+            })
         }
     }
 }
 
-fn write_context_compilation(
-    output: &mut impl Write,
+fn context_compilation_draft(
     command: &Envelope,
-    sequence: u64,
     receipt: ContextCompilationReceipt,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut response = response_envelope(command, sequence, "context.compilation", receipt)?;
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut response = response_draft(command, "context.compilation", receipt)?;
     response.run_id = command.run_id;
-    write_envelope(output, &response)
+    Ok(response)
 }
 
-fn write_context_rejected(
-    output: &mut impl Write,
+fn context_rejected_draft(
     command: &Envelope,
-    sequence: u64,
     run_id: Uuid,
     error: RuntimeError,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut response = response_envelope(command, sequence, "context.rejected", error)?;
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut response = response_draft(command, "context.rejected", error)?;
     response.run_id = Some(run_id);
-    write_envelope(output, &response)
+    Ok(response)
 }
 
 fn context_service_error(error: &ContextCompileServiceError) -> RuntimeError {
@@ -618,103 +573,93 @@ fn context_error(code: &str, class: RuntimeErrorClass, public_message: &str) -> 
     }
 }
 
-fn write_run_command_failure(
-    output: &mut impl Write,
+fn run_command_failure(
     command: &Envelope,
-    sequence: u64,
     run_id: Uuid,
     failure: RunCommandFailure,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     eprintln!("{}", failure.internal_message);
-    write_run_rejected(output, command, sequence, run_id, *failure.error)?;
-    if failure.fatal {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "fatal Run command failure").into());
-    }
-    Ok(())
+    let output = run_rejected_draft(command, run_id, *failure.error)?;
+    Ok(if failure.fatal {
+        RoutedOutput::fatal(output, "fatal Run command failure")
+    } else {
+        RoutedOutput::normal(output)
+    })
 }
 
-fn write_run_snapshot(
-    output: &mut impl Write,
+fn run_snapshot_draft(
     command: &Envelope,
-    sequence: u64,
     snapshot: RunSnapshot,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
     let run_id = snapshot.run_id;
-    let mut response = response_envelope(command, sequence, "run.snapshot", snapshot)?;
+    let mut response = response_draft(command, "run.snapshot", snapshot)?;
     response.run_id = Some(run_id);
-    write_envelope(output, &response)
+    Ok(response)
 }
 
-fn write_run_rejected(
-    output: &mut impl Write,
+fn run_rejected_draft(
     command: &Envelope,
-    sequence: u64,
     run_id: Uuid,
     error: RuntimeError,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut response = response_envelope(command, sequence, "run.rejected", error)?;
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut response = response_draft(command, "run.rejected", error)?;
     response.run_id = Some(run_id);
-    write_envelope(output, &response)
+    Ok(response)
 }
 
-fn write_response(
-    output: &mut impl Write,
+fn response_draft(
     command: &Envelope,
-    sequence: u64,
     name: &str,
     payload: impl serde::Serialize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let response = response_envelope(command, sequence, name, payload)?;
-    write_envelope(output, &response)
-}
-
-fn write_correlated_response(
-    output: &mut impl Write,
-    correlation_id: Uuid,
-    sequence: u64,
-    name: &str,
-    payload: impl serde::Serialize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
-    let mut response = Envelope::new(MessageType::Response, name, sent_at, sequence, payload)?;
-    response.correlation_id = Some(correlation_id);
-    write_envelope(output, &response)
-}
-
-fn response_envelope(
-    command: &Envelope,
-    sequence: u64,
-    name: &str,
-    payload: impl serde::Serialize,
-) -> Result<Envelope, Box<dyn std::error::Error>> {
-    let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
-    let mut response = Envelope::new(MessageType::Response, name, sent_at, sequence, payload)?;
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut response = output_draft(MessageType::Response, name, payload)?;
     response.correlation_id = Some(command.message_id);
     Ok(response)
 }
 
-fn write_envelope(
-    output: &mut impl Write,
+fn correlated_response_draft(
+    correlation_id: Uuid,
+    name: &str,
+    payload: impl serde::Serialize,
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut response = output_draft(MessageType::Response, name, payload)?;
+    response.correlation_id = Some(correlation_id);
+    Ok(response)
+}
+
+fn output_draft(
+    message_type: MessageType,
+    name: &str,
+    payload: impl serde::Serialize,
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    Ok(RuntimeOutputDraft {
+        message_type,
+        name: name.to_owned(),
+        sent_at,
+        correlation_id: None,
+        run_id: None,
+        payload: serde_json::to_value(payload)?,
+    })
+}
+
+async fn write_handshake_envelope(
+    output: &mut (impl AsyncWrite + Unpin),
     envelope: &Envelope,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    serde_json::to_writer(&mut *output, envelope)?;
-    output.write_all(b"\n")?;
-    output.flush()?;
+    output.write_all(&serde_json::to_vec(envelope)?).await?;
+    output.write_all(b"\n").await?;
+    output.flush().await?;
     Ok(())
 }
 
-fn write_protocol_error(
-    output: &mut impl Write,
+fn protocol_error_draft(
     correlation_id: Uuid,
-    sequence: u64,
     error: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
-    let mut envelope = Envelope::new(
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut output = output_draft(
         MessageType::Event,
         "runtime.error",
-        sent_at,
-        sequence,
         RuntimeError {
             code: "RUNTIME_PROTOCOL_ERROR".to_owned(),
             class: RuntimeErrorClass::Protocol,
@@ -725,12 +670,30 @@ fn write_protocol_error(
             diagnostic_id: Uuid::new_v4(),
         },
     )?;
-    envelope.correlation_id = Some(correlation_id);
-    serde_json::to_writer(&mut *output, &envelope)?;
-    output.write_all(b"\n")?;
-    output.flush()?;
+    output.correlation_id = Some(correlation_id);
     eprintln!("runtime protocol error: {error}");
-    Ok(())
+    Ok(output)
+}
+
+async fn write_protocol_error(
+    output: &mut (impl AsyncWrite + Unpin),
+    correlation_id: Uuid,
+    sequence: u64,
+    error: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let draft = protocol_error_draft(correlation_id, error)?;
+    let envelope = Envelope {
+        protocol_version: novelx_protocol::PROTOCOL_VERSION,
+        message_id: Uuid::new_v4(),
+        message_type: draft.message_type,
+        name: draft.name,
+        sent_at: draft.sent_at,
+        correlation_id: draft.correlation_id,
+        run_id: draft.run_id,
+        sequence,
+        payload: draft.payload,
+    };
+    write_handshake_envelope(output, &envelope).await
 }
 
 fn initialize_runtime(path: &str) -> Result<(EventJournal, u64), InitializationError> {
@@ -740,8 +703,8 @@ fn initialize_runtime(path: &str) -> Result<(EventJournal, u64), InitializationE
     Ok((journal, count))
 }
 
-fn write_initialization_failed(
-    output: &mut impl Write,
+async fn write_initialization_failed(
+    output: &mut (impl AsyncWrite + Unpin),
     correlation_id: Uuid,
     diagnostic_id: Uuid,
     error: &InitializationError,
@@ -775,10 +738,31 @@ fn write_initialization_failed(
         },
     )?;
     envelope.correlation_id = Some(correlation_id);
-    serde_json::to_writer(&mut *output, &envelope)?;
-    output.write_all(b"\n")?;
-    output.flush()?;
-    Ok(())
+    write_handshake_envelope(output, &envelope).await
+}
+
+struct RoutedOutput {
+    output: RuntimeOutputDraft,
+    fatal: bool,
+    fatal_message: &'static str,
+}
+
+impl RoutedOutput {
+    const fn normal(output: RuntimeOutputDraft) -> Self {
+        Self {
+            output,
+            fatal: false,
+            fatal_message: "",
+        }
+    }
+
+    const fn fatal(output: RuntimeOutputDraft, fatal_message: &'static str) -> Self {
+        Self {
+            output,
+            fatal: true,
+            fatal_message,
+        }
+    }
 }
 
 #[derive(Debug)]

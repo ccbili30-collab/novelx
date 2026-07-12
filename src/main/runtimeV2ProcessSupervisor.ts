@@ -10,6 +10,10 @@ import {
   parseRuntimeV2InitializationFailedEnvelope,
   parseRuntimeV2ProviderBoundEnvelope,
   parseRuntimeV2ProviderRejectedEnvelope,
+  parseRuntimeV2ProviderInferenceAcceptedEnvelope,
+  parseRuntimeV2ProviderInferenceCompletedEnvelope,
+  parseRuntimeV2ProviderInferenceFailedEnvelope,
+  parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope,
   parseRuntimeV2ContextCompilationEnvelope,
   parseRuntimeV2ContextRejectedEnvelope,
   parseRuntimeV2ReadyEnvelope,
@@ -20,6 +24,7 @@ import {
   runtimeV2InitializeEnvelopeSchema,
   runtimeV2ContextCompileEnvelopeSchema,
   runtimeV2SensitiveProviderBindEnvelopeSchema,
+  runtimeV2ProviderInferenceStartEnvelopeSchema,
   runtimeV2RunGetEnvelopeSchema,
   runtimeV2RunCancelEnvelopeSchema,
   runtimeV2RunPrepareEnvelopeSchema,
@@ -28,10 +33,16 @@ import {
   runtimeV2StatusGetEnvelopeSchema,
   type RuntimeV2HelloEnvelope,
   type RuntimeV2Error,
+  type RuntimeV2ErrorEnvelope,
   type RuntimeV2InitializeEnvelope,
   type RuntimeV2ReadyEnvelope,
   type RuntimeV2ProviderBindingReceipt,
   type RuntimeV2ProviderConfig,
+  type RuntimeV2ProviderInferenceAcceptedEnvelope,
+  type RuntimeV2ProviderInferenceCompletedEnvelope,
+  type RuntimeV2ProviderInferenceFailedEnvelope,
+  type RuntimeV2ProviderInferenceReconciliationRequiredEnvelope,
+  type RuntimeV2ProviderInferenceStartPayload,
   type RuntimeV2ContextCompilePayload,
   type RuntimeV2ContextCompilationReceipt,
   type RuntimeV2RunSnapshotPayload,
@@ -69,6 +80,11 @@ export interface RuntimeV2Handshake {
   hello: RuntimeV2HelloEnvelope;
   ready: RuntimeV2ReadyEnvelope;
 }
+
+export type RuntimeV2RuntimeEvent = RuntimeV2ErrorEnvelope
+  | RuntimeV2ProviderInferenceCompletedEnvelope
+  | RuntimeV2ProviderInferenceFailedEnvelope
+  | RuntimeV2ProviderInferenceReconciliationRequiredEnvelope;
 
 export type RuntimeV2SupervisorErrorCode =
   | "RUNTIME_V2_ALREADY_STARTED"
@@ -114,6 +130,8 @@ export class RuntimeV2ProcessSupervisor {
   #nextHostSequence = 2;
   #expectedRuntimeSequence = 3;
   #pending = new Map<string, PendingCommand>();
+  #activeInferences = new Map<string, ActiveProviderInference>();
+  #runtimeEventListeners = new Set<(event: RuntimeV2RuntimeEvent) => void>();
 
   constructor(options: RuntimeV2ProcessSupervisorOptions) {
     this.#options = {
@@ -130,6 +148,11 @@ export class RuntimeV2ProcessSupervisor {
 
   get stderr(): string {
     return this.#stderr;
+  }
+
+  subscribeRuntimeEvents(listener: (event: RuntimeV2RuntimeEvent) => void): () => void {
+    this.#runtimeEventListeners.add(listener);
+    return () => this.#runtimeEventListeners.delete(listener);
   }
 
   async start(): Promise<RuntimeV2Handshake> {
@@ -151,6 +174,7 @@ export class RuntimeV2ProcessSupervisor {
     this.#stopping = false;
     this.#nextHostSequence = 2;
     this.#expectedRuntimeSequence = 3;
+    this.#activeInferences.clear();
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       this.#stderr = `${this.#stderr}${chunk}`.slice(-MAX_STDERR_CHARS);
@@ -208,6 +232,21 @@ export class RuntimeV2ProcessSupervisor {
   ): Promise<RuntimeV2ProviderBindingReceipt> {
     const response = await this.#sendSensitiveProviderBind(config, configSha256, credential);
     return parseRuntimeV2ProviderBoundEnvelope(response).payload;
+  }
+
+  async startProviderInference(
+    runId: string,
+    payload: RuntimeV2ProviderInferenceStartPayload,
+  ): Promise<RuntimeV2ProviderInferenceAcceptedEnvelope["payload"]> {
+    const response = await this.#sendCommand(
+      "provider.inference.start",
+      "provider.inference.accepted",
+      runId,
+      payload,
+      this.#options.commandTimeoutMs,
+      { runId, payload },
+    );
+    return parseRuntimeV2ProviderInferenceAcceptedEnvelope(response).payload;
   }
 
   async stop(): Promise<void> {
@@ -360,8 +399,16 @@ export class RuntimeV2ProcessSupervisor {
                     ? parseRuntimeV2ContextRejectedEnvelope(value)
                     : name === "provider.bound"
                       ? parseRuntimeV2ProviderBoundEnvelope(value)
-                      : name === "provider.rejected"
+                    : name === "provider.rejected"
                         ? parseRuntimeV2ProviderRejectedEnvelope(value)
+                        : name === "provider.inference.accepted"
+                          ? parseRuntimeV2ProviderInferenceAcceptedEnvelope(value)
+                          : name === "provider.inference.completed"
+                            ? parseRuntimeV2ProviderInferenceCompletedEnvelope(value)
+                            : name === "provider.inference.failed"
+                              ? parseRuntimeV2ProviderInferenceFailedEnvelope(value)
+                              : name === "provider.inference.reconciliation_required"
+                                ? parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope(value)
                         : null;
       if (!response) throw new Error(`unexpected Runtime V2 message after ready: ${String(name)}.`);
       if (response.sequence !== this.#expectedRuntimeSequence) {
@@ -369,17 +416,30 @@ export class RuntimeV2ProcessSupervisor {
       }
       this.#expectedRuntimeSequence += 1;
       const correlationId = response.correlationId;
+      if (isProviderInferenceTerminalEvent(response)) {
+        if (!correlationId) throw new Error("Provider inference terminal event is missing correlationId.");
+        const active = this.#activeInferences.get(correlationId);
+        if (!active) throw new Error(`Provider inference terminal event has no active attempt: ${correlationId}.`);
+        assertInferenceIdentity(response.payload, active);
+        this.#activeInferences.delete(correlationId);
+        this.#emitRuntimeEvent(response);
+        return;
+      }
+      if (response.messageType === "event" && correlationId === null) {
+        this.#emitRuntimeEvent(response);
+        return;
+      }
       if (!correlationId) throw new Error("Runtime V2 response is missing correlationId.");
       const pending = this.#pending.get(correlationId);
       if (!pending) throw new Error(`Runtime V2 response has no pending command: ${String(correlationId)}.`);
-      this.#pending.delete(correlationId);
-      clearTimeout(pending.timer);
       if (
         response.name === "runtime.error"
         || response.name === "run.rejected"
         || response.name === "context.rejected"
         || response.name === "provider.rejected"
       ) {
+        this.#pending.delete(correlationId);
+        clearTimeout(pending.timer);
         pending.reject(new RuntimeV2SupervisorError(
           response.name === "run.rejected"
             ? "RUNTIME_V2_RUN_REJECTED"
@@ -396,9 +456,26 @@ export class RuntimeV2ProcessSupervisor {
       if (response.name !== pending.expectedName) {
         throw new Error(`expected ${pending.expectedName}, received ${response.name}.`);
       }
+      if (response.name === "provider.inference.accepted") {
+        if (!pending.inference) throw new Error("Provider inference acceptance has no pending inference identity.");
+        assertInferenceIdentity(response.payload, pending.inference);
+        this.#activeInferences.set(correlationId, response.payload);
+      }
+      this.#pending.delete(correlationId);
+      clearTimeout(pending.timer);
       pending.resolve(response);
     } catch (error) {
       this.#failRuntime(toProtocolError(error));
+    }
+  }
+
+  #emitRuntimeEvent(event: RuntimeV2RuntimeEvent): void {
+    for (const listener of this.#runtimeEventListeners) {
+      try {
+        listener(event);
+      } catch {
+        // Host subscribers cannot corrupt Runtime protocol state.
+      }
     }
   }
 
@@ -456,11 +533,12 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   #sendCommand(
-    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "context.compile",
-    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "context.compilation",
+    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "context.compile" | "provider.inference.start",
+    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "context.compilation" | "provider.inference.accepted",
     runId: string | null,
     payload: object,
     timeoutMs = this.#options.commandTimeoutMs,
+    inference?: PendingProviderInference,
   ): Promise<unknown> {
     const child = this.#child;
     if (!child || !this.#ready || child.stdin.destroyed) {
@@ -490,8 +568,10 @@ export class RuntimeV2ProcessSupervisor {
             : name === "run.prepare"
               ? runtimeV2RunPrepareEnvelopeSchema.parse(base)
               : name === "run.cancel"
-                ? runtimeV2RunCancelEnvelopeSchema.parse(base)
-                : runtimeV2ContextCompileEnvelopeSchema.parse(base);
+              ? runtimeV2RunCancelEnvelopeSchema.parse(base)
+                : name === "context.compile"
+                  ? runtimeV2ContextCompileEnvelopeSchema.parse(base)
+                  : runtimeV2ProviderInferenceStartEnvelopeSchema.parse(base);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(command.messageId);
@@ -503,7 +583,7 @@ export class RuntimeV2ProcessSupervisor {
         reject(error);
         this.#failRuntime(error);
       }, timeoutMs);
-      this.#pending.set(command.messageId, { expectedName, resolve, reject, timer });
+      this.#pending.set(command.messageId, { expectedName, resolve, reject, timer, inference });
       child.stdin.write(`${JSON.stringify(command)}\n`, "utf8", (error) => {
         if (!error) return;
         const pending = this.#pending.get(command.messageId);
@@ -526,6 +606,7 @@ export class RuntimeV2ProcessSupervisor {
       pending.reject(error);
     }
     this.#pending.clear();
+    this.#activeInferences.clear();
     this.#options.onRuntimeFailure?.(error);
     if (child) void this.#terminateChild(child);
   }
@@ -534,6 +615,7 @@ export class RuntimeV2ProcessSupervisor {
     if (this.#child === child) this.#child = null;
     this.#ready = false;
     this.#stopping = false;
+    this.#activeInferences.clear();
     this.#lines?.close();
     this.#lines = null;
     const pid = child.pid;
@@ -547,10 +629,49 @@ export class RuntimeV2ProcessSupervisor {
 }
 
 interface PendingCommand {
-  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "context.compilation" | "provider.bound";
+  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "context.compilation" | "provider.bound" | "provider.inference.accepted";
   resolve(value: unknown): void;
   reject(error: RuntimeV2SupervisorError): void;
   timer: NodeJS.Timeout;
+  inference?: PendingProviderInference;
+}
+
+interface PendingProviderInference {
+  runId: string;
+  payload: RuntimeV2ProviderInferenceStartPayload;
+}
+
+type ActiveProviderInference = RuntimeV2ProviderInferenceAcceptedEnvelope["payload"];
+
+function isProviderInferenceTerminalEvent(
+  event: RuntimeV2RuntimeEvent | RuntimeV2ProviderInferenceAcceptedEnvelope | object,
+): event is RuntimeV2ProviderInferenceCompletedEnvelope
+  | RuntimeV2ProviderInferenceFailedEnvelope
+  | RuntimeV2ProviderInferenceReconciliationRequiredEnvelope {
+  return "name" in event && (
+    event.name === "provider.inference.completed"
+    || event.name === "provider.inference.failed"
+    || event.name === "provider.inference.reconciliation_required"
+  );
+}
+
+function assertInferenceIdentity(
+  actual: ActiveProviderInference,
+  expected: ActiveProviderInference | PendingProviderInference,
+): void {
+  const expectedIdentity: ActiveProviderInference = "payload" in expected
+    ? { runId: expected.runId, ...expected.payload }
+    : expected;
+  for (const [field, value] of [
+    ["runId", expectedIdentity.runId],
+    ["inferenceId", expectedIdentity.inferenceId],
+    ["attemptId", expectedIdentity.attemptId],
+    ["contextCompilationId", expectedIdentity.contextCompilationId],
+    ["requestNumber", expectedIdentity.requestNumber],
+    ["attemptNumber", expectedIdentity.attemptNumber],
+  ] as const) {
+    if (actual[field] !== value) throw new Error(`Provider inference ${field} does not match the active attempt.`);
+  }
 }
 
 function createInitializeEnvelope(

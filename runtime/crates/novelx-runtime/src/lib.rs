@@ -8,5 +8,6 @@ pub mod recovery;
 pub mod run_aggregate;
 pub mod run_command_service;
 pub mod run_state;
+pub mod runtime_actor;
 pub mod tool_aggregate;
 pub mod tool_state;

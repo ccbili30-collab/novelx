@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { z } from "zod";
 
 export const RUNTIME_V2_PROTOCOL_VERSION = 1 as const;
@@ -614,6 +616,114 @@ export const runtimeV2ProviderRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.e
   payload: runtimeV2ErrorSchema,
 }).strict();
 
+const runtimeV2ProviderInferenceIdentitySchema = z.object({
+  runId: z.uuid(),
+  inferenceId: z.uuid(),
+  attemptId: z.uuid(),
+  contextCompilationId: z.uuid(),
+  requestNumber: z.number().int().positive().safe(),
+  attemptNumber: z.number().int().positive().safe(),
+}).strict();
+
+export const runtimeV2ProviderInferenceStartPayloadSchema = runtimeV2ProviderInferenceIdentitySchema.omit({ runId: true }).extend({
+  invocationId: identityStringSchema,
+  inferenceIdempotencyKey: identityStringSchema,
+}).strict();
+
+export const runtimeV2ProviderInferenceStartEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("provider.inference.start"),
+  correlationId: z.null(),
+  runId: z.uuid(),
+  payload: runtimeV2ProviderInferenceStartPayloadSchema,
+}).strict();
+
+function requireMatchingInferenceRun(
+  envelope: { runId: string; payload: { runId: string } },
+  context: z.RefinementCtx,
+) {
+  if (envelope.runId !== envelope.payload.runId) {
+    context.addIssue({ code: "custom", path: ["payload", "runId"], message: "Provider inference payload runId must match the envelope runId." });
+  }
+}
+
+export const runtimeV2ProviderInferenceAcceptedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"),
+  name: z.literal("provider.inference.accepted"),
+  correlationId: z.uuid(),
+  runId: z.uuid(),
+  payload: runtimeV2ProviderInferenceIdentitySchema,
+}).strict().superRefine(requireMatchingInferenceRun);
+
+export const runtimeV2ProviderInferenceCompletedPayloadSchema = runtimeV2ProviderInferenceIdentitySchema.extend({
+  providerId: identityStringSchema,
+  modelId: identityStringSchema,
+  responseIdSha256: sha256Schema,
+  responseBodySha256: sha256Schema,
+  stopReason: identityStringSchema,
+  usage: z.object({
+    inputTokens: z.number().int().min(0).safe(),
+    outputTokens: z.number().int().min(0).safe(),
+    totalTokens: z.number().int().min(0).safe(),
+  }).strict(),
+  output: z.object({
+    text: z.string().min(1),
+    textSha256: sha256Schema,
+    utf8Bytes: z.number().int().positive().max(1_048_576).safe(),
+  }).strict(),
+}).strict().superRefine((payload, context) => {
+  if (payload.usage.inputTokens + payload.usage.outputTokens !== payload.usage.totalTokens) {
+    context.addIssue({ code: "custom", path: ["usage", "totalTokens"], message: "Provider usage total must equal input plus output tokens." });
+  }
+  const actualBytes = new TextEncoder().encode(payload.output.text).byteLength;
+  if (actualBytes !== payload.output.utf8Bytes) {
+    context.addIssue({ code: "custom", path: ["output", "utf8Bytes"], message: "Provider output utf8Bytes must match the encoded text length." });
+  }
+  if (actualBytes > 1_048_576) {
+    context.addIssue({ code: "custom", path: ["output", "text"], message: "Provider output exceeds the 1 MiB protocol limit." });
+  }
+  const actualHash = bytesToHex(sha256(new TextEncoder().encode(payload.output.text)));
+  if (actualHash !== payload.output.textSha256) {
+    context.addIssue({ code: "custom", path: ["output", "textSha256"], message: "Provider output textSha256 must match the output text." });
+  }
+});
+
+export const runtimeV2ProviderInferenceCompletedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("event"),
+  name: z.literal("provider.inference.completed"),
+  correlationId: z.uuid(),
+  runId: z.uuid(),
+  payload: runtimeV2ProviderInferenceCompletedPayloadSchema,
+}).strict().superRefine(requireMatchingInferenceRun);
+
+export const runtimeV2ProviderInferenceFailedPayloadSchema = runtimeV2ProviderInferenceIdentitySchema.extend({
+  error: runtimeV2ErrorSchema,
+}).strict();
+
+export const runtimeV2ProviderInferenceFailedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("event"),
+  name: z.literal("provider.inference.failed"),
+  correlationId: z.uuid(),
+  runId: z.uuid(),
+  payload: runtimeV2ProviderInferenceFailedPayloadSchema,
+}).strict().superRefine(requireMatchingInferenceRun);
+
+export const runtimeV2ProviderInferenceReconciliationRequiredPayloadSchema = runtimeV2ProviderInferenceIdentitySchema.extend({
+  reason: z.literal("outcome_unknown"),
+  error: runtimeV2ErrorSchema.refine((error) => !error.retryable, {
+    path: ["retryable"],
+    message: "Unknown Provider outcomes cannot claim automatic retryability.",
+  }),
+}).strict();
+
+export const runtimeV2ProviderInferenceReconciliationRequiredEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("event"),
+  name: z.literal("provider.inference.reconciliation_required"),
+  correlationId: z.uuid(),
+  runId: z.uuid(),
+  payload: runtimeV2ProviderInferenceReconciliationRequiredPayloadSchema,
+}).strict().superRefine(requireMatchingInferenceRun);
+
 export type RuntimeV2MessageType = z.infer<typeof runtimeV2MessageTypeSchema>;
 export type RuntimeV2Envelope = z.infer<typeof runtimeV2EnvelopeSchema>;
 export type RuntimeV2HelloPayload = z.infer<typeof runtimeV2HelloPayloadSchema>;
@@ -656,6 +766,15 @@ export type RuntimeV2SensitiveProviderBindEnvelope = z.infer<typeof runtimeV2Sen
 export type RuntimeV2ProviderBindingReceipt = z.infer<typeof runtimeV2ProviderBindingReceiptSchema>;
 export type RuntimeV2ProviderBoundEnvelope = z.infer<typeof runtimeV2ProviderBoundEnvelopeSchema>;
 export type RuntimeV2ProviderRejectedEnvelope = z.infer<typeof runtimeV2ProviderRejectedEnvelopeSchema>;
+export type RuntimeV2ProviderInferenceStartPayload = z.infer<typeof runtimeV2ProviderInferenceStartPayloadSchema>;
+export type RuntimeV2ProviderInferenceStartEnvelope = z.infer<typeof runtimeV2ProviderInferenceStartEnvelopeSchema>;
+export type RuntimeV2ProviderInferenceAcceptedEnvelope = z.infer<typeof runtimeV2ProviderInferenceAcceptedEnvelopeSchema>;
+export type RuntimeV2ProviderInferenceCompletedPayload = z.infer<typeof runtimeV2ProviderInferenceCompletedPayloadSchema>;
+export type RuntimeV2ProviderInferenceCompletedEnvelope = z.infer<typeof runtimeV2ProviderInferenceCompletedEnvelopeSchema>;
+export type RuntimeV2ProviderInferenceFailedPayload = z.infer<typeof runtimeV2ProviderInferenceFailedPayloadSchema>;
+export type RuntimeV2ProviderInferenceFailedEnvelope = z.infer<typeof runtimeV2ProviderInferenceFailedEnvelopeSchema>;
+export type RuntimeV2ProviderInferenceReconciliationRequiredPayload = z.infer<typeof runtimeV2ProviderInferenceReconciliationRequiredPayloadSchema>;
+export type RuntimeV2ProviderInferenceReconciliationRequiredEnvelope = z.infer<typeof runtimeV2ProviderInferenceReconciliationRequiredEnvelopeSchema>;
 
 export class RuntimeV2ProtocolVersionError extends Error {
   readonly code = "RUNTIME_V2_PROTOCOL_VERSION_UNSUPPORTED";
@@ -767,6 +886,26 @@ export function parseRuntimeV2ProviderBoundEnvelope(value: unknown): RuntimeV2Pr
 
 export function parseRuntimeV2ProviderRejectedEnvelope(value: unknown): RuntimeV2ProviderRejectedEnvelope {
   return parseVersionedEnvelope(value, runtimeV2ProviderRejectedEnvelopeSchema);
+}
+
+export function parseRuntimeV2ProviderInferenceStartEnvelope(value: unknown): RuntimeV2ProviderInferenceStartEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ProviderInferenceStartEnvelopeSchema);
+}
+
+export function parseRuntimeV2ProviderInferenceAcceptedEnvelope(value: unknown): RuntimeV2ProviderInferenceAcceptedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ProviderInferenceAcceptedEnvelopeSchema);
+}
+
+export function parseRuntimeV2ProviderInferenceCompletedEnvelope(value: unknown): RuntimeV2ProviderInferenceCompletedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ProviderInferenceCompletedEnvelopeSchema);
+}
+
+export function parseRuntimeV2ProviderInferenceFailedEnvelope(value: unknown): RuntimeV2ProviderInferenceFailedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ProviderInferenceFailedEnvelopeSchema);
+}
+
+export function parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope(value: unknown): RuntimeV2ProviderInferenceReconciliationRequiredEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ProviderInferenceReconciliationRequiredEnvelopeSchema);
 }
 
 function parseVersionedEnvelope<T>(value: unknown, schema: z.ZodType<T>): T {

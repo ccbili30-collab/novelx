@@ -128,6 +128,72 @@ describe("RuntimeV2ProcessSupervisor", () => {
     expect(isAlive(pid)).toBe(false);
   });
 
+  it("delivers strict unsolicited events without completing the pending response", async () => {
+    const events: Array<{ name: string; sequence: number; correlationId: string | null }> = [];
+    const supervisor = createSupervisor(createFixture("event-before-status"));
+    const unsubscribe = supervisor.subscribeRuntimeEvents((event) => events.push({
+      name: event.name,
+      sequence: event.sequence,
+      correlationId: event.correlationId,
+    }));
+    await supervisor.start();
+
+    await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
+    expect(events).toEqual([{ name: "runtime.error", sequence: 3, correlationId: null }]);
+
+    unsubscribe();
+    await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
+    expect(events).toHaveLength(1);
+  });
+
+  it.each(["unknown-event-on-status", "bad-event-sequence", "orphan-correlated-event"] as const)(
+    "fails closed for %s instead of treating it as a pending response",
+    async (scenario) => {
+      const failures: RuntimeV2SupervisorError[] = [];
+      const supervisor = createSupervisor(createFixture(scenario), {
+        onRuntimeFailure: (error) => failures.push(error),
+      });
+      await supervisor.start();
+
+      await expect(supervisor.status()).rejects.toMatchObject({ code: "RUNTIME_V2_PROTOCOL_INVALID" });
+      expect(failures).toHaveLength(1);
+    },
+  );
+
+  it("registers an accepted inference before an immediately following terminal event", async () => {
+    const events: string[] = [];
+    const supervisor = createSupervisor(createFixture("inference-terminal-immediate"));
+    supervisor.subscribeRuntimeEvents((event) => events.push(event.name));
+    await supervisor.start();
+
+    const accepted = await supervisor.startProviderInference(INFERENCE_RUN_ID, inferenceStartPayload());
+    await waitUntil(() => events.length === 1);
+
+    expect(accepted).toMatchObject({
+      runId: INFERENCE_RUN_ID,
+      inferenceId: INFERENCE_ID,
+      attemptId: INFERENCE_ATTEMPT_ID,
+    });
+    expect(events).toEqual(["provider.inference.completed"]);
+  });
+
+  it.each(["inference-terminal-identity-mismatch", "inference-terminal-duplicate"] as const)(
+    "fails closed for %s",
+    async (scenario) => {
+      const failures: RuntimeV2SupervisorError[] = [];
+      const supervisor = createSupervisor(createFixture(scenario), {
+        onRuntimeFailure: (error) => failures.push(error),
+      });
+      await supervisor.start();
+
+      await supervisor.startProviderInference(INFERENCE_RUN_ID, inferenceStartPayload());
+      await waitUntil(() => failures.length === 1);
+
+      expect(failures[0]).toMatchObject({ code: "RUNTIME_V2_PROTOCOL_INVALID" });
+      expect(supervisor.pid).toBeNull();
+    },
+  );
+
   it("binds a Provider through the sensitive command path and exposes only a safe receipt", async () => {
     const supervisor = createSupervisor(createFixture("success"));
     await supervisor.start();
@@ -245,6 +311,23 @@ function providerConfig() {
   };
 }
 
+const INFERENCE_RUN_ID = "57e76f0e-934e-4d35-9bf8-37963836fe87";
+const INFERENCE_ID = "c837a70c-7547-453f-971f-8ab2b36368ed";
+const INFERENCE_ATTEMPT_ID = "d3f55d5e-da1f-40d7-b061-7106a9238c21";
+const INFERENCE_COMPILATION_ID = "51663fc0-144a-48ec-8f71-fd31c82e36a8";
+
+function inferenceStartPayload() {
+  return {
+    inferenceId: INFERENCE_ID,
+    attemptId: INFERENCE_ATTEMPT_ID,
+    contextCompilationId: INFERENCE_COMPILATION_ID,
+    requestNumber: 1,
+    attemptNumber: 1,
+    invocationId: "run-1:steward",
+    inferenceIdempotencyKey: "inference-start-1",
+  };
+}
+
 async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -256,7 +339,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<v
 const FIXTURE_SOURCE = String.raw`
 const fs = require("node:fs");
 const readline = require("node:readline");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const scenario = process.argv[2];
 const capturePath = process.argv[3];
 const now = new Date().toISOString();
@@ -282,6 +365,67 @@ input.on("line", (line) => {
     runtimeSequence += 1;
     if (scenario === "exit-on-status" && command.name === "runtime.status.get") process.exit(9);
     if (scenario === "ignore-status" && command.name === "runtime.status.get") return;
+    if (command.name === "provider.inference.start" && scenario.startsWith("inference-terminal-")) {
+      const identity = {
+        runId: command.runId,
+        inferenceId: command.payload.inferenceId,
+        attemptId: command.payload.attemptId,
+        contextCompilationId: command.payload.contextCompilationId,
+        requestNumber: command.payload.requestNumber,
+        attemptNumber: command.payload.attemptNumber,
+      };
+      const acceptedEnvelope = envelope(
+        1, "provider.inference.accepted", identity, command.messageId, runtimeSequence, "response",
+      );
+      acceptedEnvelope.runId = command.runId;
+      process.stdout.write(JSON.stringify(acceptedEnvelope) + "\n");
+      runtimeSequence += 1;
+      const terminalIdentity = scenario === "inference-terminal-identity-mismatch"
+        ? { ...identity, attemptId: randomUUID() }
+        : identity;
+      const completed = {
+        ...terminalIdentity,
+        providerId: "deepseek",
+        modelId: "deepseek-chat",
+        responseIdSha256: "3".repeat(64),
+        responseBodySha256: "4".repeat(64),
+        stopReason: "stop",
+        usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+        output: { text: "done", textSha256: createHash("sha256").update("done", "utf8").digest("hex"), utf8Bytes: 4 },
+      };
+      const completedEnvelope = envelope(
+        1, "provider.inference.completed", completed, command.messageId, runtimeSequence, "event",
+      );
+      completedEnvelope.runId = command.runId;
+      process.stdout.write(JSON.stringify(completedEnvelope) + "\n");
+      if (scenario === "inference-terminal-duplicate") {
+        runtimeSequence += 1;
+        const duplicateEnvelope = envelope(
+          1, "provider.inference.completed", completed, command.messageId, runtimeSequence, "event",
+        );
+        duplicateEnvelope.runId = command.runId;
+        process.stdout.write(JSON.stringify(duplicateEnvelope) + "\n");
+      }
+      return;
+    }
+    if (command.name === "runtime.status.get" && scenario === "unknown-event-on-status") {
+      process.stdout.write(JSON.stringify(envelope(1, "runtime.future", {}, null, runtimeSequence, "event")) + "\n");
+      return;
+    }
+    if (command.name === "runtime.status.get" && scenario === "bad-event-sequence") {
+      process.stdout.write(JSON.stringify(envelope(1, "runtime.error", {
+        code: "RUNTIME_BUSY", class: "validation", retryable: true, publicMessage: "Runtime is busy.",
+        stage: "runtime.actor", attempt: 0, diagnosticId: randomUUID(),
+      }, null, runtimeSequence + 1, "event")) + "\n");
+      return;
+    }
+    if (command.name === "runtime.status.get" && scenario === "orphan-correlated-event") {
+      process.stdout.write(JSON.stringify(envelope(1, "runtime.error", {
+        code: "RUNTIME_BUSY", class: "validation", retryable: true, publicMessage: "Runtime is busy.",
+        stage: "runtime.actor", attempt: 0, diagnosticId: randomUUID(),
+      }, randomUUID(), runtimeSequence, "event")) + "\n");
+      return;
+    }
     if (command.name === "provider.bind") {
       process.stdout.write(JSON.stringify(envelope(1, "provider.bound", {
         profileId: command.payload.config.profileId,
@@ -294,6 +438,13 @@ input.on("line", (line) => {
       return;
     }
     if (command.name === "runtime.status.get") {
+      if (scenario === "event-before-status") {
+        process.stdout.write(JSON.stringify(envelope(1, "runtime.error", {
+          code: "RUNTIME_BUSY", class: "validation", retryable: true, publicMessage: "Runtime is busy.",
+          stage: "runtime.actor", attempt: 0, diagnosticId: randomUUID(),
+        }, null, runtimeSequence, "event")) + "\n");
+        runtimeSequence += 1;
+      }
       process.stdout.write(JSON.stringify(envelope(1, "runtime.status", {
         initialized: true, workspaceDatabaseConfigured: false, recoveredRunCount: 0,
         protocolVersion: 1, runtimeVersion: "0.1.0",

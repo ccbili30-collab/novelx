@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -492,6 +493,242 @@ pub struct RuntimeError {
     pub diagnostic_id: Uuid,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceStart {
+    pub inference_id: Uuid,
+    pub attempt_id: Uuid,
+    pub invocation_id: String,
+    pub context_compilation_id: Uuid,
+    pub request_number: u64,
+    pub attempt_number: u64,
+    pub inference_idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceIdentity {
+    pub run_id: Uuid,
+    pub inference_id: Uuid,
+    pub attempt_id: Uuid,
+    pub context_compilation_id: Uuid,
+    pub request_number: u64,
+    pub attempt_number: u64,
+}
+
+pub type ProviderInferenceAccepted = ProviderInferenceIdentity;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceOutput {
+    pub text: String,
+    pub text_sha256: String,
+    pub utf8_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceCompleted {
+    #[serde(flatten)]
+    pub identity: ProviderInferenceIdentity,
+    pub provider_id: String,
+    pub model_id: String,
+    pub response_id_sha256: String,
+    pub response_body_sha256: String,
+    pub stop_reason: String,
+    pub usage: ProviderInferenceUsage,
+    pub output: ProviderInferenceOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceFailed {
+    #[serde(flatten)]
+    pub identity: ProviderInferenceIdentity,
+    pub error: RuntimeError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderInferenceReconciliationReason {
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceReconciliationRequired {
+    #[serde(flatten)]
+    pub identity: ProviderInferenceIdentity,
+    pub reason: ProviderInferenceReconciliationReason,
+    pub error: RuntimeError,
+}
+
+pub const MAX_PROVIDER_INFERENCE_OUTPUT_BYTES: usize = 1_048_576;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderInferenceValidationError {
+    EmptyIdentity { field: &'static str },
+    NumberMustBePositive { field: &'static str },
+    InvalidSha256 { field: &'static str },
+    UsageTotalMismatch,
+    OutputEmpty,
+    OutputTooLarge { actual: usize, maximum: usize },
+    OutputByteLengthMismatch { declared: u64, actual: usize },
+    OutputHashMismatch,
+    ReconciliationCannotBeRetryable,
+}
+
+impl std::fmt::Display for ProviderInferenceValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyIdentity { field } => write!(formatter, "{field} must not be empty"),
+            Self::NumberMustBePositive { field } => write!(formatter, "{field} must be positive"),
+            Self::InvalidSha256 { field } => write!(formatter, "{field} must be lowercase SHA-256"),
+            Self::UsageTotalMismatch => write!(
+                formatter,
+                "totalTokens must equal inputTokens plus outputTokens"
+            ),
+            Self::OutputEmpty => write!(formatter, "Provider inference output must not be empty"),
+            Self::OutputTooLarge { actual, maximum } => write!(
+                formatter,
+                "Provider inference output is {actual} bytes; maximum is {maximum}"
+            ),
+            Self::OutputByteLengthMismatch { declared, actual } => write!(
+                formatter,
+                "declared output byte length {declared} does not match actual length {actual}"
+            ),
+            Self::OutputHashMismatch => write!(
+                formatter,
+                "textSha256 does not match Provider inference output"
+            ),
+            Self::ReconciliationCannotBeRetryable => write!(
+                formatter,
+                "unknown Provider outcomes cannot be automatically retryable"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProviderInferenceValidationError {}
+
+impl ProviderInferenceStart {
+    pub fn validate(&self) -> Result<(), ProviderInferenceValidationError> {
+        require_identity("invocationId", &self.invocation_id)?;
+        require_identity("inferenceIdempotencyKey", &self.inference_idempotency_key)?;
+        require_positive("requestNumber", self.request_number)?;
+        require_positive("attemptNumber", self.attempt_number)
+    }
+}
+
+impl ProviderInferenceIdentity {
+    pub fn validate(&self) -> Result<(), ProviderInferenceValidationError> {
+        require_positive("requestNumber", self.request_number)?;
+        require_positive("attemptNumber", self.attempt_number)
+    }
+}
+
+impl ProviderInferenceCompleted {
+    pub fn validate(&self) -> Result<(), ProviderInferenceValidationError> {
+        self.identity.validate()?;
+        require_identity("providerId", &self.provider_id)?;
+        require_identity("modelId", &self.model_id)?;
+        require_identity("stopReason", &self.stop_reason)?;
+        require_sha256("responseIdSha256", &self.response_id_sha256)?;
+        require_sha256("responseBodySha256", &self.response_body_sha256)?;
+        require_sha256("textSha256", &self.output.text_sha256)?;
+        if self
+            .usage
+            .input_tokens
+            .checked_add(self.usage.output_tokens)
+            != Some(self.usage.total_tokens)
+        {
+            return Err(ProviderInferenceValidationError::UsageTotalMismatch);
+        }
+        if self.output.text.is_empty() {
+            return Err(ProviderInferenceValidationError::OutputEmpty);
+        }
+        let actual_bytes = self.output.text.len();
+        if actual_bytes > MAX_PROVIDER_INFERENCE_OUTPUT_BYTES {
+            return Err(ProviderInferenceValidationError::OutputTooLarge {
+                actual: actual_bytes,
+                maximum: MAX_PROVIDER_INFERENCE_OUTPUT_BYTES,
+            });
+        }
+        if self.output.utf8_bytes != actual_bytes as u64 {
+            return Err(ProviderInferenceValidationError::OutputByteLengthMismatch {
+                declared: self.output.utf8_bytes,
+                actual: actual_bytes,
+            });
+        }
+        if lowercase_sha256(self.output.text.as_bytes()) != self.output.text_sha256 {
+            return Err(ProviderInferenceValidationError::OutputHashMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl ProviderInferenceFailed {
+    pub fn validate(&self) -> Result<(), ProviderInferenceValidationError> {
+        self.identity.validate()
+    }
+}
+
+impl ProviderInferenceReconciliationRequired {
+    pub fn validate(&self) -> Result<(), ProviderInferenceValidationError> {
+        self.identity.validate()?;
+        if self.error.retryable {
+            return Err(ProviderInferenceValidationError::ReconciliationCannotBeRetryable);
+        }
+        Ok(())
+    }
+}
+
+fn require_identity(
+    field: &'static str,
+    value: &str,
+) -> Result<(), ProviderInferenceValidationError> {
+    if value.trim().is_empty() {
+        return Err(ProviderInferenceValidationError::EmptyIdentity { field });
+    }
+    Ok(())
+}
+
+fn require_positive(
+    field: &'static str,
+    value: u64,
+) -> Result<(), ProviderInferenceValidationError> {
+    if value == 0 {
+        return Err(ProviderInferenceValidationError::NumberMustBePositive { field });
+    }
+    Ok(())
+}
+
+fn require_sha256(
+    field: &'static str,
+    value: &str,
+) -> Result<(), ProviderInferenceValidationError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ProviderInferenceValidationError::InvalidSha256 { field });
+    }
+    Ok(())
+}
+
+fn lowercase_sha256(value: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,5 +996,273 @@ mod tests {
             "unexpected": true
         });
         assert!(serde_json::from_value::<ContextCompilationReceipt>(receipt_with_unknown).is_err());
+    }
+
+    #[test]
+    fn provider_inference_payloads_round_trip_strictly() {
+        let run_id = Uuid::new_v4();
+        let identity = ProviderInferenceIdentity {
+            run_id,
+            inference_id: Uuid::new_v4(),
+            attempt_id: Uuid::new_v4(),
+            context_compilation_id: Uuid::new_v4(),
+            request_number: 1,
+            attempt_number: 1,
+        };
+        let start = ProviderInferenceStart {
+            inference_id: identity.inference_id,
+            attempt_id: identity.attempt_id,
+            invocation_id: "invocation-1".to_owned(),
+            context_compilation_id: identity.context_compilation_id,
+            request_number: 1,
+            attempt_number: 1,
+            inference_idempotency_key: "inference-key-1".to_owned(),
+        };
+        let accepted: ProviderInferenceAccepted = identity.clone();
+        let error = RuntimeError {
+            code: "PROVIDER_REJECTED".to_owned(),
+            class: RuntimeErrorClass::ProviderRejected,
+            retryable: false,
+            public_message: "Provider rejected the request.".to_owned(),
+            stage: "provider.inference".to_owned(),
+            attempt: 1,
+            diagnostic_id: Uuid::new_v4(),
+        };
+        let completed = ProviderInferenceCompleted {
+            identity: identity.clone(),
+            provider_id: "deepseek".to_owned(),
+            model_id: "deepseek-chat".to_owned(),
+            response_id_sha256: "a".repeat(64),
+            response_body_sha256: "b".repeat(64),
+            stop_reason: "stop".to_owned(),
+            usage: ProviderInferenceUsage {
+                input_tokens: 10,
+                output_tokens: 2,
+                total_tokens: 12,
+            },
+            output: ProviderInferenceOutput {
+                text: "done".to_owned(),
+                text_sha256: lowercase_sha256(b"done"),
+                utf8_bytes: 4,
+            },
+        };
+        let failed = ProviderInferenceFailed {
+            identity: identity.clone(),
+            error: error.clone(),
+        };
+        let reconciliation = ProviderInferenceReconciliationRequired {
+            identity,
+            reason: ProviderInferenceReconciliationReason::OutcomeUnknown,
+            error,
+        };
+
+        let start_json = serde_json::to_value(&start).unwrap();
+        let accepted_json = serde_json::to_value(&accepted).unwrap();
+        let completed_json = serde_json::to_value(&completed).unwrap();
+        let failed_json = serde_json::to_value(&failed).unwrap();
+        let reconciliation_json = serde_json::to_value(&reconciliation).unwrap();
+        assert_eq!(start.validate(), Ok(()));
+        assert_eq!(accepted.validate(), Ok(()));
+        assert_eq!(completed.validate(), Ok(()));
+        assert_eq!(failed.validate(), Ok(()));
+        assert_eq!(reconciliation.validate(), Ok(()));
+        assert_eq!(
+            serde_json::from_value::<ProviderInferenceStart>(start_json).unwrap(),
+            start
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderInferenceAccepted>(accepted_json).unwrap(),
+            accepted
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderInferenceCompleted>(completed_json).unwrap(),
+            completed
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderInferenceFailed>(failed_json).unwrap(),
+            failed
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderInferenceReconciliationRequired>(reconciliation_json)
+                .unwrap(),
+            reconciliation
+        );
+    }
+
+    #[test]
+    fn provider_inference_payloads_reject_unknown_fields_and_bad_uuids() {
+        let start_with_unknown = serde_json::json!({
+            "inferenceId": Uuid::new_v4(),
+            "attemptId": Uuid::new_v4(),
+            "invocationId": "invocation-1",
+            "contextCompilationId": Uuid::new_v4(),
+            "requestNumber": 1,
+            "attemptNumber": 1,
+            "inferenceIdempotencyKey": "inference-key-1",
+            "credential": "must-not-cross-protocol"
+        });
+        assert!(serde_json::from_value::<ProviderInferenceStart>(start_with_unknown).is_err());
+
+        let identity_with_bad_uuid = serde_json::json!({
+            "runId": "not-a-uuid",
+            "inferenceId": Uuid::new_v4(),
+            "attemptId": Uuid::new_v4(),
+            "contextCompilationId": Uuid::new_v4(),
+            "requestNumber": 1,
+            "attemptNumber": 1
+        });
+        assert!(
+            serde_json::from_value::<ProviderInferenceIdentity>(identity_with_bad_uuid).is_err()
+        );
+
+        let reconciliation_with_bad_reason = serde_json::json!({
+            "runId": Uuid::new_v4(),
+            "inferenceId": Uuid::new_v4(),
+            "attemptId": Uuid::new_v4(),
+            "contextCompilationId": Uuid::new_v4(),
+            "requestNumber": 1,
+            "attemptNumber": 1,
+            "reason": "retry",
+            "error": {
+                "code": "PROVIDER_OUTCOME_UNKNOWN",
+                "class": "provider_timeout",
+                "retryable": false,
+                "publicMessage": "Outcome unknown.",
+                "stage": "provider.inference",
+                "attempt": 1,
+                "diagnosticId": Uuid::new_v4()
+            }
+        });
+        assert!(
+            serde_json::from_value::<ProviderInferenceReconciliationRequired>(
+                reconciliation_with_bad_reason
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_inference_validation_rejects_semantically_invalid_payloads() {
+        let identity = ProviderInferenceIdentity {
+            run_id: Uuid::new_v4(),
+            inference_id: Uuid::new_v4(),
+            attempt_id: Uuid::new_v4(),
+            context_compilation_id: Uuid::new_v4(),
+            request_number: 1,
+            attempt_number: 1,
+        };
+        let error = RuntimeError {
+            code: "PROVIDER_OUTCOME_UNKNOWN".to_owned(),
+            class: RuntimeErrorClass::ProviderTimeout,
+            retryable: false,
+            public_message: "Outcome unknown.".to_owned(),
+            stage: "provider.inference".to_owned(),
+            attempt: 1,
+            diagnostic_id: Uuid::new_v4(),
+        };
+        let valid_completed = ProviderInferenceCompleted {
+            identity: identity.clone(),
+            provider_id: "deepseek".to_owned(),
+            model_id: "deepseek-chat".to_owned(),
+            response_id_sha256: "a".repeat(64),
+            response_body_sha256: "b".repeat(64),
+            stop_reason: "stop".to_owned(),
+            usage: ProviderInferenceUsage {
+                input_tokens: 10,
+                output_tokens: 2,
+                total_tokens: 12,
+            },
+            output: ProviderInferenceOutput {
+                text: "done".to_owned(),
+                text_sha256: lowercase_sha256(b"done"),
+                utf8_bytes: 4,
+            },
+        };
+
+        let mut start = ProviderInferenceStart {
+            inference_id: identity.inference_id,
+            attempt_id: identity.attempt_id,
+            invocation_id: " ".to_owned(),
+            context_compilation_id: identity.context_compilation_id,
+            request_number: 1,
+            attempt_number: 1,
+            inference_idempotency_key: "key".to_owned(),
+        };
+        assert_eq!(
+            start.validate(),
+            Err(ProviderInferenceValidationError::EmptyIdentity {
+                field: "invocationId"
+            })
+        );
+        start.invocation_id = "invocation".to_owned();
+        start.request_number = 0;
+        assert_eq!(
+            start.validate(),
+            Err(ProviderInferenceValidationError::NumberMustBePositive {
+                field: "requestNumber"
+            })
+        );
+
+        let mut completed = valid_completed.clone();
+        completed.provider_id.clear();
+        assert!(matches!(
+            completed.validate(),
+            Err(ProviderInferenceValidationError::EmptyIdentity {
+                field: "providerId"
+            })
+        ));
+        completed = valid_completed.clone();
+        completed.response_id_sha256 = "A".repeat(64);
+        assert!(matches!(
+            completed.validate(),
+            Err(ProviderInferenceValidationError::InvalidSha256 {
+                field: "responseIdSha256"
+            })
+        ));
+        completed = valid_completed.clone();
+        completed.usage.total_tokens = 11;
+        assert_eq!(
+            completed.validate(),
+            Err(ProviderInferenceValidationError::UsageTotalMismatch)
+        );
+        completed = valid_completed.clone();
+        completed.output.text.clear();
+        assert_eq!(
+            completed.validate(),
+            Err(ProviderInferenceValidationError::OutputEmpty)
+        );
+        completed = valid_completed.clone();
+        completed.output.utf8_bytes = 3;
+        assert!(matches!(
+            completed.validate(),
+            Err(ProviderInferenceValidationError::OutputByteLengthMismatch { .. })
+        ));
+        completed = valid_completed.clone();
+        completed.output.text_sha256 = "c".repeat(64);
+        assert_eq!(
+            completed.validate(),
+            Err(ProviderInferenceValidationError::OutputHashMismatch)
+        );
+        completed = valid_completed;
+        completed.output.text = "a".repeat(MAX_PROVIDER_INFERENCE_OUTPUT_BYTES + 1);
+        completed.output.text_sha256 = lowercase_sha256(completed.output.text.as_bytes());
+        completed.output.utf8_bytes = completed.output.text.len() as u64;
+        assert!(matches!(
+            completed.validate(),
+            Err(ProviderInferenceValidationError::OutputTooLarge { .. })
+        ));
+
+        let reconciliation = ProviderInferenceReconciliationRequired {
+            identity,
+            reason: ProviderInferenceReconciliationReason::OutcomeUnknown,
+            error: RuntimeError {
+                retryable: true,
+                ..error
+            },
+        };
+        assert_eq!(
+            reconciliation.validate(),
+            Err(ProviderInferenceValidationError::ReconciliationCannotBeRetryable)
+        );
     }
 }
