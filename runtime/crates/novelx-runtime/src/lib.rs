@@ -29,6 +29,7 @@ pub mod project_search_tools;
 pub mod project_tool_dispatcher;
 pub mod project_tool_execution_service;
 pub mod provider_attempt;
+pub mod provider_dispatch_recovery_service;
 pub mod provider_gateway;
 pub mod provider_inference_protocol;
 pub mod provider_inference_service;

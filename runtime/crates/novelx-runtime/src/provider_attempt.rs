@@ -264,6 +264,14 @@ impl ProviderAttemptAggregate {
         &self.tool_calls
     }
 
+    pub fn dispatch_id(&self) -> Option<&str> {
+        self.dispatch_id.as_deref()
+    }
+
+    pub const fn failure(&self) -> Option<&ProviderAttemptFailure> {
+        self.failure.as_ref()
+    }
+
     pub fn fail(
         &mut self,
         journal: &mut EventJournal,
