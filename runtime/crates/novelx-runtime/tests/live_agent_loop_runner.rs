@@ -28,12 +28,54 @@ use novelx_runtime::{
     provider_inference_service::ProviderInferenceExecution,
     run_aggregate::{EventMetadata, RunAggregate},
     run_command_service::{RunCommandService, WorkspaceBinding},
+    workspace_runtime_lease::WorkspaceRuntimeLease,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
+
+#[test]
+fn open_rejects_empty_workspace_identity() {
+    let fixture = Fixture::new();
+    let result = LiveAgentLoopRunner::open(
+        &fixture.database,
+        "   ".to_owned(),
+        Arc::clone(&fixture.lease),
+        ProjectRoot::open(fixture.project.path().to_str().unwrap()).unwrap(),
+        "project-1".to_owned(),
+        ProviderRegistry::default(),
+        ProviderGateway::new().unwrap(),
+        loop_policy(),
+    );
+
+    assert!(matches!(result, Err(LiveAgentLoopError::IdentityInvalid)));
+}
+
+#[test]
+fn open_rejects_lease_for_a_different_database() {
+    let fixture = Fixture::new();
+    let other_directory = tempfile::tempdir().unwrap();
+    let other_database = other_directory.path().join("other-runtime.db");
+    let wrong_lease =
+        Arc::new(WorkspaceRuntimeLease::acquire(&other_database, "wrong-database-lease").unwrap());
+    let result = LiveAgentLoopRunner::open(
+        &fixture.database,
+        "workspace-1".to_owned(),
+        wrong_lease,
+        ProjectRoot::open(fixture.project.path().to_str().unwrap()).unwrap(),
+        "project-1".to_owned(),
+        ProviderRegistry::default(),
+        ProviderGateway::new().unwrap(),
+        loop_policy(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(LiveAgentLoopError::WorkspaceLeaseInvalid)
+    ));
+}
 
 #[test]
 fn awaiting_provider_is_precreated_once_and_reused_after_restart() {
@@ -230,6 +272,8 @@ async fn free_live_loop_executes_read_and_stat_then_sends_results_to_second_infe
     };
     let runner = LiveAgentLoopRunner::open(
         &fixture.database,
+        "workspace-1".to_owned(),
+        Arc::clone(&fixture.lease),
         ProjectRoot::open(fixture.project.path().to_str().unwrap()).unwrap(),
         "project-1".to_owned(),
         providers,
@@ -335,6 +379,8 @@ async fn awaiting_provider_resume_reuses_the_persisted_dispatch_identity() {
     };
     let runner = LiveAgentLoopRunner::open(
         &fixture.database,
+        "workspace-1".to_owned(),
+        Arc::clone(&fixture.lease),
         ProjectRoot::open(fixture.project.path().to_str().unwrap()).unwrap(),
         "project-1".to_owned(),
         providers,
@@ -399,6 +445,8 @@ async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_ro
     let root = ProjectRoot::open(fixture.project.path().to_str().unwrap()).unwrap();
     let runner = LiveAgentLoopRunner::open(
         &fixture.database,
+        "workspace-1".to_owned(),
+        Arc::clone(&fixture.lease),
         root.clone(),
         "project-1".to_owned(),
         providers,
@@ -481,6 +529,8 @@ fn open_runner(
 ) -> LiveAgentLoopRunner {
     LiveAgentLoopRunner::open(
         &fixture.database,
+        "workspace-1".to_owned(),
+        Arc::clone(&fixture.lease),
         ProjectRoot::open(fixture.project.path().to_str().unwrap()).unwrap(),
         project_id.to_owned(),
         providers,
@@ -554,6 +604,7 @@ fn text_outcome(execution: &ProviderInferenceExecution, text: &str) -> ProviderI
 }
 
 struct Fixture {
+    lease: Arc<WorkspaceRuntimeLease>,
     _temp: tempfile::TempDir,
     project: tempfile::TempDir,
     database: std::path::PathBuf,
@@ -564,7 +615,12 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let database = temp.path().join("runtime.db");
+        let lease = Arc::new(
+            WorkspaceRuntimeLease::acquire(&database, format!("live-loop-{}", Uuid::new_v4()))
+                .unwrap(),
+        );
         Self {
+            lease,
             _temp: temp,
             project,
             database,

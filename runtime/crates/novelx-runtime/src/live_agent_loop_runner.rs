@@ -1,6 +1,7 @@
 use std::{
     future::Future,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use novelx_protocol::{
@@ -35,6 +36,7 @@ use crate::{
     run_aggregate::{RunAggregate, RunAggregateError},
     run_state::RunState,
     tool_coordination_service::ToolCoordinationStatus,
+    workspace_runtime_lease::WorkspaceRuntimeLease,
 };
 use crate::{
     artifact_store::ArtifactStore as LoopArtifactStore,
@@ -75,6 +77,8 @@ pub enum LiveAgentLoopOutcome {
 
 pub struct LiveAgentLoopRunner {
     database_path: PathBuf,
+    workspace_id: String,
+    workspace_runtime_lease: Arc<WorkspaceRuntimeLease>,
     project_root: ProjectRoot,
     project_id: String,
     providers: ProviderRegistry,
@@ -165,27 +169,43 @@ impl LiveAgentLoopRunner {
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         database_path: impl AsRef<Path>,
+        workspace_id: String,
+        workspace_runtime_lease: Arc<WorkspaceRuntimeLease>,
         project_root: ProjectRoot,
         project_id: String,
         providers: ProviderRegistry,
         gateway: ProviderGateway,
         policy: AgentLoopPolicy,
     ) -> Result<Self, LiveAgentLoopError> {
-        if project_id.trim().is_empty() {
+        if workspace_id.trim().is_empty() || project_id.trim().is_empty() {
             return Err(LiveAgentLoopError::IdentityInvalid);
         }
         let database_path = database_path.as_ref().to_path_buf();
+        if !workspace_runtime_lease.protects_database(&database_path) {
+            return Err(LiveAgentLoopError::WorkspaceLeaseInvalid);
+        }
         EventJournal::open(&database_path)?;
         Ok(Self {
             database_path,
+            workspace_id,
+            workspace_runtime_lease,
             project_root,
             project_id,
             providers,
             gateway,
             policy,
         })
+    }
+
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
+    pub fn workspace_runtime_lease(&self) -> Arc<WorkspaceRuntimeLease> {
+        Arc::clone(&self.workspace_runtime_lease)
     }
 
     pub fn ensure_awaiting_provider(
@@ -761,6 +781,8 @@ fn checkpoint_sha256(service: &AgentLoopService) -> Result<String, LiveAgentLoop
 pub enum LiveAgentLoopError {
     #[error("live agent loop identity is invalid")]
     IdentityInvalid,
+    #[error("live agent loop workspace runtime lease does not protect its database")]
+    WorkspaceLeaseInvalid,
     #[error("live agent loop produced an unexpected directive")]
     DirectiveInvalid,
     #[error("project tool execution did not reach a terminal state")]
