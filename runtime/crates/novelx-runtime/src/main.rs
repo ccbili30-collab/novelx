@@ -61,6 +61,7 @@ use novelx_runtime::runtime_actor::{
     RuntimeActor, RuntimeActorHandle, RuntimeOutputDraft, RuntimeTaskKey, RuntimeTaskProgressSender,
 };
 use novelx_runtime::tool_protocol_mapper::ToolProtocolMapper;
+use novelx_runtime::workspace_runtime_lease::{WorkspaceRuntimeLease, WorkspaceRuntimeLeaseError};
 use novelx_runtime::{
     agent_loop_service::AgentLoopPolicy,
     live_agent_loop_runner::LiveAgentLoopError,
@@ -171,6 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assignment_recovery_report,
         mut operational_recovery_runs,
         quarantined_assignment_ids,
+        _workspace_runtime_lease,
     ) = match initialize.workspace_database_path.as_deref() {
         None => (
             None,
@@ -181,6 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             BTreeMap::new(),
             BTreeSet::new(),
+            None,
         ),
         Some(path) => match initialize_runtime(
             path,
@@ -194,6 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.assignment_report,
                 state.operational_runs,
                 state.quarantined_assignment_ids,
+                Some(state.workspace_runtime_lease),
             ),
             Err(error) => {
                 let diagnostic_id = Uuid::new_v4();
@@ -2303,6 +2307,7 @@ async fn write_protocol_error(
 }
 
 struct InitializedRuntimeState {
+    workspace_runtime_lease: WorkspaceRuntimeLease,
     journal: EventJournal,
     recovered_run_count: u64,
     assignment_report: AssignmentRecoveryReport,
@@ -2314,6 +2319,8 @@ fn initialize_runtime(
     path: &str,
     binding: &WorkspaceBinding,
 ) -> Result<InitializedRuntimeState, InitializationError> {
+    let workspace_runtime_lease = WorkspaceRuntimeLease::acquire(path, Uuid::new_v4().to_string())
+        .map_err(InitializationError::WorkspaceLease)?;
     let mut journal = EventJournal::open(path).map_err(InitializationError::Storage)?;
     let report = RecoveryCoordinator::recover_and_reconcile(&mut journal)
         .map_err(InitializationError::Recovery)?;
@@ -2346,6 +2353,7 @@ fn initialize_runtime(
         .collect();
     let count = report.recovered_nonterminal_count;
     Ok(InitializedRuntimeState {
+        workspace_runtime_lease,
         journal,
         recovered_run_count: count,
         assignment_report,
@@ -2361,6 +2369,11 @@ async fn write_initialization_failed(
     error: &InitializationError,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (code, class, stage) = match error {
+        InitializationError::WorkspaceLease(_) => (
+            "WORKSPACE_RUNTIME_LEASE_UNAVAILABLE",
+            RuntimeErrorClass::Storage,
+            "runtime.initialize.workspace_lease",
+        ),
         InitializationError::Storage(_) => (
             "RUNTIME_STORAGE_INITIALIZATION_FAILED",
             RuntimeErrorClass::Storage,
@@ -2438,6 +2451,7 @@ impl RoutedOutput {
 
 #[derive(Debug)]
 enum InitializationError {
+    WorkspaceLease(WorkspaceRuntimeLeaseError),
     Storage(EventJournalError),
     Recovery(RecoveryError),
     AssignmentRecovery(AgentAssignmentRecoveryError),
@@ -2449,6 +2463,7 @@ enum InitializationError {
 impl std::fmt::Display for InitializationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::WorkspaceLease(error) => write!(formatter, "workspace runtime lease: {error}"),
             Self::Storage(error) => write!(formatter, "storage: {error}"),
             Self::Recovery(error) => write!(formatter, "recovery: {error}"),
             Self::AssignmentRecovery(error) => {

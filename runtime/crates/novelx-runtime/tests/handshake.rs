@@ -416,6 +416,46 @@ fn initializes_an_empty_database_with_zero_recovered_runs() {
 }
 
 #[test]
+fn only_one_runtime_process_can_own_a_workspace_database() {
+    let fixture = Fixture::new();
+    let database_path = fixture.database_path.to_string_lossy().into_owned();
+    let (mut first, _hello) = spawn_and_read_hello();
+    let first_initialize = initialize_envelope_with_path(
+        PROTOCOL_VERSION,
+        "runtime.initialize",
+        Some(database_path.clone()),
+    );
+    write_envelope(&mut first, &first_initialize);
+    assert_eq!(read_next_envelope(&mut first).name, "runtime.ready");
+
+    let (mut second, _hello) = spawn_and_read_hello();
+    let second_initialize = initialize_envelope_with_path(
+        PROTOCOL_VERSION,
+        "runtime.initialize",
+        Some(database_path.clone()),
+    );
+    write_envelope(&mut second, &second_initialize);
+    let rejected = read_next_envelope(&mut second);
+    assert_eq!(rejected.name, "runtime.initialization_failed");
+    let error: RuntimeError = serde_json::from_value(rejected.payload).unwrap();
+    assert_eq!(error.code, "WORKSPACE_RUNTIME_LEASE_UNAVAILABLE");
+    assert_eq!(error.stage, "runtime.initialize.workspace_lease");
+    drop(second.stdin.take());
+    assert!(!second.wait().unwrap().success());
+
+    drop(first.stdin.take());
+    assert!(first.wait().unwrap().success());
+
+    let (mut third, _hello) = spawn_and_read_hello();
+    let third_initialize =
+        initialize_envelope_with_path(PROTOCOL_VERSION, "runtime.initialize", Some(database_path));
+    write_envelope(&mut third, &third_initialize);
+    assert_eq!(read_next_envelope(&mut third).name, "runtime.ready");
+    drop(third.stdin.take());
+    assert!(third.wait().unwrap().success());
+}
+
+#[test]
 fn reports_the_real_nonterminal_recovery_count() {
     let fixture = Fixture::new();
     {

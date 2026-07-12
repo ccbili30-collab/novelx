@@ -9,6 +9,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::workspace_event_journal::{
     NewWorkspaceEvent, WorkspaceEvent, WorkspaceEventJournal, WorkspaceEventJournalError,
 };
+use crate::workspace_runtime_lease::WorkspaceRuntimeLease;
 
 const STREAM_TYPE: &str = "operational_recovery";
 const EVENT_TYPE: &str = "operational_recovery.event";
@@ -356,6 +357,12 @@ enum RecoveryEventData {
     Claimed {
         claim: OperationalRecoveryClaim,
     },
+    ClaimTransferred {
+        operation_id: String,
+        previous_claim_id: String,
+        exclusive_owner_instance_id: String,
+        claim: OperationalRecoveryClaim,
+    },
     LeaseRenewed {
         operation_id: String,
         claim_id: String,
@@ -571,6 +578,65 @@ impl OperationalRecoveryRepository {
         self.append_at_global_sequence(
             current,
             RecoveryEventData::Claimed { claim },
+            expected_global_sequence,
+            metadata,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfer_claim(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        operation_id: &str,
+        previous_claim_id: &str,
+        claim: OperationalRecoveryClaim,
+        exclusive_lease: &WorkspaceRuntimeLease,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        validate_claim(&claim)?;
+        validate_initial_lease_policy(&claim)?;
+        if !exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) {
+            return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
+        }
+        let current = self.load(workspace_id, run_id)?;
+        let operation = current
+            .operations
+            .get(operation_id)
+            .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+        let previous = operation
+            .claim
+            .as_ref()
+            .ok_or(OperationalRecoveryAggregateError::ClaimRequired)?;
+        if previous.claim_id != previous_claim_id
+            || operation.execution.is_some()
+            || operation.outcome.is_some()
+            || claim.operation_id != previous.operation_id
+            || claim.source_fingerprint != previous.source_fingerprint
+            || claim.executor_version != previous.executor_version
+            || claim.action_spec_sha256 != previous.action_spec_sha256
+            || claim.fencing_token
+                != previous
+                    .fencing_token
+                    .checked_add(1)
+                    .ok_or(OperationalRecoveryAggregateError::FencingTokenInvalid)?
+        {
+            return Err(OperationalRecoveryAggregateError::ClaimTransferInvalid);
+        }
+        let transferred_at = parse_time("claimed_at", &claim.claimed_at)?;
+        let previous_expiry = parse_time("lease_expires_at", &previous.lease_expires_at)?;
+        if transferred_at < previous_expiry {
+            return Err(OperationalRecoveryAggregateError::ClaimTransferBeforeExpiry);
+        }
+        self.append_at_global_sequence(
+            current,
+            RecoveryEventData::ClaimTransferred {
+                operation_id: operation_id.to_owned(),
+                previous_claim_id: previous_claim_id.to_owned(),
+                exclusive_owner_instance_id: exclusive_lease.instance_id().to_owned(),
+                claim,
+            },
             expected_global_sequence,
             metadata,
         )
@@ -902,6 +968,47 @@ fn apply_event(
                 || claim.fencing_token != 1
             {
                 return Err(OperationalRecoveryAggregateError::OperationNotClaimable);
+            }
+            operation.claim = Some(claim);
+            aggregate.revision = event.aggregate_revision;
+            aggregate.last_event_hash = event.event_hash;
+        }
+        RecoveryEventData::ClaimTransferred {
+            operation_id,
+            previous_claim_id,
+            exclusive_owner_instance_id,
+            claim,
+        } => {
+            validate_claim(&claim)?;
+            validate_initial_lease_policy(&claim)?;
+            let aggregate = value
+                .as_mut()
+                .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            let operation = aggregate
+                .operations
+                .get_mut(&operation_id)
+                .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+            let previous = operation
+                .claim
+                .as_ref()
+                .ok_or(OperationalRecoveryAggregateError::ClaimRequired)?;
+            if previous.claim_id != previous_claim_id
+                || exclusive_owner_instance_id != claim.owner_instance_id
+                || operation.execution.is_some()
+                || operation.outcome.is_some()
+                || claim.operation_id != previous.operation_id
+                || claim.source_fingerprint != previous.source_fingerprint
+                || claim.executor_version != previous.executor_version
+                || claim.action_spec_sha256 != previous.action_spec_sha256
+                || claim.fencing_token
+                    != previous
+                        .fencing_token
+                        .checked_add(1)
+                        .ok_or(OperationalRecoveryAggregateError::FencingTokenInvalid)?
+                || parse_time("claimed_at", &claim.claimed_at)?
+                    < parse_time("lease_expires_at", &previous.lease_expires_at)?
+            {
+                return Err(OperationalRecoveryAggregateError::ClaimTransferInvalid);
             }
             operation.claim = Some(claim);
             aggregate.revision = event.aggregate_revision;
@@ -1263,7 +1370,8 @@ fn event_operation_id(data: &RecoveryEventData) -> &str {
         RecoveryEventData::Waiting { operation_id, .. }
         | RecoveryEventData::Quarantined { operation_id, .. } => operation_id,
         RecoveryEventData::Claimed { claim } => &claim.operation_id,
-        RecoveryEventData::LeaseRenewed { operation_id, .. }
+        RecoveryEventData::ClaimTransferred { operation_id, .. }
+        | RecoveryEventData::LeaseRenewed { operation_id, .. }
         | RecoveryEventData::ExecutionStarted { operation_id, .. }
         | RecoveryEventData::ExecutionFinished { operation_id, .. } => operation_id,
     }
@@ -1280,6 +1388,11 @@ fn event_suffix(data: &RecoveryEventData) -> Result<String, OperationalRecoveryA
             canonical_sha256(&serde_json::to_value(invariant_codes)?)?
         ),
         RecoveryEventData::Claimed { claim } => format!("claimed:{}", claim.claim_id),
+        RecoveryEventData::ClaimTransferred {
+            previous_claim_id,
+            claim,
+            ..
+        } => format!("claim-transferred:{previous_claim_id}:{}", claim.claim_id),
         RecoveryEventData::LeaseRenewed {
             claim_id,
             lease_expires_at,
@@ -1347,6 +1460,12 @@ pub enum OperationalRecoveryAggregateError {
     ClaimConflict,
     #[error("operational recovery fencing token is invalid")]
     FencingTokenInvalid,
+    #[error("operational recovery requires the exclusive workspace runtime owner")]
+    ExclusiveOwnerRequired,
+    #[error("operational recovery claim transfer is invalid")]
+    ClaimTransferInvalid,
+    #[error("operational recovery claim cannot transfer before lease expiry")]
+    ClaimTransferBeforeExpiry,
     #[error("operational recovery lease must expire after it is claimed")]
     LeaseWindowInvalid,
     #[error("operational recovery claim lease has expired")]

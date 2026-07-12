@@ -5,6 +5,7 @@ use novelx_runtime::operational_recovery_aggregate::{
     OperationalRecoveryObservedGate, OperationalRecoveryOutcome, OperationalRecoveryRepository,
     OperationalRecoverySubject, OperationalRecoveryWaitingReason,
 };
+use novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
@@ -601,6 +602,116 @@ fn terminal_outcome_rejects_conflicting_writeback_and_unverified_success() {
             metadata(),
         ),
         Err(OperationalRecoveryAggregateError::OperationTerminal)
+    ));
+}
+
+#[test]
+fn expired_unstarted_claim_transfers_with_exclusive_owner_and_increments_fence() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "4",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let first_claim = claim(&observation, "runtime-instance-1", 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            first_claim.clone(),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let exclusive = WorkspaceRuntimeLease::acquire(&fixture.path, "runtime-instance-2").unwrap();
+    let second_claim = OperationalRecoveryClaim::derive(
+        observation.operation_id.clone(),
+        "runtime-instance-2".to_owned(),
+        2,
+        observation.source_fingerprint.clone(),
+        "2026-07-13T00:05:00Z".to_owned(),
+        "2026-07-13T00:10:00Z".to_owned(),
+        first_claim.executor_version.clone(),
+        first_claim.action_spec_sha256.clone(),
+    )
+    .unwrap();
+    let transferred = repository
+        .transfer_claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            &first_claim.claim_id,
+            second_claim.clone(),
+            &exclusive,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:05:00Z"),
+        )
+        .unwrap();
+    assert_eq!(
+        transferred.operations[&observation.operation_id].claim,
+        Some(second_claim.clone())
+    );
+    assert!(matches!(
+        repository.start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            OperationalRecoveryExecution::derive(
+                &first_claim,
+                OperationalRecoveryEffectClass::LocalDeterministic,
+                "2026-07-13T00:04:00Z".to_owned(),
+            )
+            .unwrap(),
+            fixture.clock(),
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::FenceMismatch)
+    ));
+    let execution = OperationalRecoveryExecution::derive(
+        &second_claim,
+        OperationalRecoveryEffectClass::LocalDeterministic,
+        "2026-07-13T00:06:00Z".to_owned(),
+    )
+    .unwrap();
+    repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            execution,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:06:00Z"),
+        )
+        .unwrap();
+    let third_claim = OperationalRecoveryClaim::derive(
+        observation.operation_id.clone(),
+        "runtime-instance-2".to_owned(),
+        3,
+        observation.source_fingerprint,
+        "2026-07-13T00:10:00Z".to_owned(),
+        "2026-07-13T00:15:00Z".to_owned(),
+        second_claim.executor_version,
+        second_claim.action_spec_sha256,
+    )
+    .unwrap();
+    assert!(matches!(
+        repository.transfer_claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            &second_claim.claim_id,
+            third_claim,
+            &exclusive,
+            fixture.clock(),
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::ClaimTransferInvalid)
     ));
 }
 

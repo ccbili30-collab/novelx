@@ -41,3 +41,4 @@ pub mod tool_coordination_service;
 pub mod tool_protocol_mapper;
 pub mod tool_state;
 pub mod workspace_event_journal;
+pub mod workspace_runtime_lease;
