@@ -9,17 +9,19 @@
 - Only `RecoveryReady（恢复就绪）` operations without Waiting/Quarantined disposition are claimable.
 - First ownership uses fencing token 1. A second owner cannot replace it, while an identical retry is semantically idempotent.
 - Added ADR-0012 documenting source-snapshot CAS, fencing and side-effect restrictions.
+- Added a Claim coordinator that re-runs Assignment structural recovery and operational scanning between two global-clock reads before it derives ownership.
+- The coordinator rejects missing observations, changed Provider evidence, stale operation IDs and any mutation that lands during its scan/CAS window.
 
 ## Verification
 
 - Tests prove the global clock observes both event journals.
 - Tests prove stale global snapshots cannot append a guarded event.
 - Tests prove ready Claims survive replay, identical retries do not append, another owner conflicts, and non-ready operations cannot be claimed.
+- Claim coordinator tests prove fresh ready evidence can be claimed, changed Provider evidence is rejected, unrecorded observations cannot be claimed, and two Runtime instances cannot both acquire ownership. The two-instance race passed ten consecutive focused runs.
 - Full Rust workspace tests pass after the migration and aggregate changes.
 
 ## Not Complete
 
-- No Claim coordinator performs the required fresh structural and operational rescan yet.
 - No Runtime supervisor automatically claims candidates.
 - No lease renewal, release, transfer, stale, execution-started or terminal execution events exist yet.
 - No executor consumes Claims, and no Provider or Tool side effect is enabled by this batch.
