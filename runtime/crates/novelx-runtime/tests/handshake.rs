@@ -10,6 +10,7 @@ use novelx_protocol::{
 use novelx_runtime::event_journal::EventJournal;
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use rusqlite::Connection;
+use support::pinned_identity;
 use tempfile::TempDir;
 
 #[test]
@@ -423,8 +424,10 @@ fn create_run(journal: &mut EventJournal, run_id: &str, target: &str) {
     let mut run = RunAggregate::create(
         journal,
         run_id,
+        pinned_identity(),
         EventMetadata {
             message_id: &created_message,
+            idempotency_key: &created_message,
             created_at: "2026-07-12T00:00:00Z",
             reason: None,
         },
@@ -486,6 +489,7 @@ fn apply_step(
         journal,
         EventMetadata {
             message_id: &message,
+            idempotency_key: &message,
             created_at: "2026-07-12T00:00:01Z",
             reason: None,
         },
@@ -518,3 +522,4 @@ fn write_line(child: &mut Child, line: &str) {
     writeln!(stdin, "{line}").expect("stdin write");
     stdin.flush().expect("stdin flush");
 }
+mod support;

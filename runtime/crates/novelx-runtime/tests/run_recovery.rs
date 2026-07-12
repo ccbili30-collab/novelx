@@ -1,7 +1,10 @@
+mod support;
+
 use novelx_runtime::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent};
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use novelx_runtime::run_state::{RunState, TransitionError};
 use serde_json::json;
+use support::pinned_identity;
 use tempfile::TempDir;
 
 #[test]
@@ -9,8 +12,13 @@ fn persists_transitions_and_recovers_after_reopening_sqlite() {
     let fixture = Fixture::new();
     let (expected_state, expected_sequence) = {
         let mut journal = fixture.open();
-        let mut run =
-            RunAggregate::create(&mut journal, "run-1", metadata("message-1", None)).unwrap();
+        let mut run = RunAggregate::create(
+            &mut journal,
+            "run-1",
+            pinned_identity(),
+            metadata("message-1", None),
+        )
+        .unwrap();
         run.prepare(&mut journal, metadata("message-2", None))
             .unwrap();
         run.start(&mut journal, metadata("message-3", None))
@@ -27,6 +35,7 @@ fn persists_transitions_and_recovers_after_reopening_sqlite() {
     let journal = fixture.open();
     let recovered = RunAggregate::recover(&journal, "run-1").unwrap();
     assert_eq!(recovered.state(), expected_state);
+    assert_eq!(recovered.pinned_identity(), &pinned_identity());
     assert_eq!(recovered.last_sequence(), expected_sequence);
     assert_eq!(expected_state, RunState::Completed);
     assert_eq!(expected_sequence, 6);
@@ -38,6 +47,7 @@ fn persists_transitions_and_recovers_after_reopening_sqlite() {
             "previousState": null,
             "currentState": "created",
             "reason": null,
+            "pinnedIdentity": serde_json::to_value(pinned_identity()).unwrap(),
         })
     );
     assert_eq!(
@@ -51,10 +61,142 @@ fn persists_transitions_and_recovers_after_reopening_sqlite() {
 }
 
 #[test]
+fn stable_start_idempotency_recovers_the_current_run_without_a_second_creation() {
+    let fixture = Fixture::new();
+    {
+        let mut journal = fixture.open();
+        let mut run = RunAggregate::create(
+            &mut journal,
+            "run-1",
+            pinned_identity(),
+            EventMetadata {
+                message_id: "transport-1",
+                idempotency_key: "start-key-1",
+                created_at: "2026-07-12T00:00:00Z",
+                reason: None,
+            },
+        )
+        .unwrap();
+        run.prepare(&mut journal, metadata("prepare-1", None))
+            .unwrap();
+    }
+
+    let mut journal = fixture.open();
+    let retried = RunAggregate::create(
+        &mut journal,
+        "run-1",
+        pinned_identity(),
+        EventMetadata {
+            message_id: "transport-retry",
+            idempotency_key: "start-key-1",
+            created_at: "2026-07-12T00:05:00Z",
+            reason: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(retried.state(), RunState::Preparing);
+    assert_eq!(retried.last_sequence(), 2);
+    assert_eq!(journal.read_run("run-1", 0).unwrap().len(), 2);
+}
+
+#[test]
+fn stable_start_key_rejects_any_changed_pinned_identity_without_writing() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    RunAggregate::create(
+        &mut journal,
+        "run-1",
+        pinned_identity(),
+        EventMetadata {
+            message_id: "transport-1",
+            idempotency_key: "start-key-1",
+            created_at: "2026-07-12T00:00:00Z",
+            reason: None,
+        },
+    )
+    .unwrap();
+
+    let mut changed = pinned_identity();
+    changed.provider.model_id = "deepseek-reasoner".to_owned();
+    let error = RunAggregate::create(
+        &mut journal,
+        "run-1",
+        changed,
+        EventMetadata {
+            message_id: "transport-2",
+            idempotency_key: "start-key-1",
+            created_at: "2026-07-12T00:01:00Z",
+            reason: None,
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RunAggregateError::Journal(EventJournalError::IdempotencyConflict { .. })
+    ));
+    assert_eq!(journal.read_run("run-1", 0).unwrap().len(), 1);
+}
+
+#[test]
+fn rejects_unsorted_scope_and_unknown_transition_versions() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    let mut invalid = pinned_identity();
+    invalid.scope_resource_ids.reverse();
+    assert!(matches!(
+        RunAggregate::create(
+            &mut journal,
+            "run-invalid",
+            invalid,
+            metadata("message-invalid", None)
+        ),
+        Err(RunAggregateError::InvalidPinnedIdentity("scopeResourceIds"))
+    ));
+    assert!(journal.read_run("run-invalid", 0).unwrap().is_empty());
+
+    RunAggregate::create(
+        &mut journal,
+        "run-1",
+        pinned_identity(),
+        metadata("message-1", None),
+    )
+    .unwrap();
+    journal
+        .append(
+            NewRuntimeEvent {
+                run_id: "run-1".to_owned(),
+                aggregate_type: "run".to_owned(),
+                aggregate_id: "run-1".to_owned(),
+                message_id: "message-2".to_owned(),
+                idempotency_key: "message-2".to_owned(),
+                event_type: "run.preparing".to_owned(),
+                event_version: 99,
+                payload: transition_payload("created", "preparing"),
+                created_at: "2026-07-12T00:00:01Z".to_owned(),
+            },
+            1,
+            1,
+        )
+        .unwrap();
+    assert!(matches!(
+        RunAggregate::recover(&journal, "run-1"),
+        Err(RunAggregateError::UnknownEventVersion { version: 99, .. })
+    ));
+}
+
+#[test]
 fn illegal_or_second_terminal_transition_writes_nothing() {
     let fixture = Fixture::new();
     let mut journal = fixture.open();
-    let mut run = RunAggregate::create(&mut journal, "run-1", metadata("message-1", None)).unwrap();
+    let mut run = RunAggregate::create(
+        &mut journal,
+        "run-1",
+        pinned_identity(),
+        metadata("message-1", None),
+    )
+    .unwrap();
 
     assert!(matches!(
         run.complete(&mut journal, metadata("message-2", None)),
@@ -82,12 +224,21 @@ fn illegal_or_second_terminal_transition_writes_nothing() {
 fn duplicate_creation_message_and_stale_aggregate_fail_closed() {
     let fixture = Fixture::new();
     let mut first_journal = fixture.open();
-    let mut first =
-        RunAggregate::create(&mut first_journal, "run-1", metadata("message-1", None)).unwrap();
+    let mut first = RunAggregate::create(
+        &mut first_journal,
+        "run-1",
+        pinned_identity(),
+        metadata("message-1", None),
+    )
+    .unwrap();
 
-    let duplicate =
-        RunAggregate::create(&mut first_journal, "run-1", metadata("message-other", None))
-            .unwrap_err();
+    let duplicate = RunAggregate::create(
+        &mut first_journal,
+        "run-1",
+        pinned_identity(),
+        metadata("message-other", None),
+    )
+    .unwrap_err();
     assert!(matches!(
         duplicate,
         RunAggregateError::Journal(EventJournalError::RunSequenceConflict {
@@ -127,7 +278,13 @@ fn replay_rejects_unknown_duplicate_and_mismatched_events() {
     for case in cases {
         let fixture = Fixture::new();
         let mut journal = fixture.open();
-        RunAggregate::create(&mut journal, "run-1", metadata("message-1", None)).unwrap();
+        RunAggregate::create(
+            &mut journal,
+            "run-1",
+            pinned_identity(),
+            metadata("message-1", None),
+        )
+        .unwrap();
         let (event_type, payload) = match case {
             "unknown" => ("run.future", transition_payload("created", "running")),
             "duplicate_created" => ("run.created", transition_payload("created", "created")),
@@ -185,6 +342,7 @@ fn replay_rejects_unknown_duplicate_and_mismatched_events() {
 fn metadata<'a>(message_id: &'a str, reason: Option<&'a str>) -> EventMetadata<'a> {
     EventMetadata {
         message_id,
+        idempotency_key: message_id,
         created_at: "2026-07-12T00:00:00Z",
         reason,
     }

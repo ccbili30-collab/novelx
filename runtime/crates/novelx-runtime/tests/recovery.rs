@@ -3,6 +3,7 @@ use novelx_runtime::recovery::{RecoveryClassification, RecoveryCoordinator, Reco
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::run_state::RunState;
 use serde_json::json;
+use support::pinned_identity;
 use tempfile::TempDir;
 
 #[test]
@@ -180,8 +181,10 @@ fn create_run(journal: &mut EventJournal, run_id: &str, steps: &[Step]) {
     let mut run = RunAggregate::create(
         journal,
         run_id,
+        pinned_identity(),
         EventMetadata {
             message_id: &created_message,
+            idempotency_key: &created_message,
             created_at: "2026-07-12T00:00:00Z",
             reason: None,
         },
@@ -191,6 +194,7 @@ fn create_run(journal: &mut EventJournal, run_id: &str, steps: &[Step]) {
         let message_id = format!("{run_id}-message-{}", index + 1);
         let metadata = EventMetadata {
             message_id: &message_id,
+            idempotency_key: &message_id,
             created_at: "2026-07-12T00:00:00Z",
             reason: None,
         };
@@ -228,3 +232,4 @@ impl Fixture {
         EventJournal::open(&self.database_path).unwrap()
     }
 }
+mod support;

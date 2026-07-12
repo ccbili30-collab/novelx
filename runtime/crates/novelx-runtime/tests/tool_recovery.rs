@@ -7,6 +7,7 @@ use novelx_runtime::tool_state::{
     ToolAuthorization, ToolOutcomeKnowledge, ToolRetryError, ToolSideEffect, ToolState,
 };
 use serde_json::json;
+use support::pinned_identity;
 use tempfile::TempDir;
 
 const ARGUMENTS_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -78,8 +79,13 @@ fn persists_all_transitions_and_recovers_after_reopening_sqlite() {
 fn interleaves_with_run_events_while_preserving_run_and_aggregate_sequences() {
     let fixture = Fixture::new();
     let mut journal = fixture.open();
-    let mut run =
-        RunAggregate::create(&mut journal, "run-1", run_metadata("run-message-1")).unwrap();
+    let mut run = RunAggregate::create(
+        &mut journal,
+        "run-1",
+        pinned_identity(),
+        run_metadata("run-message-1"),
+    )
+    .unwrap();
     run.prepare(&mut journal, run_metadata("run-message-2"))
         .unwrap();
     let mut tool = ToolCallAggregate::create(
@@ -462,6 +468,7 @@ fn metadata_with_key_at<'a>(
 fn run_metadata(message_id: &str) -> EventMetadata<'_> {
     EventMetadata {
         message_id,
+        idempotency_key: message_id,
         created_at: "2026-07-12T00:00:00Z",
         reason: None,
     }
@@ -484,3 +491,4 @@ impl Fixture {
         EventJournal::open(&self.database_path).unwrap()
     }
 }
+mod support;

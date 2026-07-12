@@ -161,6 +161,62 @@ pub struct RuntimeStopped {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RunPermissionMode {
+    Free,
+    Assist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RevisionReference {
+    pub id: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VersionedPolicyIdentity {
+    pub id: String,
+    pub version: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderRunIdentity {
+    pub profile_id: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub config_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunPinnedIdentity {
+    pub project_id: String,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub session_branch_id: String,
+    pub user_message_id: String,
+    pub project_branch_id: String,
+    pub goal: Option<RevisionReference>,
+    pub plan: Option<RevisionReference>,
+    pub provider: ProviderRunIdentity,
+    pub prompt_bundle: VersionedPolicyIdentity,
+    pub agent_profile: VersionedPolicyIdentity,
+    pub tool_policy: VersionedPolicyIdentity,
+    pub context_policy: VersionedPolicyIdentity,
+    pub runtime_policy: VersionedPolicyIdentity,
+    pub runtime_contract_version: String,
+    pub mode: RunPermissionMode,
+    pub source_checkpoint_id: String,
+    pub scope_resource_ids: Vec<String>,
+    pub resource_scope_sha256: String,
+    pub user_input_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeErrorClass {
     Protocol,
     ProviderAuth,

@@ -1,3 +1,4 @@
+use novelx_protocol::RunPinnedIdentity;
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -7,6 +8,7 @@ use crate::run_state::{RunState, RunStateMachine, TransitionError};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunAggregate {
     run_id: String,
+    pinned_identity: RunPinnedIdentity,
     machine: RunStateMachine,
     last_run_sequence: u64,
     last_aggregate_sequence: u64,
@@ -14,6 +16,7 @@ pub struct RunAggregate {
 
 pub struct EventMetadata<'a> {
     pub message_id: &'a str,
+    pub idempotency_key: &'a str,
     pub created_at: &'a str,
     pub reason: Option<&'a str>,
 }
@@ -22,16 +25,13 @@ impl RunAggregate {
     pub fn create(
         journal: &mut EventJournal,
         run_id: &str,
+        pinned_identity: RunPinnedIdentity,
         metadata: EventMetadata<'_>,
     ) -> Result<Self, RunAggregateError> {
-        let event = transition_event(run_id, metadata, "run.created", None, RunState::Created);
-        let stored = journal.append(event, 0, 0)?;
-        Ok(Self {
-            run_id: run_id.to_owned(),
-            machine: RunStateMachine::new(),
-            last_run_sequence: stored.run_sequence,
-            last_aggregate_sequence: stored.aggregate_sequence,
-        })
+        validate_pinned_identity(&pinned_identity)?;
+        let event = creation_event(run_id, &pinned_identity, metadata)?;
+        journal.append(event, 0, 0)?;
+        Self::recover(journal, run_id)
     }
 
     pub fn recover(journal: &EventJournal, run_id: &str) -> Result<Self, RunAggregateError> {
@@ -49,6 +49,10 @@ impl RunAggregate {
 
     pub const fn state(&self) -> RunState {
         self.machine.state()
+    }
+
+    pub const fn pinned_identity(&self) -> &RunPinnedIdentity {
+        &self.pinned_identity
     }
 
     pub const fn last_sequence(&self) -> u64 {
@@ -166,10 +170,14 @@ pub enum RunAggregateError {
     SequenceGap { expected: u64, actual: u64 },
     #[error("unknown run event type `{0}`")]
     UnknownEvent(String),
+    #[error("unknown run event version {version} for `{event_type}`")]
+    UnknownEventVersion { event_type: String, version: u32 },
     #[error("run.created must be the first and only creation event")]
     DuplicateCreated,
     #[error("run event payload is invalid")]
     InvalidPayload,
+    #[error("run pinned identity field `{0}` is invalid")]
+    InvalidPinnedIdentity(&'static str),
     #[error("run event state does not match aggregate state")]
     StateMismatch,
     #[error(transparent)]
@@ -192,15 +200,20 @@ fn replay(
             actual: first.aggregate_sequence,
         });
     }
-    let payload = parse_payload(&first.payload)?;
+    if first.event_version != 2 {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    let creation = parse_creation_payload(&first.payload)?;
     if first.event_type != "run.created"
-        || payload.previous.is_some()
-        || payload.current != RunState::Created
+        || creation.transition.previous.is_some()
+        || creation.transition.current != RunState::Created
     {
         return Err(RunAggregateError::InvalidPayload);
     }
+    validate_pinned_identity(&creation.pinned_identity)?;
     let mut aggregate = RunAggregate {
         run_id: run_id.to_owned(),
+        pinned_identity: creation.pinned_identity,
         machine: RunStateMachine::new(),
         last_run_sequence,
         last_aggregate_sequence: 1,
@@ -215,6 +228,12 @@ fn replay(
         }
         if event.event_type == "run.created" {
             return Err(RunAggregateError::DuplicateCreated);
+        }
+        if event.event_version != 1 {
+            return Err(RunAggregateError::UnknownEventVersion {
+                event_type: event.event_type.clone(),
+                version: event.event_version,
+            });
         }
         let target = state_for_event(&event.event_type)?;
         let payload = parse_payload(&event.payload)?;
@@ -232,6 +251,25 @@ struct TransitionPayload {
     current: RunState,
 }
 
+struct CreationPayload {
+    transition: TransitionPayload,
+    pinned_identity: RunPinnedIdentity,
+}
+
+fn parse_creation_payload(value: &Value) -> Result<CreationPayload, RunAggregateError> {
+    let object = value.as_object().ok_or(RunAggregateError::InvalidPayload)?;
+    if object.len() != 4 || !object.contains_key("pinnedIdentity") {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    let transition = parse_transition_fields(object)?;
+    let pinned_identity = serde_json::from_value(object["pinnedIdentity"].clone())
+        .map_err(|_| RunAggregateError::InvalidPayload)?;
+    Ok(CreationPayload {
+        transition,
+        pinned_identity,
+    })
+}
+
 fn parse_payload(value: &Value) -> Result<TransitionPayload, RunAggregateError> {
     let object = value.as_object().ok_or(RunAggregateError::InvalidPayload)?;
     if object.len() != 3
@@ -241,20 +279,56 @@ fn parse_payload(value: &Value) -> Result<TransitionPayload, RunAggregateError> 
     {
         return Err(RunAggregateError::InvalidPayload);
     }
-    let reason = &object["reason"];
+    parse_transition_fields(object)
+}
+
+fn parse_transition_fields(
+    object: &serde_json::Map<String, Value>,
+) -> Result<TransitionPayload, RunAggregateError> {
+    let reason = object
+        .get("reason")
+        .ok_or(RunAggregateError::InvalidPayload)?;
     if !reason.is_null() && !reason.is_string() {
         return Err(RunAggregateError::InvalidPayload);
     }
-    let previous = match &object["previousState"] {
+    let previous = match object
+        .get("previousState")
+        .ok_or(RunAggregateError::InvalidPayload)?
+    {
         Value::Null => None,
         Value::String(value) => Some(parse_state(value)?),
         _ => return Err(RunAggregateError::InvalidPayload),
     };
-    let current = object["currentState"]
+    let current = object
+        .get("currentState")
+        .ok_or(RunAggregateError::InvalidPayload)?
         .as_str()
         .ok_or(RunAggregateError::InvalidPayload)
         .and_then(parse_state)?;
     Ok(TransitionPayload { previous, current })
+}
+
+fn creation_event(
+    run_id: &str,
+    pinned_identity: &RunPinnedIdentity,
+    metadata: EventMetadata<'_>,
+) -> Result<NewRuntimeEvent, RunAggregateError> {
+    Ok(NewRuntimeEvent {
+        run_id: run_id.to_owned(),
+        aggregate_type: "run".to_owned(),
+        aggregate_id: run_id.to_owned(),
+        message_id: metadata.message_id.to_owned(),
+        idempotency_key: metadata.idempotency_key.to_owned(),
+        event_type: "run.created".to_owned(),
+        event_version: 2,
+        payload: json!({
+            "previousState": null,
+            "currentState": "created",
+            "reason": metadata.reason,
+            "pinnedIdentity": pinned_identity,
+        }),
+        created_at: metadata.created_at.to_owned(),
+    })
 }
 
 fn transition_event(
@@ -269,7 +343,7 @@ fn transition_event(
         aggregate_type: "run".to_owned(),
         aggregate_id: run_id.to_owned(),
         message_id: metadata.message_id.to_owned(),
-        idempotency_key: metadata.message_id.to_owned(),
+        idempotency_key: metadata.idempotency_key.to_owned(),
         event_type: event_type.to_owned(),
         event_version: 1,
         payload: json!({
@@ -279,6 +353,124 @@ fn transition_event(
         }),
         created_at: metadata.created_at.to_owned(),
     }
+}
+
+fn validate_pinned_identity(identity: &RunPinnedIdentity) -> Result<(), RunAggregateError> {
+    for (name, value) in [
+        ("projectId", identity.project_id.as_str()),
+        ("workspaceId", identity.workspace_id.as_str()),
+        ("sessionId", identity.session_id.as_str()),
+        ("sessionBranchId", identity.session_branch_id.as_str()),
+        ("userMessageId", identity.user_message_id.as_str()),
+        ("projectBranchId", identity.project_branch_id.as_str()),
+        ("provider.profileId", identity.provider.profile_id.as_str()),
+        (
+            "provider.providerId",
+            identity.provider.provider_id.as_str(),
+        ),
+        ("provider.modelId", identity.provider.model_id.as_str()),
+        ("promptBundle.id", identity.prompt_bundle.id.as_str()),
+        (
+            "promptBundle.version",
+            identity.prompt_bundle.version.as_str(),
+        ),
+        ("agentProfile.id", identity.agent_profile.id.as_str()),
+        (
+            "agentProfile.version",
+            identity.agent_profile.version.as_str(),
+        ),
+        ("toolPolicy.id", identity.tool_policy.id.as_str()),
+        ("toolPolicy.version", identity.tool_policy.version.as_str()),
+        ("contextPolicy.id", identity.context_policy.id.as_str()),
+        (
+            "contextPolicy.version",
+            identity.context_policy.version.as_str(),
+        ),
+        ("runtimePolicy.id", identity.runtime_policy.id.as_str()),
+        (
+            "runtimePolicy.version",
+            identity.runtime_policy.version.as_str(),
+        ),
+        (
+            "runtimeContractVersion",
+            identity.runtime_contract_version.as_str(),
+        ),
+        ("sourceCheckpointId", identity.source_checkpoint_id.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(RunAggregateError::InvalidPinnedIdentity(name));
+        }
+    }
+    for (name, value) in [
+        (
+            "provider.configSha256",
+            identity.provider.config_sha256.as_str(),
+        ),
+        (
+            "promptBundle.sha256",
+            identity.prompt_bundle.sha256.as_str(),
+        ),
+        (
+            "agentProfile.sha256",
+            identity.agent_profile.sha256.as_str(),
+        ),
+        ("toolPolicy.sha256", identity.tool_policy.sha256.as_str()),
+        (
+            "contextPolicy.sha256",
+            identity.context_policy.sha256.as_str(),
+        ),
+        (
+            "runtimePolicy.sha256",
+            identity.runtime_policy.sha256.as_str(),
+        ),
+        (
+            "resourceScopeSha256",
+            identity.resource_scope_sha256.as_str(),
+        ),
+        ("userInputSha256", identity.user_input_sha256.as_str()),
+    ] {
+        if !is_lowercase_sha256(value) {
+            return Err(RunAggregateError::InvalidPinnedIdentity(name));
+        }
+    }
+    if identity
+        .goal
+        .as_ref()
+        .is_some_and(invalid_revision_reference)
+    {
+        return Err(RunAggregateError::InvalidPinnedIdentity("goal"));
+    }
+    if identity
+        .plan
+        .as_ref()
+        .is_some_and(invalid_revision_reference)
+    {
+        return Err(RunAggregateError::InvalidPinnedIdentity("plan"));
+    }
+    if identity.scope_resource_ids.is_empty()
+        || identity
+            .scope_resource_ids
+            .iter()
+            .any(|value| value.trim().is_empty())
+        || identity
+            .scope_resource_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(RunAggregateError::InvalidPinnedIdentity("scopeResourceIds"));
+    }
+    Ok(())
+}
+
+fn invalid_revision_reference(reference: &novelx_protocol::RevisionReference) -> bool {
+    reference.id.trim().is_empty() || reference.revision == 0
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn transition_machine(

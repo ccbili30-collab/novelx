@@ -175,6 +175,8 @@ Baseline commands:
 
 `run.start` pins project, session branch, Goal/Plan revision, Provider profile identity, Prompt/runtime policy identities, Free/Assist mode and source checkpoint. A running Run cannot silently change these identities. Changes produce a new Run or an explicit persisted revision event.
 
+The durable `run.created` version-2 payload carries the complete secret-free pinned identity defined by ADR-0005. The stable start idempotency key is distinct from the envelope `messageId`. A retry with the same Run/key/identity returns the current recovered snapshot; a changed identity conflicts and writes nothing. Experimental version-1 creation events do not qualify as live Runs because they lack sufficient provenance.
+
 ## 5. Durable Events
 
 The runtime journal may emit:

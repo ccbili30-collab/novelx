@@ -29,11 +29,14 @@
 - Added graceful `runtime.stopped` shutdown and strict Rust/TypeScript schemas for status and shutdown messages.
 - Extended the Electron Main process supervisor to retain the post-ready NDJSON connection, allocate Host sequences, correlate status/shutdown responses, reject in-flight commands on a runtime crash and terminate only the owned process tree.
 - Extended the real TypeScript-to-Rust integration test through `runtime.status.get` and graceful `runtime.shutdown`, rather than stopping at handshake readiness.
+- Accepted ADR-0005 and added strict event-version-2 Run pinned identity covering project/workspace, session and project branches, user message, source checkpoint, Goal/Plan revisions, effective scope, Provider/model, Prompt/Agent/tool/context/runtime policies and input hashes.
+- Separated Run start business idempotency from transport message identity; a retry after restart returns the journal-recovered current state, while changed identity under the same key fails without writing.
+- Added fail-closed recovery for unknown Run event versions and validation for canonical sorted resource scopes and lowercase SHA-256 identities.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 43 tests.
+- Rust workspace tests pass: 46 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
 - Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 42 tests, including fatal timeout cleanup and post-ready crash rejection.
@@ -44,6 +47,7 @@
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor is a continuously connected, independently tested module but is not part of production startup.
 - The runtime opens and recovers the supplied workspace database and processes status/shutdown control commands after readiness, but it still does not process durable Run commands.
+- The Run pinned identity is persisted and recoverable inside the aggregate, but `run.start`/`run.get` transport commands and their TypeScript mirror are not implemented yet.
 - The ToolCall state machine and event-backed aggregate exist, but the real tool executor, Provider call, context compiler, recovery execution policy and domain tools are not implemented.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
