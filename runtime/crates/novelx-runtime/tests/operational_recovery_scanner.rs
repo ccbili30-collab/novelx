@@ -144,7 +144,7 @@ fn persisted_provider_response_is_evidence_first_without_provider_binding() {
             context_compilation_id: compilation_id,
             canonical_context_sha256: "b".repeat(64),
             transport_payload_sha256: "c".repeat(64),
-            provider,
+            provider: provider.clone(),
             request_number: 1,
             attempt_number: 1,
             output_reserve_tokens: 4096,
@@ -186,6 +186,66 @@ fn persisted_provider_response_is_evidence_first_without_provider_binding() {
     assert!(matches!(
         fixture.recovered_run(&[], &run_id).action,
         OperationalRecoveryAction::PersistedProviderResultProjection { .. }
+    ));
+}
+
+#[test]
+fn requested_attempt_is_a_typed_external_dispatch_action_not_a_local_projection() {
+    let fixture = Fixture::new();
+    let run_id = Uuid::new_v4().to_string();
+    let provider = create_running_run(&fixture, &run_id);
+    let mut journal = fixture.open();
+    let compilation_id = Uuid::new_v4();
+    let inference_id = Uuid::new_v4();
+    let attempt_id = Uuid::new_v4();
+    let loop_service = projectable_loop_service(
+        Uuid::parse_str(&run_id).unwrap(),
+        compilation_id,
+        inference_id,
+        attempt_id,
+    );
+    AgentLoopJournalRepository::new(&mut journal)
+        .create(
+            &loop_service,
+            "dispatch-loop-create",
+            loop_metadata("dispatch-loop-message"),
+        )
+        .unwrap();
+    let sequence = current_run_sequence(&journal, &run_id);
+    ProviderAttemptAggregate::create(
+        &mut journal,
+        &run_id,
+        &attempt_id.to_string(),
+        ProviderAttemptDefinition {
+            run_id: run_id.clone(),
+            inference_id: inference_id.to_string(),
+            invocation_id: "invocation-1".to_owned(),
+            context_compilation_id: compilation_id,
+            canonical_context_sha256: "b".repeat(64),
+            transport_payload_sha256: "c".repeat(64),
+            provider: provider.clone(),
+            request_number: 1,
+            attempt_number: 1,
+            output_reserve_tokens: 4096,
+            request_timeout_ms: 30_000,
+            total_deadline_ms: 120_000,
+            max_attempts: 3,
+            max_total_delay_ms: 30_000,
+        },
+        sequence,
+        provider_metadata("dispatch-request", "dispatch-request-key"),
+    )
+    .unwrap();
+    drop(journal);
+
+    let recovered = fixture.recovered_run(std::slice::from_ref(&provider), &run_id);
+    assert_eq!(
+        recovered.gate,
+        OperationalRecoveryGate::WaitingForExplicitExecution
+    );
+    assert!(matches!(
+        recovered.action,
+        OperationalRecoveryAction::PersistedProviderAttemptDispatch { .. }
     ));
 }
 

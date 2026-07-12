@@ -1,3 +1,4 @@
+use novelx_protocol::ProviderRunIdentity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -10,6 +11,18 @@ pub enum OperationalRecoveryAction {
         expected_loop_checkpoint_sha256: String,
         expected_attempt_sequence: u64,
         response_body_sha256: String,
+    },
+    PersistedProviderAttemptDispatch {
+        invocation_id: String,
+        attempt_id: String,
+        inference_id: String,
+        context_compilation_id: String,
+        attempt_number: u16,
+        provider: ProviderRunIdentity,
+        canonical_context_sha256: String,
+        expected_loop_checkpoint_sha256: String,
+        expected_attempt_sequence: u64,
+        transport_payload_sha256: String,
     },
     ContextEvidenceRequired {
         invocation_id: String,

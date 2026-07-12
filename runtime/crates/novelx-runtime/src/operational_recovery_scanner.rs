@@ -338,6 +338,9 @@ fn action_wait_reason(action: &OperationalRecoveryAction) -> &'static str {
         OperationalRecoveryAction::ProviderDispatchRequired { .. } => {
             "provider_dispatch_requires_effect_protocol"
         }
+        OperationalRecoveryAction::PersistedProviderAttemptDispatch { .. } => {
+            "persisted_provider_attempt_dispatch_requires_effect_protocol"
+        }
         OperationalRecoveryAction::ToolEvidenceOrDispatchRequired { .. } => {
             "tool_result_manifest_or_dispatch_protocol_required"
         }
@@ -403,12 +406,13 @@ fn classify_action(
                     invocation_id: Some(invocation_id.clone()),
                 };
             };
-            let matched = (attempt.state() == ProviderAttemptState::Responded
-                && attempt_id == &dispatch.attempt_id.to_string()
+            let identity_matches = attempt_id == &dispatch.attempt_id.to_string()
                 && attempt.definition().inference_id == dispatch.inference_id.to_string()
                 && attempt.definition().context_compilation_id == dispatch.context_compilation_id
                 && attempt.definition().attempt_number == dispatch.attempt_number
-                && attempt.definition().provider == run.pinned_identity().provider
+                && attempt.definition().provider == run.pinned_identity().provider;
+            let matched = (attempt.state() == ProviderAttemptState::Responded
+                && identity_matches
                 && attempt.response_receipt().is_some_and(|receipt| {
                     receipt.actual_provider_id == run.pinned_identity().provider.provider_id
                         && receipt.actual_model_id == run.pinned_identity().provider.model_id
@@ -416,11 +420,24 @@ fn classify_action(
             .then_some((attempt_id, attempt));
             matched.map_or_else(
                 || {
-                    if attempt.state() == ProviderAttemptState::Requested
-                        && attempt_id == &dispatch.attempt_id.to_string()
-                    {
-                        OperationalRecoveryAction::ProviderDispatchRequired {
-                            invocation_id: Some(invocation_id.clone()),
+                    if attempt.state() == ProviderAttemptState::Requested && identity_matches {
+                        OperationalRecoveryAction::PersistedProviderAttemptDispatch {
+                            invocation_id: invocation_id.clone(),
+                            attempt_id: attempt_id.clone(),
+                            inference_id: dispatch.inference_id.to_string(),
+                            context_compilation_id: dispatch.context_compilation_id.to_string(),
+                            attempt_number: dispatch.attempt_number,
+                            provider: attempt.definition().provider.clone(),
+                            canonical_context_sha256: attempt
+                                .definition()
+                                .canonical_context_sha256
+                                .clone(),
+                            expected_loop_checkpoint_sha256: checkpoint_sha256.clone(),
+                            expected_attempt_sequence: attempt.aggregate_sequence(),
+                            transport_payload_sha256: attempt
+                                .definition()
+                                .transport_payload_sha256
+                                .clone(),
                         }
                     } else {
                         OperationalRecoveryAction::PersistedEvidenceConflict {
