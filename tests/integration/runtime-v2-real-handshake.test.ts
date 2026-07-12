@@ -68,6 +68,7 @@ describe("Runtime V2 real Rust handshake", () => {
         commit: "runtime-v2-real-handshake-test",
       },
       workspaceDatabasePath: null,
+      projectRootPath: null,
       projectId: null,
       workspaceId: null,
       featureFlags: { runtime_v2: true },
@@ -127,7 +128,7 @@ describe("Runtime V2 real Rust handshake", () => {
     const runId = "f25772f3-b0aa-4449-92eb-8ddf611a810d";
     const payload = runStartPayload();
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     await supervisor.start();
     const mismatched = runStartPayload();
     mismatched.pinnedIdentity.projectId = "another-project";
@@ -150,7 +151,7 @@ describe("Runtime V2 real Rust handshake", () => {
     });
     await supervisor.stop();
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     const restarted = await supervisor.start();
     expect(restarted.ready.payload.recoveredRunCount).toBe(1);
     await expect(supervisor.getRun(runId)).resolves.toEqual(created);
@@ -166,7 +167,7 @@ describe("Runtime V2 real Rust handshake", () => {
     })).resolves.toEqual(cancelled);
     await supervisor.stop();
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     const terminalRestart = await supervisor.start();
     expect(terminalRestart.ready.payload.recoveredRunCount).toBe(0);
     await expect(supervisor.getRun(runId)).resolves.toEqual(cancelled);
@@ -178,7 +179,7 @@ describe("Runtime V2 real Rust handshake", () => {
     const databasePath = path.join(root, "runtime.db");
     const runId = "3f7202b5-e640-4c9c-b86a-a549fd7e6ac8";
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     await supervisor.start();
     await supervisor.startRun(runId, runStartPayload());
     const failed = await supervisor.prepareRun(runId, {
@@ -200,7 +201,7 @@ describe("Runtime V2 real Rust handshake", () => {
     await supervisor.stop();
     expect(countRuntimeEvents(databasePath, runId)).toBe(2);
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     const restarted = await supervisor.start();
     expect(restarted.ready.payload.recoveredRunCount).toBe(0);
     await expect(supervisor.getRun(runId)).resolves.toEqual(failed);
@@ -216,7 +217,7 @@ describe("Runtime V2 real Rust handshake", () => {
     payload.pinnedIdentity.provider.profileId = "profile-1";
     payload.pinnedIdentity.provider.configSha256 = configSha256;
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     await supervisor.start();
     await supervisor.bindProvider(runtimeProviderConfig(), configSha256, "integration-provider-secret");
     await supervisor.startRun(runId, payload);
@@ -248,7 +249,7 @@ describe("Runtime V2 real Rust handshake", () => {
     start.pinnedIdentity.provider.configSha256 = configSha256;
     const compile = contextCompilePayload(start);
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     const handshake = await supervisor.start();
     expect(handshake.hello.payload.capabilities).toContain("contexts_v1");
     await supervisor.bindProvider(runtimeProviderConfig(), configSha256, "context-integration-secret");
@@ -276,7 +277,7 @@ describe("Runtime V2 real Rust handshake", () => {
     await supervisor.stop();
     expect(countRuntimeEvents(databasePath, runId)).toBe(3);
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     await supervisor.start();
     await expect(supervisor.compileContext(runId, compile)).resolves.toEqual(first);
     expect(countRuntimeEvents(databasePath, runId)).toBe(3);
@@ -297,7 +298,7 @@ describe("Runtime V2 real Rust handshake", () => {
     const compile = contextCompilePayload(start);
     const terminal = deferred<RuntimeV2RuntimeEvent>();
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     supervisor.subscribeRuntimeEvents((event) => {
       if (event.name.startsWith("provider.inference.")) terminal.resolve(event);
     });
@@ -351,7 +352,7 @@ describe("Runtime V2 real Rust handshake", () => {
     start.pinnedIdentity.provider.configSha256 = configSha256;
     const runtimeFailure = deferred<RuntimeV2SupervisorError>();
 
-    supervisor = createWorkspaceSupervisor(databasePath, (error) => runtimeFailure.resolve(error));
+    supervisor = createWorkspaceSupervisor(databasePath, root, (error) => runtimeFailure.resolve(error));
     await supervisor.start();
     await supervisor.bindProvider(providerConfig, configSha256, "kill-integration-secret");
     await supervisor.startRun(runId, start);
@@ -372,7 +373,7 @@ describe("Runtime V2 real Rust handshake", () => {
       "provider.sent",
     ]);
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     const restarted = await supervisor.start();
     expect(restarted.ready.payload.recoveredRunCount).toBe(1);
     await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
@@ -398,7 +399,7 @@ describe("Runtime V2 real Rust handshake", () => {
     const terminal = deferred<RuntimeV2RuntimeEvent>();
     const terminalNames: string[] = [];
 
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, root);
     supervisor.subscribeRuntimeEvents((event) => {
       if (!event.name.startsWith("provider.inference.")) return;
       terminalNames.push(event.name);
@@ -449,7 +450,7 @@ describe("Runtime V2 real Rust handshake", () => {
 
   it("reconciles an unknown Provider outcome as cancelled and preserves it across restart", async () => {
     const runId = "7800e97d-48c7-4517-b17f-6d6dfbd998c2";
-    const { databasePath, providerServer, attemptId } = await createOutcomeUnknownRun(runId);
+    const { databasePath, projectRootPath, providerServer, attemptId } = await createOutcomeUnknownRun(runId);
 
     await expect(supervisor!.reconcileRun(runId, {
       reconciliationIdempotencyKey: "integration-reconcile-cancel-1",
@@ -470,7 +471,7 @@ describe("Runtime V2 real Rust handshake", () => {
     expect(providerServer.requestCount).toBe(1);
 
     await supervisor!.stop();
-    supervisor = createWorkspaceSupervisor(databasePath);
+    supervisor = createWorkspaceSupervisor(databasePath, projectRootPath);
     await supervisor.start();
     await expect(supervisor.getRun(runId)).resolves.toMatchObject({
       state: "cancelled",
@@ -510,6 +511,7 @@ describe("Runtime V2 real Rust handshake", () => {
 
 async function createOutcomeUnknownRun(runId: string): Promise<{
   databasePath: string;
+  projectRootPath: string;
   providerServer: ControlledProviderServer;
   attemptId: string;
 }> {
@@ -524,7 +526,7 @@ async function createOutcomeUnknownRun(runId: string): Promise<{
   start.startIdempotencyKey = `integration-reconcile-start-${runId}`;
   start.pinnedIdentity.provider.profileId = providerConfig.profileId;
   start.pinnedIdentity.provider.configSha256 = configSha256;
-  supervisor = createWorkspaceSupervisor(databasePath);
+  supervisor = createWorkspaceSupervisor(databasePath, root);
   await supervisor.start();
   await supervisor.bindProvider(providerConfig, configSha256, "reconcile-integration-secret");
   await supervisor.startRun(runId, start);
@@ -550,18 +552,19 @@ async function createOutcomeUnknownRun(runId: string): Promise<{
   expect(providerServer.requestCount).toBe(1);
 
   await supervisor.stop();
-  supervisor = createWorkspaceSupervisor(databasePath);
+  supervisor = createWorkspaceSupervisor(databasePath, root);
   await supervisor.start();
   await expect(supervisor.getRun(runId)).resolves.toMatchObject({
     state: "waiting_for_reconciliation",
     recoveryClassification: "waiting_for_reconciliation",
   });
   expect(providerServer.requestCount).toBe(1);
-  return { databasePath, providerServer, attemptId: inference.attemptId };
+  return { databasePath, projectRootPath: root, providerServer, attemptId: inference.attemptId };
 }
 
 function createWorkspaceSupervisor(
   databasePath: string,
+  projectRootPath: string,
   onRuntimeFailure?: (error: RuntimeV2SupervisorError) => void,
 ): RuntimeV2ProcessSupervisor {
   return new RuntimeV2ProcessSupervisor({
@@ -572,6 +575,7 @@ function createWorkspaceSupervisor(
       commit: "runtime-v2-real-run-test",
     },
     workspaceDatabasePath: databasePath,
+    projectRootPath,
     projectId: "project-1",
     workspaceId: "workspace-1",
     featureFlags: { runtime_v2: true },

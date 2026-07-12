@@ -125,6 +125,7 @@ pub struct RuntimeInitialize {
     pub selected_protocol_version: u16,
     pub application: RuntimeApplicationIdentity,
     pub workspace_database_path: Option<String>,
+    pub project_root_path: Option<String>,
     pub project_id: Option<String>,
     pub workspace_id: Option<String>,
     pub feature_flags: BTreeMap<String, bool>,

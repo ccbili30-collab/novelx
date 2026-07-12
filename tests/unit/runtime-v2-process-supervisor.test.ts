@@ -28,11 +28,30 @@ describe("RuntimeV2ProcessSupervisor", () => {
       payload: {
         application: { id: "novelx.desktop", version: "0.2.7", commit: "desktop-test" },
         workspaceDatabasePath: null,
+        projectRootPath: null,
         projectId: null,
         workspaceId: null,
         featureFlags: { runtime_v2: true },
         hostCapabilityVersions: { project_tools: "1.0.0" },
       },
+    });
+  });
+
+  it("sends projectRootPath independently from workspaceDatabasePath", async () => {
+    const fixture = createFixture("success");
+    const supervisor = createSupervisor(fixture, {
+      workspaceDatabasePath: "D:\\NovelXRuntime\\workspace.db",
+      projectRootPath: "C:\\Creators\\SilverBay",
+      projectId: "project-1",
+      workspaceId: "workspace-1",
+    });
+
+    await supervisor.start();
+
+    const initialize = JSON.parse(fs.readFileSync(fixture.capturePath, "utf8"));
+    expect(initialize.payload).toMatchObject({
+      workspaceDatabasePath: "D:\\NovelXRuntime\\workspace.db",
+      projectRootPath: "C:\\Creators\\SilverBay",
     });
   });
 
@@ -293,6 +312,7 @@ function createSupervisor(
     executableArgs: [fixture.scriptPath, fixture.scenario, fixture.capturePath],
     application: { id: "novelx.desktop", version: "0.2.7", commit: "desktop-test" },
     workspaceDatabasePath: null,
+    projectRootPath: null,
     projectId: null,
     workspaceId: null,
     featureFlags: { runtime_v2: true },

@@ -69,6 +69,7 @@ export interface RuntimeV2ProcessSupervisorOptions {
   executableArgs?: string[];
   application: RuntimeV2ApplicationIdentity;
   workspaceDatabasePath: string | null;
+  projectRootPath: string | null;
   projectId: string | null;
   workspaceId: string | null;
   featureFlags: Record<string, boolean>;
@@ -730,6 +731,7 @@ function createInitializeEnvelope(
       selectedProtocolVersion: RUNTIME_V2_PROTOCOL_VERSION,
       application: options.application,
       workspaceDatabasePath: options.workspaceDatabasePath,
+      projectRootPath: options.projectRootPath,
       projectId: options.projectId,
       workspaceId: options.workspaceId,
       featureFlags: options.featureFlags,

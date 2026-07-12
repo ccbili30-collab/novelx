@@ -78,12 +78,16 @@ export const runtimeV2InitializePayloadSchema = z.object({
     commit: z.string().trim().min(1).max(160),
   }).strict(),
   workspaceDatabasePath: z.string().trim().min(1).max(32_767).nullable(),
+  projectRootPath: z.string().trim().min(1).max(32_767).nullable(),
   projectId: identityStringSchema.nullable(),
   workspaceId: identityStringSchema.nullable(),
   featureFlags: z.record(versionedCapabilityKeySchema, z.boolean()),
   hostCapabilityVersions: z.record(versionedCapabilityKeySchema, semanticVersionSchema),
 }).strict().superRefine((payload, context) => {
   const configured = payload.workspaceDatabasePath !== null;
+  if ((payload.projectRootPath !== null) !== configured) {
+    context.addIssue({ code: "custom", path: ["projectRootPath"], message: "projectRootPath must match workspaceDatabasePath presence." });
+  }
   if ((payload.projectId !== null) !== configured) {
     context.addIssue({ code: "custom", path: ["projectId"], message: "projectId must match workspaceDatabasePath presence." });
   }

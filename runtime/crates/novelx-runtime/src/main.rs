@@ -11,6 +11,7 @@ use novelx_runtime::context_compile_service::{
     ContextCompileService, ContextCompileServiceError, recover_compilation_receipt,
 };
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
+use novelx_runtime::project_path::ProjectRoot;
 use novelx_runtime::provider_gateway::{
     ProviderBindSensitiveEnvelope, ProviderGateway, ProviderGatewayError, ProviderInferenceRequest,
     ProviderRegistry,
@@ -92,11 +93,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let workspace_binding = match (
         initialize.workspace_database_path.as_ref(),
+        initialize.project_root_path.as_ref(),
         initialize.project_id.as_ref(),
         initialize.workspace_id.as_ref(),
     ) {
-        (None, None, None) => None,
-        (Some(_), Some(project_id), Some(workspace_id))
+        (None, None, None, None) => None,
+        (Some(_), Some(_), Some(project_id), Some(workspace_id))
             if !project_id.trim().is_empty() && !workspace_id.trim().is_empty() =>
         {
             Some(WorkspaceBinding {
@@ -105,10 +107,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         _ => {
-            let error = "runtime.initialize requires projectId and workspaceId exactly when workspaceDatabasePath is configured";
+            let error = "runtime.initialize requires projectRootPath, projectId and workspaceId exactly when workspaceDatabasePath is configured";
             write_protocol_error(&mut output, initialize_envelope.message_id, 2, error).await?;
             return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
         }
+    };
+
+    let project_root = match initialize.project_root_path.as_deref() {
+        None => None,
+        Some(path) => match ProjectRoot::open(path) {
+            Ok(root) => Some(root),
+            Err(error) => {
+                let message = format!("runtime project root binding failed: {error}");
+                write_protocol_error(&mut output, initialize_envelope.message_id, 2, &message)
+                    .await?;
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, message).into());
+            }
+        },
     };
 
     let (mut journal, recovered_run_count) = match initialize.workspace_database_path.as_deref() {
@@ -167,6 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspace_binding: workspace_binding.as_ref(),
         provider_registry: &mut provider_registry,
         provider_gateway: &provider_gateway,
+        _project_root: project_root.as_ref(),
     };
     let loop_result = run_command_loop(&mut lines, &actor_handle, &mut command_context).await;
     drop(actor_handle);
@@ -314,6 +330,7 @@ struct RuntimeCommandContext<'a> {
     workspace_binding: Option<&'a WorkspaceBinding>,
     provider_registry: &'a mut ProviderRegistry,
     provider_gateway: &'a Arc<ProviderGateway>,
+    _project_root: Option<&'a ProjectRoot>,
 }
 
 fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), String> {

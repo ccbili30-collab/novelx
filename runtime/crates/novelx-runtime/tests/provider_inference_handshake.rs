@@ -436,6 +436,7 @@ fn initialize_envelope(path: &std::path::Path) -> Envelope {
                 commit: "provider-inference-handshake".to_owned(),
             },
             workspace_database_path: Some(path.to_string_lossy().into_owned()),
+            project_root_path: Some(path.parent().unwrap().to_string_lossy().into_owned()),
             project_id: Some("project-1".to_owned()),
             workspace_id: Some("workspace-1".to_owned()),
             feature_flags: BTreeMap::new(),

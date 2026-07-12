@@ -8,6 +8,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_event_journal.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_stream_addressing.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_artifact_store.sql");
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewRuntimeEvent {
@@ -92,6 +93,7 @@ impl EventJournal {
         verify_migration_ledger_schema(&connection)?;
         apply_simple_migration(&mut connection, 1, MIGRATION_0001)?;
         apply_addressing_migration(&mut connection)?;
+        apply_simple_migration(&mut connection, 3, MIGRATION_0003)?;
         verify_schema_integrity(&connection)?;
         Ok(Self { connection })
     }

@@ -80,6 +80,7 @@ function initializeEnvelope(overrides: Record<string, unknown> = {}) {
         commit: "desktop-development",
       },
       workspaceDatabasePath: "C:\\NovelX\\Project\\.novax\\workspace.db",
+      projectRootPath: "C:\\NovelX\\Project",
       projectId: "project-1",
       workspaceId: "workspace-1",
       featureFlags: {
@@ -538,10 +539,14 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
       payload: {
         ...initializeEnvelope().payload,
         workspaceDatabasePath: null,
+        projectRootPath: null,
         projectId: null,
         workspaceId: null,
       },
     })).payload.workspaceDatabasePath).toBeNull();
+    expect(() => parseRuntimeV2InitializeEnvelope(initializeEnvelope({
+      payload: { ...initializeEnvelope().payload, projectRootPath: null },
+    }))).toThrow();
   });
 
   it("rejects invalid runtime.initialize identities, versions and secrets", () => {

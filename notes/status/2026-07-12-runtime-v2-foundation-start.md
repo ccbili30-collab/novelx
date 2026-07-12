@@ -85,6 +85,8 @@
 - Added strict OpenAI-compatible assistant `tool_calls` response parsing. Pure tool-call and text-plus-tool-call responses preserve call ID, function name, canonical JSON-object arguments and an independently recomputable SHA-256 receipt; malformed JSON, scalar/array arguments, duplicate IDs, empty names and inconsistent finish reasons fail closed.
 - Provider Attempt `provider.responded` events now persist optional assistant text plus structured tool-call receipts and recover them idempotently without a second Provider request. Legacy event-version-1 responded records that predate `tool_calls` remain recoverable through an explicit empty-list default.
 - Extended the Rust and TypeScript `provider.inference.completed` protocol with nullable text output and structured `toolCalls`, including cross-language argument-hash, unique-ID and output-shape validation.
+- Added an explicit `projectRootPath` to `runtime.initialize`; it is independent from `workspaceDatabasePath` and is required together with project/workspace identity. The authoritative desktop source is `ApplicationRegistryRepository.getProject(projectId).rootPath`; Runtime code does not infer a project root from the SQLite path.
+- Added a Windows-native Rust `ProjectRoot` confinement boundary for future tools. It rejects absolute, drive-prefixed, UNC, rooted and parent-traversal inputs, blocks `.novax`, `.git` and `node_modules` case-insensitively, canonicalizes existing targets and rejects Junction/Symlink/reparse-point escapes outside the bound root.
 
 ## Verification
 
@@ -92,6 +94,7 @@
 - Rust workspace tests pass: 139 tests, including Context Compiler, real child-process loopback Provider inference, structured tool-call parsing and replay, legacy Provider Attempt compatibility, inference-service idempotency/uncertainty, authoritative persisted-input enforcement, exact Provider HTTP status auditing, strict asynchronous inference and reconciliation validation, cancellable Runtime Actor scheduling and Provider-aware startup recovery.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
+- Targeted project-root verification passes: 16 Rust handshake/path tests, 70 TypeScript protocol/Supervisor tests and 10 real TypeScript-to-Rust integration tests.
 - The full TypeScript/Vitest suite passes: 394 tests in 84 files, including strict inference/tool/reconciliation schemas, Supervisor correlation state machines, kill/restart recovery barriers and the real Electron-to-Rust workflow.
 - `git diff --check` passes.
 - Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and explicit `handshake`, `runtime_control`, `runs_v1`, `run_reconciliation_v1`, `contexts_v1` and `provider_inference_v1` capabilities.
@@ -110,6 +113,8 @@
 - Exact Provider/model tokenizer integrations are not implemented; the compiler currently uses only the disclosed conservative fallback estimator.
 - Context compaction, durable task-note replacement, source locator/range receipts and full truncation disclosure are not implemented. Current item inclusion/omission metadata is not a substitute for those capabilities.
 - Electron production startup and the live Agent workflow do not route through `context.compile`; real loopback HTTP inference is proven inside Rust tests, but no desktop production Agent request uses that path yet.
+- The production Electron entry point still does not construct Runtime V2, so the registered project's authoritative `rootPath` is not yet wired into a live Supervisor instance. The new protocol prevents database-path inference, but the call site remains future integration work.
+- `ProjectRoot` protects path resolution, including existing and nearest-existing-ancestor checks, but no tool executor consumes it yet. Secure writes will still require handle-based/open-time checks to close filesystem time-of-check/time-of-use races before they can be called fully hardened.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.

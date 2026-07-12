@@ -23,6 +23,7 @@ fn completes_one_correlated_initialize_and_waits_for_eof() {
             "selectedProtocolVersion": 1,
             "application": { "id": "novelx.desktop", "version": "0.2.7", "commit": "desktop-development" },
             "workspaceDatabasePath": null,
+            "projectRootPath": null,
             "projectId": null,
             "workspaceId": null,
             "featureFlags": { "recovery": false, "runtime_v2": true },
@@ -79,6 +80,7 @@ fn rejects_invalid_handshake_input_without_emitting_ready() {
         "wrong_correlation",
         "wrong_sequence",
         "extra_payload",
+        "missing_project_root",
     ];
     for case in cases {
         let (mut child, hello) = spawn_and_read_hello();
@@ -110,6 +112,22 @@ fn rejects_invalid_handshake_input_without_emitting_ready() {
             "extra_payload" => {
                 let mut envelope = initialize_envelope(PROTOCOL_VERSION, "runtime.initialize");
                 envelope.payload["unexpected"] = serde_json::json!(true);
+                correlated_message_id = Some(envelope.message_id);
+                write_envelope(&mut child, &envelope);
+            }
+            "missing_project_root" => {
+                let temp = tempfile::tempdir().unwrap();
+                let mut envelope = initialize_envelope_with_path(
+                    PROTOCOL_VERSION,
+                    "runtime.initialize",
+                    Some(
+                        temp.path()
+                            .join("runtime.db")
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                );
+                envelope.payload["projectRootPath"] = serde_json::Value::Null;
                 correlated_message_id = Some(envelope.message_id);
                 write_envelope(&mut child, &envelope);
             }
@@ -497,6 +515,13 @@ fn initialize_envelope_with_path(
     workspace_database_path: Option<String>,
 ) -> Envelope {
     let has_workspace = workspace_database_path.is_some();
+    let project_root_path = workspace_database_path.as_ref().map(|database_path| {
+        std::path::Path::new(database_path)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    });
     let mut envelope = Envelope::new(
         MessageType::Command,
         name,
@@ -510,6 +535,7 @@ fn initialize_envelope_with_path(
                 commit: "desktop-development".to_owned(),
             },
             workspace_database_path,
+            project_root_path,
             project_id: has_workspace.then(|| "project-1".to_owned()),
             workspace_id: has_workspace.then(|| "workspace-1".to_owned()),
             feature_flags: BTreeMap::from([

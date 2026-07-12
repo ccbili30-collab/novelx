@@ -225,7 +225,7 @@ fn migrates_a_real_0001_database_and_preserves_rows_constraints_and_ledger() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(migrations, vec![(1, 64), (2, 64)]);
+    assert_eq!(migrations, vec![(1, 64), (2, 64), (3, 64)]);
     let indexes: Vec<String> = connection
         .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='runtime_events' ORDER BY name")
         .unwrap()
