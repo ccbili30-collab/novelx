@@ -123,6 +123,43 @@ impl<'a> ProviderInferenceService<'a> {
         if run.pinned_identity().provider != execution.provider {
             return Err(ProviderInferenceServiceError::PinnedProviderMismatch);
         }
+        if !self
+            .journal
+            .read_aggregate(
+                &execution.run_id,
+                "provider_attempt",
+                &execution.attempt_id,
+                0,
+            )?
+            .is_empty()
+        {
+            let existing = ProviderAttemptAggregate::recover(
+                self.journal,
+                &execution.run_id,
+                &execution.attempt_id,
+            )?;
+            return match existing.state() {
+                ProviderAttemptState::Responded => recovered_outcome(&existing)
+                    .map(Box::new)
+                    .map(PreparedProviderAttempt::Recovered),
+                ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
+                    Err(ProviderInferenceServiceError::OutcomeUnknown)
+                }
+                ProviderAttemptState::Failed => Err(
+                    ProviderInferenceServiceError::ExistingTerminal(existing.recovery()),
+                ),
+                ProviderAttemptState::Requested => {
+                    self.prepare_requested_attempt(execution, existing)
+                }
+            };
+        }
+        self.prepare_new_attempt(execution)
+    }
+
+    fn prepare_new_attempt(
+        &mut self,
+        execution: ProviderInferenceExecution,
+    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
         let persisted = load_persisted_context(
             self.journal,
             &execution.run_id,
@@ -161,7 +198,7 @@ impl<'a> ProviderInferenceService<'a> {
         let requested_message_id = Uuid::new_v4().to_string();
         let requested_key = execution.inference_idempotency_key.clone();
         let requested_at = timestamp()?;
-        let mut attempt = ProviderAttemptAggregate::create(
+        let attempt = ProviderAttemptAggregate::create(
             self.journal,
             &execution.run_id,
             &execution.attempt_id,
@@ -169,23 +206,54 @@ impl<'a> ProviderInferenceService<'a> {
             current_run_sequence(self.journal, &execution.run_id)?,
             metadata(&requested_message_id, &requested_key, &requested_at),
         )?;
-        match attempt.state() {
-            ProviderAttemptState::Responded => {
-                return recovered_outcome(&attempt)
-                    .map(Box::new)
-                    .map(PreparedProviderAttempt::Recovered);
-            }
-            ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
-                return Err(ProviderInferenceServiceError::OutcomeUnknown);
-            }
-            ProviderAttemptState::Failed => {
-                return Err(ProviderInferenceServiceError::ExistingTerminal(
-                    attempt.recovery(),
-                ));
-            }
-            ProviderAttemptState::Requested => {}
-        }
+        self.arm_dispatch(execution, attempt, prepared)
+    }
 
+    fn prepare_requested_attempt(
+        &mut self,
+        execution: ProviderInferenceExecution,
+        attempt: ProviderAttemptAggregate,
+    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
+        let persisted = load_persisted_context(
+            self.journal,
+            &execution.run_id,
+            &execution.request.compilation,
+        )?;
+        let actual_hash = normalized_provider_input_sha256(&persisted.normalized_input)
+            .map_err(|_| ProviderInferenceServiceError::ContextNormalizedInputInvalid)?;
+        if actual_hash != persisted.normalized_input_sha256 {
+            return Err(ProviderInferenceServiceError::ContextNormalizedInputHashMismatch);
+        }
+        let provider = self.providers.resolve(&execution.provider)?;
+        let prepared = self.gateway.prepare_inference(
+            provider,
+            ProviderInferenceRequest {
+                compilation: persisted.receipt,
+                messages: persisted.normalized_input.messages,
+                tools: persisted.normalized_input.tools,
+            },
+        )?;
+        let definition = attempt.definition();
+        if definition.inference_id != execution.inference_id
+            || definition.invocation_id != execution.invocation_id
+            || definition.context_compilation_id != prepared.compilation().compilation_id
+            || definition.canonical_context_sha256
+                != prepared.compilation().canonical_context_sha256
+            || definition.transport_payload_sha256 != prepared.transport_payload_sha256()
+            || definition.provider != execution.provider
+            || definition.attempt_number != execution.attempt_number
+        {
+            return Err(ProviderInferenceServiceError::PersistedAttemptMismatch);
+        }
+        self.arm_dispatch(execution, attempt, prepared)
+    }
+
+    fn arm_dispatch(
+        &mut self,
+        execution: ProviderInferenceExecution,
+        mut attempt: ProviderAttemptAggregate,
+        prepared: PreparedProviderInference,
+    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
         let dispatch_id = Uuid::new_v4().to_string();
         let sent_message_id = Uuid::new_v4().to_string();
         let sent_key = format!("{}:sent", execution.attempt_id);
@@ -340,6 +408,8 @@ pub enum ProviderInferenceServiceError {
     ContextNormalizedInputInvalid,
     #[error("Persisted normalized Provider input hash does not match its content")]
     ContextNormalizedInputHashMismatch,
+    #[error("Persisted Provider attempt does not match the reconstructed dispatch")]
+    PersistedAttemptMismatch,
     #[error("Provider inference outcome is unknown and cannot be auto-retried")]
     OutcomeUnknown,
     #[error("Provider inference was dispatched but its terminal journal result is unknown")]

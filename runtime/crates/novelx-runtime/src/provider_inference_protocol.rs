@@ -271,6 +271,12 @@ fn classify_error(
             false,
             "The persisted Provider input failed integrity validation.",
         ),
+        ProviderInferenceServiceError::PersistedAttemptMismatch => (
+            "PROVIDER_ATTEMPT_EVIDENCE_MISMATCH",
+            RuntimeErrorClass::Validation,
+            false,
+            "The persisted Provider attempt does not match the reconstructed dispatch.",
+        ),
         ProviderInferenceServiceError::ExistingTerminal(_) => (
             "PROVIDER_ATTEMPT_ALREADY_TERMINAL",
             RuntimeErrorClass::Validation,

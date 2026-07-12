@@ -1669,18 +1669,6 @@ async fn handle_provider_inference_start(
             tools: Vec::new(),
         },
     };
-    let provider = match providers.resolve_owned(&execution.provider) {
-        Ok(provider) => provider,
-        Err(error) => {
-            let service_error = ProviderInferenceServiceError::Gateway(error);
-            let mapper =
-                ProviderInferenceProtocolMapper::new(command.message_id, current_timestamp()?);
-            output
-                .emit(mapper.rejected(&execution, &service_error)?)
-                .await?;
-            return Ok(());
-        }
-    };
     let prepared = match ProviderInferenceService::new(journal, providers, gateway)
         .prepare_attempt(execution.clone())
     {
@@ -1690,6 +1678,25 @@ async fn handle_provider_inference_start(
                 ProviderInferenceProtocolMapper::new(command.message_id, current_timestamp()?);
             output.emit(mapper.rejected(&execution, &error)?).await?;
             return Ok(());
+        }
+    };
+    let provider = match &prepared {
+        PreparedProviderAttempt::Recovered(_) => None,
+        PreparedProviderAttempt::Dispatch(_) => {
+            match providers.resolve_owned(&execution.provider) {
+                Ok(provider) => Some(provider),
+                Err(error) => {
+                    let service_error = ProviderInferenceServiceError::Gateway(error);
+                    let mapper = ProviderInferenceProtocolMapper::new(
+                        command.message_id,
+                        current_timestamp()?,
+                    );
+                    output
+                        .emit(mapper.rejected(&execution, &service_error)?)
+                        .await?;
+                    return Ok(());
+                }
+            }
         }
     };
     let accepted = ProviderInferenceProtocolMapper::new(command.message_id, current_timestamp()?)
@@ -1724,6 +1731,9 @@ async fn handle_provider_inference_start(
                 let result = match prepared {
                     PreparedProviderAttempt::Recovered(outcome) => Ok(*outcome),
                     PreparedProviderAttempt::Dispatch(dispatch) => {
+                        let provider = provider.ok_or_else(|| {
+                            "Provider dispatch prepared without a bound Provider".to_owned()
+                        })?;
                         let dispatched = ProviderInferenceService::dispatch_attempt_cancellable(
                             &gateway,
                             &provider,

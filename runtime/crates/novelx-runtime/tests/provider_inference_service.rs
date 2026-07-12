@@ -179,9 +179,10 @@ async fn persists_requested_sent_responded_and_recovers_the_response_text_after_
     drop(journal);
 
     let no_network_gateway = ProviderGateway::new().unwrap();
+    let unbound_providers = ProviderRegistry::default();
     let recovered = {
         let mut reopened = fixture.open();
-        ProviderInferenceService::new(&mut reopened, &providers, &no_network_gateway)
+        ProviderInferenceService::new(&mut reopened, &unbound_providers, &no_network_gateway)
             .execute(execution)
             .await
             .unwrap()
