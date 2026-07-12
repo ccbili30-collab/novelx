@@ -122,6 +122,50 @@ fn a_new_exclusive_runtime_can_authorize_resume_of_a_started_local_projection() 
 }
 
 #[test]
+fn one_run_cannot_claim_two_unfinished_recovery_operations() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let first = observation(
+        &subject,
+        "a",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let second = observation(
+        &subject,
+        "c",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), first.clone(), metadata())
+        .unwrap();
+    repository
+        .observe(subject.clone(), second.clone(), metadata())
+        .unwrap();
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim(&first, "runtime-1", 1),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    assert!(matches!(
+        repository.claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim(&second, "runtime-1", 1),
+            fixture.clock(),
+            metadata(),
+        ),
+        Err(OperationalRecoveryAggregateError::ActiveOperationConflict)
+    ));
+}
+
+#[test]
 fn identical_observation_and_wait_are_idempotent_across_reopen() {
     let fixture = Fixture::new();
     let subject = subject();

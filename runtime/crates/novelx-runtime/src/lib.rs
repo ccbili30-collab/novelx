@@ -21,6 +21,7 @@ pub mod operational_recovery_completion_service;
 pub mod operational_recovery_projection_service;
 pub mod operational_recovery_recording_service;
 pub mod operational_recovery_scanner;
+pub mod operational_recovery_supervisor;
 pub mod plan_aggregate;
 pub mod project_file_tools;
 pub mod project_path;

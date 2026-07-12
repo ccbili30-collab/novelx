@@ -36,6 +36,9 @@ use novelx_runtime::operational_recovery_scanner::{
     OperationalRecoveryGate, OperationalRecoveryRun, OperationalRecoveryScanError,
     OperationalRecoveryScanner,
 };
+use novelx_runtime::operational_recovery_supervisor::{
+    OperationalRecoverySupervisor, OperationalRecoverySupervisorError,
+};
 use novelx_runtime::project_path::ProjectRoot;
 use novelx_runtime::project_tool_execution_service::{
     ProjectToolExecutionOutcome, ProjectToolExecutionService,
@@ -172,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assignment_recovery_report,
         mut operational_recovery_runs,
         quarantined_assignment_ids,
-        _workspace_runtime_lease,
+        workspace_runtime_lease,
     ) = match initialize.workspace_database_path.as_deref() {
         None => (
             None,
@@ -250,6 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         journal: &mut journal,
         workspace_binding: workspace_binding.as_ref(),
         assignment_recovery_report: &assignment_recovery_report,
+        workspace_runtime_lease: workspace_runtime_lease.as_ref(),
         operational_recovery_runs: &mut operational_recovery_runs,
         quarantined_assignment_ids: &quarantined_assignment_ids,
         provider_registry: &mut provider_registry,
@@ -567,6 +571,7 @@ struct RuntimeCommandContext<'a> {
     journal: &'a mut Option<EventJournal>,
     workspace_binding: Option<&'a WorkspaceBinding>,
     assignment_recovery_report: &'a AssignmentRecoveryReport,
+    workspace_runtime_lease: Option<&'a WorkspaceRuntimeLease>,
     operational_recovery_runs: &'a mut BTreeMap<String, OperationalRecoveryRun>,
     quarantined_assignment_ids: &'a BTreeSet<String>,
     provider_registry: &'a mut ProviderRegistry,
@@ -800,14 +805,24 @@ fn handle_provider_bind(
 fn refresh_operational_recovery(
     context: &mut RuntimeCommandContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (Some(database_path), Some(binding), Some(journal)) = (
+    let (Some(database_path), Some(binding), Some(exclusive_lease)) = (
         context.workspace_database_path,
         context.workspace_binding,
-        context.journal.as_mut(),
+        context.workspace_runtime_lease,
     ) else {
         return Ok(());
     };
     let providers = context.provider_registry.bound_identities();
+    OperationalRecoverySupervisor::new(database_path).run_local_recovery_pass(
+        &binding.workspace_id,
+        &binding.project_id,
+        &providers,
+        exclusive_lease,
+    )?;
+    let journal = context
+        .journal
+        .as_mut()
+        .ok_or("workspace journal missing after operational recovery")?;
     let report =
         OperationalRecoveryScanner::new(journal, context.assignment_recovery_report, &providers)
             .scan(&binding.workspace_id, &binding.project_id)?;
@@ -2340,6 +2355,14 @@ fn initialize_runtime(
         .iter()
         .map(|value| value.assignment_id.clone())
         .collect();
+    OperationalRecoverySupervisor::new(path)
+        .run_local_recovery_pass(
+            &binding.workspace_id,
+            &binding.project_id,
+            &[],
+            &workspace_runtime_lease,
+        )
+        .map_err(|error| InitializationError::OperationalRecoverySupervisor(Box::new(error)))?;
     let operational_report = OperationalRecoveryScanner::new(&mut journal, &assignment_report, &[])
         .scan(&binding.workspace_id, &binding.project_id)
         .map_err(InitializationError::OperationalRecoveryScan)?;
@@ -2407,6 +2430,11 @@ async fn write_initialization_failed(
             RuntimeErrorClass::Storage,
             "runtime.initialize.operational_recovery.record",
         ),
+        InitializationError::OperationalRecoverySupervisor(_) => (
+            "OPERATIONAL_RECOVERY_SUPERVISOR_FAILED",
+            RuntimeErrorClass::Validation,
+            "runtime.initialize.operational_recovery.supervisor",
+        ),
         InitializationError::Time(_) => (
             "RUNTIME_INITIALIZATION_TIME_FAILED",
             RuntimeErrorClass::Storage,
@@ -2465,6 +2493,7 @@ enum InitializationError {
     AssignmentRecovery(AgentAssignmentRecoveryError),
     OperationalRecoveryScan(OperationalRecoveryScanError),
     OperationalRecoveryRecording(OperationalRecoveryRecordingError),
+    OperationalRecoverySupervisor(Box<OperationalRecoverySupervisorError>),
     Time(time::error::Format),
 }
 
@@ -2482,6 +2511,9 @@ impl std::fmt::Display for InitializationError {
             }
             Self::OperationalRecoveryRecording(error) => {
                 write!(formatter, "operational recovery recording: {error}")
+            }
+            Self::OperationalRecoverySupervisor(error) => {
+                write!(formatter, "operational recovery supervisor: {error}")
             }
             Self::Time(error) => write!(formatter, "initialization time: {error}"),
         }

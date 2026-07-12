@@ -26,6 +26,9 @@ use novelx_runtime::{
     },
     operational_recovery_recording_service::OperationalRecoveryRecordingService,
     operational_recovery_scanner::{OperationalRecoveryGate, OperationalRecoveryScanner},
+    operational_recovery_supervisor::{
+        OperationalRecoverySupervisor, OperationalRecoverySupervisorOutcome,
+    },
     provider_attempt::{
         ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptMetadata,
         ProviderResponseReceipt,
@@ -64,6 +67,207 @@ fn claim_service_rescans_and_claims_the_recorded_ready_operation() {
     assert_eq!(
         action.action_spec_sha256().unwrap(),
         claim.action_spec_sha256
+    );
+}
+
+#[test]
+fn supervisor_completes_only_the_persisted_local_projection_and_is_restart_safe() {
+    let fixture = Fixture::new();
+    let (run_id, provider) = fixture.create_projectable_run();
+    let lease = fixture.lease("runtime-supervisor");
+    let provider_events_before = fixture.provider_attempt_event_count(&run_id);
+    let supervisor = OperationalRecoverySupervisor::new(&fixture.path);
+
+    let first = supervisor
+        .run_local_recovery_pass(
+            "workspace-1",
+            "project-1",
+            std::slice::from_ref(&provider),
+            &lease,
+        )
+        .unwrap();
+    assert_eq!(first.runs.len(), 1);
+    assert_eq!(
+        first.runs[0].outcome,
+        OperationalRecoverySupervisorOutcome::CompletedLocalProjection
+    );
+    assert_eq!(
+        fixture.provider_attempt_event_count(&run_id),
+        provider_events_before,
+        "local recovery must not dispatch a second Provider request"
+    );
+
+    let second = supervisor
+        .run_local_recovery_pass(
+            "workspace-1",
+            "project-1",
+            std::slice::from_ref(&provider),
+            &lease,
+        )
+        .unwrap();
+    assert!(matches!(
+        second.runs[0].outcome,
+        OperationalRecoverySupervisorOutcome::Waiting(
+            OperationalRecoveryGate::WaitingForExplicitExecution
+        )
+    ));
+    assert_eq!(
+        fixture.provider_attempt_event_count(&run_id),
+        provider_events_before
+    );
+}
+
+#[test]
+fn supervisor_never_dispatches_a_provider_for_an_explicit_execution_action() {
+    let fixture = Fixture::new();
+    let (run_id, provider) = fixture.create_running_without_loop();
+    let lease = fixture.lease("runtime-no-dispatch");
+    let report = OperationalRecoverySupervisor::new(&fixture.path)
+        .run_local_recovery_pass(
+            "workspace-1",
+            "project-1",
+            std::slice::from_ref(&provider),
+            &lease,
+        )
+        .unwrap();
+    assert!(matches!(
+        report.runs[0].outcome,
+        OperationalRecoverySupervisorOutcome::Waiting(
+            OperationalRecoveryGate::WaitingForExplicitExecution
+        )
+    ));
+    assert_eq!(fixture.provider_attempt_event_count(&run_id), 0);
+}
+
+#[test]
+fn supervisor_resumes_projection_committed_before_the_previous_process_crashed() {
+    let fixture = Fixture::new();
+    let (run_id, provider) = fixture.create_projectable_run();
+    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let claims = OperationalRecoveryClaimService::new(&fixture.path);
+    let old_lease = fixture.lease("old-runtime");
+    let claimed = claims
+        .claim_ready(
+            claim_request(&run_id, &operation_id),
+            std::slice::from_ref(&provider),
+            &old_lease,
+        )
+        .unwrap();
+    let claim = claimed.operations[&operation_id].claim.as_ref().unwrap();
+    let started = claims
+        .start_claimed(
+            OperationalRecoveryStartRequest {
+                workspace_id: "workspace-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                run_id: run_id.clone(),
+                operation_id: operation_id.clone(),
+                claim_id: claim.claim_id.clone(),
+                owner_instance_id: claim.owner_instance_id.clone(),
+                fencing_token: claim.fencing_token,
+            },
+            std::slice::from_ref(&provider),
+            &old_lease,
+        )
+        .unwrap();
+    let execution_id = started.operations[&operation_id]
+        .execution
+        .as_ref()
+        .unwrap()
+        .execution_id
+        .clone();
+    OperationalRecoveryProjectionService::new(&fixture.path)
+        .project_persisted_provider_result(
+            PersistedProviderProjectionRequest {
+                workspace_id: "workspace-1".to_owned(),
+                run_id: run_id.clone(),
+                operation_id: operation_id.clone(),
+                execution_id,
+            },
+            &old_lease,
+        )
+        .unwrap();
+    drop(old_lease);
+
+    let new_lease = fixture.lease("new-runtime");
+    let recovered = OperationalRecoverySupervisor::new(&fixture.path)
+        .run_local_recovery_pass(
+            "workspace-1",
+            "project-1",
+            std::slice::from_ref(&provider),
+            &new_lease,
+        )
+        .unwrap();
+    assert_eq!(
+        recovered.runs[0].outcome,
+        OperationalRecoverySupervisorOutcome::CompletedLocalProjection
+    );
+    assert_eq!(recovered.runs[0].operation_id, operation_id);
+    let aggregate = OperationalRecoveryRepository::open(&fixture.path)
+        .unwrap()
+        .load("workspace-1", &run_id)
+        .unwrap();
+    let operation = &aggregate.operations[&operation_id];
+    assert!(operation.outcome.is_some());
+    assert_eq!(
+        operation.resumes.last().unwrap().resumer_instance_id,
+        "new-runtime"
+    );
+}
+
+#[test]
+fn supervisor_resumes_an_execution_that_crashed_before_local_projection() {
+    let fixture = Fixture::new();
+    let (run_id, provider) = fixture.create_projectable_run();
+    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let claims = OperationalRecoveryClaimService::new(&fixture.path);
+    let old_lease = fixture.lease("old-runtime-before-projection");
+    let claimed = claims
+        .claim_ready(
+            claim_request(&run_id, &operation_id),
+            std::slice::from_ref(&provider),
+            &old_lease,
+        )
+        .unwrap();
+    let claim = claimed.operations[&operation_id].claim.as_ref().unwrap();
+    claims
+        .start_claimed(
+            OperationalRecoveryStartRequest {
+                workspace_id: "workspace-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                run_id: run_id.clone(),
+                operation_id: operation_id.clone(),
+                claim_id: claim.claim_id.clone(),
+                owner_instance_id: claim.owner_instance_id.clone(),
+                fencing_token: claim.fencing_token,
+            },
+            std::slice::from_ref(&provider),
+            &old_lease,
+        )
+        .unwrap();
+    drop(old_lease);
+
+    let new_lease = fixture.lease("new-runtime-before-projection");
+    let recovered = OperationalRecoverySupervisor::new(&fixture.path)
+        .run_local_recovery_pass(
+            "workspace-1",
+            "project-1",
+            std::slice::from_ref(&provider),
+            &new_lease,
+        )
+        .unwrap();
+    assert_eq!(
+        recovered.runs[0].outcome,
+        OperationalRecoverySupervisorOutcome::CompletedLocalProjection
+    );
+    let aggregate = OperationalRecoveryRepository::open(&fixture.path)
+        .unwrap()
+        .load("workspace-1", &run_id)
+        .unwrap();
+    let operation = &aggregate.operations[&operation_id];
+    assert!(operation.outcome.is_some());
+    assert_eq!(
+        operation.resumes.last().unwrap().resumer_instance_id,
+        "new-runtime-before-projection"
     );
 }
 
@@ -520,6 +724,31 @@ impl Fixture {
         (run_id, provider)
     }
 
+    fn create_running_without_loop(&self) -> (String, ProviderRunIdentity) {
+        let run_id = Uuid::new_v4().to_string();
+        let identity = support::pinned_identity();
+        let provider = identity.provider.clone();
+        let mut journal = EventJournal::open(&self.path).unwrap();
+        let mut run = RunAggregate::create(
+            &mut journal,
+            &run_id,
+            identity,
+            metadata("run-create-no-loop", "run-create-no-loop-key"),
+        )
+        .unwrap();
+        run.prepare(
+            &mut journal,
+            metadata("run-prepare-no-loop", "run-prepare-no-loop-key"),
+        )
+        .unwrap();
+        run.start(
+            &mut journal,
+            metadata("run-start-no-loop", "run-start-no-loop-key"),
+        )
+        .unwrap();
+        (run_id, provider)
+    }
+
     fn move_run_to_waiting_approval(&self, run_id: &str) {
         let mut journal = EventJournal::open(&self.path).unwrap();
         let mut run = RunAggregate::recover(&journal, run_id).unwrap();
@@ -547,6 +776,16 @@ impl Fixture {
             .unwrap()
             .current_global_sequence()
             .unwrap()
+    }
+
+    fn provider_attempt_event_count(&self, run_id: &str) -> usize {
+        EventJournal::open(&self.path)
+            .unwrap()
+            .read_run(run_id, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.aggregate_type == "provider_attempt")
+            .count()
     }
 
     fn record_ready(&self, run_id: &str, providers: &[ProviderRunIdentity]) -> String {
