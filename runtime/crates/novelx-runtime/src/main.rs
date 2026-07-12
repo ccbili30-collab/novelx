@@ -1,14 +1,13 @@
 use std::io::{self, BufRead, Write};
 
 use novelx_protocol::{
-    Envelope, MessageType, PROTOCOL_VERSION, RunLifecycleState, RunRecoveryClassification,
-    RunSnapshot, RunStart, RuntimeBuild, RuntimeError, RuntimeErrorClass, RuntimeHello,
-    RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
+    Envelope, MessageType, PROTOCOL_VERSION, RunSnapshot, RunStart, RuntimeBuild, RuntimeError,
+    RuntimeErrorClass, RuntimeHello, RuntimeIdentity, RuntimeInitialize, RuntimeReady,
+    RuntimeStatus, RuntimeStopped,
 };
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
 use novelx_runtime::recovery::{RecoveryCoordinator, RecoveryError};
-use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
-use novelx_runtime::run_state::RunState;
+use novelx_runtime::run_command_service::{RunCommandFailure, RunCommandService, WorkspaceBinding};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
@@ -285,75 +284,15 @@ fn handle_run_start(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated run.start runId");
     let start: RunStart = serde_json::from_value(command.payload.clone())?;
-    let Some(journal) = journal.as_mut() else {
-        return write_run_rejected(
-            output,
-            command,
-            runtime_sequence,
-            run_id,
-            runtime_error(
-                "RUNTIME_STORAGE_REQUIRED",
-                RuntimeErrorClass::Storage,
-                false,
-                "当前运行时没有绑定项目存储，无法创建任务。",
-                "run.start.storage",
-            ),
-        );
-    };
-    let Some(binding) = workspace_binding else {
-        return write_run_rejected(
-            output,
-            command,
-            runtime_sequence,
-            run_id,
-            runtime_error(
-                "RUNTIME_WORKSPACE_BINDING_REQUIRED",
-                RuntimeErrorClass::Validation,
-                false,
-                "当前运行时缺少项目身份绑定，无法创建任务。",
-                "run.start.binding",
-            ),
-        );
-    };
-    if start.pinned_identity.project_id != binding.project_id
-        || start.pinned_identity.workspace_id != binding.workspace_id
-    {
-        return write_run_rejected(
-            output,
-            command,
-            runtime_sequence,
-            run_id,
-            runtime_error(
-                "RUN_WORKSPACE_BINDING_CONFLICT",
-                RuntimeErrorClass::SourceConflict,
-                false,
-                "任务绑定的项目与当前运行时不一致，未写入任何数据。",
-                "run.start.binding",
-            ),
-        );
-    }
-
-    let created_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
-    match RunAggregate::create(
-        journal,
-        &run_id.to_string(),
-        start.pinned_identity,
-        EventMetadata {
-            message_id: &command.message_id.to_string(),
-            idempotency_key: &start.start_idempotency_key,
-            created_at: &created_at,
-            reason: None,
-        },
+    match RunCommandService::new(journal, workspace_binding).start(
+        run_id,
+        command.message_id,
+        start,
     ) {
-        Ok(run) => write_run_snapshot(output, command, runtime_sequence, &run),
-        Err(error) => write_run_failure(
-            output,
-            command,
-            runtime_sequence,
-            run_id,
-            "run.start.persist",
-            error,
-        ),
+        Ok(snapshot) => write_run_snapshot(output, command, runtime_sequence, snapshot),
+        Err(failure) => {
+            write_run_command_failure(output, command, runtime_sequence, run_id, failure)
+        }
     }
 }
 
@@ -364,113 +303,37 @@ fn handle_run_get(
     journal: &mut Option<EventJournal>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated run.get runId");
-    let Some(journal) = journal.as_ref() else {
-        return write_run_rejected(
-            output,
-            command,
-            runtime_sequence,
-            run_id,
-            runtime_error(
-                "RUNTIME_STORAGE_REQUIRED",
-                RuntimeErrorClass::Storage,
-                false,
-                "当前运行时没有绑定项目存储，无法查询任务。",
-                "run.get.storage",
-            ),
-        );
-    };
-    match RunAggregate::recover(journal, &run_id.to_string()) {
-        Ok(run) => write_run_snapshot(output, command, runtime_sequence, &run),
-        Err(RunAggregateError::NotFound(_)) => write_run_rejected(
-            output,
-            command,
-            runtime_sequence,
-            run_id,
-            runtime_error(
-                "RUN_NOT_FOUND",
-                RuntimeErrorClass::Validation,
-                false,
-                "没有找到这个任务。",
-                "run.get.recover",
-            ),
-        ),
-        Err(error) => write_run_failure(
-            output,
-            command,
-            runtime_sequence,
-            run_id,
-            "run.get.recover",
-            error,
-        ),
+    match RunCommandService::new(journal, None).get(run_id) {
+        Ok(snapshot) => write_run_snapshot(output, command, runtime_sequence, snapshot),
+        Err(failure) => {
+            write_run_command_failure(output, command, runtime_sequence, run_id, failure)
+        }
     }
 }
 
-fn write_run_failure(
+fn write_run_command_failure(
     output: &mut impl Write,
     command: &Envelope,
     sequence: u64,
     run_id: Uuid,
-    stage: &str,
-    error: RunAggregateError,
+    failure: RunCommandFailure,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let fatal = is_fatal_run_error(&error);
-    write_run_rejected(
-        output,
-        command,
-        sequence,
-        run_id,
-        run_aggregate_error(stage, &error),
-    )?;
-    if fatal {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("fatal Run journal failure: {error}"),
-        )
-        .into());
+    eprintln!("{}", failure.internal_message);
+    write_run_rejected(output, command, sequence, run_id, *failure.error)?;
+    if failure.fatal {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "fatal Run command failure").into());
     }
     Ok(())
-}
-
-fn is_fatal_run_error(error: &RunAggregateError) -> bool {
-    matches!(
-        error,
-        RunAggregateError::SequenceGap { .. }
-            | RunAggregateError::UnknownEvent(_)
-            | RunAggregateError::UnknownEventVersion { .. }
-            | RunAggregateError::DuplicateCreated
-            | RunAggregateError::InvalidPayload
-            | RunAggregateError::StateMismatch
-            | RunAggregateError::Journal(
-                novelx_runtime::event_journal::EventJournalError::MigrationChecksumMismatch { .. }
-                    | novelx_runtime::event_journal::EventJournalError::MigrationVerificationFailed
-                    | novelx_runtime::event_journal::EventJournalError::SchemaIntegrityFailed
-                    | novelx_runtime::event_journal::EventJournalError::Storage(_)
-            )
-    )
 }
 
 fn write_run_snapshot(
     output: &mut impl Write,
     command: &Envelope,
     sequence: u64,
-    run: &RunAggregate,
+    snapshot: RunSnapshot,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let run_id = Uuid::parse_str(run.run_id())?;
-    let mut response = response_envelope(
-        command,
-        sequence,
-        "run.snapshot",
-        RunSnapshot {
-            run_id,
-            pinned_identity: run.pinned_identity().clone(),
-            state: lifecycle_state(run.state()),
-            recovery_classification: recovery_classification(run.state()),
-            run_sequence: run.last_run_sequence(),
-            aggregate_sequence: run.last_sequence(),
-            created_at: run.created_at().to_owned(),
-            updated_at: run.updated_at().to_owned(),
-        },
-    )?;
+    let run_id = snapshot.run_id;
+    let mut response = response_envelope(command, sequence, "run.snapshot", snapshot)?;
     response.run_id = Some(run_id);
     write_envelope(output, &response)
 }
@@ -485,93 +348,6 @@ fn write_run_rejected(
     let mut response = response_envelope(command, sequence, "run.rejected", error)?;
     response.run_id = Some(run_id);
     write_envelope(output, &response)
-}
-
-fn run_aggregate_error(stage: &str, error: &RunAggregateError) -> RuntimeError {
-    let (code, class) = match error {
-        RunAggregateError::InvalidPinnedIdentity(_) => {
-            ("RUN_PINNED_IDENTITY_INVALID", RuntimeErrorClass::Validation)
-        }
-        RunAggregateError::Journal(
-            novelx_runtime::event_journal::EventJournalError::IdempotencyConflict { .. },
-        ) => (
-            "RUN_START_IDEMPOTENCY_CONFLICT",
-            RuntimeErrorClass::Protocol,
-        ),
-        RunAggregateError::Journal(
-            novelx_runtime::event_journal::EventJournalError::MessageIdConflict { .. },
-        ) => ("MESSAGE_ID_CONFLICT", RuntimeErrorClass::Protocol),
-        RunAggregateError::UnknownEvent(_)
-        | RunAggregateError::UnknownEventVersion { .. }
-        | RunAggregateError::InvalidPayload
-        | RunAggregateError::StateMismatch
-        | RunAggregateError::SequenceGap { .. }
-        | RunAggregateError::DuplicateCreated => (
-            "RUN_JOURNAL_INTEGRITY_FAILED",
-            RuntimeErrorClass::Validation,
-        ),
-        _ => ("RUN_PERSISTENCE_FAILED", RuntimeErrorClass::Storage),
-    };
-    eprintln!("{stage}: {error}");
-    runtime_error(
-        code,
-        class,
-        false,
-        "任务状态无法安全处理，项目数据未被覆盖。",
-        stage,
-    )
-}
-
-fn runtime_error(
-    code: &str,
-    class: RuntimeErrorClass,
-    retryable: bool,
-    public_message: &str,
-    stage: &str,
-) -> RuntimeError {
-    RuntimeError {
-        code: code.to_owned(),
-        class,
-        retryable,
-        public_message: public_message.to_owned(),
-        stage: stage.to_owned(),
-        attempt: 0,
-        diagnostic_id: Uuid::new_v4(),
-    }
-}
-
-fn lifecycle_state(state: RunState) -> RunLifecycleState {
-    match state {
-        RunState::Created => RunLifecycleState::Created,
-        RunState::Preparing => RunLifecycleState::Preparing,
-        RunState::Running => RunLifecycleState::Running,
-        RunState::WaitingForApproval => RunLifecycleState::WaitingForApproval,
-        RunState::Committing => RunLifecycleState::Committing,
-        RunState::Retrying => RunLifecycleState::Retrying,
-        RunState::Blocked => RunLifecycleState::Blocked,
-        RunState::Cancelled => RunLifecycleState::Cancelled,
-        RunState::Failed => RunLifecycleState::Failed,
-        RunState::Completed => RunLifecycleState::Completed,
-    }
-}
-
-fn recovery_classification(state: RunState) -> RunRecoveryClassification {
-    match state {
-        RunState::Created | RunState::Preparing | RunState::Running | RunState::Retrying => {
-            RunRecoveryClassification::Resumable
-        }
-        RunState::WaitingForApproval => RunRecoveryClassification::WaitingForApproval,
-        RunState::Committing => RunRecoveryClassification::CommitUncertain,
-        RunState::Blocked | RunState::Cancelled | RunState::Failed | RunState::Completed => {
-            RunRecoveryClassification::Terminal
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct WorkspaceBinding {
-    project_id: String,
-    workspace_id: String,
 }
 
 fn write_response(

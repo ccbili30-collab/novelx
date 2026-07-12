@@ -36,11 +36,13 @@
 - Added project/workspace binding to initialization so a Run cannot be accepted into another workspace's runtime process.
 - Extended the Electron Supervisor with typed Run start/get APIs and verified that domain rejection leaves the valid runtime connection usable.
 - Added a real cross-process restart test: create a pinned Run, stop Rust, reopen the same database, recover one nonterminal Run and retrieve the identical snapshot.
+- Extracted Run acceptance/query, snapshot projection and failure classification from the binary entry point into a dedicated `RunCommandService`; NDJSON transport no longer owns Run domain decisions.
+- Added isolated service tests for restart recovery, nonfatal workspace rejection with zero writes and fatal corrupted-history classification.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 47 tests.
+- Rust workspace tests pass: 50 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
 - Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 45 tests, including Run schema strictness, fatal timeout cleanup, post-ready crash rejection and real restart recovery.
