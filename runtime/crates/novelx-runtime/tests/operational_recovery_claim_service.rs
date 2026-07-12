@@ -222,6 +222,54 @@ fn claim_lease_duration_is_enforced_by_runtime_policy() {
 }
 
 #[test]
+fn a_new_runtime_owner_cannot_start_an_old_untransferred_claim() {
+    let fixture = Fixture::new();
+    let (run_id, provider) = fixture.create_projectable_run();
+    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let service = OperationalRecoveryClaimService::new(&fixture.path);
+    let old_lease = fixture.lease("old-runtime");
+    let claimed = service
+        .claim_ready(
+            claim_request(&run_id, &operation_id),
+            std::slice::from_ref(&provider),
+            &old_lease,
+        )
+        .unwrap();
+    let claim = claimed.operations[&operation_id]
+        .claim
+        .as_ref()
+        .unwrap()
+        .clone();
+    drop(old_lease);
+    let new_lease = fixture.lease("new-runtime");
+
+    assert!(matches!(
+        service.start_claimed(
+            OperationalRecoveryStartRequest {
+                workspace_id: "workspace-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                run_id: run_id.clone(),
+                operation_id: operation_id.clone(),
+                claim_id: claim.claim_id,
+                owner_instance_id: claim.owner_instance_id,
+                fencing_token: claim.fencing_token,
+            },
+            std::slice::from_ref(&provider),
+            &new_lease,
+        ),
+        Err(OperationalRecoveryClaimError::ExclusiveOwnerMismatch)
+    ));
+    let persisted =
+        novelx_runtime::operational_recovery_aggregate::OperationalRecoveryRepository::open(
+            &fixture.path,
+        )
+        .unwrap()
+        .load("workspace-1", &run_id)
+        .unwrap();
+    assert!(persisted.operations[&operation_id].execution.is_none());
+}
+
+#[test]
 fn expired_unstarted_claim_transfers_only_to_exclusive_runtime_owner() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();

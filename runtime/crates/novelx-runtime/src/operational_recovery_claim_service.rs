@@ -181,6 +181,9 @@ impl OperationalRecoveryClaimService {
         {
             return Err(OperationalRecoveryClaimError::FenceMismatch);
         }
+        if !exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) {
+            return Err(OperationalRecoveryClaimError::ExclusiveOwnerMismatch);
+        }
         if claim.executor_version != OPERATIONAL_RECOVERY_EXECUTOR_VERSION
             || claim.action_spec_sha256 != action_spec_sha256
         {
@@ -443,6 +446,8 @@ pub enum OperationalRecoveryClaimError {
     ActionNotLocallyExecutable,
     #[error("operational recovery workspace lease does not protect this database")]
     WorkspaceLeaseMismatch,
+    #[error("operational recovery claim owner is not the exclusive workspace runtime owner")]
+    ExclusiveOwnerMismatch,
     #[error("operational recovery lease duration is outside the server policy")]
     LeaseDurationInvalid,
     #[error(transparent)]
