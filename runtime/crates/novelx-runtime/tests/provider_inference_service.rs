@@ -11,14 +11,18 @@ use novelx_protocol::{
     ContextRepresentation, ProviderRunIdentity, TokenizerIdentity, TokenizerKind,
 };
 use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
+use novelx_runtime::provider_attempt::{
+    ProviderAttemptAggregate, ProviderAttemptFailure, ProviderAttemptMetadata,
+    ProviderAttemptRecovery, ProviderDeliveryCertainty, ProviderResponseReceipt,
+};
 use novelx_runtime::provider_gateway::{
     ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderGateway,
     ProviderInferenceMessage, ProviderInferenceRequest, ProviderInferenceRole,
     ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
 };
 use novelx_runtime::provider_inference_service::{
-    PreparedProviderAttempt, ProviderInferenceExecution, ProviderInferenceService,
-    ProviderInferenceServiceError,
+    EnsuredProviderAttempt, PreparedProviderAttempt, ProviderInferenceExecution,
+    ProviderInferenceService, ProviderInferenceServiceError,
 };
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::run_state::RunState;
@@ -31,6 +35,205 @@ use uuid::Uuid;
 const API_KEY: &str = "provider-service-sensitive-key";
 const RUN_ID: &str = "run-provider-service-1";
 const ATTEMPT_ID: &str = "attempt-provider-service-1";
+
+#[tokio::test]
+async fn ensure_requested_is_pure_idempotent_and_releases_attempt_ownership() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("不应发送"),
+    )))
+    .await;
+    let (providers, identity) = bound_registry(base_url, 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+    let execution = execution(identity);
+    let mut journal = fixture.open();
+    let mut service = ProviderInferenceService::new(&mut journal, &providers, &gateway);
+
+    let first = service.ensure_requested(execution.clone()).unwrap();
+    let second = service.ensure_requested(execution).unwrap();
+
+    assert!(matches!(first, EnsuredProviderAttempt::Requested));
+    assert!(matches!(second, EnsuredProviderAttempt::Requested));
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        attempt_events(&journal)
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["provider.requested"]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn ensure_requested_never_redispatches_sent_or_outcome_unknown_attempts() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("不应发送"),
+    )))
+    .await;
+    let (providers, identity) = bound_registry(base_url, 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+    let execution = execution(identity);
+    let mut journal = fixture.open();
+    ProviderInferenceService::new(&mut journal, &providers, &gateway)
+        .ensure_requested(execution.clone())
+        .unwrap();
+    let mut attempt = ProviderAttemptAggregate::recover(&journal, RUN_ID, ATTEMPT_ID).unwrap();
+    let expected_run_sequence = current_run_sequence(&journal);
+    attempt
+        .mark_sent(
+            &mut journal,
+            expected_run_sequence,
+            "dispatch-ensure-requested-test",
+            attempt_metadata("sent"),
+        )
+        .unwrap();
+
+    let sent = ProviderInferenceService::new(&mut journal, &providers, &gateway)
+        .ensure_requested(execution.clone());
+    assert!(matches!(
+        sent,
+        Err(ProviderInferenceServiceError::OutcomeUnknown)
+    ));
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+
+    let expected_run_sequence = current_run_sequence(&journal);
+    attempt
+        .mark_outcome_unknown(
+            &mut journal,
+            expected_run_sequence,
+            Uuid::parse_str("58fa84a4-3b3e-4aa9-996a-2b74e0b0df94").unwrap(),
+            attempt_metadata("outcome-unknown"),
+        )
+        .unwrap();
+    let unknown = ProviderInferenceService::new(&mut journal, &providers, &gateway)
+        .ensure_requested(execution);
+    assert!(matches!(
+        unknown,
+        Err(ProviderInferenceServiceError::OutcomeUnknown)
+    ));
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        attempt_events(&journal)
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "provider.requested",
+            "provider.sent",
+            "provider.outcome_unknown"
+        ]
+    );
+    server.abort();
+}
+
+#[test]
+fn ensure_requested_projects_responded_attempt_without_provider_binding_or_network() {
+    let fixture = Fixture::new();
+    let (providers, identity) = bound_registry("http://127.0.0.1:9/v1".to_owned(), 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+    let execution = execution(identity.clone());
+    let mut journal = fixture.open();
+    ProviderInferenceService::new(&mut journal, &providers, &gateway)
+        .ensure_requested(execution.clone())
+        .unwrap();
+    let mut attempt = ProviderAttemptAggregate::recover(&journal, RUN_ID, ATTEMPT_ID).unwrap();
+    let expected_run_sequence = current_run_sequence(&journal);
+    attempt
+        .mark_sent(
+            &mut journal,
+            expected_run_sequence,
+            "dispatch-responded-test",
+            attempt_metadata("responded-sent"),
+        )
+        .unwrap();
+    let expected_run_sequence = current_run_sequence(&journal);
+    attempt
+        .respond_with_output(
+            &mut journal,
+            expected_run_sequence,
+            ProviderResponseReceipt {
+                http_status: 200,
+                actual_provider_id: identity.provider_id.clone(),
+                actual_model_id: identity.model_id.clone(),
+                response_id_sha256: Some("a".repeat(64)),
+                response_body_sha256: "b".repeat(64),
+                stop_reason: "stop".to_owned(),
+                input_tokens: 10,
+                output_tokens: 2,
+                total_tokens: 12,
+            },
+            Some("持久化响应".to_owned()),
+            vec![],
+            attempt_metadata("responded"),
+        )
+        .unwrap();
+
+    let recovered = ProviderInferenceService::new(
+        &mut journal,
+        &ProviderRegistry::default(),
+        &ProviderGateway::new().unwrap(),
+    )
+    .ensure_requested(execution)
+    .unwrap();
+
+    let EnsuredProviderAttempt::Recovered(outcome) = recovered else {
+        panic!("responded Attempt must project its persisted outcome");
+    };
+    assert_eq!(outcome.text.as_deref(), Some("持久化响应"));
+    assert_eq!(attempt_events(&journal).len(), 3);
+}
+
+#[test]
+fn ensure_requested_keeps_failed_attempt_terminal() {
+    let fixture = Fixture::new();
+    let (providers, identity) = bound_registry("http://127.0.0.1:9/v1".to_owned(), 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+    let execution = execution(identity);
+    let mut journal = fixture.open();
+    ProviderInferenceService::new(&mut journal, &providers, &gateway)
+        .ensure_requested(execution.clone())
+        .unwrap();
+    let mut attempt = ProviderAttemptAggregate::recover(&journal, RUN_ID, ATTEMPT_ID).unwrap();
+    let expected_run_sequence = current_run_sequence(&journal);
+    attempt
+        .fail(
+            &mut journal,
+            expected_run_sequence,
+            ProviderAttemptFailure {
+                code: "LOCAL_AUTHORIZATION_REJECTED".to_owned(),
+                retryable: false,
+                retry_after_ms: None,
+                retry_after: None,
+                http_status: None,
+                delivery_certainty: ProviderDeliveryCertainty::NotSent,
+                diagnostic_id: Uuid::parse_str("1f25d22e-0773-4237-a84e-7031c0d668ee").unwrap(),
+            },
+            attempt_metadata("failed"),
+        )
+        .unwrap();
+
+    let failed = ProviderInferenceService::new(
+        &mut journal,
+        &ProviderRegistry::default(),
+        &ProviderGateway::new().unwrap(),
+    )
+    .ensure_requested(execution);
+    assert!(matches!(
+        failed,
+        Err(ProviderInferenceServiceError::ExistingTerminal(
+            ProviderAttemptRecovery::TerminalFailure
+        ))
+    ));
+    assert_eq!(attempt_events(&journal).len(), 2);
+}
 
 #[tokio::test]
 async fn dispatch_runs_with_the_journal_closed_and_finalize_writes_the_terminal_event_after_reopen()
@@ -792,6 +995,23 @@ fn attempt_events(journal: &EventJournal) -> Vec<novelx_runtime::event_journal::
     journal
         .read_aggregate(RUN_ID, "provider_attempt", ATTEMPT_ID, 0)
         .unwrap()
+}
+
+fn current_run_sequence(journal: &EventJournal) -> u64 {
+    journal
+        .read_run(RUN_ID, 0)
+        .unwrap()
+        .last()
+        .map_or(0, |event| event.run_sequence)
+}
+
+fn attempt_metadata(idempotency_key: &'static str) -> ProviderAttemptMetadata<'static> {
+    ProviderAttemptMetadata {
+        message_id: idempotency_key,
+        idempotency_key,
+        created_at: "2026-07-13T00:00:00Z",
+        reason: None,
+    }
 }
 
 struct Fixture {
