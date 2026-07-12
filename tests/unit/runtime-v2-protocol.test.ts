@@ -35,6 +35,7 @@ import {
   parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope,
   parseRuntimeV2ProviderInferenceStartEnvelope,
   runtimeV2EnvelopeSchema,
+  runtimeV2GoalCompletePayloadSchema,
 } from "../../src/shared/runtimeV2Protocol";
 
 const MESSAGE_ID = "35bf2cb7-b0db-44e7-985d-664f9cd98f97";
@@ -467,6 +468,20 @@ function inferenceReconciliationEnvelope(overrides: Record<string, unknown> = {}
 }
 
 describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
+  it("rejects caller-supplied Goal completion actor identity", () => {
+    const valid = {
+      completeIdempotencyKey: "goal-complete-1",
+      goalId: "goal-1",
+      expectedRevision: 3,
+      evidenceRefs: [{ kind: "artifact", reference: "artifact-1", description: "validated output" }],
+    };
+    expect(runtimeV2GoalCompletePayloadSchema.parse(valid)).toEqual(valid);
+    expect(runtimeV2GoalCompletePayloadSchema.safeParse({
+      ...valid,
+      actor: { agentId: "child", isChildAgent: false },
+    }).success).toBe(false);
+  });
+
   it("accepts the Rust runtime.hello envelope", () => {
     expect(parseRuntimeV2HelloEnvelope(helloEnvelope())).toEqual(helloEnvelope());
   });

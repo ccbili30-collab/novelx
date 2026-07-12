@@ -1,8 +1,8 @@
 use novelx_protocol::{
-    GoalAcceptanceCriterion, GoalActor, GoalComplete, GoalCompletionPropose, GoalCreate,
-    GoalDefinition, GoalEvidenceReference, GoalGet, GoalPermissionMode, GoalRevise, GoalScope,
-    GoalStatus, PlanCreate, PlanEvidence, PlanGet, PlanRevise, PlanStep, PlanStepComplete,
-    PlanStepStart, PlanStepStatus, RuntimeErrorClass,
+    GoalAcceptanceCriterion, GoalComplete, GoalCompletionPropose, GoalCreate, GoalDefinition,
+    GoalEvidenceReference, GoalGet, GoalPermissionMode, GoalRevise, GoalScope, GoalStatus,
+    PlanCreate, PlanEvidence, PlanGet, PlanRevise, PlanStep, PlanStepComplete, PlanStepStart,
+    PlanStepStatus, RuntimeErrorClass,
 };
 use novelx_runtime::{
     goal_plan_command_service::GoalPlanCommandService, run_command_service::WorkspaceBinding,
@@ -66,10 +66,6 @@ fn goal_and_plan_commands_round_trip_exact_revisions_and_evidence() {
                 complete_idempotency_key: "goal-complete-1".into(),
                 goal_id: "goal-1".into(),
                 expected_revision: 3,
-                actor: GoalActor {
-                    agent_id: "steward".into(),
-                    is_child_agent: false,
-                },
                 evidence_refs: vec![goal_evidence()],
             },
         )
@@ -240,10 +236,6 @@ fn plan_rejects_missing_stale_foreign_and_terminal_goal_revisions() {
                 complete_idempotency_key: "complete-goal".into(),
                 goal_id: "goal-1".into(),
                 expected_revision: 3,
-                actor: GoalActor {
-                    agent_id: "steward".into(),
-                    is_child_agent: false,
-                },
                 evidence_refs: vec![goal_evidence()],
             },
         )
@@ -255,7 +247,7 @@ fn plan_rejects_missing_stale_foreign_and_terminal_goal_revisions() {
 }
 
 #[test]
-fn revision_conflicts_and_forbidden_completion_are_typed_nonfatal_domain_errors() {
+fn revision_conflicts_are_typed_and_goal_completion_uses_the_persisted_owner() {
     let fixture = Fixture::new();
     let service = fixture.service();
     service
@@ -301,23 +293,18 @@ fn revision_conflicts_and_forbidden_completion_are_typed_nonfatal_domain_errors(
             },
         )
         .unwrap();
-    let forbidden = service
+    let completed = service
         .complete_goal(
             Uuid::new_v4(),
             GoalComplete {
-                complete_idempotency_key: "child-complete".into(),
+                complete_idempotency_key: "owner-complete".into(),
                 goal_id: "goal-1".into(),
                 expected_revision: 3,
-                actor: GoalActor {
-                    agent_id: "child".into(),
-                    is_child_agent: true,
-                },
                 evidence_refs: vec![goal_evidence()],
             },
         )
-        .unwrap_err();
-    assert_eq!(forbidden.error.code, "GOAL_OPERATION_FORBIDDEN");
-    assert!(!forbidden.error.retryable);
+        .unwrap();
+    assert_eq!(completed.status, GoalStatus::Completed);
 }
 
 struct Fixture {

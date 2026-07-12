@@ -462,7 +462,7 @@ export const runtimeV2GoalCreatePayloadSchema = z.object({
 export const runtimeV2GoalGetPayloadSchema = z.object({ goalId: identityStringSchema, revision: z.number().int().positive().safe().optional() }).strict();
 export const runtimeV2GoalRevisePayloadSchema = z.object({ reviseIdempotencyKey: identityStringSchema, goalId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), definition: runtimeV2GoalDefinitionSchema }).strict();
 export const runtimeV2GoalCompletionProposePayloadSchema = z.object({ proposeIdempotencyKey: identityStringSchema, goalId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), evidenceRefs: z.array(runtimeV2GoalEvidenceReferenceSchema).min(1).max(10_000) }).strict();
-export const runtimeV2GoalCompletePayloadSchema = z.object({ completeIdempotencyKey: identityStringSchema, goalId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), actor: z.object({ agentId: identityStringSchema, isChildAgent: z.boolean() }).strict(), evidenceRefs: z.array(runtimeV2GoalEvidenceReferenceSchema).min(1).max(10_000) }).strict();
+export const runtimeV2GoalCompletePayloadSchema = z.object({ completeIdempotencyKey: identityStringSchema, goalId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), evidenceRefs: z.array(runtimeV2GoalEvidenceReferenceSchema).min(1).max(10_000) }).strict();
 
 const workspaceCommandEnvelope = (name: string, payload: z.ZodType) => runtimeV2EnvelopeSchema.extend({ messageType: z.literal("command"), name: z.literal(name), correlationId: z.null(), runId: z.null(), payload }).strict();
 export const runtimeV2GoalCreateEnvelopeSchema = workspaceCommandEnvelope("goal.create", runtimeV2GoalCreatePayloadSchema);

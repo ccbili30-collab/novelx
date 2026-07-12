@@ -264,13 +264,6 @@ pub struct GoalSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct GoalActor {
-    pub agent_id: String,
-    pub is_child_agent: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GoalCreate {
     pub create_idempotency_key: String,
     pub goal_id: String,
@@ -310,7 +303,6 @@ pub struct GoalComplete {
     pub complete_idempotency_key: String,
     pub goal_id: String,
     pub expected_revision: u64,
-    pub actor: GoalActor,
     pub evidence_refs: Vec<GoalEvidenceReference>,
 }
 
@@ -596,7 +588,6 @@ impl GoalComplete {
         gp_require_text("completeIdempotencyKey", &self.complete_idempotency_key)?;
         gp_require_text("goalId", &self.goal_id)?;
         gp_require_positive("expectedRevision", self.expected_revision)?;
-        gp_require_text("actor.agentId", &self.actor.agent_id)?;
         gp_require_nonempty("evidenceRefs", &self.evidence_refs)?;
         gp_validate_goal_evidence(&self.evidence_refs)
     }
@@ -2473,10 +2464,6 @@ mod tests {
             complete_idempotency_key: "goal-complete-1".to_owned(),
             goal_id: "goal-1".to_owned(),
             expected_revision: 3,
-            actor: GoalActor {
-                agent_id: "steward".to_owned(),
-                is_child_agent: false,
-            },
             evidence_refs: vec![goal_evidence()],
         };
 
@@ -2485,6 +2472,12 @@ mod tests {
         assert_eq!(revise.validate(), Ok(()));
         assert_eq!(propose.validate(), Ok(()));
         assert_eq!(complete.validate(), Ok(()));
+        let mut forged_complete = serde_json::to_value(&complete).unwrap();
+        forged_complete["actor"] = serde_json::json!({
+            "agentId": "child",
+            "isChildAgent": false
+        });
+        assert!(serde_json::from_value::<GoalComplete>(forged_complete).is_err());
         let encoded = serde_json::to_value(&create).unwrap();
         assert!(encoded.get("createIdempotencyKey").is_some());
         assert!(encoded["definition"]["scope"].get("scopeSha256").is_some());

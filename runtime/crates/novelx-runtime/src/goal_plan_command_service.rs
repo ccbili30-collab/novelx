@@ -151,8 +151,8 @@ impl<'a> GoalPlanCommandService<'a> {
                 &command.goal_id,
                 command.expected_revision,
                 &goal::GoalActor {
-                    agent_id: command.actor.agent_id,
-                    is_child_agent: command.actor.is_child_agent,
+                    agent_id: current.identity.owner_agent_id.clone(),
+                    is_child_agent: false,
                 },
                 to_goal_evidence(command.evidence_refs),
                 goal_metadata(
