@@ -13,6 +13,7 @@ import {
   parseRuntimeV2StatusGetEnvelope,
   parseRuntimeV2StoppedEnvelope,
   parseRuntimeV2RunGetEnvelope,
+  parseRuntimeV2RunPrepareEnvelope,
   parseRuntimeV2RunCancelEnvelope,
   parseRuntimeV2RunSnapshotEnvelope,
   parseRuntimeV2RunStartEnvelope,
@@ -255,6 +256,13 @@ function runCancelEnvelope(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function runPrepareEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    ...runStartEnvelope(), messageId: "52a163ed-67d4-493c-b00e-ff83354b79b4", name: "run.prepare", sequence: 8,
+    payload: { prepareIdempotencyKey: "prepare-key-1" }, ...overrides,
+  };
+}
+
 function runSnapshotEnvelope(overrides: Record<string, unknown> = {}) {
   const runId = "f25772f3-b0aa-4449-92eb-8ddf611a810d";
   return {
@@ -263,6 +271,7 @@ function runSnapshotEnvelope(overrides: Record<string, unknown> = {}) {
     payload: {
       runId, pinnedIdentity: runPinnedIdentity(), state: "created", recoveryClassification: "resumable",
       runSequence: 1, aggregateSequence: 1, createdAt: "2026-07-12T00:00:09Z", updatedAt: "2026-07-12T00:00:09Z",
+      terminalError: null,
     }, ...overrides,
   };
 }
@@ -532,9 +541,10 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ payload: { reason: "requested", extra: true } }))).toThrow();
   });
 
-  it("accepts strict run.start, run.get and correlated run.snapshot messages", () => {
+  it("accepts strict run.start, run.get, run.prepare and correlated run.snapshot messages", () => {
     expect(parseRuntimeV2RunStartEnvelope(runStartEnvelope())).toEqual(runStartEnvelope());
     expect(parseRuntimeV2RunGetEnvelope(runGetEnvelope())).toEqual(runGetEnvelope());
+    expect(parseRuntimeV2RunPrepareEnvelope(runPrepareEnvelope())).toEqual(runPrepareEnvelope());
     expect(parseRuntimeV2RunCancelEnvelope(runCancelEnvelope())).toEqual(runCancelEnvelope());
     expect(parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope())).toEqual(runSnapshotEnvelope());
   });
@@ -560,6 +570,14 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
       runId: "0c49e78c-3a5c-45b5-a1ca-af61173f35a6",
     }))).toThrow();
     expect(() => parseRuntimeV2RunCancelEnvelope(runCancelEnvelope({ payload: { cancelIdempotencyKey: "", reason: "" } }))).toThrow();
+    expect(() => parseRuntimeV2RunPrepareEnvelope(runPrepareEnvelope({ payload: { prepareIdempotencyKey: "", extra: true } }))).toThrow();
+    expect(() => parseRuntimeV2RunPrepareEnvelope(runPrepareEnvelope({ correlationId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope({
+      payload: { ...runSnapshotEnvelope().payload, terminalError: { ...errorEnvelope().payload } },
+    }))).not.toThrow();
+    expect(() => parseRuntimeV2RunSnapshotEnvelope(runSnapshotEnvelope({
+      payload: { ...runSnapshotEnvelope().payload, terminalError: undefined },
+    }))).toThrow();
   });
 
   it("keeps Provider credentials on a dedicated sensitive message type", () => {

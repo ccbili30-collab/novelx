@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -158,6 +159,71 @@ describe("Runtime V2 real Rust handshake", () => {
     expect(terminalRestart.ready.payload.recoveredRunCount).toBe(0);
     await expect(supervisor.getRun(runId)).resolves.toEqual(cancelled);
   }, 30_000);
+
+  it("persists REAL_GM_PROVIDER_REQUIRED from run.prepare and recovers it after restart", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-runtime-v2-provider-required-"));
+    tempRoots.push(root);
+    const databasePath = path.join(root, "runtime.db");
+    const runId = "3f7202b5-e640-4c9c-b86a-a549fd7e6ac8";
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    await supervisor.start();
+    await supervisor.startRun(runId, runStartPayload());
+    const failed = await supervisor.prepareRun(runId, {
+      prepareIdempotencyKey: "integration-prepare-provider-required-1",
+    });
+
+    expect(failed).toMatchObject({
+      runId,
+      state: "failed",
+      recoveryClassification: "terminal",
+      aggregateSequence: 2,
+      terminalError: {
+        code: "REAL_GM_PROVIDER_REQUIRED",
+        class: "provider_auth",
+        retryable: false,
+        stage: "run.prepare.provider",
+      },
+    });
+    await supervisor.stop();
+    expect(countRuntimeEvents(databasePath, runId)).toBe(2);
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    const restarted = await supervisor.start();
+    expect(restarted.ready.payload.recoveredRunCount).toBe(0);
+    await expect(supervisor.getRun(runId)).resolves.toEqual(failed);
+  }, 30_000);
+
+  it("prepares with the exact bound Provider and does not append an event for the same idempotency key", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novelx-runtime-v2-provider-bound-"));
+    tempRoots.push(root);
+    const databasePath = path.join(root, "runtime.db");
+    const runId = "21752d5a-8878-45ba-ad9f-3e9400e80ae6";
+    const configSha256 = "bc9267f85e52b4ac2945b81966aa9a4cc7f513642cfa8f0057f7fc35b90586c8";
+    const payload = runStartPayload();
+    payload.pinnedIdentity.provider.profileId = "profile-1";
+    payload.pinnedIdentity.provider.configSha256 = configSha256;
+
+    supervisor = createWorkspaceSupervisor(databasePath);
+    await supervisor.start();
+    await supervisor.bindProvider(runtimeProviderConfig(), configSha256, "integration-provider-secret");
+    await supervisor.startRun(runId, payload);
+
+    const prepare = { prepareIdempotencyKey: "integration-prepare-bound-1" };
+    const first = await supervisor.prepareRun(runId, prepare);
+    const retried = await supervisor.prepareRun(runId, prepare);
+
+    expect(first).toMatchObject({
+      runId,
+      state: "preparing",
+      recoveryClassification: "resumable",
+      aggregateSequence: 2,
+      terminalError: null,
+    });
+    expect(retried).toEqual(first);
+    await supervisor.stop();
+    expect(countRuntimeEvents(databasePath, runId)).toBe(2);
+  }, 30_000);
 });
 
 function createWorkspaceSupervisor(databasePath: string): RuntimeV2ProcessSupervisor {
@@ -239,5 +305,17 @@ function isProcessAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function countRuntimeEvents(databasePath: string, runId: string): number {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const row = database.prepare("SELECT COUNT(*) AS count FROM runtime_events WHERE run_id = ?").get(runId) as {
+      count: number;
+    };
+    return row.count;
+  } finally {
+    database.close();
   }
 }

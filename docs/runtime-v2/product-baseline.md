@@ -190,7 +190,52 @@ The desktop pet is a future presentation extension, not an Agent authority and n
 
 The pet cannot read raw prompts, credentials, private transcripts, hidden Creator Lens facts or arbitrary project files. It cannot invoke tools, approve Change Sets, alter canon or execute arbitrary scripts. Future skill effects or OC animations belong to a separately permissioned visual extension system and are not part of the initial pet contract.
 
-## 12. Acceptance metrics
+## 12. Codex-style capability tiers and dependency order
+
+The following capabilities are confirmed product requirements. “Required” means the relevant Runtime V2 or desktop-workbench acceptance gate cannot pass without the defined behavior. “Enhancement” means the capability is part of the approved direction but does not block the first Runtime V2 kernel migration. Neither label means the feature is implemented today.
+
+| Capability | Tier | Primary layer | Hard dependencies | Product boundary |
+| --- | --- | --- | --- | --- |
+| Goal | Required | Kernel capability | Durable Run journal, project/session identity, acceptance evidence | Created for multi-step or resumable work; ordinary chat is not forced into a Goal. |
+| Plan | Required | Kernel capability + UI projection | Goal, versioned steps, tool ledger, Agent assignment | Inspectable and revisable; it is not hidden chain-of-thought and cannot mark itself complete without evidence. |
+| Session branch | Required | Kernel capability + domain version link | Durable messages, fork point, project checkpoint identity | Forks conversation history only; committed project state changes only through an explicit restore/branch action. |
+| Automatic Agent allocation | Required | Kernel capability | Goal, Plan, concurrency budget, child scope/permission lease, cancellation | Bounded delegation only; no unbounded autonomous swarm and no child self-authorizing writes. |
+| Session/Agent communication | Required | Kernel capability + domain module | Session identity, Handoff, Shared Memory, source checkpoint, stale-source check | Structured exchange rather than implicit access to another private transcript. Group-chat presentation is not required. |
+| Lower-right model adjustment | Required desktop projection | UI projection backed by kernel profile registry | Published model profile, capability metadata, session override, per-Run audit | Affects the next Run only and never changes permissions, Prompt publication or an active Run. |
+| Right-side sliding history/rollback | Required desktop projection | UI projection + domain version module | Checkpoints, Change Sets, diff projection, write lease, branch/restore service | Restore creates an auditable new head or branch; it never deletes later history or rewinds a Player save implicitly. |
+| Comments/annotations | Enhancement | Domain module + UI projection | Stable version anchors, thread status, Agent assignment, Change Set | Comments do not mutate content by themselves; failed anchor relocation becomes `outdated`. |
+| Desktop pet | Future enhancement | Future extension | Allowlisted public event bus, presentation command API, resource budget, reduced-motion support | Presentation-only; no project-file access, tool invocation, approval, Prompt access or arbitrary scripts. |
+
+### 12.1 Required dependency sequence
+
+The implementation order is constrained by state ownership, not by visual convenience:
+
+1. Durable Run events, protocol handshake, recovery and tool ledger.
+2. Goal and versioned Plan persistence with evidence-backed terminal rules.
+3. Session identity and session branching linked to explicit project checkpoints.
+4. Bounded child-Agent allocation, cancellation and parent synthesis.
+5. Handoff and Shared Memory communication with stale-checkpoint validation.
+6. Model profile selection and per-Run effective-profile audit.
+7. Checkpoint/diff projection and the right-side history/restore drawer.
+8. Version-anchored comments and Agent comment-resolution workflow.
+9. Allowlisted public extension events for the desktop pet.
+
+UI mockups may be explored earlier, but they cannot be marked live before their authoritative kernel or domain dependency exists. In particular, a visual Plan without durable steps, a model selector without audited effective profiles, or a rollback drawer backed by fixture history fails this baseline.
+
+### 12.2 Non-commitments
+
+This baseline does not commit NovelX to:
+
+- reproducing Codex source code, internal Prompt behavior or private implementation details;
+- exposing raw filesystem/runtime internals as the default creative interface;
+- unlimited Agents, unlimited parallel Provider cost or silent background work;
+- automatic cross-session transcript sharing or baseline group chat;
+- destructive Git-style reset semantics for project restoration;
+- switching the model in the middle of an active Run or Player turn;
+- executable pet scripts, novel-embedded code or a general plugin sandbox in Runtime V2;
+- declaring any capability complete from schema, documentation or static UI alone.
+
+## 13. Acceptance metrics
 
 | Area | Acceptance criterion |
 | --- | --- |
@@ -207,7 +252,7 @@ The pet cannot read raw prompts, credentials, private transcripts, hidden Creato
 | UI projection | Raw tool JSON, Prompt text, credentials, internal IDs and hidden GM fields do not appear in normal player/creator views. |
 | Pet boundary | A test extension can react to allowlisted public events and animate, while attempts to read project files or invoke tools are denied and audited. |
 
-## 13. Explicit future extensions
+## 14. Explicit future extensions
 
 The following may build on Runtime V2 but are not required to call the baseline complete:
 

@@ -1,9 +1,9 @@
 use std::io::{self, BufRead, Write};
 
 use novelx_protocol::{
-    Envelope, MessageType, PROTOCOL_VERSION, RunCancel, RunSnapshot, RunStart, RuntimeBuild,
-    RuntimeError, RuntimeErrorClass, RuntimeHello, RuntimeIdentity, RuntimeInitialize,
-    RuntimeReady, RuntimeStatus, RuntimeStopped,
+    Envelope, MessageType, PROTOCOL_VERSION, RunCancel, RunPrepare, RunSnapshot, RunStart,
+    RuntimeBuild, RuntimeError, RuntimeErrorClass, RuntimeHello, RuntimeIdentity,
+    RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
 };
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
 use novelx_runtime::provider_gateway::{
@@ -242,6 +242,13 @@ fn run_command_loop(
             )?,
             "run.get" => handle_run_get(output, &command, runtime_sequence, journal)?,
             "run.cancel" => handle_run_cancel(output, &command, runtime_sequence, journal)?,
+            "run.prepare" => handle_run_prepare(
+                output,
+                &command,
+                runtime_sequence,
+                journal,
+                provider_registry,
+            )?,
             _ => unreachable!("validated command name"),
         }
     }
@@ -291,6 +298,13 @@ fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), St
             }
             serde_json::from_value::<RunCancel>(command.payload.clone())
                 .map_err(|error| format!("invalid run.cancel payload: {error}"))?;
+        }
+        "run.prepare" => {
+            if command.run_id.is_none() {
+                return Err("run.prepare requires runId".to_owned());
+            }
+            serde_json::from_value::<RunPrepare>(command.payload.clone())
+                .map_err(|error| format!("invalid run.prepare payload: {error}"))?;
         }
         _ => return Err(format!("unknown runtime command: {}", command.name)),
     }
@@ -408,6 +422,28 @@ fn handle_run_cancel(
     let run_id = command.run_id.expect("validated run.cancel runId");
     let cancel: RunCancel = serde_json::from_value(command.payload.clone())?;
     match RunCommandService::new(journal, None).cancel(run_id, command.message_id, cancel) {
+        Ok(snapshot) => write_run_snapshot(output, command, runtime_sequence, snapshot),
+        Err(failure) => {
+            write_run_command_failure(output, command, runtime_sequence, run_id, failure)
+        }
+    }
+}
+
+fn handle_run_prepare(
+    output: &mut impl Write,
+    command: &Envelope,
+    runtime_sequence: u64,
+    journal: &mut Option<EventJournal>,
+    providers: &ProviderRegistry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run_id = command.run_id.expect("validated run.prepare runId");
+    let prepare: RunPrepare = serde_json::from_value(command.payload.clone())?;
+    match RunCommandService::new(journal, None).prepare(
+        run_id,
+        command.message_id,
+        prepare,
+        providers,
+    ) {
         Ok(snapshot) => write_run_snapshot(output, command, runtime_sequence, snapshot),
         Err(failure) => {
             write_run_command_failure(output, command, runtime_sequence, run_id, failure)

@@ -276,6 +276,18 @@ export const runtimeV2RunGetEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   payload: emptyRuntimeV2PayloadSchema,
 }).strict();
 
+export const runtimeV2RunPreparePayloadSchema = z.object({
+  prepareIdempotencyKey: identityStringSchema,
+}).strict();
+
+export const runtimeV2RunPrepareEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"),
+  name: z.literal("run.prepare"),
+  correlationId: z.null(),
+  runId: z.uuid(),
+  payload: runtimeV2RunPreparePayloadSchema,
+}).strict();
+
 export const runtimeV2RunCancelPayloadSchema = z.object({
   cancelIdempotencyKey: identityStringSchema,
   reason: z.string().trim().min(1).max(2_000),
@@ -301,6 +313,7 @@ export const runtimeV2RunSnapshotPayloadSchema = z.object({
   aggregateSequence: z.number().int().positive().safe(),
   createdAt: z.iso.datetime({ offset: true }),
   updatedAt: z.iso.datetime({ offset: true }),
+  terminalError: runtimeV2ErrorSchema.nullable(),
 }).strict().superRefine((snapshot, context) => {
   if (snapshot.runSequence < snapshot.aggregateSequence) {
     context.addIssue({ code: "custom", path: ["runSequence"], message: "runSequence cannot precede aggregateSequence." });
@@ -435,6 +448,8 @@ export type RuntimeV2RunPinnedIdentity = z.infer<typeof runtimeV2RunPinnedIdenti
 export type RuntimeV2RunStartPayload = z.infer<typeof runtimeV2RunStartPayloadSchema>;
 export type RuntimeV2RunStartEnvelope = z.infer<typeof runtimeV2RunStartEnvelopeSchema>;
 export type RuntimeV2RunGetEnvelope = z.infer<typeof runtimeV2RunGetEnvelopeSchema>;
+export type RuntimeV2RunPreparePayload = z.infer<typeof runtimeV2RunPreparePayloadSchema>;
+export type RuntimeV2RunPrepareEnvelope = z.infer<typeof runtimeV2RunPrepareEnvelopeSchema>;
 export type RuntimeV2RunCancelPayload = z.infer<typeof runtimeV2RunCancelPayloadSchema>;
 export type RuntimeV2RunCancelEnvelope = z.infer<typeof runtimeV2RunCancelEnvelopeSchema>;
 export type RuntimeV2RunSnapshotPayload = z.infer<typeof runtimeV2RunSnapshotPayloadSchema>;
@@ -516,6 +531,10 @@ export function parseRuntimeV2RunStartEnvelope(value: unknown): RuntimeV2RunStar
 
 export function parseRuntimeV2RunGetEnvelope(value: unknown): RuntimeV2RunGetEnvelope {
   return parseVersionedEnvelope(value, runtimeV2RunGetEnvelopeSchema);
+}
+
+export function parseRuntimeV2RunPrepareEnvelope(value: unknown): RuntimeV2RunPrepareEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2RunPrepareEnvelopeSchema);
 }
 
 export function parseRuntimeV2RunCancelEnvelope(value: unknown): RuntimeV2RunCancelEnvelope {

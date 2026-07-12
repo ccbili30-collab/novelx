@@ -231,6 +231,12 @@ pub struct RunCancel {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunPrepare {
+    pub prepare_idempotency_key: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunLifecycleState {
@@ -266,6 +272,7 @@ pub struct RunSnapshot {
     pub aggregate_sequence: u64,
     pub created_at: String,
     pub updated_at: String,
+    pub terminal_error: Option<RuntimeError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

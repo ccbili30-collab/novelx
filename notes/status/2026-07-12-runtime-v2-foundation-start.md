@@ -47,14 +47,17 @@
 - Added a dedicated `sensitive_command` Provider binding path. Ordinary Runtime envelopes reject it; Rust consumes the credential only into zeroizing memory and returns a secret-free binding receipt.
 - Extended the Electron Supervisor to send the sensitive frame from a Buffer that is overwritten after the pipe write callback, correlate `provider.bound`/`provider.rejected`, and never expose the credential in stderr or receipts.
 - Added real TypeScript-to-Rust sensitive binding tests and output/stderr leak assertions.
+- Added journal-backed `run.prepare`: the Runtime resolves the exact Provider identity pinned at `run.start`, persists `run.preparing` only for an exact live binding, and persists typed `REAL_GM_PROVIDER_REQUIRED` or `PROVIDER_PROFILE_MISMATCH` terminal failures otherwise.
+- Added nullable structured `terminalError` to Run snapshots and event-version-2 `run.failed` replay so Provider prerequisite failures retain their public code, class, stage and diagnostic identity across Runtime restarts.
+- Extended the Electron Supervisor with a typed `prepareRun` command path using the same sequence, correlation, timeout and schema enforcement as other Run commands.
 
 ## Verification
 
 - Rust formatting check passes.
-- Rust workspace tests pass: 57 tests.
+- Rust workspace tests pass: 59 tests.
 - Rust Clippy passes with warnings denied.
 - TypeScript typecheck passes.
-- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 48 tests, including sensitive Provider isolation, Run schema strictness, fatal timeout cleanup, post-ready crash rejection and real restart recovery.
+- Runtime V2 protocol, process-supervisor and real cross-language integration tests pass together: 50 tests, including sensitive Provider isolation, Run schema strictness, `run.prepare` persistence/idempotency, fatal timeout cleanup, post-ready crash rejection and real restart recovery.
 - `git diff --check` passes.
 - Running the binary emits protocol version 1, `runtime.hello`, runtime version `0.1.0`, sequence 1 and explicit `handshake`, `runtime_control` and `runs_v1` capabilities.
 
@@ -62,9 +65,9 @@
 
 - The Electron application entry point does not launch the supervisor yet; the supervisor is a continuously connected, independently tested module but is not part of production startup.
 - The runtime opens and recovers the supplied workspace database and processes durable Run acceptance/query plus status/shutdown controls, but it does not yet schedule Provider or tool execution.
-- `run.start` currently stops at durable `created`; Preparing/Provider/context/tool scheduling is not connected. Cancellation is connected only at the Run state level because no Provider/tool work exists yet to interrupt.
+- `run.start` durably creates a Run and `run.prepare` now verifies its pinned Provider prerequisite. No full inference request, Context Compiler, tool scheduling or Provider attempt journal exists yet. Cancellation is connected only at the Run state level because no Provider/tool work exists yet to interrupt.
 - The ToolCall state machine and event-backed aggregate exist, but the real tool executor, full Provider inference pipeline, context compiler, recovery execution policy and domain tools are not implemented.
-- The Provider Gateway can bind/validate a profile and perform a real minimal connection ping, and sensitive credential injection is connected. Durable Provider attempt events, full inference requests and Run scheduling are not connected.
+- The Provider Gateway can bind/validate a profile, perform a real minimal connection ping and gate `run.prepare`; durable Provider attempt events, full inference requests and post-prepare Run scheduling are not connected.
 - Startup verifies the required columns, constraints, indexes and immutable triggers, but does not yet prove every SQLite CHECK expression against external manual schema reconstruction.
 - Goal, Plan, branching, Agent communication, comments, model selector, history drawer and pet API are product contracts only.
 - No production workflow uses Runtime V2.

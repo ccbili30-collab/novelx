@@ -19,6 +19,7 @@ import {
   runtimeV2SensitiveProviderBindEnvelopeSchema,
   runtimeV2RunGetEnvelopeSchema,
   runtimeV2RunCancelEnvelopeSchema,
+  runtimeV2RunPrepareEnvelopeSchema,
   runtimeV2RunStartEnvelopeSchema,
   runtimeV2ShutdownEnvelopeSchema,
   runtimeV2StatusGetEnvelopeSchema,
@@ -30,6 +31,7 @@ import {
   type RuntimeV2ProviderConfig,
   type RuntimeV2RunSnapshotPayload,
   type RuntimeV2RunCancelPayload,
+  type RuntimeV2RunPreparePayload,
   type RuntimeV2RunStartPayload,
   type RuntimeV2StatusPayload,
 } from "../shared/runtimeV2Protocol";
@@ -172,6 +174,11 @@ export class RuntimeV2ProcessSupervisor {
 
   async getRun(runId: string): Promise<RuntimeV2RunSnapshotPayload> {
     const response = await this.#sendCommand("run.get", "run.snapshot", runId, {});
+    return parseRuntimeV2RunSnapshotEnvelope(response).payload;
+  }
+
+  async prepareRun(runId: string, payload: RuntimeV2RunPreparePayload): Promise<RuntimeV2RunSnapshotPayload> {
+    const response = await this.#sendCommand("run.prepare", "run.snapshot", runId, payload);
     return parseRuntimeV2RunSnapshotEnvelope(response).payload;
   }
 
@@ -424,7 +431,7 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   #sendCommand(
-    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.cancel",
+    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel",
     expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot",
     runId: string | null,
     payload: object,
@@ -455,7 +462,9 @@ export class RuntimeV2ProcessSupervisor {
           ? runtimeV2RunStartEnvelopeSchema.parse(base)
           : name === "run.get"
             ? runtimeV2RunGetEnvelopeSchema.parse(base)
-            : runtimeV2RunCancelEnvelopeSchema.parse(base);
+            : name === "run.prepare"
+              ? runtimeV2RunPrepareEnvelopeSchema.parse(base)
+              : runtimeV2RunCancelEnvelopeSchema.parse(base);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(command.messageId);

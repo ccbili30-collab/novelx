@@ -1,11 +1,12 @@
 use novelx_protocol::{
-    RunCancel, RunLifecycleState, RunRecoveryClassification, RunSnapshot, RunStart, RuntimeError,
-    RuntimeErrorClass,
+    RunCancel, RunLifecycleState, RunPrepare, RunRecoveryClassification, RunSnapshot, RunStart,
+    RuntimeError, RuntimeErrorClass,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::event_journal::{EventJournal, EventJournalError};
+use crate::provider_gateway::{ProviderGatewayError, ProviderRegistry};
 use crate::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use crate::run_state::RunState;
 
@@ -155,6 +156,69 @@ impl<'a> RunCommandService<'a> {
             .map(|run| snapshot(&run))
             .map_err(|error| aggregate_failure("run.cancel.snapshot", error))
     }
+
+    pub fn prepare(
+        &mut self,
+        run_id: Uuid,
+        command_message_id: Uuid,
+        prepare: RunPrepare,
+        providers: &ProviderRegistry,
+    ) -> Result<RunSnapshot, RunCommandFailure> {
+        let journal = self.journal.as_mut().ok_or_else(|| {
+            failure(
+                "RUNTIME_STORAGE_REQUIRED",
+                RuntimeErrorClass::Storage,
+                "当前运行时没有绑定项目存储，无法准备任务。",
+                "run.prepare.storage",
+                false,
+            )
+        })?;
+        let mut run = match RunAggregate::recover(journal, &run_id.to_string()) {
+            Ok(run) => run,
+            Err(RunAggregateError::NotFound(_)) => {
+                return Err(failure(
+                    "RUN_NOT_FOUND",
+                    RuntimeErrorClass::Validation,
+                    "没有找到这个任务。",
+                    "run.prepare.recover",
+                    false,
+                ));
+            }
+            Err(error) => return Err(aggregate_failure("run.prepare.recover", error)),
+        };
+        if run.state().is_terminal() {
+            return Ok(snapshot(&run));
+        }
+        let timestamp = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|error| internal_failure("run.prepare.timestamp", error.to_string()))?;
+        let message_id = command_message_id.to_string();
+        let metadata = EventMetadata {
+            message_id: &message_id,
+            idempotency_key: &prepare.prepare_idempotency_key,
+            created_at: &timestamp,
+            reason: None,
+        };
+        match providers.resolve(&run.pinned_identity().provider) {
+            Ok(_) => run
+                .prepare(journal, metadata)
+                .map_err(|error| aggregate_failure("run.prepare.persist", error))?,
+            Err(
+                error @ (ProviderGatewayError::CredentialRequired
+                | ProviderGatewayError::ProfileMismatch),
+            ) => {
+                let terminal_error = provider_precondition_error(&error);
+                run.fail_with_error(journal, metadata, terminal_error)
+                    .map_err(|error| aggregate_failure("run.prepare.fail", error))?;
+            }
+            Err(error) => {
+                return Err(internal_failure("run.prepare.provider", error.to_string()));
+            }
+        }
+        RunAggregate::recover(journal, &run_id.to_string())
+            .map(|run| snapshot(&run))
+            .map_err(|error| aggregate_failure("run.prepare.snapshot", error))
+    }
 }
 
 #[derive(Debug)]
@@ -175,6 +239,7 @@ fn snapshot(run: &RunAggregate) -> RunSnapshot {
         aggregate_sequence: run.last_sequence(),
         created_at: run.created_at().to_owned(),
         updated_at: run.updated_at().to_owned(),
+        terminal_error: run.terminal_error().cloned(),
     }
 }
 
@@ -224,6 +289,31 @@ fn internal_failure(stage: &str, internal_message: String) -> RunCommandFailure 
     );
     result.internal_message = internal_message;
     result
+}
+
+fn provider_precondition_error(error: &ProviderGatewayError) -> RuntimeError {
+    let (code, class, message) = match error {
+        ProviderGatewayError::CredentialRequired => (
+            "REAL_GM_PROVIDER_REQUIRED",
+            RuntimeErrorClass::ProviderAuth,
+            "需要先配置可用的模型服务。",
+        ),
+        ProviderGatewayError::ProfileMismatch => (
+            "PROVIDER_PROFILE_MISMATCH",
+            RuntimeErrorClass::Validation,
+            "模型服务配置与任务记录不一致。",
+        ),
+        _ => unreachable!("only Provider precondition errors are persisted"),
+    };
+    RuntimeError {
+        code: code.to_owned(),
+        class,
+        retryable: false,
+        public_message: message.to_owned(),
+        stage: "run.prepare.provider".to_owned(),
+        attempt: 0,
+        diagnostic_id: Uuid::new_v4(),
+    }
 }
 
 fn failure(

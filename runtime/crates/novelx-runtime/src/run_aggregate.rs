@@ -1,4 +1,4 @@
-use novelx_protocol::RunPinnedIdentity;
+use novelx_protocol::{RunPinnedIdentity, RuntimeError};
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -14,6 +14,7 @@ pub struct RunAggregate {
     last_aggregate_sequence: u64,
     created_at: String,
     updated_at: String,
+    terminal_error: Option<RuntimeError>,
 }
 
 pub struct EventMetadata<'a> {
@@ -73,11 +74,25 @@ impl RunAggregate {
         &self.updated_at
     }
 
+    pub const fn terminal_error(&self) -> Option<&RuntimeError> {
+        self.terminal_error.as_ref()
+    }
+
     pub fn prepare(
         &mut self,
         journal: &mut EventJournal,
         metadata: EventMetadata<'_>,
     ) -> Result<(), RunAggregateError> {
+        if self.machine.state() == RunState::Preparing
+            && self.is_idempotent_transition(
+                journal,
+                &metadata,
+                "run.preparing",
+                RunState::Preparing,
+            )?
+        {
+            return Ok(());
+        }
         self.apply(journal, metadata, RunState::Preparing)
     }
 
@@ -159,6 +174,28 @@ impl RunAggregate {
         self.apply(journal, metadata, RunState::Failed)
     }
 
+    pub fn fail_with_error(
+        &mut self,
+        journal: &mut EventJournal,
+        metadata: EventMetadata<'_>,
+        terminal_error: RuntimeError,
+    ) -> Result<(), RunAggregateError> {
+        let previous = self.machine.state();
+        let mut candidate = self.machine;
+        transition_machine(&mut candidate, RunState::Failed)?;
+        let stored = journal.append(
+            failure_event(&self.run_id, metadata, previous, &terminal_error)?,
+            self.last_run_sequence,
+            self.last_aggregate_sequence,
+        )?;
+        self.machine = candidate;
+        self.last_run_sequence = stored.run_sequence;
+        self.last_aggregate_sequence = stored.aggregate_sequence;
+        self.updated_at = stored.created_at;
+        self.terminal_error = Some(terminal_error);
+        Ok(())
+    }
+
     pub fn complete(
         &mut self,
         journal: &mut EventJournal,
@@ -192,6 +229,39 @@ impl RunAggregate {
         self.last_aggregate_sequence = stored.aggregate_sequence;
         self.updated_at = stored.created_at;
         Ok(())
+    }
+
+    fn is_idempotent_transition(
+        &self,
+        journal: &EventJournal,
+        metadata: &EventMetadata<'_>,
+        event_type: &str,
+        current: RunState,
+    ) -> Result<bool, RunAggregateError> {
+        let events = journal.read_aggregate(&self.run_id, "run", &self.run_id, 0)?;
+        let Some(existing) = events
+            .iter()
+            .find(|event| event.idempotency_key == metadata.idempotency_key)
+        else {
+            return Ok(false);
+        };
+        let payload = parse_payload(&existing.payload)?;
+        if existing.event_type == event_type
+            && existing.event_version == 1
+            && payload.current == current
+            && existing.payload.get("reason")
+                == Some(
+                    &metadata
+                        .reason
+                        .map_or(Value::Null, |value| Value::String(value.to_owned())),
+                )
+        {
+            return Ok(true);
+        }
+        Err(EventJournalError::IdempotencyConflict {
+            idempotency_key: metadata.idempotency_key.to_owned(),
+        }
+        .into())
     }
 }
 
@@ -252,6 +322,7 @@ fn replay(
         last_aggregate_sequence: 1,
         created_at: first.created_at.clone(),
         updated_at: first.created_at.clone(),
+        terminal_error: None,
     };
     for event in &events[1..] {
         let expected = aggregate.last_aggregate_sequence + 1;
@@ -263,6 +334,19 @@ fn replay(
         }
         if event.event_type == "run.created" {
             return Err(RunAggregateError::DuplicateCreated);
+        }
+        if event.event_type == "run.failed" && event.event_version == 2 {
+            let failure = parse_failure_payload(&event.payload)?;
+            if failure.transition.previous != Some(aggregate.machine.state())
+                || failure.transition.current != RunState::Failed
+            {
+                return Err(RunAggregateError::StateMismatch);
+            }
+            transition_machine(&mut aggregate.machine, RunState::Failed)?;
+            aggregate.terminal_error = Some(failure.terminal_error);
+            aggregate.last_aggregate_sequence = event.aggregate_sequence;
+            aggregate.updated_at = event.created_at.clone();
+            continue;
         }
         if event.event_version != 1 {
             return Err(RunAggregateError::UnknownEventVersion {
@@ -292,6 +376,11 @@ struct CreationPayload {
     pinned_identity: RunPinnedIdentity,
 }
 
+struct FailurePayload {
+    transition: TransitionPayload,
+    terminal_error: RuntimeError,
+}
+
 fn parse_creation_payload(value: &Value) -> Result<CreationPayload, RunAggregateError> {
     let object = value.as_object().ok_or(RunAggregateError::InvalidPayload)?;
     if object.len() != 4 || !object.contains_key("pinnedIdentity") {
@@ -303,6 +392,20 @@ fn parse_creation_payload(value: &Value) -> Result<CreationPayload, RunAggregate
     Ok(CreationPayload {
         transition,
         pinned_identity,
+    })
+}
+
+fn parse_failure_payload(value: &Value) -> Result<FailurePayload, RunAggregateError> {
+    let object = value.as_object().ok_or(RunAggregateError::InvalidPayload)?;
+    if object.len() != 4 || !object.contains_key("terminalError") {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    let transition = parse_transition_fields(object)?;
+    let terminal_error = serde_json::from_value(object["terminalError"].clone())
+        .map_err(|_| RunAggregateError::InvalidPayload)?;
+    Ok(FailurePayload {
+        transition,
+        terminal_error,
     })
 }
 
@@ -389,6 +492,30 @@ fn transition_event(
         }),
         created_at: metadata.created_at.to_owned(),
     }
+}
+
+fn failure_event(
+    run_id: &str,
+    metadata: EventMetadata<'_>,
+    previous: RunState,
+    terminal_error: &RuntimeError,
+) -> Result<NewRuntimeEvent, RunAggregateError> {
+    Ok(NewRuntimeEvent {
+        run_id: run_id.to_owned(),
+        aggregate_type: "run".to_owned(),
+        aggregate_id: run_id.to_owned(),
+        message_id: metadata.message_id.to_owned(),
+        idempotency_key: metadata.idempotency_key.to_owned(),
+        event_type: "run.failed".to_owned(),
+        event_version: 2,
+        payload: json!({
+            "previousState": state_name(previous),
+            "currentState": "failed",
+            "reason": metadata.reason,
+            "terminalError": terminal_error,
+        }),
+        created_at: metadata.created_at.to_owned(),
+    })
 }
 
 fn validate_pinned_identity(identity: &RunPinnedIdentity) -> Result<(), RunAggregateError> {

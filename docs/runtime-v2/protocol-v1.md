@@ -167,6 +167,7 @@ When `workspaceDatabasePath` is configured, `runtime.initialize` also requires n
 Baseline commands:
 
 - `run.start`
+- `run.prepare`
 - `run.cancel`
 - `run.resume`
 - `run.retry`
@@ -187,8 +188,9 @@ The current foundation implements:
 
 - `run.start`: command with required envelope `runId` and strict `{ startIdempotencyKey, pinnedIdentity }` payload. It durably accepts the Run and returns `run.snapshot`; it does not claim that Provider execution has started.
 - `run.get`: command with required envelope `runId` and strict empty payload. It replays the journal and returns `run.snapshot` without changing state.
+- `run.prepare`: command with required envelope `runId` and strict `{ prepareIdempotencyKey }` payload. It resolves the exact Provider profile pinned by the Run before scheduling any inference. An exact in-memory binding persists `run.preparing`; a missing credential persists terminal `REAL_GM_PROVIDER_REQUIRED`; a changed profile persists terminal `PROVIDER_PROFILE_MISMATCH`. A retry with the same business key returns the recovered snapshot without another transition event.
 - `run.cancel`: command with required envelope `runId` and strict `{ cancelIdempotencyKey, reason }` payload. It persists `run.cancelled`, returns the terminal snapshot and is idempotent across transport retries.
-- `run.snapshot`: correlated response whose envelope and payload `runId` match. It includes pinned identity, lifecycle state, recovery classification, Run/aggregate sequences and creation/update timestamps.
+- `run.snapshot`: correlated response whose envelope and payload `runId` match. It includes pinned identity, lifecycle state, recovery classification, Run/aggregate sequences, creation/update timestamps and nullable structured `terminalError`. A terminal prerequisite failure must remain recoverable after process restart; it cannot be replaced by a generic planning error.
 - `run.rejected`: correlated, Run-scoped response carrying a typed Runtime error. Domain rejection does not terminate an otherwise valid protocol connection.
 
 `WaitingForApproval` projects as `waiting_for_approval` and remains nonterminal. `Committing` recovers as `commit_uncertain`; queries never auto-repeat a commit or external side effect.

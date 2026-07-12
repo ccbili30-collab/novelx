@@ -1,7 +1,11 @@
 mod support;
 
-use novelx_protocol::{RunCancel, RunStart};
+use novelx_protocol::{RunCancel, RunPrepare, RunStart};
 use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
+use novelx_runtime::provider_gateway::{
+    ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderInputCapability,
+    ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
+};
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::run_command_service::{RunCommandService, WorkspaceBinding};
 use serde_json::json;
@@ -139,6 +143,75 @@ fn cancellation_is_persisted_and_idempotent_across_transport_retries() {
     );
 }
 
+#[test]
+fn missing_provider_is_persisted_as_a_structured_terminal_failure() {
+    let fixture = Fixture::new();
+    let run_id = Uuid::new_v4();
+    let mut journal = Some(fixture.open());
+    let workspace_binding = binding();
+    let failed = {
+        let mut service = RunCommandService::new(&mut journal, Some(&workspace_binding));
+        service
+            .start(run_id, Uuid::new_v4(), start_payload())
+            .unwrap();
+        service
+            .prepare(
+                run_id,
+                Uuid::new_v4(),
+                RunPrepare {
+                    prepare_idempotency_key: "prepare-key-1".to_owned(),
+                },
+                &ProviderRegistry::default(),
+            )
+            .unwrap()
+    };
+
+    assert_eq!(failed.state, novelx_protocol::RunLifecycleState::Failed);
+    assert_eq!(
+        failed
+            .terminal_error
+            .as_ref()
+            .map(|error| error.code.as_str()),
+        Some("REAL_GM_PROVIDER_REQUIRED")
+    );
+    drop(journal);
+    let mut reopened = Some(fixture.open());
+    let recovered = RunCommandService::new(&mut reopened, Some(&workspace_binding))
+        .get(run_id)
+        .unwrap();
+    assert_eq!(recovered, failed);
+}
+
+#[test]
+fn exact_bound_provider_prepares_once_and_retry_returns_the_same_snapshot() {
+    let fixture = Fixture::new();
+    let run_id = Uuid::new_v4();
+    let config = provider_config();
+    let hash = provider_config_sha256(&config).unwrap();
+    let mut payload = start_payload();
+    payload.pinned_identity.provider.config_sha256 = hash.clone();
+    let mut providers = ProviderRegistry::default();
+    providers.bind(config, &hash, "secret".to_owned()).unwrap();
+    let mut journal = Some(fixture.open());
+    let workspace_binding = binding();
+    let mut service = RunCommandService::new(&mut journal, Some(&workspace_binding));
+    service.start(run_id, Uuid::new_v4(), payload).unwrap();
+    let prepare = RunPrepare {
+        prepare_idempotency_key: "prepare-key-1".to_owned(),
+    };
+
+    let first = service
+        .prepare(run_id, Uuid::new_v4(), prepare.clone(), &providers)
+        .unwrap();
+    let retried = service
+        .prepare(run_id, Uuid::new_v4(), prepare, &providers)
+        .unwrap();
+
+    assert_eq!(first.state, novelx_protocol::RunLifecycleState::Preparing);
+    assert!(first.terminal_error.is_none());
+    assert_eq!(retried, first);
+}
+
 fn start_payload() -> RunStart {
     RunStart {
         start_idempotency_key: "stable-start-1".to_owned(),
@@ -150,6 +223,29 @@ fn binding() -> WorkspaceBinding {
     WorkspaceBinding {
         project_id: "project-1".to_owned(),
         workspace_id: "workspace-1".to_owned(),
+    }
+}
+
+fn provider_config() -> ProviderConfig {
+    ProviderConfig {
+        schema_version: 1,
+        profile_id: "profile-1".to_owned(),
+        provider_id: "deepseek".to_owned(),
+        display_name: "DeepSeek".to_owned(),
+        base_url: "https://api.deepseek.com/v1".to_owned(),
+        model_id: "deepseek-chat".to_owned(),
+        api_flavor: ProviderApiFlavor::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
+        context_window: 1_000_000,
+        max_tokens: None,
+        reasoning: false,
+        input: vec![ProviderInputCapability::Text],
+        request_timeout_ms: 30_000,
+        total_deadline_ms: 120_000,
+        retry_policy: ProviderRetryPolicy {
+            max_attempts: 3,
+            max_total_delay_ms: 30_000,
+        },
     }
 }
 
