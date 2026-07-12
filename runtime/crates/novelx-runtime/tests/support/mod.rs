@@ -19,6 +19,9 @@ pub fn pinned_identity() -> RunPinnedIdentity {
         project_branch_id: "project-branch-1".to_owned(),
         goal: None,
         plan: None,
+        assignment: None,
+        parent_run_id: None,
+        delegation_depth: 0,
         provider: ProviderRunIdentity {
             profile_id: "profile-1".to_owned(),
             provider_id: "deepseek".to_owned(),

@@ -50,6 +50,16 @@ fn immutable_assignment_round_trips_after_restart() {
     let recovered = fixture.open().load("workspace", "assignment-1").unwrap();
     assert_eq!(recovered, running);
     assert_eq!(recovered.child_run_id.as_deref(), Some("child-run-1"));
+    let allocated_revision = fixture
+        .open()
+        .load_revision("workspace", "assignment-1", 1)
+        .unwrap();
+    assert_eq!(allocated_revision.status, AgentAssignmentStatus::Allocated);
+    assert_eq!(allocated_revision.child_run_id, None);
+    assert!(matches!(
+        fixture.open().load_revision("workspace", "assignment-1", 3),
+        Err(AgentAssignmentError::RevisionNotFound(3))
+    ));
 }
 
 #[test]

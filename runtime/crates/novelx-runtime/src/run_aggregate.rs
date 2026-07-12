@@ -905,6 +905,32 @@ fn validate_pinned_identity_common(
     {
         return Err(RunAggregateError::InvalidPinnedIdentity("plan"));
     }
+    if identity
+        .assignment
+        .as_ref()
+        .is_some_and(|reference| invalid_revision_reference(reference, require_revision_hashes))
+    {
+        return Err(RunAggregateError::InvalidPinnedIdentity("assignment"));
+    }
+    match identity.assignment.as_ref() {
+        Some(_) => {
+            if identity.goal.is_none()
+                || identity.plan.is_none()
+                || identity
+                    .parent_run_id
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                || identity.delegation_depth != 1
+            {
+                return Err(RunAggregateError::InvalidPinnedIdentity("delegation"));
+            }
+        }
+        None => {
+            if identity.parent_run_id.is_some() || identity.delegation_depth != 0 {
+                return Err(RunAggregateError::InvalidPinnedIdentity("delegation"));
+            }
+        }
+    }
     if identity.scope_resource_ids.is_empty()
         || identity
             .scope_resource_ids

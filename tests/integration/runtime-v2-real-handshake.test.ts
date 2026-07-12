@@ -514,7 +514,7 @@ describe("Runtime V2 real Rust handshake", () => {
     const databasePath = path.join(root, "runtime.db");
     supervisor = createWorkspaceSupervisor(databasePath, root);
     const handshake = await supervisor.start();
-    expect(handshake.hello.payload.capabilities).toEqual(expect.arrayContaining(["goals_v1", "plans_v1"]));
+    expect(handshake.hello.payload.capabilities).toEqual(expect.arrayContaining(["goals_v1", "plans_v1", "agent_assignments_v1"]));
     const resourceIds = ["resource-1", "resource-2"];
     const definition = {
       objective: "整理银湾世界观并保留可审计来源",
@@ -564,6 +564,33 @@ describe("Runtime V2 real Rust handshake", () => {
       }],
     });
     expect(createdPlan.currentRevision).toMatchObject({ revision: 1, goalRevision: 2 });
+
+    await expect(supervisor.createAgentAssignment({
+      createIdempotencyKey: "assignment-invalid-parent-live-1",
+      assignmentId: "assignment-live-1",
+      goal: { id: "goal-live-1", revision: 2, sha256: revisedGoal.lastEventHash },
+      plan: { id: "plan-live-1", revision: 1, sha256: createdPlan.currentRevision.revisionSha256 },
+      planStepId: "step-read",
+      parentRunId: randomUUID(),
+      parentInvocationId: "invocation-missing",
+      childProfileId: "steward",
+      scope: { resourceIds, scopeSha256: sha256Text(JSON.stringify(resourceIds)) },
+      definition: {
+        boundedObjective: "核对项目来源",
+        sourceCheckpointId: "checkpoint-1",
+        expectedArtifact: "source-report",
+        capabilities: ["project.read"],
+      },
+      permission: "read_only",
+    })).rejects.toMatchObject({
+      code: "RUNTIME_V2_AGENT_ASSIGNMENT_REJECTED",
+      publicPayload: { code: "ASSIGNMENT_PARENT_RUN_NOT_FOUND" },
+    });
+    await expect(supervisor.getAgentAssignment({ assignmentId: "assignment-live-1" })).rejects.toMatchObject({
+      code: "RUNTIME_V2_AGENT_ASSIGNMENT_REJECTED",
+      publicPayload: { code: "ASSIGNMENT_NOT_FOUND" },
+    });
+    await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
 
     await supervisor.stop();
     supervisor = createWorkspaceSupervisor(databasePath, root);
@@ -680,6 +707,9 @@ function runStartPayload(): RuntimeV2RunStartPayload {
       projectBranchId: "project-branch-1",
       goal: null,
       plan: null,
+      assignment: null,
+      parentRunId: null,
+      delegationDepth: 0,
       provider: {
         profileId: "provider-profile-1",
         providerId: "deepseek",

@@ -202,6 +202,24 @@ impl AgentAssignmentRepository {
         replay(&events)?.ok_or(AgentAssignmentError::NotFound)
     }
 
+    pub fn load_revision(
+        &self,
+        workspace_id: &str,
+        assignment_id: &str,
+        revision: u64,
+    ) -> Result<AgentAssignmentAggregate, AgentAssignmentError> {
+        if revision == 0 {
+            return Err(AgentAssignmentError::RevisionNotFound(revision));
+        }
+        let events = self
+            .journal
+            .read_stream(workspace_id, STREAM_TYPE, assignment_id, 0)?;
+        if revision > events.len() as u64 {
+            return Err(AgentAssignmentError::RevisionNotFound(revision));
+        }
+        replay(&events[..revision as usize])?.ok_or(AgentAssignmentError::NotFound)
+    }
+
     pub fn start(
         &mut self,
         workspace_id: &str,
@@ -714,6 +732,8 @@ pub enum AgentAssignmentError {
     InvalidEvidenceHash,
     #[error("agent assignment revision conflict: expected {expected}, actual {actual}")]
     RevisionConflict { expected: u64, actual: u64 },
+    #[error("agent assignment revision {0} was not found")]
+    RevisionNotFound(u64),
     #[error("agent assignment revision is outside the supported range")]
     RevisionOutOfRange,
     #[error("agent assignment transition is invalid")]

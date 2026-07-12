@@ -2,6 +2,7 @@
 extern crate self as novelx_runtime;
 
 pub mod agent_assignment_aggregate;
+pub mod agent_assignment_command_service;
 pub mod agent_loop_journal;
 pub mod agent_loop_service;
 pub mod artifact_store;

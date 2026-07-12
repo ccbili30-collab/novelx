@@ -2,6 +2,8 @@ use std::io;
 use std::sync::Arc;
 
 use novelx_protocol::{
+    AgentAssignmentComplete, AgentAssignmentConfirmCancelled, AgentAssignmentCreate,
+    AgentAssignmentFail, AgentAssignmentGet, AgentAssignmentRequestCancel, AgentAssignmentStart,
     ContextCompilationReceipt, ContextCompile, Envelope, GoalComplete, GoalCompletionPropose,
     GoalCreate, GoalGet, GoalRevise, MessageType, PROTOCOL_VERSION, PlanCreate, PlanGet,
     PlanRevise, PlanStepComplete, PlanStepStart, ProviderInferenceCompleted,
@@ -10,6 +12,9 @@ use novelx_protocol::{
     RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
     ToolAuthorizationResolve, ToolAuthorizationResolved, ToolAuthorizationResolvedStatus,
     ToolRequest,
+};
+use novelx_runtime::agent_assignment_command_service::{
+    AgentAssignmentCommandFailure, AgentAssignmentCommandService,
 };
 use novelx_runtime::agent_loop_journal::AgentLoopJournalRepository;
 use novelx_runtime::context_compile_service::{
@@ -70,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "provider_inference_v1".to_owned(),
             "goals_v1".to_owned(),
             "plans_v1".to_owned(),
+            "agent_assignments_v1".to_owned(),
         ],
         build: RuntimeBuild {
             commit: option_env!("NOVELX_BUILD_COMMIT")
@@ -299,6 +305,17 @@ async fn run_command_loop(
                 context.workspace_database_path,
                 context.workspace_binding,
             )?,
+            "agent.assignment.create"
+            | "agent.assignment.get"
+            | "agent.assignment.start"
+            | "agent.assignment.request_cancel"
+            | "agent.assignment.confirm_cancelled"
+            | "agent.assignment.complete"
+            | "agent.assignment.fail" => handle_agent_assignment_command(
+                &command,
+                context.workspace_database_path,
+                context.workspace_binding,
+            )?,
             "runtime.shutdown" => {
                 output
                     .shutdown(response_draft(
@@ -455,6 +472,45 @@ fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), St
             require_workspace_command(command)?;
             serde_json::from_value::<PlanStepComplete>(command.payload.clone())
                 .map_err(|error| format!("invalid plan.step.complete payload: {error}"))?;
+        }
+        "agent.assignment.create" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<AgentAssignmentCreate>(command.payload.clone())
+                .map_err(|error| format!("invalid agent.assignment.create payload: {error}"))?;
+        }
+        "agent.assignment.get" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<AgentAssignmentGet>(command.payload.clone())
+                .map_err(|error| format!("invalid agent.assignment.get payload: {error}"))?;
+        }
+        "agent.assignment.start" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<AgentAssignmentStart>(command.payload.clone())
+                .map_err(|error| format!("invalid agent.assignment.start payload: {error}"))?;
+        }
+        "agent.assignment.request_cancel" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<AgentAssignmentRequestCancel>(command.payload.clone())
+                .map_err(|error| {
+                    format!("invalid agent.assignment.request_cancel payload: {error}")
+                })?;
+        }
+        "agent.assignment.confirm_cancelled" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<AgentAssignmentConfirmCancelled>(command.payload.clone())
+                .map_err(|error| {
+                    format!("invalid agent.assignment.confirm_cancelled payload: {error}")
+                })?;
+        }
+        "agent.assignment.complete" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<AgentAssignmentComplete>(command.payload.clone())
+                .map_err(|error| format!("invalid agent.assignment.complete payload: {error}"))?;
+        }
+        "agent.assignment.fail" => {
+            require_workspace_command(command)?;
+            serde_json::from_value::<AgentAssignmentFail>(command.payload.clone())
+                .map_err(|error| format!("invalid agent.assignment.fail payload: {error}"))?;
         }
         "run.start" => {
             if command.run_id.is_none() {
@@ -722,6 +778,105 @@ fn goal_plan_command_failure(
     Ok(RoutedOutput::normal(response_draft(
         command,
         name,
+        *failure.error,
+    )?))
+}
+
+fn handle_agent_assignment_command(
+    command: &Envelope,
+    workspace_database_path: Option<&str>,
+    workspace_binding: Option<&WorkspaceBinding>,
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
+    let Some(database_path) = workspace_database_path else {
+        return agent_assignment_command_failure(
+            command,
+            AgentAssignmentCommandFailure {
+                error: Box::new(runtime_domain_error(
+                    "RUNTIME_STORAGE_REQUIRED",
+                    RuntimeErrorClass::Storage,
+                    "当前运行时没有绑定工作区存储。",
+                    "agent_assignment.storage",
+                )),
+                internal_message: "Assignment command requires workspace storage".to_owned(),
+            },
+        );
+    };
+    let Some(binding) = workspace_binding else {
+        return agent_assignment_command_failure(
+            command,
+            AgentAssignmentCommandFailure {
+                error: Box::new(runtime_domain_error(
+                    "RUNTIME_WORKSPACE_BINDING_REQUIRED",
+                    RuntimeErrorClass::Validation,
+                    "当前运行时缺少工作区和项目身份绑定。",
+                    "agent_assignment.binding",
+                )),
+                internal_message: "Assignment command requires workspace binding".to_owned(),
+            },
+        );
+    };
+    let service = AgentAssignmentCommandService::new(database_path, binding);
+    let result: Result<serde_json::Value, AgentAssignmentCommandFailure> =
+        match command.name.as_str() {
+            "agent.assignment.create" => service.create(
+                command.message_id,
+                serde_json::from_value(command.payload.clone())?,
+            ),
+            "agent.assignment.get" => service.get(serde_json::from_value(command.payload.clone())?),
+            "agent.assignment.start" => service.start(
+                command.message_id,
+                serde_json::from_value(command.payload.clone())?,
+            ),
+            "agent.assignment.request_cancel" => service.request_cancel(
+                command.message_id,
+                serde_json::from_value(command.payload.clone())?,
+            ),
+            "agent.assignment.confirm_cancelled" => service.confirm_cancelled(
+                command.message_id,
+                serde_json::from_value(command.payload.clone())?,
+            ),
+            "agent.assignment.complete" => service.complete(
+                command.message_id,
+                serde_json::from_value(command.payload.clone())?,
+            ),
+            "agent.assignment.fail" => service.fail(
+                command.message_id,
+                serde_json::from_value(command.payload.clone())?,
+            ),
+            _ => unreachable!("validated Agent Assignment command"),
+        }
+        .and_then(|snapshot| {
+            serde_json::to_value(snapshot).map_err(|error| AgentAssignmentCommandFailure {
+                error: Box::new(runtime_domain_error(
+                    "ASSIGNMENT_SNAPSHOT_SERIALIZATION_FAILED",
+                    RuntimeErrorClass::RuntimeCrash,
+                    "智能体分配状态无法序列化。",
+                    "agent_assignment.snapshot",
+                )),
+                internal_message: error.to_string(),
+            })
+        });
+    match result {
+        Ok(payload) => {
+            let mut response = response_draft(command, "agent.assignment.snapshot", payload)?;
+            response.run_id = None;
+            Ok(RoutedOutput::normal(response))
+        }
+        Err(failure) => agent_assignment_command_failure(command, failure),
+    }
+}
+
+fn agent_assignment_command_failure(
+    command: &Envelope,
+    failure: AgentAssignmentCommandFailure,
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
+    eprintln!(
+        "Agent Assignment command rejected: {}",
+        failure.internal_message
+    );
+    Ok(RoutedOutput::normal(response_draft(
+        command,
+        "agent.assignment.rejected",
         *failure.error,
     )?))
 }

@@ -405,6 +405,392 @@ pub struct PlanStepComplete {
     pub evidence: Vec<PlanEvidence>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildAgentPermission {
+    ReadOnly,
+    ProposeChangeSet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAssignmentStatus {
+    Allocated,
+    Running,
+    CancelRequested,
+    Cancelled,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentScope {
+    pub resource_ids: Vec<String>,
+    pub scope_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentDefinition {
+    pub bounded_objective: String,
+    pub source_checkpoint_id: String,
+    pub expected_artifact: String,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentCompletionEvidence {
+    pub kind: String,
+    pub reference: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAssignmentSnapshot {
+    pub assignment_id: String,
+    pub workspace_id: String,
+    pub project_id: String,
+    pub goal: RevisionReference,
+    pub plan: RevisionReference,
+    pub plan_step_id: String,
+    pub parent_run_id: String,
+    pub parent_invocation_id: String,
+    pub child_profile_id: String,
+    pub scope: AssignmentScope,
+    pub definition: AssignmentDefinition,
+    pub permission: ChildAgentPermission,
+    pub status: AgentAssignmentStatus,
+    pub child_run_id: Option<String>,
+    pub completion_evidence: Vec<AssignmentCompletionEvidence>,
+    pub failure_code: Option<String>,
+    pub revision: u64,
+    pub last_event_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAssignmentCreate {
+    pub create_idempotency_key: String,
+    pub assignment_id: String,
+    pub goal: RevisionReference,
+    pub plan: RevisionReference,
+    pub plan_step_id: String,
+    pub parent_run_id: String,
+    pub parent_invocation_id: String,
+    pub child_profile_id: String,
+    pub scope: AssignmentScope,
+    pub definition: AssignmentDefinition,
+    pub permission: ChildAgentPermission,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAssignmentGet {
+    pub assignment_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAssignmentStart {
+    pub start_idempotency_key: String,
+    pub assignment_id: String,
+    pub expected_revision: u64,
+    pub child_run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAssignmentRequestCancel {
+    pub cancel_idempotency_key: String,
+    pub assignment_id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAssignmentConfirmCancelled {
+    pub confirm_idempotency_key: String,
+    pub assignment_id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAssignmentComplete {
+    pub complete_idempotency_key: String,
+    pub assignment_id: String,
+    pub expected_revision: u64,
+    pub evidence: Vec<AssignmentCompletionEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAssignmentFail {
+    pub fail_idempotency_key: String,
+    pub assignment_id: String,
+    pub expected_revision: u64,
+    pub failure_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentAssignmentValidationError {
+    EmptyField { field: &'static str },
+    NumberMustBePositive { field: &'static str },
+    CollectionMustNotBeEmpty { field: &'static str },
+    InvalidSha256 { field: &'static str },
+    NonCanonicalCollection { field: &'static str },
+    InvalidState,
+}
+
+impl std::fmt::Display for AgentAssignmentValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyField { field } => write!(formatter, "{field} must not be empty"),
+            Self::NumberMustBePositive { field } => write!(formatter, "{field} must be positive"),
+            Self::CollectionMustNotBeEmpty { field } => {
+                write!(formatter, "{field} must not be empty")
+            }
+            Self::InvalidSha256 { field } => {
+                write!(formatter, "{field} must be a lowercase SHA-256")
+            }
+            Self::NonCanonicalCollection { field } => {
+                write!(formatter, "{field} must be sorted and unique")
+            }
+            Self::InvalidState => write!(formatter, "assignment snapshot state is inconsistent"),
+        }
+    }
+}
+
+impl std::error::Error for AgentAssignmentValidationError {}
+
+impl AssignmentScope {
+    fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_canonical("scope.resourceIds", &self.resource_ids)?;
+        assignment_require_sha256("scope.scopeSha256", &self.scope_sha256)
+    }
+}
+
+impl AssignmentDefinition {
+    fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("boundedObjective", &self.bounded_objective)?;
+        assignment_require_text("sourceCheckpointId", &self.source_checkpoint_id)?;
+        assignment_require_text("expectedArtifact", &self.expected_artifact)?;
+        assignment_require_canonical("capabilities", &self.capabilities)
+    }
+}
+
+impl AssignmentCompletionEvidence {
+    fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("evidence.kind", &self.kind)?;
+        assignment_require_text("evidence.reference", &self.reference)?;
+        assignment_require_sha256("evidence.sha256", &self.sha256)
+    }
+}
+
+impl AgentAssignmentSnapshot {
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        for (field, value) in [
+            ("assignmentId", self.assignment_id.as_str()),
+            ("workspaceId", self.workspace_id.as_str()),
+            ("projectId", self.project_id.as_str()),
+            ("planStepId", self.plan_step_id.as_str()),
+            ("parentRunId", self.parent_run_id.as_str()),
+            ("parentInvocationId", self.parent_invocation_id.as_str()),
+            ("childProfileId", self.child_profile_id.as_str()),
+        ] {
+            assignment_require_text(field, value)?;
+        }
+        assignment_validate_reference("goal", &self.goal)?;
+        assignment_validate_reference("plan", &self.plan)?;
+        self.scope.validate()?;
+        self.definition.validate()?;
+        if let Some(child_run_id) = &self.child_run_id {
+            assignment_require_text("childRunId", child_run_id)?;
+        }
+        for evidence in &self.completion_evidence {
+            evidence.validate()?;
+        }
+        if let Some(failure_code) = &self.failure_code {
+            assignment_require_text("failureCode", failure_code)?;
+        }
+        let state_valid = match self.status {
+            AgentAssignmentStatus::Allocated => {
+                self.child_run_id.is_none()
+                    && self.completion_evidence.is_empty()
+                    && self.failure_code.is_none()
+            }
+            AgentAssignmentStatus::Running => {
+                self.child_run_id.is_some()
+                    && self.completion_evidence.is_empty()
+                    && self.failure_code.is_none()
+            }
+            AgentAssignmentStatus::CancelRequested | AgentAssignmentStatus::Cancelled => {
+                self.completion_evidence.is_empty() && self.failure_code.is_none()
+            }
+            AgentAssignmentStatus::Completed => {
+                self.child_run_id.is_some()
+                    && !self.completion_evidence.is_empty()
+                    && self.failure_code.is_none()
+            }
+            AgentAssignmentStatus::Failed => {
+                self.child_run_id.is_some()
+                    && self.completion_evidence.is_empty()
+                    && self.failure_code.is_some()
+            }
+        };
+        if !state_valid {
+            return Err(AgentAssignmentValidationError::InvalidState);
+        }
+        assignment_require_positive("revision", self.revision)?;
+        assignment_require_sha256("lastEventHash", &self.last_event_hash)
+    }
+}
+
+impl AgentAssignmentCreate {
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("createIdempotencyKey", &self.create_idempotency_key)?;
+        assignment_require_text("assignmentId", &self.assignment_id)?;
+        assignment_validate_reference("goal", &self.goal)?;
+        assignment_validate_reference("plan", &self.plan)?;
+        assignment_require_text("planStepId", &self.plan_step_id)?;
+        assignment_require_text("parentRunId", &self.parent_run_id)?;
+        assignment_require_text("parentInvocationId", &self.parent_invocation_id)?;
+        assignment_require_text("childProfileId", &self.child_profile_id)?;
+        self.scope.validate()?;
+        self.definition.validate()
+    }
+}
+
+impl AgentAssignmentGet {
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("assignmentId", &self.assignment_id)
+    }
+}
+
+impl AgentAssignmentStart {
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("startIdempotencyKey", &self.start_idempotency_key)?;
+        assignment_require_text("assignmentId", &self.assignment_id)?;
+        assignment_require_positive("expectedRevision", self.expected_revision)?;
+        assignment_require_text("childRunId", &self.child_run_id)
+    }
+}
+
+impl AgentAssignmentRequestCancel {
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("cancelIdempotencyKey", &self.cancel_idempotency_key)?;
+        assignment_require_text("assignmentId", &self.assignment_id)?;
+        assignment_require_positive("expectedRevision", self.expected_revision)
+    }
+}
+
+impl AgentAssignmentConfirmCancelled {
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("confirmIdempotencyKey", &self.confirm_idempotency_key)?;
+        assignment_require_text("assignmentId", &self.assignment_id)?;
+        assignment_require_positive("expectedRevision", self.expected_revision)
+    }
+}
+
+impl AgentAssignmentComplete {
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("completeIdempotencyKey", &self.complete_idempotency_key)?;
+        assignment_require_text("assignmentId", &self.assignment_id)?;
+        assignment_require_positive("expectedRevision", self.expected_revision)?;
+        if self.evidence.is_empty() {
+            return Err(AgentAssignmentValidationError::CollectionMustNotBeEmpty {
+                field: "evidence",
+            });
+        }
+        for evidence in &self.evidence {
+            evidence.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl AgentAssignmentFail {
+    pub fn validate(&self) -> Result<(), AgentAssignmentValidationError> {
+        assignment_require_text("failIdempotencyKey", &self.fail_idempotency_key)?;
+        assignment_require_text("assignmentId", &self.assignment_id)?;
+        assignment_require_positive("expectedRevision", self.expected_revision)?;
+        assignment_require_text("failureCode", &self.failure_code)
+    }
+}
+
+fn assignment_validate_reference(
+    field: &'static str,
+    value: &RevisionReference,
+) -> Result<(), AgentAssignmentValidationError> {
+    assignment_require_text(field, &value.id)?;
+    assignment_require_positive(field, value.revision)?;
+    assignment_require_sha256(
+        field,
+        value
+            .sha256
+            .as_deref()
+            .ok_or(AgentAssignmentValidationError::EmptyField { field })?,
+    )
+}
+
+fn assignment_require_text(
+    field: &'static str,
+    value: &str,
+) -> Result<(), AgentAssignmentValidationError> {
+    if value.trim().is_empty() {
+        Err(AgentAssignmentValidationError::EmptyField { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn assignment_require_positive(
+    field: &'static str,
+    value: u64,
+) -> Result<(), AgentAssignmentValidationError> {
+    if value == 0 {
+        Err(AgentAssignmentValidationError::NumberMustBePositive { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn assignment_require_sha256(
+    field: &'static str,
+    value: &str,
+) -> Result<(), AgentAssignmentValidationError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(AgentAssignmentValidationError::InvalidSha256 { field })
+    }
+}
+
+fn assignment_require_canonical(
+    field: &'static str,
+    values: &[String],
+) -> Result<(), AgentAssignmentValidationError> {
+    if values.is_empty() {
+        return Err(AgentAssignmentValidationError::CollectionMustNotBeEmpty { field });
+    }
+    let mut previous: Option<&str> = None;
+    for value in values {
+        assignment_require_text(field, value)?;
+        if previous.is_some_and(|item| item >= value.as_str()) {
+            return Err(AgentAssignmentValidationError::NonCanonicalCollection { field });
+        }
+        previous = Some(value);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalPlanValidationError {
     EmptyField { field: &'static str },
@@ -807,6 +1193,12 @@ pub struct RunPinnedIdentity {
     pub project_branch_id: String,
     pub goal: Option<RevisionReference>,
     pub plan: Option<RevisionReference>,
+    #[serde(default)]
+    pub assignment: Option<RevisionReference>,
+    #[serde(default)]
+    pub parent_run_id: Option<String>,
+    #[serde(default)]
+    pub delegation_depth: u32,
     pub provider: ProviderRunIdentity,
     pub prompt_bundle: VersionedPolicyIdentity,
     pub agent_profile: VersionedPolicyIdentity,

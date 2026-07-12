@@ -362,3 +362,72 @@ This definition is constrained by:
 - `docs/plans/2026-07-12-runtime-v2-foundation.md` for the implementation gates and reconnection order.
 
 Any future change that moves Provider calls, permissions, canonical writes, recovery ownership or authoritative Run state outside the Rust Runtime V2 kernel requires a new ADR（架构决策记录）. Presentation changes and additional domain object types do not require redefining the Harness if they preserve these boundaries.
+
+## 17. Three-layer reference strategy
+
+Decision date: 2026-07-12.
+
+NovelX will not replace Runtime V2 with an oh-my-pi fork. The accepted reference hierarchy is:
+
+```text
+Codex CLI（Codex 命令行）
+  reliability, recovery, permission, audit and side-effect safety standard
+
+oh-my-pi
+  mature Agent feature and implementation reference
+
+NovelX Runtime V2（第二版运行时）
+  authoritative creative-domain implementation
+```
+
+“Reference” does not grant upstream code authority over canon, project writes, credentials or recovery. Every adopted component is wrapped by Runtime V2 identities, events, permissions, source receipts and failure behavior.
+
+### 17.1 Accepted implementation sequence
+
+| Stage | Goal | Primary reference | Acceptance boundary |
+| --- | --- | --- | --- |
+| 1 | Finish Assignment（智能体分配） wiring | Codex + current NovelX | Strict commands, exact child Run pin, non-forgeable identity, no duplicate child Run after restart |
+| 2 | Complete startup recovery | Codex CLI | Restart never duplicates Provider calls, tools or project writes |
+| 3 | Rebuild context and compaction | oh-my-pi Compaction（上下文压缩） | Tool pairs, sources, Goal/Plan/Assignment and pending approvals survive compaction |
+| 4 | Build real multi-Agent scheduling | oh-my-pi Task（子任务） + Codex state machines | Bounded parallelism, cancellation, recovery, budgets and typed Artifacts（产物） |
+| 5 | Build long-term memory and graph retrieval | mnemopi + NovelX Canon（正史） | Active retrieval; candidate memory cannot mutate canon |
+| 6 | Upgrade tools | oh-my-pi Tools（工具系统） | Stable reads, search, chunking, version checks, timeouts and typed failures |
+| 7 | Reconnect creative Agents | NovelX domain implementation | Steward, Writer, Checker and GM use the same authoritative runtime |
+| 8 | Reconnect desktop workbench | oh-my-pi RPC（远程过程调用） + Codex UI（用户界面） | Real Goal, Plan, Assignment, model selection, branches, comments, activity and history |
+| 9 | Stress and fault acceptance | all three | Long documents, multi-Agent, network loss, crashes and conflicts pass continuously |
+
+### 17.2 oh-my-pi audit scope
+
+The first audit is restricted to:
+
+- `packages/agent/src/agent-loop.ts`;
+- `packages/agent/src/compaction`;
+- `packages/coding-agent/src/task`;
+- `packages/coding-agent/src/session`;
+- `packages/coding-agent/src/modes/rpc`;
+- `packages/mnemopi`;
+- `packages/ai`;
+- Rust-native read, search and token-counting tools.
+
+Every module audit must classify:
+
+1. code that can be reused directly;
+2. design that can only be referenced;
+3. assumptions that conflict with NovelX;
+4. state that must remain authoritative in Rust Runtime V2.
+
+No whole-repository copy is permitted. Upstream code cannot receive direct Canonical Assertion（权威断言）, project commit or unrestricted filesystem authority.
+
+### 17.3 Context and memory boundaries
+
+oh-my-pi patterns to evaluate include Tool Protection（工具结果保护）, Branch Summary（分支摘要）, Compaction Summary（压缩摘要）, Handoff Document（任务交接文档）and File Operation Summary（文件操作摘要）.
+
+NovelX must additionally preserve strict ToolCall/ToolResult pairing, current Goal/Plan/Assignment state, unresolved approvals and Change Sets, source versions and retrieval receipts, Canonical Assertions, world rules and conflict warnings. Acceptance includes million-scale source material chunking, repeated compaction and restart recovery.
+
+mnemopi is only a candidate-memory layer. Raw sources, candidate facts, confirmed canon, story-scoped canon, OC variants, private task memory and project shared memory remain separate. Similarity and model confidence never promote a candidate fact to canon; Checker review and source-linked Canonical Assertion are required.
+
+### 17.4 Evaluation discipline
+
+oh-my-pi is preferred as a reference for Provider compatibility, feature-rich task coordination, experimental memory, tool breadth, Windows-aware native utilities and RPC embedding. Codex remains preferred for Run lifecycle, crash recovery, permission boundaries, side-effect safety, conservative protocol design and auditability.
+
+Neither project is a complete NovelX foundation. Upstream README performance claims are not accepted evidence. All adopted behavior must be re-measured with NovelX's real Provider configurations, DeepSeek, long Chinese documents, multi-Agent workloads, cancellation, network failure, process termination and source conflicts.

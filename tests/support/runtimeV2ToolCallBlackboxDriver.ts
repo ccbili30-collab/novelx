@@ -179,6 +179,7 @@ function runStartPayload(mode: "free" | "assist", configSha256: string): Runtime
   return { startIdempotencyKey: `start-${randomUUID()}`, pinnedIdentity: {
     projectId: "project-1", workspaceId: "workspace-1", sessionId: "session-1", sessionBranchId: "session-branch-1",
     userMessageId: "user-message-1", projectBranchId: "project-branch-1", goal: null, plan: null,
+    assignment: null, parentRunId: null, delegationDepth: 0,
     provider: { profileId: "profile-1", providerId: "deepseek", modelId: "deepseek-chat", configSha256 },
     promptBundle: policy("novelx.steward", "b"), agentProfile: policy("novelx.agent.steward", "c"),
     toolPolicy: policy("novelx.tools", "d"), contextPolicy: policy("novelx.context", "e"), runtimePolicy: policy("novelx.runtime", "f"),

@@ -241,6 +241,9 @@ export const runtimeV2RunPinnedIdentitySchema = z.object({
   projectBranchId: identityStringSchema,
   goal: legacyRevisionReferenceSchema.nullable(),
   plan: legacyRevisionReferenceSchema.nullable(),
+  assignment: legacyRevisionReferenceSchema.nullable().optional(),
+  parentRunId: identityStringSchema.nullable().optional(),
+  delegationDepth: z.number().int().min(0).max(1).safe().optional(),
   provider: providerRunIdentitySchema,
   promptBundle: versionedPolicyIdentitySchema,
   agentProfile: versionedPolicyIdentitySchema,
@@ -264,6 +267,16 @@ export const runtimeV2RunPinnedIdentitySchema = z.object({
       break;
     }
   }
+  const assignment = identity.assignment ?? null;
+  const parentRunId = identity.parentRunId ?? null;
+  const delegationDepth = identity.delegationDepth ?? 0;
+  if (assignment === null) {
+    if (parentRunId !== null || delegationDepth !== 0) {
+      context.addIssue({ code: "custom", path: ["assignment"], message: "Root Runs cannot include delegation identity." });
+    }
+  } else if (identity.goal === null || identity.plan === null || parentRunId === null || delegationDepth !== 1) {
+    context.addIssue({ code: "custom", path: ["assignment"], message: "Child Runs require Goal, Plan, parentRunId and delegationDepth 1." });
+  }
 });
 
 export const runtimeV2RunStartPayloadSchema = z.object({
@@ -271,6 +284,9 @@ export const runtimeV2RunStartPayloadSchema = z.object({
   pinnedIdentity: runtimeV2RunPinnedIdentitySchema.safeExtend({
     goal: strictRevisionReferenceSchema.nullable(),
     plan: strictRevisionReferenceSchema.nullable(),
+    assignment: strictRevisionReferenceSchema.nullable(),
+    parentRunId: identityStringSchema.nullable(),
+    delegationDepth: z.number().int().min(0).max(1).safe(),
   }).strict(),
 }).strict();
 
@@ -510,6 +526,91 @@ export const runtimeV2PlanRevisionSchema = z.object({ revision: z.number().int()
 export const runtimeV2PlanSnapshotPayloadSchema = z.object({ workspaceId: identityStringSchema, planId: identityStringSchema, goalId: identityStringSchema, currentRevision: runtimeV2PlanRevisionSchema, lastStreamSequence: z.number().int().positive().safe() }).strict();
 export const runtimeV2PlanSnapshotEnvelopeSchema = runtimeV2EnvelopeSchema.extend({ messageType: z.literal("response"), name: z.literal("plan.snapshot"), correlationId: z.uuid(), runId: z.null(), payload: runtimeV2PlanSnapshotPayloadSchema }).strict();
 export const runtimeV2PlanRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({ messageType: z.literal("response"), name: z.literal("plan.rejected"), correlationId: z.uuid(), runId: z.null(), payload: runtimeV2ErrorSchema }).strict();
+
+const canonicalIdentityListSchema = z.array(identityStringSchema).min(1).max(10_000).superRefine((values, context) => {
+  for (let index = 1; index < values.length; index += 1) {
+    if (values[index - 1] >= values[index]) {
+      context.addIssue({ code: "custom", path: [index], message: "values must be sorted and unique." });
+      break;
+    }
+  }
+});
+
+export const runtimeV2AgentAssignmentScopeSchema = z.object({
+  resourceIds: canonicalIdentityListSchema,
+  scopeSha256: sha256Schema,
+}).strict();
+export const runtimeV2AgentAssignmentDefinitionSchema = z.object({
+  boundedObjective: z.string().trim().min(1).max(20_000),
+  sourceCheckpointId: identityStringSchema,
+  expectedArtifact: identityStringSchema,
+  capabilities: canonicalIdentityListSchema,
+}).strict();
+export const runtimeV2AgentAssignmentCompletionEvidenceSchema = z.object({
+  kind: identityStringSchema,
+  reference: identityStringSchema,
+  sha256: sha256Schema,
+}).strict();
+export const runtimeV2AgentAssignmentCreatePayloadSchema = z.object({
+  createIdempotencyKey: identityStringSchema,
+  assignmentId: identityStringSchema,
+  goal: strictRevisionReferenceSchema,
+  plan: strictRevisionReferenceSchema,
+  planStepId: identityStringSchema,
+  parentRunId: identityStringSchema,
+  parentInvocationId: identityStringSchema,
+  childProfileId: identityStringSchema,
+  scope: runtimeV2AgentAssignmentScopeSchema,
+  definition: runtimeV2AgentAssignmentDefinitionSchema,
+  permission: z.enum(["read_only", "propose_change_set"]),
+}).strict();
+export const runtimeV2AgentAssignmentGetPayloadSchema = z.object({ assignmentId: identityStringSchema }).strict();
+export const runtimeV2AgentAssignmentStartPayloadSchema = z.object({ startIdempotencyKey: identityStringSchema, assignmentId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), childRunId: identityStringSchema }).strict();
+export const runtimeV2AgentAssignmentRequestCancelPayloadSchema = z.object({ cancelIdempotencyKey: identityStringSchema, assignmentId: identityStringSchema, expectedRevision: z.number().int().positive().safe() }).strict();
+export const runtimeV2AgentAssignmentConfirmCancelledPayloadSchema = z.object({ confirmIdempotencyKey: identityStringSchema, assignmentId: identityStringSchema, expectedRevision: z.number().int().positive().safe() }).strict();
+export const runtimeV2AgentAssignmentCompletePayloadSchema = z.object({ completeIdempotencyKey: identityStringSchema, assignmentId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), evidence: z.array(runtimeV2AgentAssignmentCompletionEvidenceSchema).min(1).max(10_000) }).strict();
+export const runtimeV2AgentAssignmentFailPayloadSchema = z.object({ failIdempotencyKey: identityStringSchema, assignmentId: identityStringSchema, expectedRevision: z.number().int().positive().safe(), failureCode: identityStringSchema }).strict();
+export const runtimeV2AgentAssignmentCreateEnvelopeSchema = workspaceCommandEnvelope("agent.assignment.create", runtimeV2AgentAssignmentCreatePayloadSchema);
+export const runtimeV2AgentAssignmentGetEnvelopeSchema = workspaceCommandEnvelope("agent.assignment.get", runtimeV2AgentAssignmentGetPayloadSchema);
+export const runtimeV2AgentAssignmentStartEnvelopeSchema = workspaceCommandEnvelope("agent.assignment.start", runtimeV2AgentAssignmentStartPayloadSchema);
+export const runtimeV2AgentAssignmentRequestCancelEnvelopeSchema = workspaceCommandEnvelope("agent.assignment.request_cancel", runtimeV2AgentAssignmentRequestCancelPayloadSchema);
+export const runtimeV2AgentAssignmentConfirmCancelledEnvelopeSchema = workspaceCommandEnvelope("agent.assignment.confirm_cancelled", runtimeV2AgentAssignmentConfirmCancelledPayloadSchema);
+export const runtimeV2AgentAssignmentCompleteEnvelopeSchema = workspaceCommandEnvelope("agent.assignment.complete", runtimeV2AgentAssignmentCompletePayloadSchema);
+export const runtimeV2AgentAssignmentFailEnvelopeSchema = workspaceCommandEnvelope("agent.assignment.fail", runtimeV2AgentAssignmentFailPayloadSchema);
+export const runtimeV2AgentAssignmentSnapshotPayloadSchema = z.object({
+  assignmentId: identityStringSchema,
+  workspaceId: identityStringSchema,
+  projectId: identityStringSchema,
+  goal: strictRevisionReferenceSchema,
+  plan: strictRevisionReferenceSchema,
+  planStepId: identityStringSchema,
+  parentRunId: identityStringSchema,
+  parentInvocationId: identityStringSchema,
+  childProfileId: identityStringSchema,
+  scope: runtimeV2AgentAssignmentScopeSchema,
+  definition: runtimeV2AgentAssignmentDefinitionSchema,
+  permission: z.enum(["read_only", "propose_change_set"]),
+  status: z.enum(["allocated", "running", "cancel_requested", "cancelled", "completed", "failed"]),
+  childRunId: identityStringSchema.nullable(),
+  completionEvidence: z.array(runtimeV2AgentAssignmentCompletionEvidenceSchema).max(10_000),
+  failureCode: identityStringSchema.nullable(),
+  revision: z.number().int().positive().safe(),
+  lastEventHash: sha256Schema,
+}).strict().superRefine((snapshot, context) => {
+  const evidence = snapshot.completionEvidence.length;
+  const valid = snapshot.status === "allocated"
+    ? snapshot.childRunId === null && evidence === 0 && snapshot.failureCode === null
+    : snapshot.status === "running"
+      ? snapshot.childRunId !== null && evidence === 0 && snapshot.failureCode === null
+      : snapshot.status === "cancel_requested" || snapshot.status === "cancelled"
+        ? evidence === 0 && snapshot.failureCode === null
+        : snapshot.status === "completed"
+          ? snapshot.childRunId !== null && evidence > 0 && snapshot.failureCode === null
+          : snapshot.childRunId !== null && evidence === 0 && snapshot.failureCode !== null;
+  if (!valid) context.addIssue({ code: "custom", path: ["status"], message: "Assignment snapshot state is inconsistent." });
+});
+export const runtimeV2AgentAssignmentSnapshotEnvelopeSchema = runtimeV2EnvelopeSchema.extend({ messageType: z.literal("response"), name: z.literal("agent.assignment.snapshot"), correlationId: z.uuid(), runId: z.null(), payload: runtimeV2AgentAssignmentSnapshotPayloadSchema }).strict();
+export const runtimeV2AgentAssignmentRejectedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({ messageType: z.literal("response"), name: z.literal("agent.assignment.rejected"), correlationId: z.uuid(), runId: z.null(), payload: runtimeV2ErrorSchema }).strict();
 
 export const runtimeV2ContextDisclosureSchema = z.enum([
   "public", "project_private", "agent_internal", "player_hidden",
@@ -1059,6 +1160,16 @@ export type RuntimeV2PlanStepCompletePayload = z.infer<typeof runtimeV2PlanStepC
 export type RuntimeV2PlanSnapshotPayload = z.infer<typeof runtimeV2PlanSnapshotPayloadSchema>;
 export type RuntimeV2PlanSnapshotEnvelope = z.infer<typeof runtimeV2PlanSnapshotEnvelopeSchema>;
 export type RuntimeV2PlanRejectedEnvelope = z.infer<typeof runtimeV2PlanRejectedEnvelopeSchema>;
+export type RuntimeV2AgentAssignmentCreatePayload = z.infer<typeof runtimeV2AgentAssignmentCreatePayloadSchema>;
+export type RuntimeV2AgentAssignmentGetPayload = z.infer<typeof runtimeV2AgentAssignmentGetPayloadSchema>;
+export type RuntimeV2AgentAssignmentStartPayload = z.infer<typeof runtimeV2AgentAssignmentStartPayloadSchema>;
+export type RuntimeV2AgentAssignmentRequestCancelPayload = z.infer<typeof runtimeV2AgentAssignmentRequestCancelPayloadSchema>;
+export type RuntimeV2AgentAssignmentConfirmCancelledPayload = z.infer<typeof runtimeV2AgentAssignmentConfirmCancelledPayloadSchema>;
+export type RuntimeV2AgentAssignmentCompletePayload = z.infer<typeof runtimeV2AgentAssignmentCompletePayloadSchema>;
+export type RuntimeV2AgentAssignmentFailPayload = z.infer<typeof runtimeV2AgentAssignmentFailPayloadSchema>;
+export type RuntimeV2AgentAssignmentSnapshotPayload = z.infer<typeof runtimeV2AgentAssignmentSnapshotPayloadSchema>;
+export type RuntimeV2AgentAssignmentSnapshotEnvelope = z.infer<typeof runtimeV2AgentAssignmentSnapshotEnvelopeSchema>;
+export type RuntimeV2AgentAssignmentRejectedEnvelope = z.infer<typeof runtimeV2AgentAssignmentRejectedEnvelopeSchema>;
 export type RuntimeV2ContextDisclosure = z.infer<typeof runtimeV2ContextDisclosureSchema>;
 export type RuntimeV2ContextItem = z.infer<typeof runtimeV2ContextItemSchema>;
 export type RuntimeV2ContextCompilePayload = z.infer<typeof runtimeV2ContextCompilePayloadSchema>;
@@ -1201,6 +1312,14 @@ export function parseRuntimeV2PlanSnapshotEnvelope(value: unknown): RuntimeV2Pla
 }
 export function parseRuntimeV2PlanRejectedEnvelope(value: unknown): RuntimeV2PlanRejectedEnvelope {
   return parseVersionedEnvelope(value, runtimeV2PlanRejectedEnvelopeSchema);
+}
+
+export function parseRuntimeV2AgentAssignmentSnapshotEnvelope(value: unknown): RuntimeV2AgentAssignmentSnapshotEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2AgentAssignmentSnapshotEnvelopeSchema);
+}
+
+export function parseRuntimeV2AgentAssignmentRejectedEnvelope(value: unknown): RuntimeV2AgentAssignmentRejectedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2AgentAssignmentRejectedEnvelopeSchema);
 }
 
 export function parseRuntimeV2ContextCompileEnvelope(value: unknown): RuntimeV2ContextCompileEnvelope {

@@ -2,12 +2,17 @@ mod support;
 
 use novelx_protocol::{RevisionReference, RunStart};
 use novelx_runtime::{
+    agent_assignment_aggregate::{
+        AgentAssignmentIdentity, AgentAssignmentRepository, AssignmentDefinition,
+        AssignmentEventMetadata, AssignmentScope, ChildAgentPermission, RevisionBinding,
+    },
     event_journal::EventJournal,
     goal_aggregate::{
         AcceptanceCriterion, GoalAggregateRepository, GoalDefinition, GoalIdentity,
         GoalPermissionMode, GoalScope,
     },
     plan_aggregate::{PlanAggregate, PlanEventMetadata, PlanStep, PlanStepStatus},
+    run_aggregate::{EventMetadata, RunAggregate},
     run_command_service::{RunCommandService, WorkspaceBinding},
     run_pin_validator::{RunPinValidationError, RunPinValidator},
     workspace_event_journal::WorkspaceEventJournal,
@@ -16,6 +21,124 @@ use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+#[test]
+fn validates_exact_assignment_child_run_parent_scope_profile_and_depth() {
+    let fixture = Fixture::new();
+    let (goal, plan) = fixture.seed();
+    let goal_ref = RevisionReference {
+        id: goal.identity.goal_id.clone(),
+        revision: goal.revision,
+        sha256: Some(goal.last_event_hash.clone()),
+    };
+    let plan_ref = RevisionReference {
+        id: plan.plan_id().to_owned(),
+        revision: plan.current_revision().revision,
+        sha256: Some(plan.current_revision().revision_sha256.clone()),
+    };
+    let parent_run_id = Uuid::new_v4().to_string();
+    let mut parent_identity = pinned_identity();
+    parent_identity.goal = Some(goal_ref.clone());
+    parent_identity.plan = Some(plan_ref.clone());
+    let mut runtime = EventJournal::open(&fixture.database).unwrap();
+    let mut parent = RunAggregate::create(
+        &mut runtime,
+        &parent_run_id,
+        parent_identity,
+        run_metadata("parent-created"),
+    )
+    .unwrap();
+    parent
+        .prepare(&mut runtime, run_metadata("parent-preparing"))
+        .unwrap();
+    parent
+        .start(&mut runtime, run_metadata("parent-running"))
+        .unwrap();
+
+    let child_run_id = Uuid::new_v4().to_string();
+    let mut assignments = AgentAssignmentRepository::open(&fixture.database).unwrap();
+    let allocated = assignments
+        .allocate(
+            AgentAssignmentIdentity {
+                assignment_id: "assignment-1".into(),
+                workspace_id: "workspace-1".into(),
+                project_id: "project-1".into(),
+                goal: binding(&goal_ref),
+                plan: binding(&plan_ref),
+                plan_step_id: "step-1".into(),
+                parent_run_id: parent_run_id.clone(),
+                parent_invocation_id: "invocation-1".into(),
+                child_profile_id: "novelx.agent.steward".into(),
+            },
+            AssignmentScope {
+                resource_ids: vec!["resource-1".into(), "resource-2".into()],
+                scope_sha256: scope_sha(&["resource-1".into(), "resource-2".into()]),
+            },
+            AssignmentDefinition {
+                bounded_objective: "核对来源".into(),
+                source_checkpoint_id: "checkpoint-1".into(),
+                expected_artifact: "source-report".into(),
+                capabilities: vec!["project.read".into()],
+            },
+            ChildAgentPermission::ReadOnly,
+            assignment_metadata("assignment-created"),
+        )
+        .unwrap();
+    let running = assignments
+        .start(
+            "workspace-1",
+            "assignment-1",
+            allocated.revision,
+            child_run_id.clone(),
+            assignment_metadata("assignment-started"),
+        )
+        .unwrap();
+    let mut child_identity = pinned_identity();
+    child_identity.goal = Some(goal_ref);
+    child_identity.plan = Some(plan_ref);
+    child_identity.assignment = Some(RevisionReference {
+        id: "assignment-1".into(),
+        revision: running.revision,
+        sha256: Some(running.last_event_hash.clone()),
+    });
+    child_identity.parent_run_id = Some(parent_run_id);
+    child_identity.delegation_depth = 1;
+
+    let receipt = RunPinValidator::new(&fixture.database)
+        .validate(&child_run_id, &child_identity)
+        .unwrap();
+    assert_eq!(receipt.assignment_sha256, Some(running.last_event_hash));
+
+    child_identity.delegation_depth = 2;
+    assert!(matches!(
+        RunPinValidator::new(&fixture.database).validate(&child_run_id, &child_identity),
+        Err(RunPinValidationError::DelegationDepthUnsupported)
+    ));
+    child_identity.delegation_depth = 1;
+    drop(runtime);
+    let mut journal = Some(EventJournal::open(&fixture.database).unwrap());
+    let binding = WorkspaceBinding {
+        project_id: "project-1".into(),
+        workspace_id: "workspace-1".into(),
+    };
+    let validator = RunPinValidator::new(&fixture.database);
+    let snapshot = RunCommandService::new(&mut journal, Some(&binding))
+        .with_pin_validator(&validator)
+        .start(
+            Uuid::parse_str(&child_run_id).unwrap(),
+            Uuid::new_v4(),
+            RunStart {
+                start_idempotency_key: "child-run-start".into(),
+                pinned_identity: child_identity,
+            },
+        )
+        .unwrap();
+    assert_eq!(snapshot.pinned_identity.delegation_depth, 1);
+    assert_eq!(
+        snapshot.pinned_identity.assignment.as_ref().unwrap().id,
+        "assignment-1"
+    );
+}
 
 #[test]
 fn validates_exact_goal_and_plan_revisions_with_hashes_and_scope() {
@@ -34,7 +157,7 @@ fn validates_exact_goal_and_plan_revisions_with_hashes_and_scope() {
     });
 
     let receipt = RunPinValidator::new(&fixture.database)
-        .validate(&identity)
+        .validate("run-1", &identity)
         .unwrap();
     assert_eq!(receipt.goal_sha256, Some(goal.last_event_hash));
     assert_eq!(
@@ -55,7 +178,7 @@ fn rejects_missing_hash_scope_revision_and_plan_without_goal() {
         sha256: Some(plan.current_revision().revision_sha256.clone()),
     });
     assert!(matches!(
-        validator.validate(&identity),
+        validator.validate("run-1", &identity),
         Err(RunPinValidationError::PlanWithoutGoal)
     ));
 
@@ -66,7 +189,7 @@ fn rejects_missing_hash_scope_revision_and_plan_without_goal() {
     });
     identity.plan = None;
     assert!(matches!(
-        validator.validate(&identity),
+        validator.validate("run-1", &identity),
         Err(RunPinValidationError::GoalRevisionNotFound)
     ));
 
@@ -76,7 +199,7 @@ fn rejects_missing_hash_scope_revision_and_plan_without_goal() {
         sha256: Some("0".repeat(64)),
     });
     assert!(matches!(
-        validator.validate(&identity),
+        validator.validate("run-1", &identity),
         Err(RunPinValidationError::GoalHashMismatch)
     ));
 
@@ -84,7 +207,7 @@ fn rejects_missing_hash_scope_revision_and_plan_without_goal() {
     identity.scope_resource_ids = vec!["resource-outside".to_owned()];
     identity.resource_scope_sha256 = scope_sha(&identity.scope_resource_ids);
     assert!(matches!(
-        validator.validate(&identity),
+        validator.validate("run-1", &identity),
         Err(RunPinValidationError::GoalScopeConflict)
     ));
 }
@@ -209,4 +332,29 @@ fn scope_sha(resource_ids: &[String]) -> String {
         "{:x}",
         Sha256::digest(serde_json::to_vec(resource_ids).unwrap())
     )
+}
+
+fn binding(reference: &RevisionReference) -> RevisionBinding {
+    RevisionBinding {
+        id: reference.id.clone(),
+        revision: reference.revision,
+        sha256: reference.sha256.clone().unwrap(),
+    }
+}
+
+fn assignment_metadata(id: &str) -> AssignmentEventMetadata {
+    AssignmentEventMetadata {
+        message_id: format!("{id}-message"),
+        idempotency_key: format!("{id}-key"),
+        created_at: "2026-07-12T00:00:02Z".into(),
+    }
+}
+
+fn run_metadata(id: &str) -> EventMetadata<'_> {
+    EventMetadata {
+        message_id: id,
+        idempotency_key: id,
+        created_at: "2026-07-12T00:00:03Z",
+        reason: None,
+    }
 }

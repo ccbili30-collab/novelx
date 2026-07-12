@@ -171,6 +171,21 @@ describe("RuntimeV2ProcessSupervisor", () => {
     expect(isAlive(pid)).toBe(false);
   });
 
+  it("routes Agent Assignment commands and preserves typed rejections", async () => {
+    const accepted = createSupervisor(createFixture("assignment-success"));
+    await accepted.start();
+    await expect(accepted.getAgentAssignment({ assignmentId: "assignment-1" })).resolves.toMatchObject({
+      assignmentId: "assignment-1", status: "allocated", revision: 1,
+    });
+
+    const rejected = createSupervisor(createFixture("assignment-rejected"));
+    await rejected.start();
+    await expect(rejected.getAgentAssignment({ assignmentId: "assignment-1" })).rejects.toMatchObject({
+      code: "RUNTIME_V2_AGENT_ASSIGNMENT_REJECTED",
+      publicPayload: { code: "AGENT_ASSIGNMENT_NOT_FOUND" },
+    });
+  });
+
   it("delivers strict unsolicited events without completing the pending response", async () => {
     const events: Array<{ name: string; sequence: number; correlationId: string | null }> = [];
     const supervisor = createSupervisor(createFixture("event-before-status"));
@@ -425,6 +440,7 @@ const pinnedIdentity = () => {
   return {
     projectId: "project-1", workspaceId: "workspace-1", sessionId: "session-1", sessionBranchId: "branch-1",
     userMessageId: "message-1", projectBranchId: "project-branch-1", goal: null, plan: null,
+    assignment: null, parentRunId: null, delegationDepth: 0,
     provider: { profileId: "profile-1", providerId: "deepseek", modelId: "deepseek-chat", configSha256: "a".repeat(64) },
     promptBundle: policy("prompt", "b"), agentProfile: policy("agent", "c"), toolPolicy: policy("tool", "d"),
     contextPolicy: policy("context", "e"), runtimePolicy: policy("runtime", "f"), runtimeContractVersion: "1.0.0",
@@ -571,6 +587,27 @@ input.on("line", (line) => {
         contextWindow: command.payload.config.contextWindow,
         maxTokens: command.payload.config.maxTokens,
       }, command.messageId, runtimeSequence, "response")) + "\n");
+      return;
+    }
+    if (command.name.startsWith("agent.assignment.")) {
+      if (scenario === "assignment-rejected") {
+        process.stdout.write(JSON.stringify(envelope(1, "agent.assignment.rejected", {
+          code: "AGENT_ASSIGNMENT_NOT_FOUND", class: "validation", retryable: false,
+          publicMessage: "Assignment was not found.", stage: command.name, attempt: 0, diagnosticId: randomUUID(),
+        }, command.messageId, runtimeSequence, "response")) + "\n");
+        return;
+      }
+      const response = envelope(1, "agent.assignment.snapshot", {
+        assignmentId: "assignment-1", workspaceId: "workspace-1", projectId: "project-1",
+        goal: { id: "goal-1", revision: 1, sha256: "a".repeat(64) },
+        plan: { id: "plan-1", revision: 1, sha256: "b".repeat(64) },
+        planStepId: "step-1", parentRunId: "parent-1", parentInvocationId: "invocation-1",
+        childProfileId: "checker-v1", scope: { resourceIds: ["resource-1"], scopeSha256: "c".repeat(64) },
+        definition: { boundedObjective: "Audit", sourceCheckpointId: "checkpoint-1", expectedArtifact: "report", capabilities: ["project.read"] },
+        permission: "read_only", status: "allocated", childRunId: null, completionEvidence: [], failureCode: null,
+        revision: 1, lastEventHash: "d".repeat(64),
+      }, command.messageId, runtimeSequence, "response");
+      process.stdout.write(JSON.stringify(response) + "\n");
       return;
     }
     if (command.name === "runtime.status.get") {

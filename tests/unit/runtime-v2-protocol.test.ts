@@ -34,8 +34,11 @@ import {
   parseRuntimeV2ProviderInferenceFailedEnvelope,
   parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope,
   parseRuntimeV2ProviderInferenceStartEnvelope,
+  parseRuntimeV2AgentAssignmentSnapshotEnvelope,
   runtimeV2EnvelopeSchema,
   runtimeV2GoalCompletePayloadSchema,
+  runtimeV2AgentAssignmentCreateEnvelopeSchema,
+  runtimeV2AgentAssignmentCompleteEnvelopeSchema,
 } from "../../src/shared/runtimeV2Protocol";
 
 const MESSAGE_ID = "35bf2cb7-b0db-44e7-985d-664f9cd98f97";
@@ -240,7 +243,7 @@ function runPinnedIdentity() {
   return {
     projectId: "project-1", workspaceId: "workspace-1", sessionId: "session-1",
     sessionBranchId: "session-branch-1", userMessageId: "user-message-1", projectBranchId: "project-branch-1",
-    goal: null, plan: null,
+    goal: null, plan: null, assignment: null, parentRunId: null, delegationDepth: 0,
     provider: { profileId: "profile-1", providerId: "deepseek", modelId: "deepseek-chat", configSha256: "a".repeat(64) },
     promptBundle: policy("novelx.steward", "b"), agentProfile: policy("novelx.agent.steward", "c"),
     toolPolicy: policy("novelx.tools", "d"), contextPolicy: policy("novelx.context", "e"),
@@ -468,6 +471,19 @@ function inferenceReconciliationEnvelope(overrides: Record<string, unknown> = {}
 }
 
 describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
+  it("mirrors strict Agent Assignment commands and snapshots", () => {
+    const reference = (id: string, digit: string) => ({ id, revision: 1, sha256: digit.repeat(64) });
+    const scope = { resourceIds: ["chapter-1", "world-1"], scopeSha256: "c".repeat(64) };
+    const definition = { boundedObjective: "Audit chapter", sourceCheckpointId: "checkpoint-1", expectedArtifact: "report", capabilities: ["project.read"] };
+    const base = { protocolVersion: 1, messageId: MESSAGE_ID, messageType: "command", sentAt: "2026-07-12T00:00:00Z", correlationId: null, runId: null, sequence: 2 } as const;
+    const payload = { createIdempotencyKey: "create-1", assignmentId: "assignment-1", goal: reference("goal-1", "a"), plan: reference("plan-1", "b"), planStepId: "step-1", parentRunId: "parent-1", parentInvocationId: "invocation-1", childProfileId: "checker-v1", scope, definition, permission: "read_only" as const };
+    expect(runtimeV2AgentAssignmentCreateEnvelopeSchema.parse({ ...base, name: "agent.assignment.create", payload }).runId).toBeNull();
+    const snapshot = parseRuntimeV2AgentAssignmentSnapshotEnvelope({ ...base, messageId: "3f16bd41-31df-4d58-9a66-056e56b3b953", messageType: "response", name: "agent.assignment.snapshot", correlationId: MESSAGE_ID, sequence: 3, payload: { assignmentId: "assignment-1", workspaceId: "workspace-1", projectId: "project-1", goal: payload.goal, plan: payload.plan, planStepId: "step-1", parentRunId: "parent-1", parentInvocationId: "invocation-1", childProfileId: "checker-v1", scope, definition, permission: "read_only", status: "allocated", childRunId: null, completionEvidence: [], failureCode: null, revision: 1, lastEventHash: "d".repeat(64) } });
+    expect(snapshot.payload.status).toBe("allocated");
+    expect(runtimeV2AgentAssignmentCreateEnvelopeSchema.safeParse({ ...base, name: "agent.assignment.create", payload: { ...payload, scope: { ...scope, resourceIds: ["world-1", "chapter-1"] } } }).success).toBe(false);
+    expect(runtimeV2AgentAssignmentCompleteEnvelopeSchema.safeParse({ ...base, name: "agent.assignment.complete", payload: { completeIdempotencyKey: "complete-1", assignmentId: "assignment-1", expectedRevision: 1, evidence: [] } }).success).toBe(false);
+  });
+
   it("rejects caller-supplied Goal completion actor identity", () => {
     const valid = {
       completeIdempotencyKey: "goal-complete-1",

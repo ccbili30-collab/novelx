@@ -24,6 +24,8 @@ import {
   parseRuntimeV2GoalRejectedEnvelope,
   parseRuntimeV2PlanSnapshotEnvelope,
   parseRuntimeV2PlanRejectedEnvelope,
+  parseRuntimeV2AgentAssignmentSnapshotEnvelope,
+  parseRuntimeV2AgentAssignmentRejectedEnvelope,
   parseRuntimeV2StatusEnvelope,
   parseRuntimeV2StoppedEnvelope,
   parseRuntimeV2ToolAuthorizationResolvedEnvelope,
@@ -52,6 +54,13 @@ import {
   runtimeV2PlanReviseEnvelopeSchema,
   runtimeV2PlanStepStartEnvelopeSchema,
   runtimeV2PlanStepCompleteEnvelopeSchema,
+  runtimeV2AgentAssignmentCreateEnvelopeSchema,
+  runtimeV2AgentAssignmentGetEnvelopeSchema,
+  runtimeV2AgentAssignmentStartEnvelopeSchema,
+  runtimeV2AgentAssignmentRequestCancelEnvelopeSchema,
+  runtimeV2AgentAssignmentConfirmCancelledEnvelopeSchema,
+  runtimeV2AgentAssignmentCompleteEnvelopeSchema,
+  runtimeV2AgentAssignmentFailEnvelopeSchema,
   runtimeV2ShutdownEnvelopeSchema,
   runtimeV2StatusGetEnvelopeSchema,
   runtimeV2ToolAuthorizationResolveEnvelopeSchema,
@@ -87,6 +96,14 @@ import {
   type RuntimeV2PlanStepStartPayload,
   type RuntimeV2PlanStepCompletePayload,
   type RuntimeV2PlanSnapshotPayload,
+  type RuntimeV2AgentAssignmentCreatePayload,
+  type RuntimeV2AgentAssignmentGetPayload,
+  type RuntimeV2AgentAssignmentStartPayload,
+  type RuntimeV2AgentAssignmentRequestCancelPayload,
+  type RuntimeV2AgentAssignmentConfirmCancelledPayload,
+  type RuntimeV2AgentAssignmentCompletePayload,
+  type RuntimeV2AgentAssignmentFailPayload,
+  type RuntimeV2AgentAssignmentSnapshotPayload,
   type RuntimeV2StatusPayload,
   type RuntimeV2ToolAuthorizationResolvePayload,
   type RuntimeV2ToolAuthorizationResolvedPayload,
@@ -150,6 +167,7 @@ export type RuntimeV2SupervisorErrorCode =
   | "RUNTIME_V2_RUN_REJECTED"
   | "RUNTIME_V2_GOAL_REJECTED"
   | "RUNTIME_V2_PLAN_REJECTED"
+  | "RUNTIME_V2_AGENT_ASSIGNMENT_REJECTED"
   | "RUNTIME_V2_CONTEXT_REJECTED"
   | "RUNTIME_V2_PROVIDER_REJECTED"
   | "RUNTIME_V2_WRITE_FAILED";
@@ -305,6 +323,48 @@ export class RuntimeV2ProcessSupervisor {
   async completePlanStep(payload: RuntimeV2PlanStepCompletePayload): Promise<RuntimeV2PlanSnapshotPayload> {
     return parseRuntimeV2PlanSnapshotEnvelope(
       await this.#sendCommand("plan.step.complete", "plan.snapshot", null, payload),
+    ).payload;
+  }
+
+  async createAgentAssignment(payload: RuntimeV2AgentAssignmentCreatePayload): Promise<RuntimeV2AgentAssignmentSnapshotPayload> {
+    return parseRuntimeV2AgentAssignmentSnapshotEnvelope(
+      await this.#sendCommand("agent.assignment.create", "agent.assignment.snapshot", null, payload),
+    ).payload;
+  }
+
+  async getAgentAssignment(payload: RuntimeV2AgentAssignmentGetPayload): Promise<RuntimeV2AgentAssignmentSnapshotPayload> {
+    return parseRuntimeV2AgentAssignmentSnapshotEnvelope(
+      await this.#sendCommand("agent.assignment.get", "agent.assignment.snapshot", null, payload),
+    ).payload;
+  }
+
+  async startAgentAssignment(payload: RuntimeV2AgentAssignmentStartPayload): Promise<RuntimeV2AgentAssignmentSnapshotPayload> {
+    return parseRuntimeV2AgentAssignmentSnapshotEnvelope(
+      await this.#sendCommand("agent.assignment.start", "agent.assignment.snapshot", null, payload),
+    ).payload;
+  }
+
+  async requestAgentAssignmentCancellation(payload: RuntimeV2AgentAssignmentRequestCancelPayload): Promise<RuntimeV2AgentAssignmentSnapshotPayload> {
+    return parseRuntimeV2AgentAssignmentSnapshotEnvelope(
+      await this.#sendCommand("agent.assignment.request_cancel", "agent.assignment.snapshot", null, payload),
+    ).payload;
+  }
+
+  async confirmAgentAssignmentCancelled(payload: RuntimeV2AgentAssignmentConfirmCancelledPayload): Promise<RuntimeV2AgentAssignmentSnapshotPayload> {
+    return parseRuntimeV2AgentAssignmentSnapshotEnvelope(
+      await this.#sendCommand("agent.assignment.confirm_cancelled", "agent.assignment.snapshot", null, payload),
+    ).payload;
+  }
+
+  async completeAgentAssignment(payload: RuntimeV2AgentAssignmentCompletePayload): Promise<RuntimeV2AgentAssignmentSnapshotPayload> {
+    return parseRuntimeV2AgentAssignmentSnapshotEnvelope(
+      await this.#sendCommand("agent.assignment.complete", "agent.assignment.snapshot", null, payload),
+    ).payload;
+  }
+
+  async failAgentAssignment(payload: RuntimeV2AgentAssignmentFailPayload): Promise<RuntimeV2AgentAssignmentSnapshotPayload> {
+    return parseRuntimeV2AgentAssignmentSnapshotEnvelope(
+      await this.#sendCommand("agent.assignment.fail", "agent.assignment.snapshot", null, payload),
     ).payload;
   }
 
@@ -540,8 +600,12 @@ export class RuntimeV2ProcessSupervisor {
                     ? parseRuntimeV2GoalRejectedEnvelope(value)
                     : name === "plan.snapshot"
                       ? parseRuntimeV2PlanSnapshotEnvelope(value)
-                      : name === "plan.rejected"
-                        ? parseRuntimeV2PlanRejectedEnvelope(value)
+                    : name === "plan.rejected"
+                      ? parseRuntimeV2PlanRejectedEnvelope(value)
+                      : name === "agent.assignment.snapshot"
+                        ? parseRuntimeV2AgentAssignmentSnapshotEnvelope(value)
+                        : name === "agent.assignment.rejected"
+                          ? parseRuntimeV2AgentAssignmentRejectedEnvelope(value)
                 : name === "context.compilation"
                   ? parseRuntimeV2ContextCompilationEnvelope(value)
                   : name === "context.rejected"
@@ -598,6 +662,7 @@ export class RuntimeV2ProcessSupervisor {
         || response.name === "run.rejected"
         || response.name === "goal.rejected"
         || response.name === "plan.rejected"
+        || response.name === "agent.assignment.rejected"
         || response.name === "context.rejected"
         || response.name === "provider.rejected"
       ) {
@@ -610,6 +675,8 @@ export class RuntimeV2ProcessSupervisor {
               ? "RUNTIME_V2_GOAL_REJECTED"
               : response.name === "plan.rejected"
                 ? "RUNTIME_V2_PLAN_REJECTED"
+                : response.name === "agent.assignment.rejected"
+                  ? "RUNTIME_V2_AGENT_ASSIGNMENT_REJECTED"
             : response.name === "context.rejected"
               ? "RUNTIME_V2_CONTEXT_REJECTED"
             : response.name === "provider.rejected"
@@ -716,8 +783,8 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   #sendCommand(
-    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "run.reconcile" | "goal.create" | "goal.get" | "goal.revise" | "goal.completion.propose" | "goal.complete" | "plan.create" | "plan.get" | "plan.revise" | "plan.step.start" | "plan.step.complete" | "context.compile" | "provider.inference.start" | "tool.authorization.resolve",
-    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "context.compilation" | "provider.inference.accepted" | "tool.authorization.resolved",
+    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "run.reconcile" | "goal.create" | "goal.get" | "goal.revise" | "goal.completion.propose" | "goal.complete" | "plan.create" | "plan.get" | "plan.revise" | "plan.step.start" | "plan.step.complete" | "agent.assignment.create" | "agent.assignment.get" | "agent.assignment.start" | "agent.assignment.request_cancel" | "agent.assignment.confirm_cancelled" | "agent.assignment.complete" | "agent.assignment.fail" | "context.compile" | "provider.inference.start" | "tool.authorization.resolve",
+    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "agent.assignment.snapshot" | "context.compilation" | "provider.inference.accepted" | "tool.authorization.resolved",
     runId: string | null,
     payload: object,
     timeoutMs = this.#options.commandTimeoutMs,
@@ -776,6 +843,20 @@ export class RuntimeV2ProcessSupervisor {
                                   ? runtimeV2PlanStepStartEnvelopeSchema.parse(base)
                                   : name === "plan.step.complete"
                                     ? runtimeV2PlanStepCompleteEnvelopeSchema.parse(base)
+                                    : name === "agent.assignment.create"
+                                      ? runtimeV2AgentAssignmentCreateEnvelopeSchema.parse(base)
+                                      : name === "agent.assignment.get"
+                                        ? runtimeV2AgentAssignmentGetEnvelopeSchema.parse(base)
+                                        : name === "agent.assignment.start"
+                                          ? runtimeV2AgentAssignmentStartEnvelopeSchema.parse(base)
+                                          : name === "agent.assignment.request_cancel"
+                                            ? runtimeV2AgentAssignmentRequestCancelEnvelopeSchema.parse(base)
+                                            : name === "agent.assignment.confirm_cancelled"
+                                              ? runtimeV2AgentAssignmentConfirmCancelledEnvelopeSchema.parse(base)
+                                              : name === "agent.assignment.complete"
+                                                ? runtimeV2AgentAssignmentCompleteEnvelopeSchema.parse(base)
+                                                : name === "agent.assignment.fail"
+                                                  ? runtimeV2AgentAssignmentFailEnvelopeSchema.parse(base)
                 : name === "tool.authorization.resolve"
                   ? runtimeV2ToolAuthorizationResolveEnvelopeSchema.parse(base)
                 : name === "context.compile"
@@ -838,7 +919,7 @@ export class RuntimeV2ProcessSupervisor {
 }
 
 interface PendingCommand {
-  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "context.compilation" | "provider.bound" | "provider.inference.accepted" | "tool.authorization.resolved";
+  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "agent.assignment.snapshot" | "context.compilation" | "provider.bound" | "provider.inference.accepted" | "tool.authorization.resolved";
   resolve(value: unknown): void;
   reject(error: RuntimeV2SupervisorError): void;
   timer: NodeJS.Timeout;

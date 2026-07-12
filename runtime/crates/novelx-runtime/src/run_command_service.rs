@@ -80,7 +80,10 @@ impl<'a> RunCommandService<'a> {
         match RunAggregate::recover(journal, &run_id_text) {
             Ok(_) => {}
             Err(RunAggregateError::NotFound(_)) => {
-                if start.pinned_identity.goal.is_some() || start.pinned_identity.plan.is_some() {
+                if start.pinned_identity.goal.is_some()
+                    || start.pinned_identity.plan.is_some()
+                    || start.pinned_identity.assignment.is_some()
+                {
                     self.pin_validator
                         .ok_or_else(|| {
                             failure(
@@ -91,7 +94,7 @@ impl<'a> RunCommandService<'a> {
                                 false,
                             )
                         })?
-                        .validate(&start.pinned_identity)
+                        .validate(&run_id_text, &start.pinned_identity)
                         .map_err(pin_failure)?;
                 }
             }
@@ -318,9 +321,67 @@ fn pin_failure(error: RunPinValidationError) -> RunCommandFailure {
             RuntimeErrorClass::StaleVersion,
             "计划与任务固定的目标修订不一致。",
         ),
+        RunPinValidationError::AssignmentReferenceInvalid => (
+            "RUN_ASSIGNMENT_PIN_INVALID",
+            RuntimeErrorClass::Validation,
+            "子智能体分配引用无效。",
+        ),
+        RunPinValidationError::AssignmentNotFound => (
+            "RUN_ASSIGNMENT_PIN_NOT_FOUND",
+            RuntimeErrorClass::SourceConflict,
+            "没有找到子智能体分配。",
+        ),
+        RunPinValidationError::AssignmentRevisionNotFound => (
+            "RUN_ASSIGNMENT_PIN_REVISION_NOT_FOUND",
+            RuntimeErrorClass::StaleVersion,
+            "没有找到固定的子智能体分配修订。",
+        ),
+        RunPinValidationError::AssignmentHashMismatch => (
+            "RUN_ASSIGNMENT_PIN_HASH_MISMATCH",
+            RuntimeErrorClass::SourceConflict,
+            "子智能体分配哈希与持久化修订不一致。",
+        ),
+        RunPinValidationError::AssignmentChildRunMismatch => (
+            "RUN_ASSIGNMENT_CHILD_RUN_MISMATCH",
+            RuntimeErrorClass::SourceConflict,
+            "分配没有绑定当前子运行。",
+        ),
+        RunPinValidationError::AssignmentBindingConflict
+        | RunPinValidationError::ParentRunBindingConflict => (
+            "RUN_ASSIGNMENT_BINDING_CONFLICT",
+            RuntimeErrorClass::SourceConflict,
+            "子运行与分配或父运行的固定身份冲突。",
+        ),
+        RunPinValidationError::AssignmentScopeConflict => (
+            "RUN_ASSIGNMENT_SCOPE_CONFLICT",
+            RuntimeErrorClass::SourceConflict,
+            "子运行资源范围与分配范围不一致。",
+        ),
+        RunPinValidationError::AssignmentPolicyConflict => (
+            "RUN_ASSIGNMENT_POLICY_CONFLICT",
+            RuntimeErrorClass::SourceConflict,
+            "子运行的智能体配置或来源检查点与分配不一致。",
+        ),
+        RunPinValidationError::DelegationIdentityInvalid => (
+            "RUN_DELEGATION_IDENTITY_INVALID",
+            RuntimeErrorClass::Validation,
+            "子运行的委派身份不完整。",
+        ),
+        RunPinValidationError::DelegationDepthUnsupported => (
+            "RUN_DELEGATION_DEPTH_UNSUPPORTED",
+            RuntimeErrorClass::Validation,
+            "第一版不允许子智能体递归分配其他智能体。",
+        ),
+        RunPinValidationError::ParentRunNotFound => (
+            "RUN_ASSIGNMENT_PARENT_RUN_NOT_FOUND",
+            RuntimeErrorClass::SourceConflict,
+            "没有找到分配绑定的父运行。",
+        ),
         RunPinValidationError::GoalIntegrity(_)
         | RunPinValidationError::PlanIntegrity(_)
-        | RunPinValidationError::WorkspaceJournal(_) => (
+        | RunPinValidationError::AssignmentIntegrity(_)
+        | RunPinValidationError::WorkspaceJournal(_)
+        | RunPinValidationError::RuntimeJournal(_) => (
             "RUN_PIN_JOURNAL_INTEGRITY_FAILED",
             RuntimeErrorClass::Storage,
             "目标或计划记录无法通过完整性校验。",
