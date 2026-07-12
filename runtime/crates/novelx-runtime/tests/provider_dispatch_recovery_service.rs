@@ -28,17 +28,25 @@ use novelx_runtime::{
     operational_recovery_recording_service::OperationalRecoveryRecordingService,
     operational_recovery_scanner::{OperationalRecoveryGate, OperationalRecoveryScanner},
     provider_attempt::{
-        ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptMetadata,
-        ProviderAttemptState, ProviderResponseReceipt,
+        ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptFailure,
+        ProviderAttemptMetadata, ProviderAttemptState, ProviderDeliveryCertainty,
+        ProviderResponseReceipt,
     },
     provider_dispatch_recovery_service::{
-        ProviderDispatchRecoveryError, ProviderDispatchRecoveryRequest,
-        ProviderDispatchRecoveryService, ProviderDispatchRecoveryTerminal,
+        ProviderDispatchAuthorizedResumeRequest, ProviderDispatchRecoveryError,
+        ProviderDispatchRecoveryRequest, ProviderDispatchRecoveryService,
+        ProviderDispatchRecoveryTerminal,
+    },
+    provider_dispatch_resume_authorization_service::{
+        ProviderDispatchResumeAuthorizationRequest, ProviderDispatchResumeAuthorizationService,
     },
     provider_gateway::{
         ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderGateway,
         ProviderInferenceMessage, ProviderInferenceRequest, ProviderInferenceRole,
         ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
+    },
+    provider_inference_service::{
+        ProviderInferenceExecution, ProviderInferenceService, ProviderInferenceServiceError,
     },
     run_aggregate::{EventMetadata, RunAggregate},
     workspace_runtime_lease::WorkspaceRuntimeLease,
@@ -312,7 +320,9 @@ async fn concurrent_execute_is_single_flight_and_never_marks_the_live_request_ou
     );
     assert!(matches!(
         second.unwrap_err(),
-        ProviderDispatchRecoveryError::DispatchAlreadyInFlight
+        ProviderDispatchRecoveryError::Provider(
+            ProviderInferenceServiceError::AttemptInFlight { .. }
+        )
     ));
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -325,6 +335,306 @@ async fn concurrent_execute_is_single_flight_and_never_marks_the_live_request_ou
     ));
 }
 
+#[tokio::test]
+async fn recovery_cannot_terminalize_an_attempt_owned_by_the_live_provider_path() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Delayed {
+        delay: Duration::from_millis(500),
+        response: json_response(200, successful_body("直接路径唯一响应")),
+    })
+    .await;
+    let (providers, provider) = bound_registry(base_url, 2_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway, "runtime-shared-guard");
+    let mut direct_journal = EventJournal::open(&fixture.path).unwrap();
+    let mut direct = ProviderInferenceService::new(&mut direct_journal, &providers, &gateway);
+    let recovery = ProviderDispatchRecoveryService::new(&fixture.path);
+
+    let direct_call = direct.execute(seeded.execution.clone());
+    let recovery_call = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        recovery
+            .execute_requested(seeded.request.clone(), &providers, &gateway, &seeded.lease)
+            .await
+    };
+    let (direct_result, recovery_result) = tokio::join!(direct_call, recovery_call);
+
+    server.await.unwrap();
+    assert_eq!(
+        direct_result.unwrap().text.as_deref(),
+        Some("直接路径唯一响应")
+    );
+    assert!(matches!(
+        recovery_result.unwrap_err(),
+        ProviderDispatchRecoveryError::Provider(
+            ProviderInferenceServiceError::AttemptInFlight { .. }
+        )
+    ));
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.attempt_state(&seeded),
+        ProviderAttemptState::Responded
+    );
+    assert_eq!(fixture.outcome(&seeded), None);
+
+    let recovered = recovery
+        .execute_requested(
+            seeded.request.clone(),
+            &ProviderRegistry::default(),
+            &ProviderGateway::new().unwrap(),
+            &seeded.lease,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered.terminal,
+        ProviderDispatchRecoveryTerminal::Responded
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        fixture.outcome(&seeded),
+        Some(OperationalRecoveryOutcome::Succeeded { .. })
+    ));
+}
+
+#[tokio::test]
+async fn requested_attempt_requires_new_owner_authorization_and_dispatches_exactly_once() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("跨进程恢复成功"),
+    )))
+    .await;
+    let (providers, provider) = bound_registry(base_url, 2_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture
+        .seed_requested(&providers, &provider, &gateway, "runtime-owner-a")
+        .transfer_owner(&fixture, "runtime-owner-b");
+    let recovery = ProviderDispatchRecoveryService::new(&fixture.path);
+
+    let unauthorized = recovery
+        .execute_requested(seeded.request.clone(), &providers, &gateway, &seeded.lease)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        unauthorized,
+        ProviderDispatchRecoveryError::ResumeAuthorizationMissing
+    ));
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+
+    let authorization = fixture.authorize_resume(&seeded);
+    let resume_request = ProviderDispatchAuthorizedResumeRequest {
+        recovery: seeded.request.clone(),
+        authorization_id: authorization.authorization_id,
+    };
+    let first = recovery
+        .resume_authorized(resume_request.clone(), &providers, &gateway, &seeded.lease)
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(first.terminal, ProviderDispatchRecoveryTerminal::Responded);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+
+    let repeated = recovery
+        .resume_authorized(
+            resume_request,
+            &ProviderRegistry::default(),
+            &ProviderGateway::new().unwrap(),
+            &seeded.lease,
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeated, first);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn sent_attempt_new_owner_authorization_finalizes_unknown_without_provider_or_network() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("不应被请求"),
+    )))
+    .await;
+    let (providers, provider) = bound_registry(base_url, 2_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway, "sent-owner-a");
+    fixture.mark_sent(&seeded);
+    let seeded = seeded.transfer_owner(&fixture, "sent-owner-b");
+    let authorization = fixture.authorize_resume(&seeded);
+
+    let receipt = ProviderDispatchRecoveryService::new(&fixture.path)
+        .resume_authorized(
+            authorized_request(&seeded, authorization.authorization_id),
+            &ProviderRegistry::default(),
+            &ProviderGateway::new().unwrap(),
+            &seeded.lease,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        receipt.terminal,
+        ProviderDispatchRecoveryTerminal::OutcomeUnknown
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        fixture.outcome(&seeded),
+        Some(OperationalRecoveryOutcome::OutcomeUnknown { .. })
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn responded_attempt_new_owner_authorization_finalizes_without_provider_or_network() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("不应被请求"),
+    )))
+    .await;
+    let (providers, provider) = bound_registry(base_url, 2_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway, "responded-owner-a");
+    fixture.mark_responded(&seeded);
+    let seeded = seeded.transfer_owner(&fixture, "responded-owner-b");
+    let authorization = fixture.authorize_resume(&seeded);
+
+    let receipt = ProviderDispatchRecoveryService::new(&fixture.path)
+        .resume_authorized(
+            authorized_request(&seeded, authorization.authorization_id),
+            &ProviderRegistry::default(),
+            &ProviderGateway::new().unwrap(),
+            &seeded.lease,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        receipt.terminal,
+        ProviderDispatchRecoveryTerminal::Responded
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        fixture.outcome(&seeded),
+        Some(OperationalRecoveryOutcome::Succeeded { .. })
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn failed_attempt_new_owner_authorization_finalizes_without_provider_or_network() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("不应被请求"),
+    )))
+    .await;
+    let (providers, provider) = bound_registry(base_url, 2_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway, "failed-owner-a");
+    fixture.mark_failed(&seeded);
+    let seeded = seeded.transfer_owner(&fixture, "failed-owner-b");
+    let authorization = fixture.authorize_resume(&seeded);
+
+    let receipt = ProviderDispatchRecoveryService::new(&fixture.path)
+        .resume_authorized(
+            authorized_request(&seeded, authorization.authorization_id),
+            &ProviderRegistry::default(),
+            &ProviderGateway::new().unwrap(),
+            &seeded.lease,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        receipt.terminal,
+        ProviderDispatchRecoveryTerminal::FailedSafe
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        fixture.outcome(&seeded),
+        Some(OperationalRecoveryOutcome::FailedSafe { .. })
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn authorization_is_rejected_when_attempt_evidence_changes_before_resume() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("不应被请求"),
+    )))
+    .await;
+    let (providers, provider) = bound_registry(base_url, 2_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture
+        .seed_requested(&providers, &provider, &gateway, "changed-owner-a")
+        .transfer_owner(&fixture, "changed-owner-b");
+    let authorization = fixture.authorize_resume(&seeded);
+    fixture.mark_sent(&seeded);
+
+    let error = ProviderDispatchRecoveryService::new(&fixture.path)
+        .resume_authorized(
+            authorized_request(&seeded, authorization.authorization_id),
+            &ProviderRegistry::default(),
+            &ProviderGateway::new().unwrap(),
+            &seeded.lease,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProviderDispatchRecoveryError::ResumeEvidenceChanged
+    ));
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.outcome(&seeded), None);
+    server.abort();
+}
+
+#[tokio::test]
+async fn terminal_outcome_is_readable_by_new_owner_without_resume_authorization() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("已持久化终态"),
+    )))
+    .await;
+    let (providers, provider) = bound_registry(base_url, 2_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway, "terminal-owner-a");
+    let original = ProviderDispatchRecoveryService::new(&fixture.path)
+        .execute_requested(seeded.request.clone(), &providers, &gateway, &seeded.lease)
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let seeded = seeded.transfer_owner(&fixture, "terminal-owner-b");
+
+    let recovered = ProviderDispatchRecoveryService::new(&fixture.path)
+        .execute_requested(
+            seeded.request.clone(),
+            &ProviderRegistry::default(),
+            &ProviderGateway::new().unwrap(),
+            &seeded.lease,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(recovered, original);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    let recovery = OperationalRecoveryRepository::open(&fixture.path)
+        .unwrap()
+        .load(WORKSPACE_ID, &seeded.run_id)
+        .unwrap();
+    assert!(
+        recovery.operations[&seeded.request.operation_id]
+            .provider_dispatch_resumes
+            .is_empty()
+    );
+}
+
 struct Fixture {
     _temp: TempDir,
     path: std::path::PathBuf,
@@ -334,8 +644,31 @@ struct SeededRecovery {
     run_id: String,
     attempt_id: String,
     provider: ProviderRunIdentity,
+    execution: ProviderInferenceExecution,
     request: ProviderDispatchRecoveryRequest,
     lease: WorkspaceRuntimeLease,
+}
+
+impl SeededRecovery {
+    fn transfer_owner(self, fixture: &Fixture, new_owner_instance_id: &str) -> Self {
+        let Self {
+            run_id,
+            attempt_id,
+            provider,
+            execution,
+            request,
+            lease,
+        } = self;
+        drop(lease);
+        Self {
+            run_id,
+            attempt_id,
+            provider,
+            execution,
+            request,
+            lease: fixture.lease(new_owner_instance_id),
+        }
+    }
 }
 
 impl Fixture {
@@ -363,11 +696,19 @@ impl Fixture {
         let attempt_id = Uuid::new_v4();
         let compilation_id = Uuid::new_v4();
         let receipt = compilation_receipt(compilation_id);
-        let authoritative_request = authoritative_request(receipt.clone());
+        let prepared_request = authoritative_request(receipt.clone());
         let bound = providers.resolve(provider).unwrap();
-        let prepared = gateway
-            .prepare_inference(bound, authoritative_request)
-            .unwrap();
+        let prepared = gateway.prepare_inference(bound, prepared_request).unwrap();
+        let execution = ProviderInferenceExecution {
+            run_id: run_id.clone(),
+            attempt_id: attempt_id.to_string(),
+            inference_id: inference_id.to_string(),
+            invocation_id: invocation_id.clone(),
+            inference_idempotency_key: format!("{run_id}:inference:1"),
+            attempt_number: 1,
+            provider: provider.clone(),
+            request: authoritative_request(receipt.clone()),
+        };
         let mut identity = pinned_identity();
         identity.provider = provider.clone();
         let source_scope = ToolSourceScope {
@@ -550,6 +891,7 @@ impl Fixture {
             run_id: run_id.clone(),
             attempt_id: attempt_id_string,
             provider: provider.clone(),
+            execution,
             request: ProviderDispatchRecoveryRequest {
                 workspace_id: WORKSPACE_ID.to_owned(),
                 run_id,
@@ -605,6 +947,47 @@ impl Fixture {
             .unwrap();
     }
 
+    fn mark_failed(&self, seeded: &SeededRecovery) {
+        self.mark_sent(seeded);
+        let mut journal = EventJournal::open(&self.path).unwrap();
+        let mut attempt =
+            ProviderAttemptAggregate::recover(&journal, &seeded.run_id, &seeded.attempt_id)
+                .unwrap();
+        let sequence = current_run_sequence(&journal, &seeded.run_id);
+        attempt
+            .fail(
+                &mut journal,
+                sequence,
+                ProviderAttemptFailure {
+                    code: "PROVIDER_AUTH_REJECTED".to_owned(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    http_status: Some(401),
+                    delivery_certainty: ProviderDeliveryCertainty::ResponseReceived,
+                    diagnostic_id: Uuid::new_v4(),
+                },
+                provider_metadata("provider-failed", "provider-failed-key"),
+            )
+            .unwrap();
+    }
+
+    fn authorize_resume(
+        &self,
+        seeded: &SeededRecovery,
+    ) -> novelx_runtime::operational_recovery_aggregate::ProviderDispatchResumeAuthorization {
+        ProviderDispatchResumeAuthorizationService::new(&self.path)
+            .authorize(
+                ProviderDispatchResumeAuthorizationRequest {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    run_id: seeded.run_id.clone(),
+                    operation_id: seeded.request.operation_id.clone(),
+                    execution_id: seeded.request.execution_id.clone(),
+                },
+                &seeded.lease,
+            )
+            .unwrap()
+    }
+
     fn attempt_state(&self, seeded: &SeededRecovery) -> ProviderAttemptState {
         ProviderAttemptAggregate::recover(
             &EventJournal::open(&self.path).unwrap(),
@@ -633,6 +1016,16 @@ fn claim_request(run_id: &str, operation_id: &str) -> OperationalRecoveryClaimRe
         run_id: run_id.to_owned(),
         expected_operation_id: operation_id.to_owned(),
         lease_duration_seconds: 30,
+    }
+}
+
+fn authorized_request(
+    seeded: &SeededRecovery,
+    authorization_id: String,
+) -> ProviderDispatchAuthorizedResumeRequest {
+    ProviderDispatchAuthorizedResumeRequest {
+        recovery: seeded.request.clone(),
+        authorization_id,
     }
 }
 

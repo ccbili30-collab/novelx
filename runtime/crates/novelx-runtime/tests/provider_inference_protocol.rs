@@ -97,6 +97,25 @@ fn maps_pre_accept_rejection_without_requiring_run_id_inside_runtime_error_paylo
 }
 
 #[test]
+fn maps_attempt_single_flight_conflicts_without_suggesting_a_provider_retry() {
+    let execution = execution();
+    let mapper = ProviderInferenceProtocolMapper::new(Uuid::new_v4(), "2026-07-12T00:00:00Z");
+    let draft = mapper
+        .rejected(
+            &execution,
+            &ProviderInferenceServiceError::AttemptInFlight {
+                run_id: execution.run_id.clone(),
+                attempt_id: execution.attempt_id.clone(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(draft.payload["code"], "PROVIDER_ATTEMPT_IN_FLIGHT");
+    assert_eq!(draft.payload["class"], "validation");
+    assert_eq!(draft.payload["retryable"], false);
+}
+
+#[test]
 fn refuses_completion_whose_context_identity_does_not_match_execution() {
     let execution = execution();
     let mapper = ProviderInferenceProtocolMapper::new(Uuid::new_v4(), "2026-07-12T00:00:00Z");

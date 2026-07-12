@@ -95,6 +95,71 @@ async fn dispatch_runs_with_the_journal_closed_and_finalize_writes_the_terminal_
 }
 
 #[tokio::test]
+async fn split_dispatch_holds_attempt_ownership_until_finalize() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("分离派发完成"),
+    )))
+    .await;
+    let (providers, identity) = bound_registry(base_url, 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+    let execution = execution(identity.clone());
+    let prepared = {
+        let mut journal = fixture.open();
+        ProviderInferenceService::new(&mut journal, &providers, &gateway)
+            .prepare_attempt(execution.clone())
+            .unwrap()
+    };
+    let PreparedProviderAttempt::Dispatch(prepared) = prepared else {
+        panic!("new attempt must require dispatch");
+    };
+
+    let blocked = {
+        let mut journal = fixture.open();
+        ProviderInferenceService::new(&mut journal, &providers, &gateway)
+            .execute(execution.clone())
+            .await
+            .unwrap_err()
+    };
+    assert!(matches!(
+        blocked,
+        ProviderInferenceServiceError::AttemptInFlight { .. }
+    ));
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+
+    let dispatched = ProviderInferenceService::dispatch_attempt(
+        &gateway,
+        providers.resolve(&identity).unwrap(),
+        *prepared,
+    )
+    .await;
+    let outcome = {
+        let mut journal = fixture.open();
+        ProviderInferenceService::new(&mut journal, &providers, &gateway)
+            .finalize_attempt(dispatched)
+            .unwrap()
+    };
+    server.await.unwrap();
+    assert_eq!(outcome.text.as_deref(), Some("分离派发完成"));
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+
+    let recovered = {
+        let mut journal = fixture.open();
+        ProviderInferenceService::new(
+            &mut journal,
+            &ProviderRegistry::default(),
+            &ProviderGateway::new().unwrap(),
+        )
+        .execute(execution)
+        .await
+        .unwrap()
+    };
+    assert_eq!(recovered, outcome);
+}
+
+#[tokio::test]
 async fn dispatch_carries_a_definitive_provider_failure_until_finalize_persists_it() {
     let fixture = Fixture::new();
     let (base_url, _, _, server) = spawn_server(ServerReply::Immediate(json_response(
@@ -246,6 +311,46 @@ async fn identical_execution_returns_the_original_result_without_a_second_networ
     server.await.unwrap();
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
     assert_eq!(attempt_events(&journal).len(), 3);
+}
+
+#[tokio::test]
+async fn concurrent_execution_of_the_same_attempt_is_rejected_as_in_flight() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Delayed {
+        delay: Duration::from_millis(500),
+        response: json_response(200, successful_body("唯一响应")),
+    })
+    .await;
+    let (providers, identity) = bound_registry(base_url, 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+    let execution = execution(identity);
+    let mut first_journal = fixture.open();
+    let mut second_journal = fixture.open();
+    let mut first = ProviderInferenceService::new(&mut first_journal, &providers, &gateway);
+    let mut second = ProviderInferenceService::new(&mut second_journal, &providers, &gateway);
+
+    let first_call = first.execute(execution.clone());
+    let second_call = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        second.execute(execution).await
+    };
+    let (first_result, second_result) = tokio::join!(first_call, second_call);
+
+    server.await.unwrap();
+    assert_eq!(first_result.unwrap().text.as_deref(), Some("唯一响应"));
+    assert!(matches!(
+        second_result.unwrap_err(),
+        ProviderInferenceServiceError::AttemptInFlight { .. }
+    ));
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        attempt_events(&fixture.open())
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec!["provider.requested", "provider.sent", "provider.responded"]
+    );
 }
 
 #[tokio::test]

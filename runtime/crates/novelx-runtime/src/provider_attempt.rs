@@ -156,6 +156,10 @@ impl ProviderAttemptAggregate {
         self.state
     }
 
+    pub fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+
     pub const fn aggregate_sequence(&self) -> u64 {
         self.aggregate_sequence
     }

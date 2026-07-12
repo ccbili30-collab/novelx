@@ -11,8 +11,8 @@ use crate::{
     agent_assignment_recovery::{AgentAssignmentRecoveryError, recover_agent_assignments},
     event_journal::{EventJournal, EventJournalError},
     operational_recovery_aggregate::{
-        OperationalRecoveryAggregateError, OperationalRecoveryEventMetadata,
-        OperationalRecoveryRepository, OperationalRecoveryResume,
+        OperationalRecoveryAggregateError, OperationalRecoveryEffectClass,
+        OperationalRecoveryEventMetadata, OperationalRecoveryRepository, OperationalRecoveryResume,
     },
     operational_recovery_claim_service::{
         OperationalRecoveryClaimError, OperationalRecoveryClaimRequest,
@@ -154,6 +154,7 @@ impl OperationalRecoverySupervisor {
                     workspace_id,
                     run_id,
                     operation_id,
+                    current_gate,
                     exclusive_lease,
                 );
             }
@@ -308,6 +309,7 @@ impl OperationalRecoverySupervisor {
         workspace_id: &str,
         run_id: &str,
         operation_id: &str,
+        current_gate: OperationalRecoveryGate,
         exclusive_lease: &WorkspaceRuntimeLease,
     ) -> Result<OperationalRecoverySupervisorRun, OperationalRecoverySupervisorError> {
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
@@ -327,6 +329,15 @@ impl OperationalRecoverySupervisor {
         let execution = operation.execution.as_ref().ok_or(
             OperationalRecoverySupervisorError::StateInvariant("active execution disappeared"),
         )?;
+        if execution.effect_class
+            != OperationalRecoveryEffectClass::PersistedProviderResultProjection
+        {
+            return Ok(supervisor_result(
+                run_id,
+                operation_id,
+                OperationalRecoverySupervisorOutcome::Waiting(current_gate),
+            ));
+        }
         if claim.action_spec.is_none() {
             return Ok(supervisor_result(
                 run_id,

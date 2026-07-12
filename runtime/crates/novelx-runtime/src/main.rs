@@ -43,6 +43,7 @@ use novelx_runtime::project_path::ProjectRoot;
 use novelx_runtime::project_tool_execution_service::{
     ProjectToolExecutionOutcome, ProjectToolExecutionService,
 };
+use novelx_runtime::provider_dispatch_recovery_supervisor::ProviderDispatchRecoverySupervisor;
 use novelx_runtime::provider_gateway::{
     ProviderBindSensitiveEnvelope, ProviderGateway, ProviderGatewayError, ProviderInferenceOutcome,
     ProviderInferenceRequest, ProviderRegistry,
@@ -314,7 +315,7 @@ async fn run_command_loop(
                 return Err(io::Error::new(io::ErrorKind::InvalidData, error.to_string()).into());
             }
             output
-                .emit(handle_provider_bind(sensitive, context)?)
+                .emit(handle_provider_bind(sensitive, context).await?)
                 .await?;
             expected_host_sequence += 1;
             continue;
@@ -408,7 +409,7 @@ async fn run_command_loop(
             }
             "run.reconcile" => {
                 let routed = handle_run_reconcile(&command, context.journal)?;
-                refresh_operational_recovery(context)?;
+                refresh_operational_recovery(context).await?;
                 routed
             }
             "context.compile" => {
@@ -416,7 +417,7 @@ async fn run_command_loop(
             }
             "tool.authorization.resolve" => {
                 handle_tool_authorization_resolve(output, &command, context).await?;
-                refresh_operational_recovery(context)?;
+                refresh_operational_recovery(context).await?;
                 expected_host_sequence += 1;
                 continue;
             }
@@ -785,7 +786,7 @@ fn require_empty_payload(command: &Envelope) -> Result<(), String> {
     }
 }
 
-fn handle_provider_bind(
+async fn handle_provider_bind(
     command: ProviderBindSensitiveEnvelope,
     context: &mut RuntimeCommandContext<'_>,
 ) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
@@ -796,7 +797,7 @@ fn handle_provider_bind(
         .bind(payload.config, &payload.config_sha256, payload.credential)
     {
         Ok(receipt) => {
-            refresh_operational_recovery(context)?;
+            refresh_operational_recovery(context).await?;
             correlated_response_draft(correlation_id, "provider.bound", receipt)
         }
         Err(error) => {
@@ -810,7 +811,7 @@ fn handle_provider_bind(
     }
 }
 
-fn refresh_operational_recovery(
+async fn refresh_operational_recovery(
     context: &mut RuntimeCommandContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (Some(database_path), Some(binding), Some(exclusive_lease)) = (
@@ -821,6 +822,21 @@ fn refresh_operational_recovery(
         return Ok(());
     };
     let providers = context.provider_registry.bound_identities();
+    OperationalRecoverySupervisor::new(database_path).run_local_recovery_pass(
+        &binding.workspace_id,
+        &binding.project_id,
+        &providers,
+        exclusive_lease,
+    )?;
+    ProviderDispatchRecoverySupervisor::new(database_path)
+        .run_provider_dispatch_pass(
+            &binding.workspace_id,
+            &binding.project_id,
+            context.provider_registry,
+            context.provider_gateway.as_ref(),
+            exclusive_lease,
+        )
+        .await?;
     OperationalRecoverySupervisor::new(database_path).run_local_recovery_pass(
         &binding.workspace_id,
         &binding.project_id,

@@ -235,6 +235,24 @@ fn classify_error(
             false,
             "Provider inference execution is invalid.",
         ),
+        ProviderInferenceServiceError::AttemptInFlight { .. } => (
+            "PROVIDER_ATTEMPT_IN_FLIGHT",
+            RuntimeErrorClass::Validation,
+            false,
+            "The Provider attempt is already executing in this Runtime process.",
+        ),
+        ProviderInferenceServiceError::AttemptGuardMismatch => (
+            "PROVIDER_ATTEMPT_GUARD_MISMATCH",
+            RuntimeErrorClass::RuntimeCrash,
+            false,
+            "Provider attempt execution ownership could not be verified.",
+        ),
+        ProviderInferenceServiceError::AttemptGuardPoisoned => (
+            "PROVIDER_ATTEMPT_GUARD_FAILED",
+            RuntimeErrorClass::RuntimeCrash,
+            false,
+            "Provider attempt execution coordination failed.",
+        ),
         ProviderInferenceServiceError::ContextReceiptNotPersisted => (
             "CONTEXT_RECEIPT_NOT_PERSISTED",
             RuntimeErrorClass::Validation,

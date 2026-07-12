@@ -6,6 +6,17 @@ use tempfile::TempDir;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_event_journal.sql");
 
 #[test]
+fn records_the_canonical_database_path_for_process_wide_coordination() {
+    let fixture = Fixture::new();
+    let journal = fixture.open();
+
+    assert_eq!(
+        journal.database_path(),
+        std::fs::canonicalize(&fixture.database_path).unwrap()
+    );
+}
+
+#[test]
 fn allocates_run_and_aggregate_sequences_and_reads_after_cursors() {
     let fixture = Fixture::new();
     let mut journal = fixture.open();

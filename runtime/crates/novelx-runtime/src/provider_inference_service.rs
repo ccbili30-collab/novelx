@@ -1,3 +1,9 @@
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
+};
+
 use novelx_protocol::{ContextCompilationReceipt, ProviderRunIdentity};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -45,12 +51,80 @@ pub struct ProviderAttemptDispatch {
     execution: ProviderInferenceExecution,
     attempt: ProviderAttemptAggregate,
     prepared: PreparedProviderInference,
+    execution_guard: ProviderAttemptExecutionGuard,
 }
 
 pub struct DispatchedProviderAttempt {
     execution: ProviderInferenceExecution,
     attempt: ProviderAttemptAggregate,
     result: Result<ProviderInferenceOutcome, ProviderGatewayError>,
+    execution_guard: ProviderAttemptExecutionGuard,
+}
+
+#[derive(Clone)]
+pub(crate) struct ProviderAttemptExecutionGuard {
+    lease: Arc<ProviderAttemptExecutionLease>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ProviderAttemptExecutionKey {
+    database_path: PathBuf,
+    run_id: String,
+    attempt_id: String,
+}
+
+struct ProviderAttemptExecutionLease {
+    key: ProviderAttemptExecutionKey,
+}
+
+static ACTIVE_PROVIDER_ATTEMPTS: OnceLock<Mutex<HashSet<ProviderAttemptExecutionKey>>> =
+    OnceLock::new();
+
+impl ProviderAttemptExecutionGuard {
+    pub(crate) fn acquire(
+        journal: &EventJournal,
+        run_id: &str,
+        attempt_id: &str,
+    ) -> Result<Self, ProviderInferenceServiceError> {
+        if run_id.trim().is_empty() || attempt_id.trim().is_empty() {
+            return Err(ProviderInferenceServiceError::InvalidExecution);
+        }
+        let key = ProviderAttemptExecutionKey {
+            database_path: journal.database_path().to_owned(),
+            run_id: run_id.to_owned(),
+            attempt_id: attempt_id.to_owned(),
+        };
+        let mut active = ACTIVE_PROVIDER_ATTEMPTS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|_| ProviderInferenceServiceError::AttemptGuardPoisoned)?;
+        if !active.insert(key.clone()) {
+            return Err(ProviderInferenceServiceError::AttemptInFlight {
+                run_id: run_id.to_owned(),
+                attempt_id: attempt_id.to_owned(),
+            });
+        }
+        Ok(Self {
+            lease: Arc::new(ProviderAttemptExecutionLease { key }),
+        })
+    }
+
+    fn protects(&self, journal: &EventJournal, run_id: &str, attempt_id: &str) -> bool {
+        self.lease.key.database_path == journal.database_path()
+            && self.lease.key.run_id == run_id
+            && self.lease.key.attempt_id == attempt_id
+    }
+}
+
+impl Drop for ProviderAttemptExecutionLease {
+    fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_PROVIDER_ATTEMPTS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+        {
+            active.remove(&self.key);
+        }
+    }
 }
 
 impl<'a> ProviderInferenceService<'a> {
@@ -71,6 +145,22 @@ impl<'a> ProviderInferenceService<'a> {
         execution: ProviderInferenceExecution,
     ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
         let prepared = self.prepare_attempt(execution)?;
+        self.execute_prepared(prepared).await
+    }
+
+    pub(crate) async fn execute_guarded(
+        &mut self,
+        execution: ProviderInferenceExecution,
+        execution_guard: ProviderAttemptExecutionGuard,
+    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
+        let prepared = self.prepare_attempt_guarded(execution, execution_guard)?;
+        self.execute_prepared(prepared).await
+    }
+
+    async fn execute_prepared(
+        &mut self,
+        prepared: PreparedProviderAttempt,
+    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
         let dispatch = match prepared {
             PreparedProviderAttempt::Recovered(outcome) => return Ok(*outcome),
             PreparedProviderAttempt::Dispatch(dispatch) => *dispatch,
@@ -85,6 +175,23 @@ impl<'a> ProviderInferenceService<'a> {
         execution: ProviderInferenceExecution,
     ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
         validate_execution(&execution)?;
+        let execution_guard = ProviderAttemptExecutionGuard::acquire(
+            self.journal,
+            &execution.run_id,
+            &execution.attempt_id,
+        )?;
+        self.prepare_attempt_guarded(execution, execution_guard)
+    }
+
+    fn prepare_attempt_guarded(
+        &mut self,
+        execution: ProviderInferenceExecution,
+        execution_guard: ProviderAttemptExecutionGuard,
+    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
+        validate_execution(&execution)?;
+        if !execution_guard.protects(self.journal, &execution.run_id, &execution.attempt_id) {
+            return Err(ProviderInferenceServiceError::AttemptGuardMismatch);
+        }
         let run = RunAggregate::recover(self.journal, &execution.run_id)?;
         if run.state() != RunState::Running {
             if run.state() == RunState::WaitingForReconciliation
@@ -149,16 +256,17 @@ impl<'a> ProviderInferenceService<'a> {
                     ProviderInferenceServiceError::ExistingTerminal(existing.recovery()),
                 ),
                 ProviderAttemptState::Requested => {
-                    self.prepare_requested_attempt(execution, existing)
+                    self.prepare_requested_attempt(execution, existing, execution_guard)
                 }
             };
         }
-        self.prepare_new_attempt(execution)
+        self.prepare_new_attempt(execution, execution_guard)
     }
 
     fn prepare_new_attempt(
         &mut self,
         execution: ProviderInferenceExecution,
+        execution_guard: ProviderAttemptExecutionGuard,
     ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
         let persisted = load_persisted_context(
             self.journal,
@@ -206,13 +314,14 @@ impl<'a> ProviderInferenceService<'a> {
             current_run_sequence(self.journal, &execution.run_id)?,
             metadata(&requested_message_id, &requested_key, &requested_at),
         )?;
-        self.arm_dispatch(execution, attempt, prepared)
+        self.arm_dispatch(execution, attempt, prepared, execution_guard)
     }
 
     fn prepare_requested_attempt(
         &mut self,
         execution: ProviderInferenceExecution,
         attempt: ProviderAttemptAggregate,
+        execution_guard: ProviderAttemptExecutionGuard,
     ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
         let persisted = load_persisted_context(
             self.journal,
@@ -245,7 +354,7 @@ impl<'a> ProviderInferenceService<'a> {
         {
             return Err(ProviderInferenceServiceError::PersistedAttemptMismatch);
         }
-        self.arm_dispatch(execution, attempt, prepared)
+        self.arm_dispatch(execution, attempt, prepared, execution_guard)
     }
 
     fn arm_dispatch(
@@ -253,6 +362,7 @@ impl<'a> ProviderInferenceService<'a> {
         execution: ProviderInferenceExecution,
         mut attempt: ProviderAttemptAggregate,
         prepared: PreparedProviderInference,
+        execution_guard: ProviderAttemptExecutionGuard,
     ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
         let dispatch_id = Uuid::new_v4().to_string();
         let sent_message_id = Uuid::new_v4().to_string();
@@ -270,6 +380,7 @@ impl<'a> ProviderInferenceService<'a> {
                 execution,
                 attempt,
                 prepared,
+                execution_guard,
             },
         )))
     }
@@ -279,11 +390,18 @@ impl<'a> ProviderInferenceService<'a> {
         provider: &BoundProvider,
         dispatch: ProviderAttemptDispatch,
     ) -> DispatchedProviderAttempt {
-        let result = gateway.infer_prepared(provider, dispatch.prepared).await;
+        let ProviderAttemptDispatch {
+            execution,
+            attempt,
+            prepared,
+            execution_guard,
+        } = dispatch;
+        let result = gateway.infer_prepared(provider, prepared).await;
         DispatchedProviderAttempt {
-            execution: dispatch.execution,
-            attempt: dispatch.attempt,
+            execution,
+            attempt,
             result,
+            execution_guard,
         }
     }
 
@@ -293,13 +411,20 @@ impl<'a> ProviderInferenceService<'a> {
         dispatch: ProviderAttemptDispatch,
         cancellation: &mut watch::Receiver<bool>,
     ) -> DispatchedProviderAttempt {
+        let ProviderAttemptDispatch {
+            execution,
+            attempt,
+            prepared,
+            execution_guard,
+        } = dispatch;
         let result = gateway
-            .infer_prepared_cancellable(provider, dispatch.prepared, cancellation)
+            .infer_prepared_cancellable(provider, prepared, cancellation)
             .await;
         DispatchedProviderAttempt {
-            execution: dispatch.execution,
-            attempt: dispatch.attempt,
+            execution,
+            attempt,
             result,
+            execution_guard,
         }
     }
 
@@ -318,6 +443,7 @@ impl<'a> ProviderInferenceService<'a> {
             execution,
             mut attempt,
             result,
+            execution_guard: _execution_guard,
         } = dispatched;
         match result {
             Ok(outcome) => {
@@ -398,6 +524,12 @@ impl<'a> ProviderInferenceService<'a> {
 pub enum ProviderInferenceServiceError {
     #[error("Provider inference execution is invalid")]
     InvalidExecution,
+    #[error("Provider attempt `{attempt_id}` for Run `{run_id}` is already in flight")]
+    AttemptInFlight { run_id: String, attempt_id: String },
+    #[error("Provider attempt execution guard does not protect this database, Run, and Attempt")]
+    AttemptGuardMismatch,
+    #[error("Provider attempt execution guard is poisoned")]
+    AttemptGuardPoisoned,
     #[error("Provider inference Context Compilation receipt is not persisted for this Run")]
     ContextReceiptNotPersisted,
     #[error("Provider inference identity does not match the provider pinned to this Run")]

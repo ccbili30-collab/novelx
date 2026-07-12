@@ -1,8 +1,4 @@
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-};
+use std::path::{Path, PathBuf};
 
 use novelx_protocol::ProviderRunIdentity;
 use serde::{Deserialize, Serialize};
@@ -18,13 +14,14 @@ use crate::{
     operational_recovery_action::OperationalRecoveryAction,
     operational_recovery_aggregate::{
         OperationalRecoveryAggregateError, OperationalRecoveryEffectClass,
-        OperationalRecoveryEventMetadata, OperationalRecoveryOutcome,
-        OperationalRecoveryRepository,
+        OperationalRecoveryEventMetadata, OperationalRecoveryOperation, OperationalRecoveryOutcome,
+        OperationalRecoveryRepository, ProviderDispatchResumeCapability,
     },
     provider_attempt::{ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState},
     provider_gateway::{ProviderGateway, ProviderInferenceRequest, ProviderRegistry},
     provider_inference_service::{
-        ProviderInferenceExecution, ProviderInferenceService, ProviderInferenceServiceError,
+        ProviderAttemptExecutionGuard, ProviderInferenceExecution, ProviderInferenceService,
+        ProviderInferenceServiceError,
     },
     run_aggregate::{RunAggregate, RunAggregateError},
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
@@ -37,6 +34,12 @@ pub struct ProviderDispatchRecoveryRequest {
     pub run_id: String,
     pub operation_id: String,
     pub execution_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderDispatchAuthorizedResumeRequest {
+    pub recovery: ProviderDispatchRecoveryRequest,
+    pub authorization_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -121,6 +124,38 @@ impl ProviderDispatchRecoveryService {
         gateway: &ProviderGateway,
         exclusive_lease: &WorkspaceRuntimeLease,
     ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
+        self.execute(request, None, providers, gateway, exclusive_lease)
+            .await
+    }
+
+    pub async fn resume_authorized(
+        &self,
+        request: ProviderDispatchAuthorizedResumeRequest,
+        providers: &ProviderRegistry,
+        gateway: &ProviderGateway,
+        exclusive_lease: &WorkspaceRuntimeLease,
+    ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
+        if request.authorization_id.trim().is_empty() {
+            return Err(ProviderDispatchRecoveryError::ResumeAuthorizationMissing);
+        }
+        self.execute(
+            request.recovery,
+            Some(request.authorization_id.as_str()),
+            providers,
+            gateway,
+            exclusive_lease,
+        )
+        .await
+    }
+
+    async fn execute(
+        &self,
+        request: ProviderDispatchRecoveryRequest,
+        resume_authorization_id: Option<&str>,
+        providers: &ProviderRegistry,
+        gateway: &ProviderGateway,
+        exclusive_lease: &WorkspaceRuntimeLease,
+    ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
         if !exclusive_lease.protects_database(&self.database_path) {
             return Err(ProviderDispatchRecoveryError::WorkspaceLeaseMismatch);
         }
@@ -154,28 +189,39 @@ impl ProviderDispatchRecoveryService {
             return Err(ProviderDispatchRecoveryError::RecoveryFenceMismatch);
         }
         let dispatch = DispatchEvidence::from_action(action)?;
+        let execution_guard = {
+            let journal = EventJournal::open(&self.database_path)?;
+            ProviderAttemptExecutionGuard::acquire(&journal, &request.run_id, &dispatch.attempt_id)?
+        };
         let attempt_before = {
             let journal = EventJournal::open(&self.database_path)?;
             ProviderAttemptAggregate::recover(&journal, &request.run_id, &dispatch.attempt_id)?
         };
         dispatch.verify_attempt(&request.run_id, &attempt_before)?;
         if operation.outcome.is_some() {
-            return self.finish_from_attempt(request, &dispatch, exclusive_lease);
+            return self.finish_from_attempt(
+                request,
+                &dispatch,
+                resume_authorization_id,
+                exclusive_lease,
+            );
         }
-        if !exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) {
-            return Err(ProviderDispatchRecoveryError::RecoveryFenceMismatch);
+        if operation.disposition.is_some() {
+            return Err(ProviderDispatchRecoveryError::OperationNotExecutable);
         }
-        let _single_flight = ProviderDispatchSingleFlight::acquire(
-            &self.database_path,
-            &request.operation_id,
-            &request.execution_id,
+        verify_dispatch_actor(
+            operation,
+            &attempt_before,
+            &dispatch,
+            resume_authorization_id,
+            exclusive_lease,
         )?;
         if attempt_before.state() == ProviderAttemptState::Requested {
             let provider_execution = self.reconstruct_execution(&request.run_id, &dispatch)?;
             let result = {
                 let mut journal = EventJournal::open(&self.database_path)?;
                 ProviderInferenceService::new(&mut journal, providers, gateway)
-                    .execute(provider_execution)
+                    .execute_guarded(provider_execution, execution_guard.clone())
                     .await
             };
             if let Err(error) = result {
@@ -195,7 +241,7 @@ impl ProviderDispatchRecoveryService {
                 }
             }
         }
-        self.finish_from_attempt(request, &dispatch, exclusive_lease)
+        self.finish_from_attempt(request, &dispatch, resume_authorization_id, exclusive_lease)
     }
 
     fn reconstruct_execution(
@@ -246,24 +292,14 @@ impl ProviderDispatchRecoveryService {
         &self,
         request: ProviderDispatchRecoveryRequest,
         dispatch: &DispatchEvidence,
+        resume_authorization_id: Option<&str>,
         exclusive_lease: &WorkspaceRuntimeLease,
     ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
         let journal = EventJournal::open(&self.database_path)?;
         let attempt =
             ProviderAttemptAggregate::recover(&journal, &request.run_id, &dispatch.attempt_id)?;
         dispatch.verify_attempt(&request.run_id, &attempt)?;
-        let evidence = serde_json::json!({
-            "attemptId": dispatch.attempt_id,
-            "aggregateSequence": attempt.aggregate_sequence(),
-            "state": attempt.state(),
-            "definition": attempt.definition(),
-            "dispatchId": attempt.dispatch_id(),
-            "response": attempt.response_receipt(),
-            "responseTextSha256": attempt.response_text_sha256(),
-            "toolCalls": attempt.tool_calls(),
-            "failure": attempt.failure(),
-        });
-        let evidence_sha256 = canonical_sha256(&evidence)?;
+        let evidence_sha256 = provider_attempt_evidence_sha256(&attempt)?;
         let terminal = match attempt.state() {
             ProviderAttemptState::Responded => ProviderDispatchRecoveryTerminal::Responded,
             ProviderAttemptState::Failed => ProviderDispatchRecoveryTerminal::FailedSafe,
@@ -281,7 +317,12 @@ impl ProviderDispatchRecoveryService {
             evidence_sha256.clone(),
             dispatch.expected_loop_checkpoint_sha256.clone(),
         )?;
-        self.finish_recovery_operation(&request, &manifest, exclusive_lease)?;
+        self.finish_recovery_operation(
+            &request,
+            &manifest,
+            resume_authorization_id,
+            exclusive_lease,
+        )?;
         Ok(ProviderDispatchRecoveryReceipt {
             run_id: request.run_id,
             attempt_id: dispatch.attempt_id.clone(),
@@ -298,6 +339,7 @@ impl ProviderDispatchRecoveryService {
         &self,
         request: &ProviderDispatchRecoveryRequest,
         manifest: &ProviderDispatchRecoveryManifest,
+        resume_authorization_id: Option<&str>,
         exclusive_lease: &WorkspaceRuntimeLease,
     ) -> Result<(), ProviderDispatchRecoveryError> {
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
@@ -326,7 +368,20 @@ impl ProviderDispatchRecoveryService {
                 Err(ProviderDispatchRecoveryError::OutcomeConflict)
             };
         }
-        if !exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) {
+        let resume_owner = resume_authorization_id.is_some_and(|authorization_id| {
+            operation
+                .latest_provider_dispatch_resume()
+                .is_some_and(|authorization| {
+                    authorization.authorization_id == authorization_id
+                        && authorization.execution_id == execution.execution_id
+                        && authorization.claim_id == claim.claim_id
+                        && authorization.fencing_token == claim.fencing_token
+                        && authorization.action_spec_sha256 == claim.action_spec_sha256
+                        && exclusive_lease
+                            .proves_exclusive_owner(&authorization.resumer_instance_id)
+                })
+        });
+        if !exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) && !resume_owner {
             return Err(ProviderDispatchRecoveryError::RecoveryFenceMismatch);
         }
         let now = OffsetDateTime::now_utc().format(&Rfc3339)?;
@@ -367,63 +422,22 @@ impl ProviderDispatchRecoveryService {
     }
 }
 
-static ACTIVE_PROVIDER_DISPATCHES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-
-struct ProviderDispatchSingleFlight {
-    key: String,
-}
-
-impl ProviderDispatchSingleFlight {
-    fn acquire(
-        database_path: &Path,
-        operation_id: &str,
-        execution_id: &str,
-    ) -> Result<Self, ProviderDispatchRecoveryError> {
-        let key = format!(
-            "{}:{operation_id}:{execution_id}",
-            database_path
-                .canonicalize()
-                .unwrap_or_else(|_| database_path.to_owned())
-                .display()
-        );
-        let mut active = ACTIVE_PROVIDER_DISPATCHES
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .map_err(|_| ProviderDispatchRecoveryError::DispatchGuardPoisoned)?;
-        if !active.insert(key.clone()) {
-            return Err(ProviderDispatchRecoveryError::DispatchAlreadyInFlight);
-        }
-        Ok(Self { key })
-    }
-}
-
-impl Drop for ProviderDispatchSingleFlight {
-    fn drop(&mut self) {
-        if let Ok(mut active) = ACTIVE_PROVIDER_DISPATCHES
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-        {
-            active.remove(&self.key);
-        }
-    }
-}
-
 #[derive(Clone)]
-struct DispatchEvidence {
-    invocation_id: String,
-    attempt_id: String,
-    inference_id: String,
-    context_compilation_id: String,
-    attempt_number: u16,
-    provider: ProviderRunIdentity,
-    canonical_context_sha256: String,
-    transport_payload_sha256: String,
-    expected_loop_checkpoint_sha256: String,
-    expected_attempt_sequence: u64,
+pub(crate) struct DispatchEvidence {
+    pub(crate) invocation_id: String,
+    pub(crate) attempt_id: String,
+    pub(crate) inference_id: String,
+    pub(crate) context_compilation_id: String,
+    pub(crate) attempt_number: u16,
+    pub(crate) provider: ProviderRunIdentity,
+    pub(crate) canonical_context_sha256: String,
+    pub(crate) transport_payload_sha256: String,
+    pub(crate) expected_loop_checkpoint_sha256: String,
+    pub(crate) expected_attempt_sequence: u64,
 }
 
 impl DispatchEvidence {
-    fn from_action(
+    pub(crate) fn from_action(
         action: &OperationalRecoveryAction,
     ) -> Result<Self, ProviderDispatchRecoveryError> {
         let OperationalRecoveryAction::PersistedProviderAttemptDispatch {
@@ -455,7 +469,7 @@ impl DispatchEvidence {
         })
     }
 
-    fn verify_attempt(
+    pub(crate) fn verify_attempt(
         &self,
         run_id: &str,
         attempt: &ProviderAttemptAggregate,
@@ -481,6 +495,83 @@ impl DispatchEvidence {
         }
         Ok(())
     }
+}
+
+fn verify_dispatch_actor(
+    operation: &OperationalRecoveryOperation,
+    attempt: &ProviderAttemptAggregate,
+    dispatch: &DispatchEvidence,
+    resume_authorization_id: Option<&str>,
+    exclusive_lease: &WorkspaceRuntimeLease,
+) -> Result<(), ProviderDispatchRecoveryError> {
+    let claim = operation
+        .claim
+        .as_ref()
+        .ok_or(ProviderDispatchRecoveryError::ClaimMissing)?;
+    if exclusive_lease.proves_exclusive_owner(&claim.owner_instance_id) {
+        return if resume_authorization_id.is_none() {
+            Ok(())
+        } else {
+            Err(ProviderDispatchRecoveryError::ResumeAuthorizationUnexpected)
+        };
+    }
+    let authorization_id =
+        resume_authorization_id.ok_or(ProviderDispatchRecoveryError::ResumeAuthorizationMissing)?;
+    let authorization = operation
+        .latest_provider_dispatch_resume()
+        .ok_or(ProviderDispatchRecoveryError::ResumeAuthorizationMissing)?;
+    let execution = operation
+        .execution
+        .as_ref()
+        .ok_or(ProviderDispatchRecoveryError::ExecutionMissing)?;
+    let expected_capability = match attempt.state() {
+        ProviderAttemptState::Requested => ProviderDispatchResumeCapability::DispatchRequested,
+        ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
+            ProviderDispatchResumeCapability::FinalizeOutcomeUnknown
+        }
+        ProviderAttemptState::Responded => ProviderDispatchResumeCapability::FinalizeResponded,
+        ProviderAttemptState::Failed => ProviderDispatchResumeCapability::FinalizeFailed,
+    };
+    if authorization.authorization_id != authorization_id
+        || authorization.operation_id != operation.observation.operation_id
+        || authorization.execution_id != execution.execution_id
+        || authorization.claim_id != claim.claim_id
+        || authorization.original_owner_instance_id != execution.owner_instance_id
+        || authorization.fencing_token != execution.fencing_token
+        || authorization.action_spec_sha256 != claim.action_spec_sha256
+        || authorization.attempt_id != dispatch.attempt_id
+        || authorization.attempt_state != attempt.state()
+        || authorization.attempt_aggregate_sequence != attempt.aggregate_sequence()
+        || authorization.attempt_definition_sha256 != provider_attempt_definition_sha256(attempt)?
+        || authorization.attempt_evidence_sha256 != provider_attempt_evidence_sha256(attempt)?
+        || authorization.capability != expected_capability
+        || !exclusive_lease.proves_exclusive_owner(&authorization.resumer_instance_id)
+    {
+        return Err(ProviderDispatchRecoveryError::ResumeEvidenceChanged);
+    }
+    Ok(())
+}
+
+pub(crate) fn provider_attempt_definition_sha256(
+    attempt: &ProviderAttemptAggregate,
+) -> Result<String, serde_json::Error> {
+    canonical_sha256(&serde_json::to_value(attempt.definition())?)
+}
+
+pub(crate) fn provider_attempt_evidence_sha256(
+    attempt: &ProviderAttemptAggregate,
+) -> Result<String, serde_json::Error> {
+    canonical_sha256(&serde_json::json!({
+        "attemptId": attempt.attempt_id(),
+        "aggregateSequence": attempt.aggregate_sequence(),
+        "state": attempt.state(),
+        "definition": attempt.definition(),
+        "dispatchId": attempt.dispatch_id(),
+        "response": attempt.response_receipt(),
+        "responseTextSha256": attempt.response_text_sha256(),
+        "toolCalls": attempt.tool_calls(),
+        "failure": attempt.failure(),
+    }))
 }
 
 fn outcome_matches_manifest(
@@ -579,12 +670,16 @@ pub enum ProviderDispatchRecoveryError {
     DispatchDidNotCrossBoundary,
     #[error("Provider dispatch recovery outcome conflicts with persisted evidence")]
     OutcomeConflict,
+    #[error("Provider dispatch recovery operation is waiting or quarantined")]
+    OperationNotExecutable,
+    #[error("Provider dispatch resume authorization is required")]
+    ResumeAuthorizationMissing,
+    #[error("Provider dispatch resume authorization is not valid for the original owner")]
+    ResumeAuthorizationUnexpected,
+    #[error("Provider dispatch resume authorization no longer matches persisted evidence")]
+    ResumeEvidenceChanged,
     #[error("Provider dispatch was blocked before crossing the transport boundary: {0}")]
     PreDispatchBlocked(Box<ProviderInferenceServiceError>),
-    #[error("Provider dispatch execution is already in flight in this Runtime instance")]
-    DispatchAlreadyInFlight,
-    #[error("Provider dispatch single-flight guard is poisoned")]
-    DispatchGuardPoisoned,
     #[error(transparent)]
     RuntimeJournal(#[from] EventJournalError),
     #[error(transparent)]

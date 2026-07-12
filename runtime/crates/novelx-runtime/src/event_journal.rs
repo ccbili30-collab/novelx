@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
@@ -73,14 +73,18 @@ pub enum EventJournalError {
     Storage(#[from] rusqlite::Error),
     #[error("runtime migration timestamp failed: {0}")]
     Timestamp(#[from] time::error::Format),
+    #[error("runtime event journal database path could not be canonicalized: {0}")]
+    DatabasePath(#[from] std::io::Error),
 }
 
 pub struct EventJournal {
     connection: Connection,
+    database_path: PathBuf,
 }
 
 impl EventJournal {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EventJournalError> {
+        let path = path.as_ref();
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
@@ -95,7 +99,15 @@ impl EventJournal {
         apply_addressing_migration(&mut connection)?;
         apply_simple_migration(&mut connection, 3, MIGRATION_0003)?;
         verify_schema_integrity(&connection)?;
-        Ok(Self { connection })
+        let database_path = std::fs::canonicalize(path)?;
+        Ok(Self {
+            connection,
+            database_path,
+        })
+    }
+
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
     }
 
     pub fn append(

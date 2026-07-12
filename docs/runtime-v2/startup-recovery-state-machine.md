@@ -19,7 +19,9 @@
 
 ## 2. 当前事实与缺口
 
-启动入口 `main.rs:1696-1701` 只调用 `RecoveryCoordinator::recover_and_reconcile`。该协调器扫描 Run 和 Provider Attempt，并把未对账的 `Sent（已发送）/OutcomeUnknown` Provider Attempt 对应 Run 转成 `WaitingForReconciliation（等待对账）`。它没有枚举并驱动 active AgentLoop，也没有统一恢复 Tool Coordination。
+启动入口先取得工作区独占锁，运行 `RecoveryCoordinator`、Assignment structural recovery、local-only Operational Recovery Supervisor，并在 `runtime.ready` 前记录完整扫描结果。没有 Provider 绑定时不会调用模型。Host 后续完成 `provider.bind` 后，Runtime 依次运行 local projection Supervisor、Provider Dispatch Supervisor、再次运行 local projection Supervisor，再发布刷新后的恢复状态。
+
+当前启动链已经能处理一个已持久化并已启动的 `ProviderDispatch`：新 Runtime 通过专用 ResumeAuthorization 续接 `Requested`，或零网络收口 `Sent/OutcomeUnknown/Responded/Failed`。它仍没有统一驱动全部 active AgentLoop phase，也没有 Tool Dispatch Supervisor，因此这里只是 Provider 子链闭环，不是完整启动恢复闭环。
 
 `AgentLoopJournalRepository::find_active_for_run` 已能找出一个 Run 的唯一 active loop，并拒绝多个 active loop；但 `LiveAgentLoopRunner` 的常规入口只接受 `AwaitingProvider`，`resume_after_assist` 只接受 `AwaitingApproval`。因此 Journal 可恢复不等于启动后能继续执行。
 
@@ -31,7 +33,7 @@
 
 当前 `InferenceDispatchIdentity（推理派发身份）` 会在进入 `AwaitingProvider` 前与 AgentLoop checkpoint 一起持久化，包含 `inference_id`、`attempt_id`、request/context identity、attempt number 和业务幂等键。`resume_awaiting_provider` 只能使用完全相同的身份恢复；Provider completion 也必须逐字段匹配该身份。
 
-服务级故障测试已模拟“下一轮身份和 phase 已持久化，但网络派发尚未开始”后中断，再从 Journal 恢复并完成第二轮；HTTP 服务器只收到预期的两次请求，没有第三次重复请求。尚缺真实子进程 kill/restart 黑盒、启动时自动枚举调度，以及其余 phase 的统一恢复。
+服务级测试与真实 Runtime 子进程测试都已覆盖“身份、phase、Requested Attempt 和 Started Recovery Execution 已持久化，但网络尚未派发”的恢复。新 Runtime 初始化后等待 `provider.bind`，随后只发送一次，持久化响应并完成本地 AgentLoop 投影；同进程再次绑定和完整重启后再次绑定均不会重复请求。尚缺强杀点矩阵以及其余 phase 的统一恢复。
 
 ## 3. 恢复判定优先级
 
@@ -50,7 +52,7 @@
 
 | AgentLoop phase | 必须恢复的数据 | 自动继续条件 | 等待 Host / Outcome Unknown | 当前实现结论 |
 | --- | --- | --- | --- | --- |
-| `AwaitingProvider` | request number、context compilation、inference identity、关联 attempt identity | Attempt=`Requested` 可发送；Attempt=`Responded` 可消费持久响应继续；无 Attempt 仅在持久 inference intent 明确证明“从未创建 attempt”时才可创建 | Attempt=`Sent/OutcomeUnknown` 等待 Host 对账；retryable Failed 交给持久重试策略 | checkpoint 已持久派发身份，Runner 可用同一身份恢复；启动仍未自动枚举调度 |
+| `AwaitingProvider` | request number、context compilation、inference identity、关联 attempt identity | Attempt=`Requested` 在精确 Provider 绑定和专用恢复授权后只发送一次；Attempt=`Responded` 消费持久响应并本地投影 | Attempt=`Sent/OutcomeUnknown` 零网络收口为未知；retryable Failed 尚待持久重试策略 | Provider Dispatch Supervisor 已接 `provider.bind`，跨进程授权和正式子进程测试已通过；无 Attempt 创建与强杀矩阵仍未完成 |
 | `AwaitingApproval` | pending tool requests、每项 Tool Coordination、已持久化审批决定 | 不自动批准；所有请求已有终态决定与工具终态结果后，可继续汇总 | 未决审批等待 Host；Running tool 无终态 manifest 为 Outcome Unknown | Host 命令可调用 `resume_after_assist`；不是启动自动恢复 |
 | `AwaitingToolResults` | pending requests、Provider call ID、Tool Coordination、lease、completion/failure manifest | Authorized 且未开始可安全启动；Completed/Failed/Denied 收集持久结果；全部终态后进入 Context Compilation | Requested+Assist 等待 Host；Running 无终态 manifest 为 Outcome Unknown，禁止重派 | Tool orphan 可局部校准，但没有启动级 loop 驱动器 |
 | `AwaitingContextCompilation` | 完整 ContextCompileIntent、base compilation identity、intent hash、目标 request number | 相同 intent 的编译已完成则复用 receipt；未完成则用稳定 idempotency key 重新调用编译 | intent/来源编译记录缺失或 hash 冲突时阻塞 | intent 存在于 checkpoint；ContinuationContextService 已以 base id + intent hash 生成幂等键，但启动不调用 |
@@ -63,8 +65,8 @@
 
 | Provider state | 恢复分类 | 正确动作 |
 | --- | --- | --- |
-| `Requested` | `SafeToSend` | 可以自动发送同一 attempt；不得生成新 attempt identity |
-| `Sent` | `OutcomeUnknown` | 禁止自动重发，Run 转 `WaitingForReconciliation` |
+| `Requested` | `SafeToSend` | 只有当前 owner 或持有最新专用 ResumeAuthorization 的新 Runtime 可以发送同一 attempt；不得生成新 attempt identity |
+| `Sent` | `OutcomeUnknown` | 禁止自动重发；恢复 Execution 只做零网络未知收口，Run 保持/进入 `WaitingForReconciliation` |
 | `OutcomeUnknown` | `OutcomeUnknown` | 等待 Host 选择接受已验证响应、取消或进入受控重试 |
 | `Responded` | `Completed` | 使用持久 response receipt/body 继续 AgentLoop，不再调用 Provider |
 | `Failed(retryable=true)` | `RetryEligible` | 由持久重试策略决定新 attempt number、退避和 deadline；不是立即无条件重发 |
@@ -166,7 +168,14 @@ dispatch_state = prepared | attempt_requested | sent | terminal
 Runtime start
   -> recover Run aggregates
   -> reconcile Provider OutcomeUnknown into WaitingForReconciliation
-  -> for each nonterminal Run:
+  -> local-only Operational Recovery barrier
+  -> publish runtime.ready without Provider access
+  -> after exact provider.bind:
+       -> scan + record
+       -> claim/start or authorize Provider Dispatch
+       -> dispatch Requested once, or consume persisted terminal/unknown evidence
+       -> run local persisted-result projection
+  -> for remaining nonterminal Run phases:
        -> recover exactly one active AgentLoop
        -> dispatch by LoopPhase
        -> recover matching child aggregates
@@ -219,4 +228,4 @@ Runtime start
 - 启动 recovery barrier 完成前不接受会改变同一 Run 的新命令。
 - 恢复结果可通过 Run snapshot 和结构化错误审计，不依赖日志文本猜测。
 
-当前实现额外完成了 Provider 派发身份预持久化、严格 completion identity 校验和 `AwaitingProvider` 服务级恢复；仍未覆盖启动枚举、恢复屏障、其余 active phase 和真实子进程 kill/restart，因此不满足上述完整闭环。
+当前实现额外完成了 Provider 派发身份预持久化、严格 completion identity 校验、结构恢复屏障、Provider 绑定后的 Operational Supervisor、跨进程专用授权、全 Provider 入口 single-flight，以及真实子进程初始化/绑定/重启黑盒测试。仍未覆盖全部 active phase、Tool Dispatch、Provider 强杀点矩阵和持久重试调度，因此仍不满足完整 Harness 启动恢复闭环。

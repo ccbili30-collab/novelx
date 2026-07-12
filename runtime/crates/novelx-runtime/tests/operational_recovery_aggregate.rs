@@ -1,3 +1,4 @@
+use novelx_protocol::ProviderRunIdentity;
 use novelx_runtime::operational_recovery_action::OperationalRecoveryAction;
 use novelx_runtime::operational_recovery_aggregate::{
     OPERATIONAL_RECOVERY_POLICY_VERSION, OperationalRecoveryAggregateError,
@@ -5,8 +6,10 @@ use novelx_runtime::operational_recovery_aggregate::{
     OperationalRecoveryEventMetadata, OperationalRecoveryExecution, OperationalRecoveryObservation,
     OperationalRecoveryObservedGate, OperationalRecoveryOutcome, OperationalRecoveryRepository,
     OperationalRecoveryResume, OperationalRecoveryStale, OperationalRecoverySubject,
-    OperationalRecoveryWaitingReason,
+    OperationalRecoveryWaitingReason, ProviderDispatchResumeAuthorization,
+    ProviderDispatchResumeCapability,
 };
+use novelx_runtime::provider_attempt::ProviderAttemptState;
 use novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease;
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -119,6 +122,497 @@ fn a_new_exclusive_runtime_can_authorize_resume_of_a_started_local_projection() 
             .revision,
         resumed.revision
     );
+}
+
+#[test]
+fn provider_dispatch_resume_is_fenced_idempotent_and_generational() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "6",
+        OperationalRecoveryObservedGate::ProviderDispatchReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let claim = provider_dispatch_claim(&observation, "old-runtime", 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim.clone(),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let execution = OperationalRecoveryExecution::derive(
+        &claim,
+        OperationalRecoveryEffectClass::ProviderDispatch,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            execution.clone(),
+            fixture.clock(),
+            event_metadata("2026-07-13T00:01:00Z"),
+        )
+        .unwrap();
+    let first = provider_dispatch_resume(
+        &observation,
+        &execution,
+        "new-runtime",
+        ProviderAttemptState::Requested,
+        1,
+        None,
+        "2026-07-13T00:02:00Z",
+    );
+
+    let wrong_lease = fixture.lease("wrong-runtime");
+    assert!(matches!(
+        repository.authorize_provider_dispatch_resume(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            first.clone(),
+            &wrong_lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:02:00Z"),
+        ),
+        Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired)
+    ));
+    drop(wrong_lease);
+
+    let first_lease = fixture.lease("new-runtime");
+    let first_persisted = repository
+        .authorize_provider_dispatch_resume(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            first.clone(),
+            &first_lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:02:00Z"),
+        )
+        .unwrap();
+    let operation = &first_persisted.operations[&observation.operation_id];
+    assert_eq!(
+        operation.provider_dispatch_resumes,
+        std::slice::from_ref(&first)
+    );
+    assert!(operation.is_current_provider_dispatch_resume(&first.authorization_id));
+    assert_eq!(
+        repository
+            .authorize_provider_dispatch_resume(
+                &subject.workspace_id,
+                &subject.run_id,
+                &observation.operation_id,
+                first.clone(),
+                &first_lease,
+                fixture.clock(),
+                event_metadata("2026-07-13T00:02:00Z"),
+            )
+            .unwrap()
+            .revision,
+        first_persisted.revision
+    );
+    drop(first_lease);
+
+    let second = provider_dispatch_resume(
+        &observation,
+        &execution,
+        "third-runtime",
+        ProviderAttemptState::Sent,
+        2,
+        Some(&first),
+        "2026-07-13T00:03:00Z",
+    );
+    let second_lease = fixture.lease("third-runtime");
+    let second_persisted = repository
+        .authorize_provider_dispatch_resume(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            second.clone(),
+            &second_lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:03:00Z"),
+        )
+        .unwrap();
+    let operation = &second_persisted.operations[&observation.operation_id];
+    assert_eq!(second.authorization_generation, 2);
+    assert_eq!(
+        second.previous_authorization_id.as_deref(),
+        Some(first.authorization_id.as_str())
+    );
+    assert!(operation.is_current_provider_dispatch_resume(&second.authorization_id));
+    assert!(!operation.is_current_provider_dispatch_resume(&first.authorization_id));
+    drop(second_lease);
+
+    let old_resumer_lease = fixture.lease("new-runtime");
+    assert!(matches!(
+        repository.authorize_provider_dispatch_resume(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            first,
+            &old_resumer_lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:04:00Z"),
+        ),
+        Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict)
+    ));
+    drop(old_resumer_lease);
+
+    let reopened = OperationalRecoveryRepository::open(&fixture.path)
+        .unwrap()
+        .load(&subject.workspace_id, &subject.run_id)
+        .unwrap();
+    assert_eq!(
+        reopened.operations[&observation.operation_id].provider_dispatch_resumes,
+        [
+            operation.provider_dispatch_resumes[0].clone(),
+            second.clone()
+        ]
+    );
+}
+
+#[test]
+fn provider_dispatch_resume_capability_is_derived_from_exact_attempt_state() {
+    let observation = observation(
+        &subject(),
+        "6",
+        OperationalRecoveryObservedGate::ProviderDispatchReady,
+        vec![],
+    );
+    let claim = provider_dispatch_claim(&observation, "old-runtime", 1);
+    let execution = OperationalRecoveryExecution::derive(
+        &claim,
+        OperationalRecoveryEffectClass::ProviderDispatch,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    for (state, sequence, expected) in [
+        (
+            ProviderAttemptState::Requested,
+            1,
+            ProviderDispatchResumeCapability::DispatchRequested,
+        ),
+        (
+            ProviderAttemptState::Sent,
+            2,
+            ProviderDispatchResumeCapability::FinalizeOutcomeUnknown,
+        ),
+        (
+            ProviderAttemptState::OutcomeUnknown,
+            3,
+            ProviderDispatchResumeCapability::FinalizeOutcomeUnknown,
+        ),
+        (
+            ProviderAttemptState::Responded,
+            3,
+            ProviderDispatchResumeCapability::FinalizeResponded,
+        ),
+        (
+            ProviderAttemptState::Failed,
+            2,
+            ProviderDispatchResumeCapability::FinalizeFailed,
+        ),
+    ] {
+        let authorization = provider_dispatch_resume(
+            &observation,
+            &execution,
+            "new-runtime",
+            state,
+            sequence,
+            None,
+            "2026-07-13T00:02:00Z",
+        );
+        assert_eq!(authorization.capability, expected);
+    }
+}
+
+#[test]
+fn provider_dispatch_resume_rejects_sent_and_terminal_state_rollback_to_requested() {
+    for (state, sequence) in [
+        (ProviderAttemptState::Sent, 2),
+        (ProviderAttemptState::Responded, 3),
+        (ProviderAttemptState::Failed, 3),
+        (ProviderAttemptState::OutcomeUnknown, 3),
+    ] {
+        let (fixture, subject, observation, execution, first) =
+            persisted_provider_dispatch_resume(state, sequence, "2026-07-13T00:02:00Z");
+        let rollback = provider_dispatch_resume(
+            &observation,
+            &execution,
+            "third-runtime",
+            ProviderAttemptState::Requested,
+            1,
+            Some(&first),
+            "2026-07-13T00:03:00Z",
+        );
+        let lease = fixture.lease("third-runtime");
+        assert!(matches!(
+            OperationalRecoveryRepository::open(&fixture.path)
+                .unwrap()
+                .authorize_provider_dispatch_resume(
+                    &subject.workspace_id,
+                    &subject.run_id,
+                    &observation.operation_id,
+                    rollback,
+                    &lease,
+                    fixture.clock(),
+                    event_metadata("2026-07-13T00:03:00Z"),
+                ),
+            Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict)
+        ));
+    }
+}
+
+#[test]
+fn provider_dispatch_resume_rejects_sequence_evidence_and_time_regressions() {
+    let (fixture, subject, observation, execution, first) =
+        persisted_provider_dispatch_resume(ProviderAttemptState::Sent, 2, "2026-07-13T00:02:00Z");
+    let lease = fixture.lease("third-runtime");
+    let sequence_rollback = provider_dispatch_resume(
+        &observation,
+        &execution,
+        "third-runtime",
+        ProviderAttemptState::Sent,
+        1,
+        Some(&first),
+        "2026-07-13T00:03:00Z",
+    );
+    assert!(matches!(
+        OperationalRecoveryRepository::open(&fixture.path)
+            .unwrap()
+            .authorize_provider_dispatch_resume(
+                &subject.workspace_id,
+                &subject.run_id,
+                &observation.operation_id,
+                sequence_rollback,
+                &lease,
+                fixture.clock(),
+                event_metadata("2026-07-13T00:03:00Z"),
+            ),
+        Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict)
+    ));
+
+    let changed_evidence = provider_dispatch_resume_with_evidence(
+        &observation,
+        &execution,
+        "third-runtime",
+        ProviderAttemptState::Sent,
+        2,
+        "e".repeat(64),
+        Some(&first),
+        "2026-07-13T00:03:00Z",
+    );
+    assert!(matches!(
+        OperationalRecoveryRepository::open(&fixture.path)
+            .unwrap()
+            .authorize_provider_dispatch_resume(
+                &subject.workspace_id,
+                &subject.run_id,
+                &observation.operation_id,
+                changed_evidence,
+                &lease,
+                fixture.clock(),
+                event_metadata("2026-07-13T00:03:00Z"),
+            ),
+        Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict)
+    ));
+
+    let time_rollback = provider_dispatch_resume(
+        &observation,
+        &execution,
+        "third-runtime",
+        ProviderAttemptState::Sent,
+        2,
+        Some(&first),
+        "2026-07-13T00:01:59Z",
+    );
+    assert!(matches!(
+        OperationalRecoveryRepository::open(&fixture.path)
+            .unwrap()
+            .authorize_provider_dispatch_resume(
+                &subject.workspace_id,
+                &subject.run_id,
+                &observation.operation_id,
+                time_rollback,
+                &lease,
+                fixture.clock(),
+                event_metadata("2026-07-13T00:03:00Z"),
+            ),
+        Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict)
+    ));
+}
+
+#[test]
+fn provider_dispatch_resume_allows_requested_to_responded_forward_progress() {
+    let (fixture, subject, observation, execution, first) = persisted_provider_dispatch_resume(
+        ProviderAttemptState::Requested,
+        1,
+        "2026-07-13T00:02:00Z",
+    );
+    let responded = provider_dispatch_resume(
+        &observation,
+        &execution,
+        "third-runtime",
+        ProviderAttemptState::Responded,
+        3,
+        Some(&first),
+        "2026-07-13T00:03:00Z",
+    );
+    let lease = fixture.lease("third-runtime");
+    let persisted = OperationalRecoveryRepository::open(&fixture.path)
+        .unwrap()
+        .authorize_provider_dispatch_resume(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            responded.clone(),
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:03:00Z"),
+        )
+        .unwrap();
+    let operation = &persisted.operations[&observation.operation_id];
+    assert_eq!(responded.authorization_generation, 2);
+    assert_eq!(
+        operation.latest_provider_dispatch_resume(),
+        Some(&responded)
+    );
+    assert!(operation.is_current_provider_dispatch_resume(&responded.authorization_id));
+}
+
+#[test]
+fn local_projection_and_provider_dispatch_resume_protocols_reject_each_other() {
+    let provider_fixture = Fixture::new();
+    let subject = subject();
+    let provider_observation = observation(
+        &subject,
+        "6",
+        OperationalRecoveryObservedGate::ProviderDispatchReady,
+        vec![],
+    );
+    let mut provider_repository =
+        OperationalRecoveryRepository::open(&provider_fixture.path).unwrap();
+    provider_repository
+        .observe(subject.clone(), provider_observation.clone(), metadata())
+        .unwrap();
+    let provider_claim = provider_dispatch_claim(&provider_observation, "old-runtime", 1);
+    provider_repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            provider_claim.clone(),
+            provider_fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let provider_execution = OperationalRecoveryExecution::derive(
+        &provider_claim,
+        OperationalRecoveryEffectClass::ProviderDispatch,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    provider_repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &provider_observation.operation_id,
+            provider_execution.clone(),
+            provider_fixture.clock(),
+            event_metadata("2026-07-13T00:01:00Z"),
+        )
+        .unwrap();
+    let provider_lease = provider_fixture.lease("new-runtime");
+    let local_resume = OperationalRecoveryResume::derive(
+        &provider_execution,
+        "new-runtime".to_owned(),
+        "2026-07-13T00:02:00Z".to_owned(),
+    )
+    .unwrap();
+    assert!(matches!(
+        provider_repository.authorize_local_execution_resume(
+            &subject.workspace_id,
+            &subject.run_id,
+            &provider_observation.operation_id,
+            local_resume,
+            &provider_lease,
+            provider_fixture.clock(),
+            event_metadata("2026-07-13T00:02:00Z"),
+        ),
+        Err(OperationalRecoveryAggregateError::ResumeNotAllowed)
+    ));
+    drop(provider_lease);
+
+    let local_fixture = Fixture::new();
+    let local_observation = observation(
+        &subject,
+        "7",
+        OperationalRecoveryObservedGate::RecoveryReady,
+        vec![],
+    );
+    let mut local_repository = OperationalRecoveryRepository::open(&local_fixture.path).unwrap();
+    local_repository
+        .observe(subject.clone(), local_observation.clone(), metadata())
+        .unwrap();
+    let local_claim = claim(&local_observation, "old-runtime", 1);
+    local_repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            local_claim.clone(),
+            local_fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let local_execution = OperationalRecoveryExecution::derive(
+        &local_claim,
+        OperationalRecoveryEffectClass::PersistedProviderResultProjection,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    local_repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &local_observation.operation_id,
+            local_execution.clone(),
+            local_fixture.clock(),
+            event_metadata("2026-07-13T00:01:00Z"),
+        )
+        .unwrap();
+    let provider_authorization = provider_dispatch_resume(
+        &local_observation,
+        &local_execution,
+        "new-runtime",
+        ProviderAttemptState::Requested,
+        1,
+        None,
+        "2026-07-13T00:02:00Z",
+    );
+    let local_lease = local_fixture.lease("new-runtime");
+    assert!(matches!(
+        local_repository.authorize_provider_dispatch_resume(
+            &subject.workspace_id,
+            &subject.run_id,
+            &local_observation.operation_id,
+            provider_authorization,
+            &local_lease,
+            local_fixture.clock(),
+            event_metadata("2026-07-13T00:02:00Z"),
+        ),
+        Err(OperationalRecoveryAggregateError::ProviderDispatchResumeNotAllowed)
+    ));
 }
 
 #[test]
@@ -1047,6 +1541,173 @@ fn claim(
         action_sha256,
     )
     .unwrap()
+}
+
+fn provider_dispatch_claim(
+    observation: &OperationalRecoveryObservation,
+    owner_instance_id: &str,
+    fencing_token: u64,
+) -> OperationalRecoveryClaim {
+    let action = OperationalRecoveryAction::PersistedProviderAttemptDispatch {
+        invocation_id: "invocation-1".to_owned(),
+        attempt_id: "attempt-1".to_owned(),
+        inference_id: "inference-1".to_owned(),
+        context_compilation_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+        attempt_number: 1,
+        provider: ProviderRunIdentity {
+            profile_id: "profile-1".to_owned(),
+            provider_id: "provider-1".to_owned(),
+            model_id: "model-1".to_owned(),
+            config_sha256: "f".repeat(64),
+        },
+        canonical_context_sha256: "b".repeat(64),
+        expected_loop_checkpoint_sha256: "a".repeat(64),
+        expected_attempt_sequence: 1,
+        transport_payload_sha256: "c".repeat(64),
+    };
+    let action_sha256 = action.action_spec_sha256().unwrap();
+    OperationalRecoveryClaim::derive(
+        observation.operation_id.clone(),
+        owner_instance_id.to_owned(),
+        fencing_token,
+        observation.source_fingerprint.clone(),
+        "2026-07-13T00:00:00Z".to_owned(),
+        "2026-07-13T00:05:00Z".to_owned(),
+        "recovery-executor-v1".to_owned(),
+        Some(action),
+        action_sha256,
+    )
+    .unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_dispatch_resume(
+    observation: &OperationalRecoveryObservation,
+    execution: &OperationalRecoveryExecution,
+    resumer_instance_id: &str,
+    attempt_state: ProviderAttemptState,
+    attempt_aggregate_sequence: u64,
+    previous: Option<&ProviderDispatchResumeAuthorization>,
+    authorized_at: &str,
+) -> ProviderDispatchResumeAuthorization {
+    let evidence_digit = match attempt_state {
+        ProviderAttemptState::Requested => "1",
+        ProviderAttemptState::Sent => "2",
+        ProviderAttemptState::Responded => "3",
+        ProviderAttemptState::Failed => "4",
+        ProviderAttemptState::OutcomeUnknown => "5",
+    };
+    provider_dispatch_resume_with_evidence(
+        observation,
+        execution,
+        resumer_instance_id,
+        attempt_state,
+        attempt_aggregate_sequence,
+        evidence_digit.repeat(64),
+        previous,
+        authorized_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_dispatch_resume_with_evidence(
+    observation: &OperationalRecoveryObservation,
+    execution: &OperationalRecoveryExecution,
+    resumer_instance_id: &str,
+    attempt_state: ProviderAttemptState,
+    attempt_aggregate_sequence: u64,
+    attempt_evidence_sha256: String,
+    previous: Option<&ProviderDispatchResumeAuthorization>,
+    authorized_at: &str,
+) -> ProviderDispatchResumeAuthorization {
+    ProviderDispatchResumeAuthorization::derive(
+        observation.operation_id.clone(),
+        execution,
+        resumer_instance_id.to_owned(),
+        execution.action_spec_sha256.clone(),
+        "attempt-1".to_owned(),
+        attempt_state,
+        attempt_aggregate_sequence,
+        "d".repeat(64),
+        attempt_evidence_sha256,
+        previous,
+        authorized_at.to_owned(),
+    )
+    .unwrap()
+}
+
+fn persisted_provider_dispatch_resume(
+    state: ProviderAttemptState,
+    sequence: u64,
+    authorized_at: &str,
+) -> (
+    Fixture,
+    OperationalRecoverySubject,
+    OperationalRecoveryObservation,
+    OperationalRecoveryExecution,
+    ProviderDispatchResumeAuthorization,
+) {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "6",
+        OperationalRecoveryObservedGate::ProviderDispatchReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let claim = provider_dispatch_claim(&observation, "old-runtime", 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim.clone(),
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let execution = OperationalRecoveryExecution::derive(
+        &claim,
+        OperationalRecoveryEffectClass::ProviderDispatch,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            execution.clone(),
+            fixture.clock(),
+            event_metadata("2026-07-13T00:01:00Z"),
+        )
+        .unwrap();
+    let first = provider_dispatch_resume(
+        &observation,
+        &execution,
+        "new-runtime",
+        state,
+        sequence,
+        None,
+        authorized_at,
+    );
+    let lease = fixture.lease("new-runtime");
+    repository
+        .authorize_provider_dispatch_resume(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            first.clone(),
+            &lease,
+            fixture.clock(),
+            event_metadata(authorized_at),
+        )
+        .unwrap();
+    drop(lease);
+    (fixture, subject, observation, execution, first)
 }
 
 struct Fixture {

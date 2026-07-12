@@ -7,6 +7,7 @@ use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::operational_recovery_action::OperationalRecoveryAction;
+use crate::provider_attempt::ProviderAttemptState;
 use crate::workspace_event_journal::{
     NewWorkspaceEvent, WorkspaceEvent, WorkspaceEventJournal, WorkspaceEventJournalError,
 };
@@ -112,8 +113,20 @@ pub struct OperationalRecoveryOperation {
     pub claim: Option<OperationalRecoveryClaim>,
     pub execution: Option<OperationalRecoveryExecution>,
     pub resumes: Vec<OperationalRecoveryResume>,
+    pub provider_dispatch_resumes: Vec<ProviderDispatchResumeAuthorization>,
     pub outcome: Option<OperationalRecoveryOutcome>,
     pub stale: Option<OperationalRecoveryStale>,
+}
+
+impl OperationalRecoveryOperation {
+    pub fn latest_provider_dispatch_resume(&self) -> Option<&ProviderDispatchResumeAuthorization> {
+        self.provider_dispatch_resumes.last()
+    }
+
+    pub fn is_current_provider_dispatch_resume(&self, authorization_id: &str) -> bool {
+        self.latest_provider_dispatch_resume()
+            .is_some_and(|authorization| authorization.authorization_id == authorization_id)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -147,6 +160,130 @@ impl OperationalRecoveryResume {
             resumer_instance_id,
             fencing_token: execution.fencing_token,
             resumed_at,
+        })
+    }
+}
+
+pub const PROVIDER_DISPATCH_RESUME_POLICY_VERSION: &str = "provider-dispatch-resume-v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderDispatchResumeCapability {
+    DispatchRequested,
+    FinalizeOutcomeUnknown,
+    FinalizeResponded,
+    FinalizeFailed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderDispatchResumeAuthorization {
+    pub authorization_id: String,
+    pub operation_id: String,
+    pub execution_id: String,
+    pub claim_id: String,
+    pub original_owner_instance_id: String,
+    pub resumer_instance_id: String,
+    pub fencing_token: u64,
+    pub action_spec_sha256: String,
+    pub attempt_id: String,
+    pub attempt_state: ProviderAttemptState,
+    pub attempt_aggregate_sequence: u64,
+    pub attempt_definition_sha256: String,
+    pub attempt_evidence_sha256: String,
+    pub capability: ProviderDispatchResumeCapability,
+    pub previous_authorization_id: Option<String>,
+    pub authorization_generation: u64,
+    pub authorized_at: String,
+}
+
+impl ProviderDispatchResumeAuthorization {
+    #[allow(clippy::too_many_arguments)]
+    pub fn derive(
+        operation_id: String,
+        execution: &OperationalRecoveryExecution,
+        resumer_instance_id: String,
+        action_spec_sha256: String,
+        attempt_id: String,
+        attempt_state: ProviderAttemptState,
+        attempt_aggregate_sequence: u64,
+        attempt_definition_sha256: String,
+        attempt_evidence_sha256: String,
+        previous: Option<&Self>,
+        authorized_at: String,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        validate_execution(execution)?;
+        require_sha256("operation_id", &operation_id)?;
+        require_text("resumer_instance_id", &resumer_instance_id)?;
+        if resumer_instance_id == execution.owner_instance_id {
+            return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeNotAllowed);
+        }
+        if action_spec_sha256 != execution.action_spec_sha256 {
+            return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict);
+        }
+        require_text("attempt_id", &attempt_id)?;
+        if attempt_aggregate_sequence == 0 {
+            return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict);
+        }
+        require_sha256("attempt_definition_sha256", &attempt_definition_sha256)?;
+        require_sha256("attempt_evidence_sha256", &attempt_evidence_sha256)?;
+        parse_time("authorized_at", &authorized_at)?;
+
+        let capability = provider_dispatch_capability(attempt_state);
+        let (previous_authorization_id, authorization_generation) = match previous {
+            Some(previous) => {
+                validate_provider_dispatch_resume(previous)?;
+                if previous.operation_id != operation_id
+                    || previous.execution_id != execution.execution_id
+                    || previous.claim_id != execution.claim_id
+                    || previous.original_owner_instance_id != execution.owner_instance_id
+                    || previous.fencing_token != execution.fencing_token
+                    || previous.action_spec_sha256 != action_spec_sha256
+                {
+                    return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict);
+                }
+                (
+                    Some(previous.authorization_id.clone()),
+                    previous
+                        .authorization_generation
+                        .checked_add(1)
+                        .ok_or(OperationalRecoveryAggregateError::RevisionOverflow)?,
+                )
+            }
+            None => (None, 1),
+        };
+        let authorization_id = provider_dispatch_resume_id(
+            &operation_id,
+            execution,
+            &resumer_instance_id,
+            &action_spec_sha256,
+            &attempt_id,
+            attempt_state,
+            attempt_aggregate_sequence,
+            &attempt_definition_sha256,
+            &attempt_evidence_sha256,
+            capability,
+            previous_authorization_id.as_deref(),
+            authorization_generation,
+        )?;
+        Ok(Self {
+            authorization_id,
+            operation_id,
+            execution_id: execution.execution_id.clone(),
+            claim_id: execution.claim_id.clone(),
+            original_owner_instance_id: execution.owner_instance_id.clone(),
+            resumer_instance_id,
+            fencing_token: execution.fencing_token,
+            action_spec_sha256,
+            attempt_id,
+            attempt_state,
+            attempt_aggregate_sequence,
+            attempt_definition_sha256,
+            attempt_evidence_sha256,
+            capability,
+            previous_authorization_id,
+            authorization_generation,
+            authorized_at,
         })
     }
 }
@@ -490,6 +627,10 @@ enum RecoveryEventData {
     ExecutionResumeAuthorized {
         operation_id: String,
         resume: OperationalRecoveryResume,
+    },
+    ProviderDispatchResumeAuthorized {
+        operation_id: String,
+        authorization: ProviderDispatchResumeAuthorization,
     },
     ExecutionFinished {
         operation_id: String,
@@ -1033,6 +1174,45 @@ impl OperationalRecoveryRepository {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_provider_dispatch_resume(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        operation_id: &str,
+        authorization: ProviderDispatchResumeAuthorization,
+        exclusive_lease: &WorkspaceRuntimeLease,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        validate_provider_dispatch_resume(&authorization)?;
+        if !exclusive_lease.proves_exclusive_owner(&authorization.resumer_instance_id) {
+            return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
+        }
+        let current = self.load(workspace_id, run_id)?;
+        let operation = current
+            .operations
+            .get(operation_id)
+            .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+        validate_provider_dispatch_resume_for_operation(operation_id, operation, &authorization)?;
+        if operation
+            .latest_provider_dispatch_resume()
+            .is_some_and(|existing| existing == &authorization)
+        {
+            return Ok(current);
+        }
+        validate_provider_dispatch_resume_generation(operation, &authorization)?;
+        self.append_at_global_sequence(
+            current,
+            RecoveryEventData::ProviderDispatchResumeAuthorized {
+                operation_id: operation_id.to_owned(),
+                authorization,
+            },
+            expected_global_sequence,
+            metadata,
+        )
+    }
+
     fn append(
         &mut self,
         current: OperationalRecoveryAggregate,
@@ -1154,6 +1334,7 @@ fn apply_event(
                     claim: None,
                     execution: None,
                     resumes: vec![],
+                    provider_dispatch_resumes: vec![],
                     outcome: None,
                     stale: None,
                 },
@@ -1337,6 +1518,28 @@ fn apply_event(
                 return Err(OperationalRecoveryAggregateError::ResumeConflict);
             }
             operation.resumes.push(resume);
+            aggregate.revision = event.aggregate_revision;
+            aggregate.last_event_hash = event.event_hash;
+        }
+        RecoveryEventData::ProviderDispatchResumeAuthorized {
+            operation_id,
+            authorization,
+        } => {
+            validate_provider_dispatch_resume(&authorization)?;
+            let aggregate = value
+                .as_mut()
+                .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            let operation = aggregate
+                .operations
+                .get_mut(&operation_id)
+                .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+            validate_provider_dispatch_resume_for_operation(
+                &operation_id,
+                operation,
+                &authorization,
+            )?;
+            validate_provider_dispatch_resume_generation(operation, &authorization)?;
+            operation.provider_dispatch_resumes.push(authorization);
             aggregate.revision = event.aggregate_revision;
             aggregate.last_event_hash = event.event_hash;
         }
@@ -1585,6 +1788,270 @@ fn validate_resume(
     Ok(())
 }
 
+const fn provider_dispatch_capability(
+    state: ProviderAttemptState,
+) -> ProviderDispatchResumeCapability {
+    match state {
+        ProviderAttemptState::Requested => ProviderDispatchResumeCapability::DispatchRequested,
+        ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
+            ProviderDispatchResumeCapability::FinalizeOutcomeUnknown
+        }
+        ProviderAttemptState::Responded => ProviderDispatchResumeCapability::FinalizeResponded,
+        ProviderAttemptState::Failed => ProviderDispatchResumeCapability::FinalizeFailed,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_dispatch_resume_id(
+    operation_id: &str,
+    execution: &OperationalRecoveryExecution,
+    resumer_instance_id: &str,
+    action_spec_sha256: &str,
+    attempt_id: &str,
+    attempt_state: ProviderAttemptState,
+    attempt_aggregate_sequence: u64,
+    attempt_definition_sha256: &str,
+    attempt_evidence_sha256: &str,
+    capability: ProviderDispatchResumeCapability,
+    previous_authorization_id: Option<&str>,
+    authorization_generation: u64,
+) -> Result<String, OperationalRecoveryAggregateError> {
+    provider_dispatch_resume_id_from_fields(
+        operation_id,
+        &execution.execution_id,
+        &execution.claim_id,
+        &execution.owner_instance_id,
+        resumer_instance_id,
+        execution.fencing_token,
+        action_spec_sha256,
+        attempt_id,
+        attempt_state,
+        attempt_aggregate_sequence,
+        attempt_definition_sha256,
+        attempt_evidence_sha256,
+        capability,
+        previous_authorization_id,
+        authorization_generation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_dispatch_resume_id_from_fields(
+    operation_id: &str,
+    execution_id: &str,
+    claim_id: &str,
+    original_owner_instance_id: &str,
+    resumer_instance_id: &str,
+    fencing_token: u64,
+    action_spec_sha256: &str,
+    attempt_id: &str,
+    attempt_state: ProviderAttemptState,
+    attempt_aggregate_sequence: u64,
+    attempt_definition_sha256: &str,
+    attempt_evidence_sha256: &str,
+    capability: ProviderDispatchResumeCapability,
+    previous_authorization_id: Option<&str>,
+    authorization_generation: u64,
+) -> Result<String, OperationalRecoveryAggregateError> {
+    canonical_sha256(&serde_json::json!({
+        "policyVersion": PROVIDER_DISPATCH_RESUME_POLICY_VERSION,
+        "operationId": operation_id,
+        "executionId": execution_id,
+        "claimId": claim_id,
+        "originalOwnerInstanceId": original_owner_instance_id,
+        "resumerInstanceId": resumer_instance_id,
+        "fencingToken": fencing_token,
+        "actionSpecSha256": action_spec_sha256,
+        "attemptId": attempt_id,
+        "attemptState": attempt_state,
+        "attemptAggregateSequence": attempt_aggregate_sequence,
+        "attemptDefinitionSha256": attempt_definition_sha256,
+        "attemptEvidenceSha256": attempt_evidence_sha256,
+        "capability": capability,
+        "previousAuthorizationId": previous_authorization_id,
+        "authorizationGeneration": authorization_generation,
+    }))
+}
+
+fn validate_provider_dispatch_resume(
+    authorization: &ProviderDispatchResumeAuthorization,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    require_sha256("authorization_id", &authorization.authorization_id)?;
+    require_sha256("operation_id", &authorization.operation_id)?;
+    require_sha256("execution_id", &authorization.execution_id)?;
+    require_sha256("claim_id", &authorization.claim_id)?;
+    require_text(
+        "original_owner_instance_id",
+        &authorization.original_owner_instance_id,
+    )?;
+    require_text("resumer_instance_id", &authorization.resumer_instance_id)?;
+    if authorization.original_owner_instance_id == authorization.resumer_instance_id
+        || authorization.fencing_token == 0
+        || authorization.attempt_aggregate_sequence == 0
+        || authorization.authorization_generation == 0
+    {
+        return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeNotAllowed);
+    }
+    require_sha256("action_spec_sha256", &authorization.action_spec_sha256)?;
+    require_text("attempt_id", &authorization.attempt_id)?;
+    require_sha256(
+        "attempt_definition_sha256",
+        &authorization.attempt_definition_sha256,
+    )?;
+    require_sha256(
+        "attempt_evidence_sha256",
+        &authorization.attempt_evidence_sha256,
+    )?;
+    if authorization.capability != provider_dispatch_capability(authorization.attempt_state)
+        || (authorization.authorization_generation == 1
+            && authorization.previous_authorization_id.is_some())
+        || (authorization.authorization_generation > 1
+            && authorization.previous_authorization_id.is_none())
+    {
+        return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict);
+    }
+    if let Some(previous) = authorization.previous_authorization_id.as_deref() {
+        require_sha256("previous_authorization_id", previous)?;
+    }
+    parse_time("authorized_at", &authorization.authorized_at)?;
+    let expected = provider_dispatch_resume_id_from_fields(
+        &authorization.operation_id,
+        &authorization.execution_id,
+        &authorization.claim_id,
+        &authorization.original_owner_instance_id,
+        &authorization.resumer_instance_id,
+        authorization.fencing_token,
+        &authorization.action_spec_sha256,
+        &authorization.attempt_id,
+        authorization.attempt_state,
+        authorization.attempt_aggregate_sequence,
+        &authorization.attempt_definition_sha256,
+        &authorization.attempt_evidence_sha256,
+        authorization.capability,
+        authorization.previous_authorization_id.as_deref(),
+        authorization.authorization_generation,
+    )?;
+    if expected != authorization.authorization_id {
+        return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict);
+    }
+    Ok(())
+}
+
+fn validate_provider_dispatch_resume_for_operation(
+    operation_id: &str,
+    operation: &OperationalRecoveryOperation,
+    authorization: &ProviderDispatchResumeAuthorization,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    if operation.outcome.is_some() || operation.stale.is_some() || operation.disposition.is_some() {
+        return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeNotAllowed);
+    }
+    let claim = operation
+        .claim
+        .as_ref()
+        .ok_or(OperationalRecoveryAggregateError::ClaimRequired)?;
+    let execution = operation
+        .execution
+        .as_ref()
+        .ok_or(OperationalRecoveryAggregateError::ExecutionRequired)?;
+    let action = claim
+        .action_spec
+        .as_ref()
+        .ok_or(OperationalRecoveryAggregateError::ProviderDispatchResumeNotAllowed)?;
+    let OperationalRecoveryAction::PersistedProviderAttemptDispatch {
+        attempt_id,
+        expected_attempt_sequence,
+        ..
+    } = action
+    else {
+        return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeNotAllowed);
+    };
+    if execution.effect_class != OperationalRecoveryEffectClass::ProviderDispatch
+        || action.action_spec_sha256()? != claim.action_spec_sha256
+        || operation_id != authorization.operation_id
+        || execution.execution_id != authorization.execution_id
+        || execution.claim_id != authorization.claim_id
+        || execution.owner_instance_id != authorization.original_owner_instance_id
+        || execution.fencing_token != authorization.fencing_token
+        || execution.action_spec_sha256 != authorization.action_spec_sha256
+        || claim.claim_id != authorization.claim_id
+        || claim.owner_instance_id != authorization.original_owner_instance_id
+        || claim.fencing_token != authorization.fencing_token
+        || claim.action_spec_sha256 != authorization.action_spec_sha256
+        || attempt_id != &authorization.attempt_id
+        || authorization.attempt_aggregate_sequence < *expected_attempt_sequence
+        || (authorization.attempt_state == ProviderAttemptState::Requested
+            && authorization.attempt_aggregate_sequence != *expected_attempt_sequence)
+    {
+        return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeNotAllowed);
+    }
+    Ok(())
+}
+
+fn validate_provider_dispatch_resume_generation(
+    operation: &OperationalRecoveryOperation,
+    authorization: &ProviderDispatchResumeAuthorization,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    let (expected_previous, expected_generation) =
+        if let Some(previous) = operation.latest_provider_dispatch_resume() {
+            (
+                Some(previous.authorization_id.as_str()),
+                previous
+                    .authorization_generation
+                    .checked_add(1)
+                    .ok_or(OperationalRecoveryAggregateError::RevisionOverflow)?,
+            )
+        } else {
+            (None, 1)
+        };
+    if authorization.previous_authorization_id.as_deref() != expected_previous
+        || authorization.authorization_generation != expected_generation
+    {
+        return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict);
+    }
+    if let Some(previous) = operation.latest_provider_dispatch_resume() {
+        let same_evidence = authorization.attempt_aggregate_sequence
+            == previous.attempt_aggregate_sequence
+            && authorization.attempt_state == previous.attempt_state
+            && authorization.attempt_evidence_sha256 == previous.attempt_evidence_sha256;
+        let advanced_evidence = authorization.attempt_aggregate_sequence
+            > previous.attempt_aggregate_sequence
+            && valid_provider_attempt_resume_transition(
+                previous.attempt_state,
+                authorization.attempt_state,
+            );
+        if authorization.attempt_id != previous.attempt_id
+            || authorization.attempt_definition_sha256 != previous.attempt_definition_sha256
+            || parse_time("authorized_at", &authorization.authorized_at)?
+                < parse_time("authorized_at", &previous.authorized_at)?
+            || (!same_evidence && !advanced_evidence)
+        {
+            return Err(OperationalRecoveryAggregateError::ProviderDispatchResumeConflict);
+        }
+    }
+    Ok(())
+}
+
+fn valid_provider_attempt_resume_transition(
+    previous: ProviderAttemptState,
+    next: ProviderAttemptState,
+) -> bool {
+    matches!(
+        (previous, next),
+        (
+            ProviderAttemptState::Requested,
+            ProviderAttemptState::Sent
+                | ProviderAttemptState::Responded
+                | ProviderAttemptState::Failed
+                | ProviderAttemptState::OutcomeUnknown
+        ) | (
+            ProviderAttemptState::Sent,
+            ProviderAttemptState::Responded
+                | ProviderAttemptState::Failed
+                | ProviderAttemptState::OutcomeUnknown
+        )
+    )
+}
+
 fn validate_stale(
     stale: &OperationalRecoveryStale,
 ) -> Result<(), OperationalRecoveryAggregateError> {
@@ -1774,6 +2241,7 @@ fn event_operation_id(data: &RecoveryEventData) -> &str {
         | RecoveryEventData::LeaseRenewed { operation_id, .. }
         | RecoveryEventData::ExecutionStarted { operation_id, .. }
         | RecoveryEventData::ExecutionResumeAuthorized { operation_id, .. }
+        | RecoveryEventData::ProviderDispatchResumeAuthorized { operation_id, .. }
         | RecoveryEventData::ExecutionFinished { operation_id, .. }
         | RecoveryEventData::StaleMarked { operation_id, .. } => operation_id,
     }
@@ -1809,6 +2277,10 @@ fn event_suffix(data: &RecoveryEventData) -> Result<String, OperationalRecoveryA
         RecoveryEventData::ExecutionResumeAuthorized { resume, .. } => {
             format!("execution-resumed:{}", resume.resume_id)
         }
+        RecoveryEventData::ProviderDispatchResumeAuthorized { authorization, .. } => format!(
+            "provider-dispatch-resume-authorized:{}",
+            authorization.authorization_id
+        ),
         RecoveryEventData::ExecutionFinished { outcome, .. } => format!(
             "execution-finished:{}",
             canonical_sha256(&serde_json::to_value(outcome)?)?
@@ -1896,6 +2368,10 @@ pub enum OperationalRecoveryAggregateError {
     ResumeNotAllowed,
     #[error("operational recovery local execution resume conflicts with persisted history")]
     ResumeConflict,
+    #[error("operational recovery Provider dispatch resume is not allowed")]
+    ProviderDispatchResumeNotAllowed,
+    #[error("operational recovery Provider dispatch resume conflicts with persisted history")]
+    ProviderDispatchResumeConflict,
     #[error("operational recovery operation is terminal")]
     OperationTerminal,
     #[error("operational recovery stale evidence did not change")]
