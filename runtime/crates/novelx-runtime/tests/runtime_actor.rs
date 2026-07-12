@@ -145,6 +145,46 @@ async fn cancel_run_signals_the_matching_run_attempt() {
     assert!(actor_task.await.unwrap().is_ok());
 }
 
+#[tokio::test]
+async fn streaming_task_progress_is_acknowledged_and_ordered_before_terminal_output() {
+    let (writer, reader) = tokio::io::duplex(16 * 1024);
+    let (actor, handle) = RuntimeActor::new(writer, 50, 8);
+    let actor_task = tokio::spawn(actor.run());
+    let mut lines = BufReader::new(reader).lines();
+
+    handle
+        .start_streaming_task(
+            task_key(),
+            draft("task.accepted", MessageType::Response),
+            draft("runtime.error", MessageType::Event),
+            |_, progress| {
+                Box::pin(async move {
+                    progress
+                        .emit(draft("tool.requested", MessageType::Event))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    progress
+                        .emit(draft("tool.running", MessageType::Event))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    Ok(draft("task.completed", MessageType::Event))
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(next_envelope(&mut lines).await.name, "task.accepted");
+    assert_eq!(next_envelope(&mut lines).await.name, "tool.requested");
+    assert_eq!(next_envelope(&mut lines).await.name, "tool.running");
+    assert_eq!(next_envelope(&mut lines).await.name, "task.completed");
+    handle
+        .shutdown(draft("runtime.stopped", MessageType::Control))
+        .await
+        .unwrap();
+    assert!(actor_task.await.unwrap().is_ok());
+}
+
 fn task_key() -> RuntimeTaskKey {
     RuntimeTaskKey {
         run_id: uuid::Uuid::new_v4(),

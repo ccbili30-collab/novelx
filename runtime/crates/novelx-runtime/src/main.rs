@@ -3,18 +3,27 @@ use std::sync::Arc;
 
 use novelx_protocol::{
     ContextCompilationReceipt, ContextCompile, Envelope, MessageType, PROTOCOL_VERSION,
-    ProviderInferenceStart, RunCancel, RunPrepare, RunReconcile, RunReconciliationReceipt,
-    RunSnapshot, RunStart, RuntimeBuild, RuntimeError, RuntimeErrorClass, RuntimeHello,
-    RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
+    ProviderInferenceCompleted, ProviderInferenceStart, RunCancel, RunPrepare, RunReconcile,
+    RunReconciliationReceipt, RunSnapshot, RunStart, RuntimeBuild, RuntimeError, RuntimeErrorClass,
+    RuntimeHello, RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
+    ToolAuthorizationResolve, ToolAuthorizationResolved, ToolAuthorizationResolvedStatus,
+    ToolRequest,
 };
+use novelx_runtime::agent_loop_journal::AgentLoopJournalRepository;
 use novelx_runtime::context_compile_service::{
     ContextCompileService, ContextCompileServiceError, recover_compilation_receipt,
 };
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
+use novelx_runtime::live_agent_loop_runner::{
+    LiveAgentLoopOutcome, LiveAgentLoopProgress, LiveAgentLoopRunner,
+};
 use novelx_runtime::project_path::ProjectRoot;
+use novelx_runtime::project_tool_execution_service::{
+    ProjectToolExecutionOutcome, ProjectToolExecutionService,
+};
 use novelx_runtime::provider_gateway::{
-    ProviderBindSensitiveEnvelope, ProviderGateway, ProviderGatewayError, ProviderInferenceRequest,
-    ProviderRegistry,
+    ProviderBindSensitiveEnvelope, ProviderGateway, ProviderGatewayError, ProviderInferenceOutcome,
+    ProviderInferenceRequest, ProviderRegistry,
 };
 use novelx_runtime::provider_inference_protocol::ProviderInferenceProtocolMapper;
 use novelx_runtime::provider_inference_service::{
@@ -29,7 +38,14 @@ use novelx_runtime::run_reconciliation_service::{
 };
 use novelx_runtime::run_state::RunState;
 use novelx_runtime::runtime_actor::{
-    RuntimeActor, RuntimeActorHandle, RuntimeOutputDraft, RuntimeTaskKey,
+    RuntimeActor, RuntimeActorHandle, RuntimeOutputDraft, RuntimeTaskKey, RuntimeTaskProgressSender,
+};
+use novelx_runtime::tool_protocol_mapper::ToolProtocolMapper;
+use novelx_runtime::{
+    agent_loop_service::AgentLoopPolicy,
+    live_agent_loop_runner::LiveAgentLoopError,
+    tool_coordination_service::{ToolCoordinationSnapshot, ToolCoordinationStatus},
+    tool_state::{ToolAuthorization, ToolState},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -182,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspace_binding: workspace_binding.as_ref(),
         provider_registry: &mut provider_registry,
         provider_gateway: &provider_gateway,
-        _project_root: project_root.as_ref(),
+        project_root: project_root.as_ref(),
     };
     let loop_result = run_command_loop(&mut lines, &actor_handle, &mut command_context).await;
     drop(actor_handle);
@@ -298,12 +314,21 @@ async fn run_command_loop(
             "context.compile" => {
                 handle_context_compile(&command, context.journal, context.provider_registry)?
             }
+            "tool.authorization.resolve" => {
+                handle_tool_authorization_resolve(output, &command, context).await?;
+                expected_host_sequence += 1;
+                continue;
+            }
             "provider.inference.start" => {
                 handle_provider_inference_start(
                     output,
                     &command,
                     context.journal,
                     context.workspace_database_path,
+                    context.project_root,
+                    context
+                        .workspace_binding
+                        .map(|binding| binding.project_id.as_str()),
                     context.provider_registry,
                     context.provider_gateway,
                 )
@@ -330,7 +355,7 @@ struct RuntimeCommandContext<'a> {
     workspace_binding: Option<&'a WorkspaceBinding>,
     provider_registry: &'a mut ProviderRegistry,
     provider_gateway: &'a Arc<ProviderGateway>,
-    _project_root: Option<&'a ProjectRoot>,
+    project_root: Option<&'a ProjectRoot>,
 }
 
 fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), String> {
@@ -399,6 +424,13 @@ fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), St
             }
             serde_json::from_value::<ContextCompile>(command.payload.clone())
                 .map_err(|error| format!("invalid context.compile payload: {error}"))?;
+        }
+        "tool.authorization.resolve" => {
+            if command.run_id.is_none() {
+                return Err("tool.authorization.resolve requires runId".to_owned());
+            }
+            serde_json::from_value::<ToolAuthorizationResolve>(command.payload.clone())
+                .map_err(|error| format!("invalid tool.authorization.resolve payload: {error}"))?;
         }
         "provider.inference.start" => {
             if command.run_id.is_none() {
@@ -676,11 +708,222 @@ fn runtime_reconciliation_error(
     }
 }
 
+async fn handle_tool_authorization_resolve(
+    output: &RuntimeActorHandle,
+    command: &Envelope,
+    context: &mut RuntimeCommandContext<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run_id = command
+        .run_id
+        .expect("validated tool.authorization.resolve runId");
+    let resolution: ToolAuthorizationResolve = serde_json::from_value(command.payload.clone())?;
+    let database_path = context
+        .workspace_database_path
+        .ok_or("tool authorization requires Runtime storage")?;
+    let project_root = context
+        .project_root
+        .cloned()
+        .ok_or("tool authorization requires a verified project root")?;
+    let project_id = context
+        .workspace_binding
+        .map(|binding| binding.project_id.clone())
+        .ok_or("tool authorization requires a project binding")?;
+    let pending = {
+        let journal = context
+            .journal
+            .as_mut()
+            .ok_or("tool authorization requires Runtime storage")?;
+        AgentLoopJournalRepository::new(journal)
+            .find_pending_request(&run_id.to_string(), resolution.tool_call_id)?
+            .ok_or("pending ToolCall was not found")?
+    };
+    let service = ProjectToolExecutionService::open(database_path, project_root, project_id)?;
+    let outcome = service
+        .resolve_persisted_request_and_execute(
+            &run_id.to_string(),
+            &pending.request,
+            &resolution,
+            &current_timestamp()?,
+        )
+        .await?;
+    let (status, lease) = match resolution.decision {
+        novelx_protocol::ToolAuthorizationResolutionDecision::Approve => (
+            ToolAuthorizationResolvedStatus::Authorized,
+            outcome.snapshot.lease.clone(),
+        ),
+        novelx_protocol::ToolAuthorizationResolutionDecision::Deny => {
+            (ToolAuthorizationResolvedStatus::Denied, None)
+        }
+    };
+    let resolved = ToolAuthorizationResolved {
+        tool_call_id: resolution.tool_call_id,
+        decision: resolution.decision,
+        status,
+        lease,
+    };
+    resolved.validate()?;
+    let mut response = response_draft(command, "tool.authorization.resolved", resolved)?;
+    response.run_id = Some(run_id);
+    output.emit(response).await?;
+    if resolution.decision == novelx_protocol::ToolAuthorizationResolutionDecision::Approve {
+        emit_resolved_tool_lifecycle(
+            output,
+            command.message_id,
+            run_id,
+            &pending.request,
+            &outcome,
+        )
+        .await?;
+    }
+    let runner = LiveAgentLoopRunner::open(
+        database_path,
+        context
+            .project_root
+            .cloned()
+            .ok_or("tool authorization requires a verified project root")?,
+        context
+            .workspace_binding
+            .map(|binding| binding.project_id.clone())
+            .ok_or("tool authorization requires a project binding")?,
+        context.provider_registry.clone(),
+        context.provider_gateway.as_ref().clone(),
+        AgentLoopPolicy {
+            maximum_tool_rounds: 8,
+            tool_schema_version: 1,
+        },
+    )?;
+    if runner.assist_ready(run_id, &pending.invocation_id)? {
+        start_assist_resume_task(
+            output,
+            command.message_id,
+            run_id,
+            pending.invocation_id,
+            runner,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn start_assist_resume_task(
+    output: &RuntimeActorHandle,
+    correlation_id: Uuid,
+    run_id: Uuid,
+    invocation_id: String,
+    runner: LiveAgentLoopRunner,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let task_key = RuntimeTaskKey {
+        run_id,
+        attempt_id: Uuid::new_v4(),
+    };
+    let failure = inference_runtime_error_draft(
+        correlation_id,
+        run_id,
+        runtime_inference_error(
+            "ASSIST_RESUME_FAILED",
+            RuntimeErrorClass::RuntimeCrash,
+            "Assist tool execution could not resume the Agent loop.",
+            1,
+        ),
+    )?;
+    output
+        .start_silent_streaming_task(task_key, failure, move |cancellation, progress| {
+            Box::pin(async move {
+                let progress_sender = progress.clone();
+                let outcome = runner
+                    .resume_after_assist(
+                        run_id,
+                        &invocation_id,
+                        move |event| {
+                            let progress = progress_sender.clone();
+                            async move {
+                                emit_live_loop_progress(correlation_id, run_id, event, progress)
+                                    .await
+                                    .map_err(LiveAgentLoopError::Progress)
+                            }
+                        },
+                        || *cancellation.borrow(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                match outcome {
+                    LiveAgentLoopOutcome::Completed { completion, .. } => {
+                        provider_completion_draft(correlation_id, completion)
+                    }
+                    LiveAgentLoopOutcome::AwaitingApproval { .. } => Err(
+                        "Assist resume returned to approval after all decisions were persisted"
+                            .to_owned(),
+                    ),
+                    LiveAgentLoopOutcome::Cancelled => {
+                        Err("Assist Agent loop was cancelled".to_owned())
+                    }
+                }
+            })
+        })
+        .await?;
+    Ok(())
+}
+
+async fn emit_resolved_tool_lifecycle(
+    output: &RuntimeActorHandle,
+    correlation_id: Uuid,
+    run_id: Uuid,
+    request: &ToolRequest,
+    outcome: &ProjectToolExecutionOutcome,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mapper = ToolProtocolMapper::new(correlation_id, current_timestamp()?);
+    let lease = outcome
+        .snapshot
+        .lease
+        .clone()
+        .ok_or("approved ToolCall lease is missing")?;
+    let authorized = projected_snapshot(
+        &outcome.snapshot,
+        ToolState::Authorized,
+        ToolCoordinationStatus::Authorized,
+        Some(lease.clone()),
+    );
+    output
+        .emit(mapper.authorized(run_id, request, &authorized)?)
+        .await?;
+    let running = projected_snapshot(
+        &outcome.snapshot,
+        ToolState::Running,
+        ToolCoordinationStatus::Running,
+        Some(lease),
+    );
+    output
+        .emit(mapper.running(run_id, request, &running)?)
+        .await?;
+    let terminal = match outcome.snapshot.status {
+        ToolCoordinationStatus::Succeeded => {
+            mapper.succeeded(run_id, request, &outcome.snapshot)?
+        }
+        ToolCoordinationStatus::Failed => mapper.failed(
+            run_id,
+            request,
+            &outcome.snapshot,
+            runtime_inference_error(
+                "PROJECT_TOOL_EXECUTION_FAILED",
+                RuntimeErrorClass::Validation,
+                "Project tool execution failed.",
+                u64::from(request.attempt),
+            ),
+        )?,
+        _ => return Err("approved ToolCall did not reach a terminal state".into()),
+    };
+    output.emit(terminal).await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_provider_inference_start(
     output: &RuntimeActorHandle,
     command: &Envelope,
     journal: &mut Option<EventJournal>,
     workspace_database_path: Option<&str>,
+    project_root: Option<&ProjectRoot>,
+    project_id: Option<&str>,
     providers: &ProviderRegistry,
     gateway: &Arc<ProviderGateway>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -817,6 +1060,10 @@ async fn handle_provider_inference_start(
         .accepted(&execution)?;
     let database_path = database_path.to_owned();
     let gateway = Arc::clone(gateway);
+    let loop_gateway = gateway.as_ref().clone();
+    let loop_providers = providers.clone();
+    let project_root = project_root.cloned();
+    let project_id = project_id.map(str::to_owned);
     let correlation_id = command.message_id;
     let task_key = RuntimeTaskKey {
         run_id,
@@ -833,11 +1080,11 @@ async fn handle_provider_inference_start(
         ),
     )?;
     output
-        .start_task(
+        .start_streaming_task(
             task_key,
             accepted,
             task_failure,
-            move |mut cancellation| Box::pin(async move {
+            move |mut cancellation, progress| Box::pin(async move {
                 let result = match prepared {
                     PreparedProviderAttempt::Recovered(outcome) => Ok(*outcome),
                     PreparedProviderAttempt::Dispatch(dispatch) => {
@@ -894,17 +1141,251 @@ async fn handle_provider_inference_start(
                     current_timestamp().map_err(|error| error.to_string())?,
                 );
                 match result {
-                    Ok(outcome) => mapper.completed(&execution, &outcome),
-                    Err(error) if inference_outcome_unknown(&error) => {
-                        mapper.reconciliation_required(&execution, &error)
+                    Ok(outcome) if outcome.tool_calls.is_empty() => {
+                        mapper.completed(&execution, &outcome).map_err(|error| error.to_string())
                     }
-                    Err(error) => mapper.failed(&execution, &error),
+                    Ok(outcome) => run_live_tool_loop(
+                        correlation_id,
+                        execution.clone(),
+                        outcome,
+                        &database_path,
+                        project_root,
+                        project_id,
+                        loop_providers,
+                        loop_gateway,
+                        progress,
+                        &cancellation,
+                    )
+                    .await,
+                    Err(error) if inference_outcome_unknown(&error) => {
+                        mapper.reconciliation_required(&execution, &error).map_err(|error| error.to_string())
+                    }
+                    Err(error) => mapper.failed(&execution, &error).map_err(|error| error.to_string()),
                 }
-                .map_err(|error| error.to_string())
             }),
         )
         .await?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_live_tool_loop(
+    correlation_id: Uuid,
+    execution: ProviderInferenceExecution,
+    initial_outcome: ProviderInferenceOutcome,
+    database_path: &str,
+    project_root: Option<ProjectRoot>,
+    project_id: Option<String>,
+    providers: ProviderRegistry,
+    gateway: ProviderGateway,
+    progress: RuntimeTaskProgressSender,
+    cancellation: &tokio::sync::watch::Receiver<bool>,
+) -> Result<RuntimeOutputDraft, String> {
+    let project_root =
+        project_root.ok_or_else(|| "verified project root is required".to_owned())?;
+    let project_id = project_id.ok_or_else(|| "project identity is required".to_owned())?;
+    let run_id = Uuid::parse_str(&execution.run_id).map_err(|error| error.to_string())?;
+    let runner = LiveAgentLoopRunner::open(
+        database_path,
+        project_root,
+        project_id,
+        providers,
+        gateway,
+        AgentLoopPolicy {
+            maximum_tool_rounds: 8,
+            tool_schema_version: 1,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let progress_sender = progress.clone();
+    let outcome = runner
+        .run(
+            execution,
+            Some(initial_outcome),
+            move |event| {
+                let progress = progress_sender.clone();
+                async move {
+                    emit_live_loop_progress(correlation_id, run_id, event, progress)
+                        .await
+                        .map_err(LiveAgentLoopError::Progress)
+                }
+            },
+            || *cancellation.borrow(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    match outcome {
+        LiveAgentLoopOutcome::Completed { completion, .. }
+        | LiveAgentLoopOutcome::AwaitingApproval { completion, .. } => {
+            provider_completion_draft(correlation_id, completion)
+        }
+        LiveAgentLoopOutcome::Cancelled => Err("live agent loop was cancelled".to_owned()),
+    }
+}
+
+async fn emit_live_loop_progress(
+    correlation_id: Uuid,
+    run_id: Uuid,
+    event: LiveAgentLoopProgress,
+    progress: RuntimeTaskProgressSender,
+) -> Result<(), String> {
+    match event {
+        LiveAgentLoopProgress::AwaitingApproval { requests, outcomes } => {
+            emit_tool_outcomes(
+                correlation_id,
+                run_id,
+                &requests,
+                &outcomes,
+                true,
+                false,
+                &progress,
+            )
+            .await
+        }
+        LiveAgentLoopProgress::ToolsCompleted { requests, outcomes } => {
+            emit_tool_outcomes(
+                correlation_id,
+                run_id,
+                &requests,
+                &outcomes,
+                true,
+                true,
+                &progress,
+            )
+            .await
+        }
+        LiveAgentLoopProgress::ProviderCompleted(_)
+        | LiveAgentLoopProgress::ContextCompiled(_)
+        | LiveAgentLoopProgress::InferenceStarted(_)
+        | LiveAgentLoopProgress::Completed(_)
+        | LiveAgentLoopProgress::Cancelled(_) => Ok(()),
+    }
+}
+
+async fn emit_tool_outcomes(
+    correlation_id: Uuid,
+    run_id: Uuid,
+    requests: &[ToolRequest],
+    outcomes: &[ProjectToolExecutionOutcome],
+    emit_requested: bool,
+    terminal: bool,
+    progress: &RuntimeTaskProgressSender,
+) -> Result<(), String> {
+    let mapper = ToolProtocolMapper::new(
+        correlation_id,
+        current_timestamp().map_err(|error| error.to_string())?,
+    );
+    for request in requests {
+        let outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.tool_call_id == request.tool_call_id)
+            .ok_or_else(|| "tool execution outcome is missing".to_owned())?;
+        if emit_requested {
+            progress
+                .emit(
+                    mapper
+                        .requested(run_id, request, &outcome.snapshot)
+                        .map_err(|error| error.to_string())?,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if !terminal {
+            continue;
+        }
+        if outcome.snapshot.status == ToolCoordinationStatus::Denied {
+            continue;
+        }
+        let lease = outcome
+            .snapshot
+            .lease
+            .clone()
+            .ok_or_else(|| "tool execution lease is missing".to_owned())?;
+        let authorized = projected_snapshot(
+            &outcome.snapshot,
+            ToolState::Authorized,
+            ToolCoordinationStatus::Authorized,
+            Some(lease.clone()),
+        );
+        progress
+            .emit(
+                mapper
+                    .authorized(run_id, request, &authorized)
+                    .map_err(|error| error.to_string())?,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let running = projected_snapshot(
+            &outcome.snapshot,
+            ToolState::Running,
+            ToolCoordinationStatus::Running,
+            Some(lease),
+        );
+        progress
+            .emit(
+                mapper
+                    .running(run_id, request, &running)
+                    .map_err(|error| error.to_string())?,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let terminal_draft = match outcome.snapshot.status {
+            ToolCoordinationStatus::Succeeded => mapper
+                .succeeded(run_id, request, &outcome.snapshot)
+                .map_err(|error| error.to_string())?,
+            ToolCoordinationStatus::Failed | ToolCoordinationStatus::Denied => mapper
+                .failed(
+                    run_id,
+                    request,
+                    &outcome.snapshot,
+                    runtime_inference_error(
+                        "PROJECT_TOOL_EXECUTION_FAILED",
+                        RuntimeErrorClass::Validation,
+                        "Project tool execution failed.",
+                        u64::from(request.attempt),
+                    ),
+                )
+                .map_err(|error| error.to_string())?,
+            _ => return Err("tool execution did not reach a terminal state".to_owned()),
+        };
+        progress
+            .emit(terminal_draft)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn projected_snapshot(
+    source: &ToolCoordinationSnapshot,
+    state: ToolState,
+    status: ToolCoordinationStatus,
+    lease: Option<novelx_protocol::ToolPermissionLease>,
+) -> ToolCoordinationSnapshot {
+    ToolCoordinationSnapshot {
+        run_id: source.run_id.clone(),
+        tool_call_id: source.tool_call_id,
+        state,
+        authorization: ToolAuthorization::Allowed,
+        status,
+        lease,
+        result: None,
+        failure: None,
+    }
+}
+
+fn provider_completion_draft(
+    correlation_id: Uuid,
+    completion: ProviderInferenceCompleted,
+) -> Result<RuntimeOutputDraft, String> {
+    Ok(RuntimeOutputDraft {
+        message_type: MessageType::Event,
+        name: "provider.inference.completed".to_owned(),
+        sent_at: current_timestamp().map_err(|error| error.to_string())?,
+        correlation_id: Some(correlation_id),
+        run_id: Some(completion.identity.run_id),
+        payload: serde_json::to_value(completion).map_err(|error| error.to_string())?,
+    })
 }
 
 fn inference_outcome_unknown(error: &ProviderInferenceServiceError) -> bool {

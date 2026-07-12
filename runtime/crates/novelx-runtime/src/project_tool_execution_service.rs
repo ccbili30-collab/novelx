@@ -116,6 +116,39 @@ impl ProjectToolExecutionService {
             .await
     }
 
+    pub async fn resolve_persisted_request_and_execute(
+        &self,
+        run_id: &str,
+        request: &ToolRequest,
+        resolution: &ToolAuthorizationResolve,
+        created_at: &str,
+    ) -> Result<ProjectToolExecutionOutcome, ProjectToolExecutionError> {
+        if request.tool_call_id != resolution.tool_call_id {
+            return Err(ProjectToolExecutionError::IdentityConflict);
+        }
+        let snapshot = {
+            let mut journal = EventJournal::open(&self.database_path)?;
+            let mut artifacts = ArtifactStore::open(&self.database_path)?;
+            ToolCoordinationService::new(&mut journal, &mut artifacts).resolve_from_host(
+                run_id,
+                resolution,
+                metadata(
+                    &format!("host-resolve:{}", request.tool_call_id),
+                    &resolution.authorization_idempotency_key,
+                    created_at,
+                ),
+            )?
+        };
+        let materialized = MaterializedProviderToolCall {
+            tool_call_id: request.tool_call_id,
+            provider_tool_call_id: request.provider_tool_call_id.clone(),
+            tool_name: request.tool_name.clone(),
+            arguments: request.arguments.clone(),
+        };
+        self.continue_if_authorized(run_id, materialized, snapshot, created_at)
+            .await
+    }
+
     fn materialize(
         &self,
         run_id: &str,

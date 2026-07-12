@@ -266,7 +266,7 @@ impl BoundProvider {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ProviderRegistry {
     providers: BTreeMap<String, Arc<BoundProvider>>,
 }
@@ -334,6 +334,7 @@ impl ProviderRegistry {
     }
 }
 
+#[derive(Clone)]
 pub struct ProviderGateway {
     client: reqwest::Client,
 }

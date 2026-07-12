@@ -174,8 +174,44 @@ impl AgentLoopService {
         self.phase
     }
 
+    pub const fn identity(&self) -> &AgentLoopIdentity {
+        &self.identity
+    }
+
+    pub fn pending_requests(&self) -> &[ToolRequest] {
+        self.pending
+            .as_ref()
+            .map_or(&[], |pending| pending.requests.as_slice())
+    }
+
+    pub fn pending_request(&self, tool_call_id: Uuid) -> Option<&ToolRequest> {
+        self.pending_requests()
+            .iter()
+            .find(|request| request.tool_call_id == tool_call_id)
+    }
+
+    pub fn pending_completion(&self) -> Option<&ProviderInferenceCompleted> {
+        self.pending.as_ref().map(|pending| &pending.completion)
+    }
+
+    pub const fn is_active(&self) -> bool {
+        matches!(
+            self.phase,
+            LoopPhase::AwaitingProvider
+                | LoopPhase::AwaitingApproval
+                | LoopPhase::AwaitingToolResults
+                | LoopPhase::AwaitingContextCompilation
+                | LoopPhase::AwaitingInferenceStart
+        )
+    }
+
     pub fn checkpoint(&self) -> Result<Value, AgentLoopError> {
         serde_json::to_value(self).map_err(|_| AgentLoopError::Serialization)
+    }
+
+    pub fn checkpoint_sha256(&self) -> Result<String, AgentLoopError> {
+        let checkpoint = self.checkpoint()?;
+        hash_json(&checkpoint)
     }
 
     pub fn restore(checkpoint: Value) -> Result<Self, AgentLoopError> {
@@ -474,7 +510,15 @@ impl AgentLoopService {
                 | LoopPhase::AwaitingContextCompilation
                 | LoopPhase::AwaitingInferenceStart
         );
+        let duplicate_tool_call_id = self.pending.as_ref().is_some_and(|pending| {
+            let mut ids = HashSet::new();
+            pending
+                .requests
+                .iter()
+                .any(|request| !ids.insert(request.tool_call_id))
+        });
         if pending_required != self.pending.is_some()
+            || duplicate_tool_call_id
             || (self.phase == LoopPhase::AwaitingApproval
                 && self.identity.permission.mode != RunPermissionMode::Assist)
             || (matches!(

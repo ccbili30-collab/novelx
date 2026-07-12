@@ -13,6 +13,12 @@ use uuid::Uuid;
 pub type RuntimeTask =
     Pin<Box<dyn Future<Output = Result<RuntimeOutputDraft, String>> + Send + 'static>>;
 
+#[derive(Clone)]
+pub struct RuntimeTaskProgressSender {
+    key: RuntimeTaskKey,
+    sender: mpsc::Sender<RuntimeTaskProgress>,
+}
+
 struct RuntimeTaskCompletion {
     key: RuntimeTaskKey,
     result: Result<RuntimeOutputDraft, String>,
@@ -39,6 +45,7 @@ pub struct RuntimeActor<W> {
     writer: W,
     next_sequence: u64,
     commands: mpsc::Receiver<RuntimeActorCommand>,
+    progress: mpsc::Receiver<RuntimeTaskProgress>,
     tasks: JoinSet<RuntimeTaskCompletion>,
     cancellations: HashMap<RuntimeTaskKey, watch::Sender<bool>>,
 }
@@ -46,13 +53,20 @@ pub struct RuntimeActor<W> {
 #[derive(Clone)]
 pub struct RuntimeActorHandle {
     commands: mpsc::Sender<RuntimeActorCommand>,
+    progress: mpsc::Sender<RuntimeTaskProgress>,
+}
+
+struct RuntimeTaskProgress {
+    key: RuntimeTaskKey,
+    output: RuntimeOutputDraft,
+    acknowledged: oneshot::Sender<()>,
 }
 
 enum RuntimeActorCommand {
     Emit(RuntimeOutputDraft),
     StartTask {
         key: RuntimeTaskKey,
-        accepted: RuntimeOutputDraft,
+        accepted: Option<RuntimeOutputDraft>,
         failure: RuntimeOutputDraft,
         cancellation: watch::Sender<bool>,
         task: RuntimeTask,
@@ -75,15 +89,20 @@ where
         mailbox_capacity: usize,
     ) -> (Self, RuntimeActorHandle) {
         let (sender, commands) = mpsc::channel(mailbox_capacity.max(1));
+        let (progress_sender, progress) = mpsc::channel(mailbox_capacity.max(1));
         (
             Self {
                 writer,
                 next_sequence: last_sequence.checked_add(1).unwrap_or(0),
                 commands,
+                progress,
                 tasks: JoinSet::new(),
                 cancellations: HashMap::new(),
             },
-            RuntimeActorHandle { commands: sender },
+            RuntimeActorHandle {
+                commands: sender,
+                progress: progress_sender,
+            },
         )
     }
 
@@ -95,7 +114,9 @@ where
                     match command {
                         Some(RuntimeActorCommand::Emit(output)) => self.write(output).await?,
                         Some(RuntimeActorCommand::StartTask { key, accepted, failure, cancellation, task }) => {
-                            self.write(accepted).await?;
+                            if let Some(accepted) = accepted {
+                                self.write(accepted).await?;
+                            }
                             self.cancellations.insert(key, cancellation);
                             self.tasks.spawn(async move {
                                 RuntimeTaskCompletion {
@@ -138,6 +159,13 @@ where
                     self.cancellations.remove(&completion.key);
                     let output = completion.result.unwrap_or(completion.failure);
                     self.write(output).await?;
+                }
+                progress = self.progress.recv() => {
+                    let progress = progress.ok_or(RuntimeActorError::Closed)?;
+                    if self.cancellations.contains_key(&progress.key) {
+                        self.write(progress.output).await?;
+                        let _ = progress.acknowledged.send(());
+                    }
                 }
             }
         }
@@ -189,10 +217,50 @@ impl RuntimeActorHandle {
         self.commands
             .send(RuntimeActorCommand::StartTask {
                 key,
-                accepted,
+                accepted: Some(accepted),
                 failure,
                 cancellation,
                 task: task(receiver),
+            })
+            .await
+            .map_err(|_| RuntimeActorError::Closed)
+    }
+
+    pub async fn start_streaming_task(
+        &self,
+        key: RuntimeTaskKey,
+        accepted: RuntimeOutputDraft,
+        failure: RuntimeOutputDraft,
+        task: impl FnOnce(watch::Receiver<bool>, RuntimeTaskProgressSender) -> RuntimeTask,
+    ) -> Result<(), RuntimeActorError> {
+        let progress = RuntimeTaskProgressSender {
+            key,
+            sender: self.progress.clone(),
+        };
+        self.start_task(key, accepted, failure, move |cancellation| {
+            task(cancellation, progress)
+        })
+        .await
+    }
+
+    pub async fn start_silent_streaming_task(
+        &self,
+        key: RuntimeTaskKey,
+        failure: RuntimeOutputDraft,
+        task: impl FnOnce(watch::Receiver<bool>, RuntimeTaskProgressSender) -> RuntimeTask,
+    ) -> Result<(), RuntimeActorError> {
+        let (cancellation, receiver) = watch::channel(false);
+        let progress = RuntimeTaskProgressSender {
+            key,
+            sender: self.progress.clone(),
+        };
+        self.commands
+            .send(RuntimeActorCommand::StartTask {
+                key,
+                accepted: None,
+                failure,
+                cancellation,
+                task: task(receiver, progress),
             })
             .await
             .map_err(|_| RuntimeActorError::Closed)
@@ -222,6 +290,21 @@ impl RuntimeActorHandle {
             .send(RuntimeActorCommand::Shutdown(output))
             .await
             .map_err(|_| RuntimeActorError::Closed)
+    }
+}
+
+impl RuntimeTaskProgressSender {
+    pub async fn emit(&self, output: RuntimeOutputDraft) -> Result<(), RuntimeActorError> {
+        let (acknowledged, response) = oneshot::channel();
+        self.sender
+            .send(RuntimeTaskProgress {
+                key: self.key,
+                output,
+                acknowledged,
+            })
+            .await
+            .map_err(|_| RuntimeActorError::Closed)?;
+        response.await.map_err(|_| RuntimeActorError::Closed)
     }
 }
 

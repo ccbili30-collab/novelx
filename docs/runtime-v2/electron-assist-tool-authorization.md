@@ -8,4 +8,4 @@ Tool lifecycle messages are subscriptions, not pending-command responses. `tool.
 
 The future UI route must render only structured ToolCall identity, requested scope and public arguments summary. Approve/deny must invoke the Supervisor API once with a durable business idempotency key. The UI cannot manufacture a lease, call a dispatcher directly, widen source scope, or mark a tool running/succeeded. Closing the dialog is not approval.
 
-The black-box contract file uses `NOVELX_TOOLCALL_BLACKBOX_CASES` with comma-separated case IDs. Cases are skipped by default. Explicitly enabling a case currently fails until its real cross-process driver exists, so an empty fixture cannot be mistaken for live acceptance.
+The black-box contract file uses `NOVELX_TOOLCALL_BLACKBOX_CASES` with comma-separated case IDs. Cases are skipped by default. `core_tools`, `unicode` and `assist` use the real process/Provider driver and therefore fail at the first missing Runtime capability; the remaining cases retain deliberate readiness failures until their scenario setup is implemented. No empty fixture can be mistaken for live acceptance.

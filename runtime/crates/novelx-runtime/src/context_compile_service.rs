@@ -101,6 +101,7 @@ impl<'a> ContextCompileService<'a> {
                 payload: serde_json::to_value(ContextCompiledRecord {
                     request_sha256,
                     receipt: receipt.clone(),
+                    source_command: Some(command.clone()),
                     normalized_input,
                     normalized_input_sha256,
                 })?,
@@ -128,6 +129,25 @@ pub fn recover_compilation_receipt(
         if record.receipt.compilation_id == compilation_id
             && found.replace(record.receipt).is_some()
         {
+            return Err(ContextCompileServiceError::InvalidHistory);
+        }
+    }
+    found.ok_or(ContextCompileServiceError::CompilationNotFound)
+}
+
+pub(crate) fn recover_compiled_record(
+    journal: &EventJournal,
+    run_id: &str,
+    compilation_id: Uuid,
+) -> Result<ContextCompiledRecord, ContextCompileServiceError> {
+    let mut found = None;
+    for event in journal.read_run(run_id, 0)? {
+        if event.event_type != EVENT_TYPE || event.event_version != EVENT_VERSION {
+            continue;
+        }
+        let record: ContextCompiledRecord = serde_json::from_value(event.payload)
+            .map_err(|_| ContextCompileServiceError::InvalidHistory)?;
+        if record.receipt.compilation_id == compilation_id && found.replace(record).is_some() {
             return Err(ContextCompileServiceError::InvalidHistory);
         }
     }
@@ -169,6 +189,8 @@ pub enum ContextCompileServiceError {
 pub(crate) struct ContextCompiledRecord {
     pub(crate) request_sha256: String,
     pub(crate) receipt: ContextCompilationReceipt,
+    #[serde(default)]
+    pub(crate) source_command: Option<ContextCompile>,
     pub(crate) normalized_input: PersistedNormalizedProviderInput,
     pub(crate) normalized_input_sha256: String,
 }

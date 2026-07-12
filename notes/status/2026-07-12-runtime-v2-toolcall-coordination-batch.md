@@ -1,7 +1,7 @@
 # Runtime V2 ToolCall coordination batch
 
 Date: 2026-07-12  
-Status: coordination and continuation foundation complete; live automatic loop incomplete
+Status: project read-tool Free/Assist loop complete at the Runtime cross-process contract level
 
 ## Completed
 
@@ -16,22 +16,26 @@ Status: coordination and continuation foundation complete; live automatic loop i
 - Adds strict dispatch for list, read, stat, search and glob with unknown-field rejection.
 - Emits OpenAI-compatible assistant `tool_calls[]` and tool-result messages with the original `tool_call_id`.
 - Groups multiple calls from one assistant response and preserves every call/result pair during context omission.
-- Adds a reusable scripted multi-turn loopback Provider and nine explicit live contract cases.
+- Adds a reusable scripted multi-turn loopback Provider and ten explicit cross-process contract cases.
+- Routes Provider ToolCalls through the Runtime Actor, project execution service and continuation compiler.
+- Resumes the same persisted Assist AgentLoop after all approval or denial decisions are durable.
+- Runs resumed Assist inference as a cancellable background Runtime task without duplicating the authorization response.
 
 ## Verification
 
-- Rust workspace: 169 passed.
-- TypeScript/Vitest: 396 passed, 9 live contracts skipped.
-- TypeScript typecheck: passed.
-- Rust Clippy with warnings denied: passed.
-- Rust formatting and `git diff --check`: passed.
-- Chinese tool arguments and two-round HTTP continuation structure are covered.
+- Cross-process ToolCall matrix: 10/10 passed, including Assist approval and denial.
+- Runner tests: 2/2 passed.
+- Runtime Actor tests: 5/5 passed.
+- Rust workspace: 197 passed.
+- TypeScript/Vitest default suite: 399 passed, 10 opt-in cross-process cases skipped by default.
+- TypeScript typecheck, Rust format, Clippy with warnings denied and `git diff --check`: passed.
+- Chinese tool arguments, original Provider call IDs and two-round HTTP continuation structure are covered.
+- Test cleanup left no `novelx-toolcall-live-*` directory, Electron process or Runtime process behind.
 
 ## Not completed
 
-- `main.rs` does not yet route ToolCall commands or automatically process Provider tool-call outcomes.
-- There is no single Execution Service that owns coordination, the bound ProjectRoot, dispatch, result persistence and terminal event production.
-- Runtime Actor does not yet compile the continuation Context or issue the second Provider request.
 - Artifact and event writes still use separate SQLite connections; recovery closes known orphan windows, but cross-store writes are not one transaction.
-- The nine cross-process live acceptance tests remain skipped and therefore no live ToolCall claim is allowed.
+- Write tools are intentionally absent; formal mutations still require the future Change Set path.
+- A real external DeepSeek acceptance run for this exact Runtime V2 path has not been executed in this batch; loopback evidence proves protocol behavior, not third-party availability.
+- Automatic recovery of every possible active AgentLoop phase at process startup is not complete.
 - Goal, Plan, Agent delegation and long-term memory remain downstream work.
