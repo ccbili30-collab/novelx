@@ -7,9 +7,14 @@ use novelx_protocol::{
     RuntimeError, RuntimeErrorClass, RuntimeHello, RuntimeInitialize, RuntimeReady, RuntimeStatus,
     RuntimeStopped,
 };
+use novelx_runtime::agent_assignment_aggregate::{
+    AgentAssignmentIdentity, AgentAssignmentRepository, AssignmentDefinition,
+    AssignmentEventMetadata, AssignmentScope, ChildAgentPermission, RevisionBinding,
+};
 use novelx_runtime::event_journal::EventJournal;
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
 
@@ -444,6 +449,112 @@ fn reports_the_real_nonterminal_recovery_count() {
 }
 
 #[test]
+fn quarantined_assignment_is_readable_but_mutations_are_blocked_after_real_restart() {
+    let fixture = Fixture::new();
+    {
+        let mut journal = EventJournal::open(&fixture.database_path).unwrap();
+        create_run(&mut journal, "parent-run", "created");
+    }
+    let resources = vec!["resource-1".to_owned()];
+    let mut assignments = AgentAssignmentRepository::open(&fixture.database_path).unwrap();
+    let allocated = assignments
+        .allocate(
+            AgentAssignmentIdentity {
+                assignment_id: "quarantined-assignment".into(),
+                workspace_id: "workspace-1".into(),
+                project_id: "project-1".into(),
+                goal: RevisionBinding {
+                    id: "goal-1".into(),
+                    revision: 1,
+                    sha256: "a".repeat(64),
+                },
+                plan: RevisionBinding {
+                    id: "plan-1".into(),
+                    revision: 1,
+                    sha256: "b".repeat(64),
+                },
+                plan_step_id: "step-1".into(),
+                parent_run_id: "parent-run".into(),
+                parent_invocation_id: "invocation-1".into(),
+                child_profile_id: "checker".into(),
+            },
+            AssignmentScope {
+                scope_sha256: format!(
+                    "{:x}",
+                    Sha256::digest(serde_json::to_vec(&resources).unwrap())
+                ),
+                resource_ids: resources,
+            },
+            AssignmentDefinition {
+                bounded_objective: "核对来源".into(),
+                source_checkpoint_id: "checkpoint-1".into(),
+                expected_artifact: "source-report".into(),
+                capabilities: vec!["project.read".into()],
+            },
+            ChildAgentPermission::ReadOnly,
+            assignment_metadata("assignment-created"),
+        )
+        .unwrap();
+    assignments
+        .start(
+            "workspace-1",
+            "quarantined-assignment",
+            allocated.revision,
+            "missing-child-run".into(),
+            assignment_metadata("assignment-started"),
+        )
+        .unwrap();
+
+    let (mut child, _hello) = spawn_and_read_hello();
+    let initialize = initialize_envelope_with_path(
+        PROTOCOL_VERSION,
+        "runtime.initialize",
+        Some(fixture.database_path.to_string_lossy().into_owned()),
+    );
+    write_envelope(&mut child, &initialize);
+    let ready = read_next_envelope(&mut child);
+    assert_eq!(ready.name, "runtime.ready");
+
+    let get = command_envelope(
+        "agent.assignment.get",
+        2,
+        serde_json::json!({ "assignmentId": "quarantined-assignment" }),
+    );
+    write_envelope(&mut child, &get);
+    let snapshot = read_next_envelope(&mut child);
+    assert_response(&snapshot, &get, "agent.assignment.snapshot", 3);
+
+    let cancel = command_envelope(
+        "agent.assignment.request_cancel",
+        3,
+        serde_json::json!({
+            "cancelIdempotencyKey": "blocked-cancel",
+            "assignmentId": "quarantined-assignment",
+            "expectedRevision": 2
+        }),
+    );
+    write_envelope(&mut child, &cancel);
+    let rejected = read_next_envelope(&mut child);
+    assert_response(&rejected, &cancel, "agent.assignment.rejected", 4);
+    let error: RuntimeError = serde_json::from_value(rejected.payload).unwrap();
+    assert_eq!(error.code, "ASSIGNMENT_RECOVERY_QUARANTINED");
+    assert!(
+        EventJournal::open(&fixture.database_path)
+            .unwrap()
+            .read_run("missing-child-run", 0)
+            .unwrap()
+            .is_empty()
+    );
+
+    let shutdown = command_envelope("runtime.shutdown", 4, serde_json::json!({}));
+    write_envelope(&mut child, &shutdown);
+    let stopped = read_next_envelope(&mut child);
+    assert_response(&stopped, &shutdown, "runtime.stopped", 5);
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn damaged_storage_emits_initialization_failed_without_ready() {
     let fixture = Fixture::new();
     drop(EventJournal::open(&fixture.database_path).unwrap());
@@ -563,6 +674,14 @@ fn command_envelope(name: &str, sequence: u64, payload: serde_json::Value) -> En
         payload,
     )
     .unwrap()
+}
+
+fn assignment_metadata(id: &str) -> AssignmentEventMetadata {
+    AssignmentEventMetadata {
+        message_id: format!("{id}-message"),
+        idempotency_key: format!("{id}-key"),
+        created_at: "2026-07-12T00:00:01Z".into(),
+    }
 }
 
 fn assert_response(

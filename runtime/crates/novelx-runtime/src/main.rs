@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io;
 use std::sync::Arc;
 
@@ -15,6 +16,9 @@ use novelx_protocol::{
 };
 use novelx_runtime::agent_assignment_command_service::{
     AgentAssignmentCommandFailure, AgentAssignmentCommandService,
+};
+use novelx_runtime::agent_assignment_recovery::{
+    AgentAssignmentRecoveryError, recover_agent_assignments,
 };
 use novelx_runtime::agent_loop_journal::AgentLoopJournalRepository;
 use novelx_runtime::context_compile_service::{
@@ -154,25 +158,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    let (mut journal, recovered_run_count) = match initialize.workspace_database_path.as_deref() {
-        None => (None, 0),
-        Some(path) => match initialize_runtime(path) {
-            Ok((journal, count)) => (Some(journal), count),
-            Err(error) => {
-                let diagnostic_id = Uuid::new_v4();
-                write_initialization_failed(
-                    &mut output,
-                    initialize_envelope.message_id,
-                    diagnostic_id,
-                    &error,
-                )
-                .await?;
-                return Err(
-                    format!("runtime initialization failed [{diagnostic_id}]: {error}").into(),
-                );
-            }
-        },
-    };
+    let (mut journal, recovered_run_count, quarantined_assignment_ids) =
+        match initialize.workspace_database_path.as_deref() {
+            None => (None, 0, BTreeSet::new()),
+            Some(path) => match initialize_runtime(
+                path,
+                workspace_binding
+                    .as_ref()
+                    .expect("validated workspace binding"),
+            ) {
+                Ok((journal, count, quarantined)) => (Some(journal), count, quarantined),
+                Err(error) => {
+                    let diagnostic_id = Uuid::new_v4();
+                    write_initialization_failed(
+                        &mut output,
+                        initialize_envelope.message_id,
+                        diagnostic_id,
+                        &error,
+                    )
+                    .await?;
+                    return Err(format!(
+                        "runtime initialization failed [{diagnostic_id}]: {error}"
+                    )
+                    .into());
+                }
+            },
+        };
 
     let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let mut ready_envelope = Envelope::new(
@@ -208,6 +219,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recovered_run_count,
         journal: &mut journal,
         workspace_binding: workspace_binding.as_ref(),
+        quarantined_assignment_ids: &quarantined_assignment_ids,
         provider_registry: &mut provider_registry,
         provider_gateway: &provider_gateway,
         project_root: project_root.as_ref(),
@@ -315,6 +327,7 @@ async fn run_command_loop(
                 &command,
                 context.workspace_database_path,
                 context.workspace_binding,
+                context.quarantined_assignment_ids,
             )?,
             "runtime.shutdown" => {
                 output
@@ -395,6 +408,7 @@ struct RuntimeCommandContext<'a> {
     recovered_run_count: u64,
     journal: &'a mut Option<EventJournal>,
     workspace_binding: Option<&'a WorkspaceBinding>,
+    quarantined_assignment_ids: &'a BTreeSet<String>,
     provider_registry: &'a mut ProviderRegistry,
     provider_gateway: &'a Arc<ProviderGateway>,
     project_root: Option<&'a ProjectRoot>,
@@ -786,6 +800,7 @@ fn handle_agent_assignment_command(
     command: &Envelope,
     workspace_database_path: Option<&str>,
     workspace_binding: Option<&WorkspaceBinding>,
+    quarantined_assignment_ids: &BTreeSet<String>,
 ) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     let Some(database_path) = workspace_database_path else {
         return agent_assignment_command_failure(
@@ -815,6 +830,26 @@ fn handle_agent_assignment_command(
             },
         );
     };
+    if command.name != "agent.assignment.get"
+        && command
+            .payload
+            .get("assignmentId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| quarantined_assignment_ids.contains(id))
+    {
+        return agent_assignment_command_failure(
+            command,
+            AgentAssignmentCommandFailure {
+                error: Box::new(runtime_domain_error(
+                    "ASSIGNMENT_RECOVERY_QUARANTINED",
+                    RuntimeErrorClass::SourceConflict,
+                    "该智能体分配在启动恢复中被隔离，必须先处理一致性问题。",
+                    "agent_assignment.recovery_barrier",
+                )),
+                internal_message: "Assignment mutation rejected by recovery quarantine".to_owned(),
+            },
+        );
+    }
     let service = AgentAssignmentCommandService::new(database_path, binding);
     let result: Result<serde_json::Value, AgentAssignmentCommandFailure> =
         match command.name.as_str() {
@@ -2085,12 +2120,23 @@ async fn write_protocol_error(
     write_handshake_envelope(output, &envelope).await
 }
 
-fn initialize_runtime(path: &str) -> Result<(EventJournal, u64), InitializationError> {
+fn initialize_runtime(
+    path: &str,
+    binding: &WorkspaceBinding,
+) -> Result<(EventJournal, u64, BTreeSet<String>), InitializationError> {
     let mut journal = EventJournal::open(path).map_err(InitializationError::Storage)?;
     let report = RecoveryCoordinator::recover_and_reconcile(&mut journal)
         .map_err(InitializationError::Recovery)?;
+    let assignment_report =
+        recover_agent_assignments(path, &binding.workspace_id, &binding.project_id)
+            .map_err(InitializationError::AssignmentRecovery)?;
+    let quarantined = assignment_report
+        .quarantined
+        .into_iter()
+        .map(|value| value.assignment_id)
+        .collect();
     let count = report.recovered_nonterminal_count;
-    Ok((journal, count))
+    Ok((journal, count, quarantined))
 }
 
 async fn write_initialization_failed(
@@ -2109,6 +2155,11 @@ async fn write_initialization_failed(
             "RUNTIME_RECOVERY_FAILED",
             RuntimeErrorClass::Validation,
             "runtime.initialize.recovery",
+        ),
+        InitializationError::AssignmentRecovery(_) => (
+            "ASSIGNMENT_RECOVERY_FAILED",
+            RuntimeErrorClass::Validation,
+            "runtime.initialize.assignment_recovery",
         ),
     };
     let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
@@ -2159,6 +2210,7 @@ impl RoutedOutput {
 enum InitializationError {
     Storage(EventJournalError),
     Recovery(RecoveryError),
+    AssignmentRecovery(AgentAssignmentRecoveryError),
 }
 
 impl std::fmt::Display for InitializationError {
@@ -2166,6 +2218,9 @@ impl std::fmt::Display for InitializationError {
         match self {
             Self::Storage(error) => write!(formatter, "storage: {error}"),
             Self::Recovery(error) => write!(formatter, "recovery: {error}"),
+            Self::AssignmentRecovery(error) => {
+                write!(formatter, "assignment recovery: {error}")
+            }
         }
     }
 }

@@ -306,7 +306,7 @@ Status date: 2026-07-12. This table is intentionally conservative and must be up
 | Capability | Current evidence-backed status | Still required before product completion |
 | --- | --- | --- |
 | Goal / Plan | Rust workspace journal and aggregates exist; Runtime（运行时）commands and exact Run pin validation are in active integration and are not yet a complete desktop workflow | Finish compatibility/recovery gates, IPC（进程间通信）projection, desktop creation/inspection UI（用户界面）and real long-task acceptance |
-| Automatic Agent allocation | Product contract, Plan assignment fields and the durable Workspace-scoped Agent Assignment aggregate exist; real dispatch is still disabled | Runtime commands, exact child Run pins, recovery coordinator, bounded concurrency, cancellation propagation, synthesis, cost controls and cross-process acceptance |
+| Automatic Agent allocation | Durable Assignment commands, exact child Run pins and a read-only structural recovery/quarantine barrier are live; missing child Runs are never guessed or recreated | Immutable ChildRunSpec, Provider-bind operational recovery, bounded concurrency, cancellation propagation, synthesis, cost controls and real multi-Agent cross-process acceptance |
 | Handoff / Shared Memory | Legacy application records and the V2 contract exist | V2 authoritative communication objects, stale-source enforcement, recovery and UI |
 | Session branch | Product semantics are defined | Durable branch aggregate, message ancestry, project-effect reconciliation and UI |
 | Model selector | Legacy Provider（旧模型服务）settings exist and the V2 contract is defined | V2 profile registry, next-Run binding, effective-profile audit, lower-right UI（用户界面）and unavailable-model behavior |
