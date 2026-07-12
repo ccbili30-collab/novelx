@@ -33,9 +33,15 @@ fn exact_provider_binding_is_required_when_no_durable_outcome_exists() {
         fixture.gate(&[], &run_id),
         OperationalRecoveryGate::AwaitingProviderBinding
     );
+    let unbound_fingerprint = fixture.fingerprint(&[], &run_id);
+    assert_eq!(unbound_fingerprint, fixture.fingerprint(&[], &run_id));
     assert_eq!(
-        fixture.gate(&[provider], &run_id),
+        fixture.gate(std::slice::from_ref(&provider), &run_id),
         OperationalRecoveryGate::RecoveryReady
+    );
+    assert_ne!(
+        unbound_fingerprint,
+        fixture.fingerprint(std::slice::from_ref(&provider), &run_id)
     );
 
     let mut wrong_provider = support::pinned_identity().provider;
@@ -252,7 +258,7 @@ fn approval_required_tool_waits_for_host_without_provider_binding() {
 }
 
 #[test]
-fn terminal_tool_evidence_is_recovery_ready_without_provider_binding() {
+fn terminal_tool_without_verified_manifest_requires_reconciliation() {
     let fixture = Fixture::new();
     let run_id = Uuid::new_v4().to_string();
     create_running_run(&fixture, &run_id);
@@ -297,7 +303,7 @@ fn terminal_tool_evidence_is_recovery_ready_without_provider_binding() {
 
     assert_eq!(
         fixture.gate(&[], &run_id),
-        OperationalRecoveryGate::RecoveryReady
+        OperationalRecoveryGate::WaitingForReconciliation
     );
 }
 
@@ -347,6 +353,47 @@ fn terminal_run_projects_persisted_state_without_provider_binding() {
     assert_eq!(
         fixture.gate(&[], &run_id),
         OperationalRecoveryGate::TerminalProjectionOnly
+    );
+}
+
+#[test]
+fn terminal_run_with_unknown_provider_outcome_is_quarantined() {
+    let fixture = Fixture::new();
+    let run_id = Uuid::new_v4().to_string();
+    let provider = create_running_run(&fixture, &run_id);
+    let mut journal = fixture.open();
+    let mut run = RunAggregate::recover(&journal, &run_id).unwrap();
+    let mut attempt = ProviderAttemptAggregate::create(
+        &mut journal,
+        &run_id,
+        "attempt-terminal-unknown",
+        attempt_definition(&run_id, provider),
+        run.last_run_sequence(),
+        provider_metadata("provider-terminal-request", "provider-terminal-request-key"),
+    )
+    .unwrap();
+    attempt
+        .mark_sent(
+            &mut journal,
+            run.last_run_sequence() + 1,
+            "dispatch-terminal-unknown",
+            provider_metadata("provider-terminal-sent", "provider-terminal-sent-key"),
+        )
+        .unwrap();
+    run = RunAggregate::recover(&journal, &run_id).unwrap();
+    run.complete(
+        &mut journal,
+        run_metadata(
+            "run-terminal-unknown-complete",
+            "run-terminal-unknown-complete-key",
+        ),
+    )
+    .unwrap();
+    drop(journal);
+
+    assert_eq!(
+        fixture.gate(&[], &run_id),
+        OperationalRecoveryGate::Quarantined
     );
 }
 
@@ -488,6 +535,18 @@ impl Fixture {
     }
 
     fn gate(&self, providers: &[ProviderRunIdentity], run_id: &str) -> OperationalRecoveryGate {
+        self.recovered_run(providers, run_id).gate
+    }
+
+    fn fingerprint(&self, providers: &[ProviderRunIdentity], run_id: &str) -> String {
+        self.recovered_run(providers, run_id).source_fingerprint
+    }
+
+    fn recovered_run(
+        &self,
+        providers: &[ProviderRunIdentity],
+        run_id: &str,
+    ) -> novelx_runtime::operational_recovery_scanner::OperationalRecoveryRun {
         let mut journal = self.open();
         let assignments = AssignmentRecoveryReport {
             assignments: vec![],
@@ -501,6 +560,5 @@ impl Fixture {
             .into_iter()
             .find(|run| run.run_id == run_id)
             .unwrap()
-            .gate
     }
 }

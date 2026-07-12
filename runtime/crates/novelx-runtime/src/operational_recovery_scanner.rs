@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use novelx_protocol::ProviderRunIdentity;
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
+    agent_assignment_aggregate::AgentAssignmentStatus,
     agent_assignment_recovery::{
         AssignmentRecoveryClassification, AssignmentRecoveryReport, RecoveredAssignment,
     },
@@ -17,7 +20,7 @@ use crate::{
     run_aggregate::{RunAggregate, RunAggregateError},
     run_state::RunState,
     tool_aggregate::{ToolAggregateError, ToolCallAggregate},
-    tool_state::{ToolAuthorization, ToolOutcomeKnowledge, ToolState},
+    tool_state::{ToolAuthorization, ToolOutcomeKnowledge, ToolSideEffect, ToolState},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +37,7 @@ pub enum OperationalRecoveryGate {
 pub struct OperationalRecoveryRun {
     pub run_id: String,
     pub run_state: RunState,
+    pub source_fingerprint: String,
     pub gate: OperationalRecoveryGate,
     pub active_agent_loop_id: Option<String>,
     pub active_agent_loop_phase: Option<LoopPhase>,
@@ -153,7 +157,17 @@ impl<'a> OperationalRecoveryScanner<'a> {
                     },
                 )?;
             if record.service.is_active() {
-                active_loops.push((invocation_id.clone(), record.service.phase()));
+                active_loops.push((
+                    invocation_id.clone(),
+                    record.service.phase(),
+                    record.service.checkpoint_sha256().map_err(|source| {
+                        OperationalRecoveryScanError::AgentLoopCheckpointFailed {
+                            run_id: run_id.to_owned(),
+                            invocation_id: invocation_id.clone(),
+                            source,
+                        }
+                    })?,
+                ));
             }
         }
         if active_loops.len() > 1 {
@@ -200,7 +214,7 @@ impl<'a> OperationalRecoveryScanner<'a> {
         let approval_wait = run.state() == RunState::WaitingForApproval
             || active_loop
                 .as_ref()
-                .is_some_and(|(_, phase)| *phase == LoopPhase::AwaitingApproval)
+                .is_some_and(|(_, phase, _)| *phase == LoopPhase::AwaitingApproval)
             || tools.iter().any(|tool| {
                 tool.authorization() == ToolAuthorization::ApprovalRequired
                     && tool.state() == ToolState::Requested
@@ -210,8 +224,10 @@ impl<'a> OperationalRecoveryScanner<'a> {
                 attempt.recovery(),
                 ProviderAttemptRecovery::Completed | ProviderAttemptRecovery::TerminalFailure
             )
-        }) || tools.iter().any(|tool| tool.state().is_terminal());
-        let local_continuation = active_loop.as_ref().is_some_and(|(_, phase)| {
+        });
+        let terminal_tool_without_verified_manifest =
+            tools.iter().any(|tool| tool.state().is_terminal());
+        let local_continuation = active_loop.as_ref().is_some_and(|(_, phase, _)| {
             matches!(
                 phase,
                 LoopPhase::AwaitingToolResults
@@ -227,14 +243,38 @@ impl<'a> OperationalRecoveryScanner<'a> {
             .iter()
             .any(|provider| provider == &run.pinned_identity().provider);
 
-        let gate = if !reasons.is_empty() {
+        let assignment_evidence = run
+            .pinned_identity()
+            .assignment
+            .as_ref()
+            .and_then(|_| assignments_by_child.get(run_id).copied());
+        let source_fingerprint = source_fingerprint(
+            run,
+            assignment_evidence,
+            active_loop.as_ref(),
+            provider_attempt_ids,
+            &attempts,
+            tool_call_ids,
+            &tools,
+            provider_bound,
+        )?;
+
+        let terminal_with_unknown_effect = run.state().is_terminal()
+            && (provider_unknown || tool_unknown || terminal_tool_without_verified_manifest);
+        let gate = if terminal_with_unknown_effect {
+            reasons.push("terminal_run_has_unknown_external_outcome".to_owned());
             OperationalRecoveryGate::Quarantined
-        } else if provider_unknown || tool_unknown {
+        } else if !reasons.is_empty() {
+            OperationalRecoveryGate::Quarantined
+        } else if provider_unknown || tool_unknown || terminal_tool_without_verified_manifest {
             if provider_unknown {
                 reasons.push("provider_outcome_unknown".to_owned());
             }
             if tool_unknown {
                 reasons.push("tool_outcome_unknown_or_manifest_missing".to_owned());
+            }
+            if terminal_tool_without_verified_manifest {
+                reasons.push("tool_terminal_manifest_unverified".to_owned());
             }
             OperationalRecoveryGate::WaitingForReconciliation
         } else if run.state() == RunState::WaitingForReconciliation
@@ -257,9 +297,10 @@ impl<'a> OperationalRecoveryScanner<'a> {
         Ok(OperationalRecoveryRun {
             run_id: run_id.to_owned(),
             run_state: run.state(),
+            source_fingerprint,
             gate,
-            active_agent_loop_id: active_loop.as_ref().map(|(id, _)| id.clone()),
-            active_agent_loop_phase: active_loop.map(|(_, phase)| phase),
+            active_agent_loop_id: active_loop.as_ref().map(|(id, _, _)| id.clone()),
+            active_agent_loop_phase: active_loop.map(|(_, phase, _)| phase),
             provider_attempt_states: attempts
                 .iter()
                 .map(ProviderAttemptAggregate::state)
@@ -268,6 +309,113 @@ impl<'a> OperationalRecoveryScanner<'a> {
             reasons,
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_fingerprint(
+    run: &RunAggregate,
+    assignment: Option<&RecoveredAssignment>,
+    active_loop: Option<&(String, LoopPhase, String)>,
+    provider_attempt_ids: &[String],
+    attempts: &[ProviderAttemptAggregate],
+    tool_call_ids: &[String],
+    tools: &[ToolCallAggregate],
+    provider_bound: bool,
+) -> Result<String, OperationalRecoveryScanError> {
+    let provider_attempts = provider_attempt_ids
+        .iter()
+        .zip(attempts)
+        .map(|(attempt_id, attempt)| {
+            json!({
+                "attemptId": attempt_id,
+                "aggregateSequence": attempt.aggregate_sequence(),
+                "state": provider_attempt_state_name(attempt.state()),
+                "recovery": provider_attempt_recovery_name(attempt.recovery()),
+                "definition": attempt.definition(),
+                "response": attempt.response_receipt(),
+                "responseTextSha256": attempt.response_text_sha256(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let tool_calls = tool_call_ids
+        .iter()
+        .zip(tools)
+        .map(|(tool_call_id, tool)| {
+            json!({
+                "toolCallId": tool_call_id,
+                "aggregateSequence": tool.aggregate_sequence(),
+                "state": tool_state_name(tool.state()),
+                "authorization": tool_authorization_name(tool.authorization()),
+                "outcomeKnowledge": tool.outcome_knowledge().map(tool_outcome_name),
+                "definition": {
+                    "providerToolCallId": tool.definition().provider_tool_call_id,
+                    "toolName": tool.definition().tool_name,
+                    "schemaVersion": tool.definition().schema_version,
+                    "argumentsHash": tool.definition().arguments_hash,
+                    "attempt": tool.definition().attempt,
+                    "sideEffect": tool_side_effect_name(tool.definition().side_effect),
+                    "parallel": tool.definition().parallel,
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    let assignment = assignment.map(|value| {
+        json!({
+            "assignmentId": value.assignment_id,
+            "revision": value.assignment_revision,
+            "eventHash": value.assignment_event_hash,
+            "status": assignment_status_name(&value.assignment_status),
+            "classification": assignment_classification_name(&value.classification),
+        })
+    });
+    let loop_evidence = active_loop.map(|(id, phase, checkpoint_sha256)| {
+        json!({
+            "invocationId": id,
+            "phase": loop_phase_name(*phase),
+            "checkpointSha256": checkpoint_sha256,
+        })
+    });
+    let pinned_identity_sha256 =
+        novelx_protocol::child_run_pinned_identity_sha256(run.pinned_identity())
+            .map_err(OperationalRecoveryScanError::FingerprintJson)?;
+    let material = json!({
+        "policyVersion": "operational-recovery-evidence-v1",
+        "runId": run.run_id(),
+        "runSequence": run.last_sequence(),
+        "runState": run_state_name(run.state()),
+        "pinnedIdentitySha256": pinned_identity_sha256,
+        "assignment": assignment,
+        "activeAgentLoop": loop_evidence,
+        "providerAttempts": provider_attempts,
+        "toolCalls": tool_calls,
+        "exactProviderBound": provider_bound,
+    });
+    canonical_sha256(material)
+}
+
+fn canonical_sha256(value: serde_json::Value) -> Result<String, OperationalRecoveryScanError> {
+    fn canonicalize(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(canonicalize).collect())
+            }
+            serde_json::Value::Object(values) => {
+                let mut entries = values.into_iter().collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                serde_json::Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, canonicalize(value)))
+                        .collect(),
+                )
+            }
+            scalar => scalar,
+        }
+    }
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&canonicalize(value))?)
+    ))
 }
 
 fn addresses_by_run(
@@ -299,6 +447,118 @@ fn assignments_by_child_run(
                 .map(|run_id| (run_id.clone(), assignment))
         })
         .collect()
+}
+
+fn run_state_name(value: RunState) -> &'static str {
+    match value {
+        RunState::Created => "created",
+        RunState::Preparing => "preparing",
+        RunState::Running => "running",
+        RunState::WaitingForApproval => "waiting_for_approval",
+        RunState::WaitingForReconciliation => "waiting_for_reconciliation",
+        RunState::Committing => "committing",
+        RunState::Retrying => "retrying",
+        RunState::Blocked => "blocked",
+        RunState::Cancelled => "cancelled",
+        RunState::Failed => "failed",
+        RunState::Completed => "completed",
+    }
+}
+
+fn provider_attempt_state_name(value: ProviderAttemptState) -> &'static str {
+    match value {
+        ProviderAttemptState::Requested => "requested",
+        ProviderAttemptState::Sent => "sent",
+        ProviderAttemptState::Responded => "responded",
+        ProviderAttemptState::Failed => "failed",
+        ProviderAttemptState::OutcomeUnknown => "outcome_unknown",
+    }
+}
+
+fn provider_attempt_recovery_name(value: ProviderAttemptRecovery) -> &'static str {
+    match value {
+        ProviderAttemptRecovery::SafeToSend => "safe_to_send",
+        ProviderAttemptRecovery::OutcomeUnknown => "outcome_unknown",
+        ProviderAttemptRecovery::Completed => "completed",
+        ProviderAttemptRecovery::RetryEligible => "retry_eligible",
+        ProviderAttemptRecovery::TerminalFailure => "terminal_failure",
+    }
+}
+
+fn tool_state_name(value: ToolState) -> &'static str {
+    match value {
+        ToolState::Requested => "requested",
+        ToolState::Authorized => "authorized",
+        ToolState::Running => "running",
+        ToolState::Completed => "completed",
+        ToolState::Failed => "failed",
+        ToolState::Denied => "denied",
+        ToolState::Cancelled => "cancelled",
+        ToolState::TimedOut => "timed_out",
+    }
+}
+
+fn tool_authorization_name(value: ToolAuthorization) -> &'static str {
+    match value {
+        ToolAuthorization::Pending => "pending",
+        ToolAuthorization::Allowed => "allowed",
+        ToolAuthorization::ApprovalRequired => "approval_required",
+        ToolAuthorization::Denied => "denied",
+    }
+}
+
+fn tool_outcome_name(value: ToolOutcomeKnowledge) -> &'static str {
+    match value {
+        ToolOutcomeKnowledge::Known => "known",
+        ToolOutcomeKnowledge::Unknown => "unknown",
+    }
+}
+
+fn tool_side_effect_name(value: ToolSideEffect) -> &'static str {
+    match value {
+        ToolSideEffect::None => "none",
+        ToolSideEffect::StagedWrite => "staged_write",
+        ToolSideEffect::ExternalEffect => "external_effect",
+    }
+}
+
+fn loop_phase_name(value: LoopPhase) -> &'static str {
+    match value {
+        LoopPhase::AwaitingProvider => "awaiting_provider",
+        LoopPhase::AwaitingApproval => "awaiting_approval",
+        LoopPhase::AwaitingToolResults => "awaiting_tool_results",
+        LoopPhase::AwaitingContextCompilation => "awaiting_context_compilation",
+        LoopPhase::AwaitingInferenceStart => "awaiting_inference_start",
+        LoopPhase::Completed => "completed",
+        LoopPhase::Cancelled => "cancelled",
+        LoopPhase::Failed => "failed",
+    }
+}
+
+fn assignment_status_name(value: &AgentAssignmentStatus) -> &'static str {
+    match value {
+        AgentAssignmentStatus::Allocated => "allocated",
+        AgentAssignmentStatus::Running => "running",
+        AgentAssignmentStatus::CancelRequested => "cancel_requested",
+        AgentAssignmentStatus::Cancelled => "cancelled",
+        AgentAssignmentStatus::Completed => "completed",
+        AgentAssignmentStatus::Failed => "failed",
+    }
+}
+
+fn assignment_classification_name(value: &AssignmentRecoveryClassification) -> &'static str {
+    match value {
+        AssignmentRecoveryClassification::AwaitingDispatch => "awaiting_dispatch",
+        AssignmentRecoveryClassification::ProvisionChildRun => "provision_child_run",
+        AssignmentRecoveryClassification::RunningChild(_) => "running_child",
+        AssignmentRecoveryClassification::ReadyToConfirmCancellation => {
+            "ready_to_confirm_cancellation"
+        }
+        AssignmentRecoveryClassification::CancellationPending => "cancellation_pending",
+        AssignmentRecoveryClassification::ReconciliationRequired => "reconciliation_required",
+        AssignmentRecoveryClassification::TerminalConfirmed => "terminal_confirmed",
+        AssignmentRecoveryClassification::Quarantined => "quarantined",
+    }
 }
 
 fn assignment_quarantine(report: &AssignmentRecoveryReport) -> BTreeMap<String, Vec<String>> {
@@ -358,6 +618,13 @@ pub enum OperationalRecoveryScanError {
         #[source]
         source: crate::agent_loop_journal::AgentLoopJournalError,
     },
+    #[error("agent loop `{invocation_id}` in run `{run_id}` checkpoint hash failed: {source}")]
+    AgentLoopCheckpointFailed {
+        run_id: String,
+        invocation_id: String,
+        #[source]
+        source: crate::agent_loop_service::AgentLoopError,
+    },
     #[error("provider attempt `{attempt_id}` in run `{run_id}` recovery failed: {source}")]
     ProviderAttemptRecoveryFailed {
         run_id: String,
@@ -372,6 +639,8 @@ pub enum OperationalRecoveryScanError {
         #[source]
         source: ToolAggregateError,
     },
+    #[error("operational recovery evidence JSON failed: {0}")]
+    FingerprintJson(#[from] serde_json::Error),
     #[error(transparent)]
     Journal(#[from] EventJournalError),
 }

@@ -34,6 +34,7 @@ pub enum AssignmentRecoveryClassification {
 pub struct RecoveredAssignment {
     pub assignment_id: String,
     pub assignment_revision: u64,
+    pub assignment_event_hash: String,
     pub assignment_status: AgentAssignmentStatus,
     pub child_run_id: Option<String>,
     pub child_run_state: Option<RunState>,
@@ -136,6 +137,7 @@ pub fn recover_agent_assignments(
             recovered.push(RecoveredAssignment {
                 assignment_id: assignment.identity.assignment_id,
                 assignment_revision: assignment.revision,
+                assignment_event_hash: assignment.last_event_hash,
                 assignment_status: assignment.status,
                 child_run_id: assignment.child_run_id,
                 child_run_state: child.as_ref().map(RunAggregate::state),
@@ -155,6 +157,7 @@ pub fn recover_agent_assignments(
                 recovered.push(RecoveredAssignment {
                     assignment_id: assignment.identity.assignment_id,
                     assignment_revision: assignment.revision,
+                    assignment_event_hash: assignment.last_event_hash,
                     assignment_status: assignment.status,
                     child_run_id: assignment.child_run_id,
                     child_run_state: child.as_ref().map(RunAggregate::state),
@@ -291,6 +294,7 @@ fn classify(
     Ok(RecoveredAssignment {
         assignment_id: assignment.identity.assignment_id,
         assignment_revision: assignment.revision,
+        assignment_event_hash: assignment.last_event_hash,
         assignment_status: assignment.status,
         child_run_id: assignment.child_run_id,
         child_run_state,

@@ -3,9 +3,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
 use novelx_protocol::{
-    Envelope, MessageType, PROTOCOL_VERSION, RunSnapshot, RunStart, RuntimeApplicationIdentity,
-    RuntimeError, RuntimeErrorClass, RuntimeHello, RuntimeInitialize, RuntimeReady, RuntimeStatus,
-    RuntimeStopped,
+    ChildRunSpec, Envelope, MessageType, PROTOCOL_VERSION, RevisionReference, RunPrepare,
+    RunSnapshot, RunStart, RuntimeApplicationIdentity, RuntimeError, RuntimeErrorClass,
+    RuntimeHello, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
+    child_run_pinned_identity_sha256,
 };
 use novelx_runtime::agent_assignment_aggregate::{
     AgentAssignmentAggregate, AgentAssignmentIdentity, AgentAssignmentRepository,
@@ -452,6 +453,150 @@ fn reports_the_real_nonterminal_recovery_count() {
 }
 
 #[test]
+fn repeated_startup_records_identical_operational_recovery_only_once() {
+    let fixture = Fixture::new();
+    {
+        let mut journal = EventJournal::open(&fixture.database_path).unwrap();
+        create_run(&mut journal, "recovery-run", "created");
+    }
+    for _ in 0..2 {
+        let (mut child, _hello) = spawn_and_read_hello();
+        let initialize = initialize_envelope_with_path(
+            PROTOCOL_VERSION,
+            "runtime.initialize",
+            Some(fixture.database_path.to_string_lossy().into_owned()),
+        );
+        write_envelope(&mut child, &initialize);
+        assert_eq!(read_next_envelope(&mut child).name, "runtime.ready");
+        let shutdown = command_envelope("runtime.shutdown", 2, serde_json::json!({}));
+        write_envelope(&mut child, &shutdown);
+        assert_eq!(read_next_envelope(&mut child).name, "runtime.stopped");
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+    }
+    let connection = Connection::open(&fixture.database_path).unwrap();
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM workspace_events WHERE stream_type = 'operational_recovery'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2, "observed + waiting must not duplicate on restart");
+}
+
+#[test]
+fn provider_bind_records_only_the_matching_recovery_candidate_without_inference() {
+    let fixture = Fixture::new();
+    let run_id = "provider-recovery-run";
+    {
+        let mut identity = pinned_identity();
+        identity.provider.config_sha256 =
+            "bc9267f85e52b4ac2945b81966aa9a4cc7f513642cfa8f0057f7fc35b90586c8".to_owned();
+        let mut journal = EventJournal::open(&fixture.database_path).unwrap();
+        RunAggregate::create(
+            &mut journal,
+            run_id,
+            identity,
+            EventMetadata {
+                message_id: "provider-recovery-created",
+                idempotency_key: "provider-recovery-created-key",
+                created_at: "2026-07-13T00:00:00Z",
+                reason: None,
+            },
+        )
+        .unwrap();
+    }
+    let (mut child, _hello) = spawn_and_read_hello();
+    let initialize = initialize_envelope_with_path(
+        PROTOCOL_VERSION,
+        "runtime.initialize",
+        Some(fixture.database_path.to_string_lossy().into_owned()),
+    );
+    write_envelope(&mut child, &initialize);
+    assert_eq!(read_next_envelope(&mut child).name, "runtime.ready");
+
+    let message_id = uuid::Uuid::new_v4();
+    write_line(
+        &mut child,
+        &provider_bind_json(message_id, 2, "recovery-test-key").to_string(),
+    );
+    let bound = read_next_envelope(&mut child);
+    assert_eq!(bound.name, "provider.bound");
+
+    let shutdown = command_envelope("runtime.shutdown", 3, serde_json::json!({}));
+    write_envelope(&mut child, &shutdown);
+    assert_eq!(read_next_envelope(&mut child).name, "runtime.stopped");
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+
+    let connection = Connection::open(&fixture.database_path).unwrap();
+    let recovery_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM workspace_events WHERE stream_type = 'operational_recovery' AND stream_id = ?1",
+            [format!("run:{run_id}")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let provider_attempt_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM runtime_events WHERE aggregate_type = 'provider_attempt' AND run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        recovery_count, 3,
+        "unbound observed/waiting + bound observed"
+    );
+    assert_eq!(
+        provider_attempt_count, 0,
+        "provider.bind must not call the model"
+    );
+}
+
+#[test]
+fn startup_recovery_gate_prevents_prepare_from_terminalizing_a_missing_provider() {
+    let fixture = Fixture::new();
+    let run_id = uuid::Uuid::new_v4();
+    seed_assignment_child_run(&fixture.database_path, run_id);
+    let (mut child, _hello) = spawn_and_read_hello();
+    let initialize = initialize_envelope_with_path(
+        PROTOCOL_VERSION,
+        "runtime.initialize",
+        Some(fixture.database_path.to_string_lossy().into_owned()),
+    );
+    write_envelope(&mut child, &initialize);
+    assert_eq!(read_next_envelope(&mut child).name, "runtime.ready");
+
+    let mut prepare = command_envelope(
+        "run.prepare",
+        2,
+        serde_json::to_value(RunPrepare {
+            prepare_idempotency_key: "guarded-prepare".to_owned(),
+        })
+        .unwrap(),
+    );
+    prepare.run_id = Some(run_id);
+    write_envelope(&mut child, &prepare);
+    let rejected = read_next_envelope(&mut child);
+    assert_response(&rejected, &prepare, "run.rejected", 3);
+    let error: RuntimeError = serde_json::from_value(rejected.payload).unwrap();
+    assert_eq!(error.code, "RUN_RECOVERY_AWAITING_PROVIDER_BINDING");
+    assert!(error.retryable);
+
+    let shutdown = command_envelope("runtime.shutdown", 3, serde_json::json!({}));
+    write_envelope(&mut child, &shutdown);
+    assert_eq!(read_next_envelope(&mut child).name, "runtime.stopped");
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+    let journal = EventJournal::open(&fixture.database_path).unwrap();
+    let run = RunAggregate::recover(&journal, &run_id.to_string()).unwrap();
+    assert_eq!(run.state(), novelx_runtime::run_state::RunState::Created);
+    assert!(run.terminal_error().is_none());
+}
+
+#[test]
 fn quarantined_assignment_is_readable_but_mutations_are_blocked_after_real_restart() {
     let fixture = Fixture::new();
     {
@@ -672,6 +817,44 @@ fn command_envelope(name: &str, sequence: u64, payload: serde_json::Value) -> En
     .unwrap()
 }
 
+fn provider_bind_json(
+    message_id: uuid::Uuid,
+    sequence: u64,
+    credential: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": 1,
+        "messageId": message_id,
+        "messageType": "sensitive_command",
+        "name": "provider.bind",
+        "sentAt": "2026-07-13T00:00:10Z",
+        "correlationId": null,
+        "runId": null,
+        "sequence": sequence,
+        "payload": {
+            "config": {
+                "schemaVersion": 1,
+                "profileId": "profile-1",
+                "providerId": "deepseek",
+                "displayName": "DeepSeek",
+                "baseUrl": "https://api.deepseek.com/v1",
+                "modelId": "deepseek-chat",
+                "apiFlavor": "open_ai_chat_completions",
+                "authScheme": "bearer",
+                "contextWindow": 1000000,
+                "maxTokens": null,
+                "reasoning": false,
+                "input": ["text"],
+                "requestTimeoutMs": 30000,
+                "totalDeadlineMs": 120000,
+                "retryPolicy": { "maxAttempts": 3, "maxTotalDelayMs": 30000 }
+            },
+            "configSha256": "bc9267f85e52b4ac2945b81966aa9a4cc7f513642cfa8f0057f7fc35b90586c8",
+            "credential": credential
+        }
+    })
+}
+
 fn assignment_metadata(id: &str) -> AssignmentEventMetadata {
     AssignmentEventMetadata {
         message_id: format!("{id}-message"),
@@ -760,6 +943,136 @@ fn read_next_envelope(child: &mut Child) -> Envelope {
         .read_line(&mut line)
         .unwrap();
     serde_json::from_str(line.trim()).unwrap()
+}
+
+fn seed_assignment_child_run(path: &std::path::Path, child_run_id: uuid::Uuid) {
+    let parent_run_id = uuid::Uuid::new_v4().to_string();
+    let goal = RevisionReference {
+        id: "guard-goal".to_owned(),
+        revision: 1,
+        sha256: Some("7".repeat(64)),
+    };
+    let plan = RevisionReference {
+        id: "guard-plan".to_owned(),
+        revision: 1,
+        sha256: Some("8".repeat(64)),
+    };
+    let mut parent_identity = pinned_identity();
+    parent_identity.goal = Some(goal.clone());
+    parent_identity.plan = Some(plan.clone());
+    let mut journal = EventJournal::open(path).unwrap();
+    let mut parent = RunAggregate::create(
+        &mut journal,
+        &parent_run_id,
+        parent_identity,
+        EventMetadata {
+            message_id: "guard-parent-created",
+            idempotency_key: "guard-parent-created-key",
+            created_at: "2026-07-13T00:00:00Z",
+            reason: None,
+        },
+    )
+    .unwrap();
+    parent
+        .prepare(
+            &mut journal,
+            EventMetadata {
+                message_id: "guard-parent-prepared",
+                idempotency_key: "guard-parent-prepared-key",
+                created_at: "2026-07-13T00:00:01Z",
+                reason: None,
+            },
+        )
+        .unwrap();
+    parent
+        .start(
+            &mut journal,
+            EventMetadata {
+                message_id: "guard-parent-started",
+                idempotency_key: "guard-parent-started-key",
+                created_at: "2026-07-13T00:00:02Z",
+                reason: None,
+            },
+        )
+        .unwrap();
+    drop(journal);
+
+    let base_child = pinned_identity();
+    let assignment_id = "guard-assignment";
+    let mut assignments = AgentAssignmentRepository::open(path).unwrap();
+    let allocation = assignments
+        .allocate(
+            AgentAssignmentIdentity {
+                assignment_id: assignment_id.to_owned(),
+                workspace_id: "workspace-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                goal: RevisionBinding {
+                    id: goal.id.clone(),
+                    revision: goal.revision,
+                    sha256: goal.sha256.clone().unwrap(),
+                },
+                plan: RevisionBinding {
+                    id: plan.id.clone(),
+                    revision: plan.revision,
+                    sha256: plan.sha256.clone().unwrap(),
+                },
+                plan_step_id: "guard-step".to_owned(),
+                parent_run_id: parent_run_id.clone(),
+                parent_invocation_id: "guard-parent-invocation".to_owned(),
+                child_profile_id: base_child.agent_profile.id.clone(),
+            },
+            AssignmentScope {
+                resource_ids: base_child.scope_resource_ids.clone(),
+                scope_sha256: base_child.resource_scope_sha256.clone(),
+            },
+            AssignmentDefinition {
+                bounded_objective: "Guard a recovered child run".to_owned(),
+                source_checkpoint_id: base_child.source_checkpoint_id.clone(),
+                expected_artifact: "guard-report".to_owned(),
+                capabilities: vec!["project.read".to_owned()],
+            },
+            ChildAgentPermission::ReadOnly,
+            assignment_metadata("guard-assignment-allocated"),
+        )
+        .unwrap();
+    let mut child_identity = base_child;
+    child_identity.goal = Some(goal);
+    child_identity.plan = Some(plan);
+    child_identity.assignment = Some(RevisionReference {
+        id: assignment_id.to_owned(),
+        revision: allocation.revision,
+        sha256: Some(allocation.last_event_hash.clone()),
+    });
+    child_identity.parent_run_id = Some(parent_run_id);
+    child_identity.delegation_depth = 1;
+    let spec = ChildRunSpec {
+        child_run_id: child_run_id.to_string(),
+        run_start_idempotency_key: "guard-child-run-start".to_owned(),
+        pinned_identity_sha256: child_run_pinned_identity_sha256(&child_identity).unwrap(),
+        pinned_identity: child_identity.clone(),
+    };
+    assignments
+        .start(
+            "workspace-1",
+            assignment_id,
+            allocation.revision,
+            spec,
+            assignment_metadata("guard-assignment-started"),
+        )
+        .unwrap();
+    drop(assignments);
+    RunAggregate::create(
+        &mut EventJournal::open(path).unwrap(),
+        &child_run_id.to_string(),
+        child_identity,
+        EventMetadata {
+            message_id: "guarded-run-created",
+            idempotency_key: "guarded-run-created-key",
+            created_at: "2026-07-13T00:00:03Z",
+            reason: None,
+        },
+    )
+    .unwrap();
 }
 
 fn create_run(journal: &mut EventJournal, run_id: &str, target: &str) {

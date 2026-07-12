@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use novelx_runtime::agent_assignment_command_service::{
     AgentAssignmentCommandFailure, AgentAssignmentCommandService,
 };
 use novelx_runtime::agent_assignment_recovery::{
-    AgentAssignmentRecoveryError, recover_agent_assignments,
+    AgentAssignmentRecoveryError, AssignmentRecoveryReport, recover_agent_assignments,
 };
 use novelx_runtime::agent_loop_journal::AgentLoopJournalRepository;
 use novelx_runtime::context_compile_service::{
@@ -28,6 +28,13 @@ use novelx_runtime::event_journal::{EventJournal, EventJournalError};
 use novelx_runtime::goal_plan_command_service::{GoalPlanCommandFailure, GoalPlanCommandService};
 use novelx_runtime::live_agent_loop_runner::{
     LiveAgentLoopOutcome, LiveAgentLoopProgress, LiveAgentLoopRunner,
+};
+use novelx_runtime::operational_recovery_recording_service::{
+    OperationalRecoveryRecordingError, OperationalRecoveryRecordingService,
+};
+use novelx_runtime::operational_recovery_scanner::{
+    OperationalRecoveryGate, OperationalRecoveryRun, OperationalRecoveryScanError,
+    OperationalRecoveryScanner,
 };
 use novelx_runtime::project_path::ProjectRoot;
 use novelx_runtime::project_tool_execution_service::{
@@ -158,32 +165,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    let (mut journal, recovered_run_count, quarantined_assignment_ids) =
-        match initialize.workspace_database_path.as_deref() {
-            None => (None, 0, BTreeSet::new()),
-            Some(path) => match initialize_runtime(
-                path,
-                workspace_binding
-                    .as_ref()
-                    .expect("validated workspace binding"),
-            ) {
-                Ok((journal, count, quarantined)) => (Some(journal), count, quarantined),
-                Err(error) => {
-                    let diagnostic_id = Uuid::new_v4();
-                    write_initialization_failed(
-                        &mut output,
-                        initialize_envelope.message_id,
-                        diagnostic_id,
-                        &error,
-                    )
-                    .await?;
-                    return Err(format!(
-                        "runtime initialization failed [{diagnostic_id}]: {error}"
-                    )
-                    .into());
-                }
+    let (
+        mut journal,
+        recovered_run_count,
+        assignment_recovery_report,
+        mut operational_recovery_runs,
+        quarantined_assignment_ids,
+    ) = match initialize.workspace_database_path.as_deref() {
+        None => (
+            None,
+            0,
+            AssignmentRecoveryReport {
+                assignments: vec![],
+                quarantined: vec![],
             },
-        };
+            BTreeMap::new(),
+            BTreeSet::new(),
+        ),
+        Some(path) => match initialize_runtime(
+            path,
+            workspace_binding
+                .as_ref()
+                .expect("validated workspace binding"),
+        ) {
+            Ok(state) => (
+                Some(state.journal),
+                state.recovered_run_count,
+                state.assignment_report,
+                state.operational_runs,
+                state.quarantined_assignment_ids,
+            ),
+            Err(error) => {
+                let diagnostic_id = Uuid::new_v4();
+                write_initialization_failed(
+                    &mut output,
+                    initialize_envelope.message_id,
+                    diagnostic_id,
+                    &error,
+                )
+                .await?;
+                return Err(
+                    format!("runtime initialization failed [{diagnostic_id}]: {error}").into(),
+                );
+            }
+        },
+    };
 
     let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let mut ready_envelope = Envelope::new(
@@ -219,6 +245,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recovered_run_count,
         journal: &mut journal,
         workspace_binding: workspace_binding.as_ref(),
+        assignment_recovery_report: &assignment_recovery_report,
+        operational_recovery_runs: &mut operational_recovery_runs,
         quarantined_assignment_ids: &quarantined_assignment_ids,
         provider_registry: &mut provider_registry,
         provider_gateway: &provider_gateway,
@@ -278,7 +306,7 @@ async fn run_command_loop(
                 return Err(io::Error::new(io::ErrorKind::InvalidData, error.to_string()).into());
             }
             output
-                .emit(handle_provider_bind(sensitive, context.provider_registry)?)
+                .emit(handle_provider_bind(sensitive, context)?)
                 .await?;
             expected_host_sequence += 1;
             continue;
@@ -289,6 +317,11 @@ async fn run_command_loop(
                 .emit(protocol_error_draft(command.message_id, &error)?)
                 .await?;
             return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
+        }
+        if let Some(rejected) = operational_recovery_guard(&command, context)? {
+            output.emit(rejected).await?;
+            expected_host_sequence += 1;
+            continue;
         }
 
         let routed = match command.name.as_str() {
@@ -365,12 +398,17 @@ async fn run_command_loop(
             "run.prepare" => {
                 handle_run_prepare(&command, context.journal, context.provider_registry)?
             }
-            "run.reconcile" => handle_run_reconcile(&command, context.journal)?,
+            "run.reconcile" => {
+                let routed = handle_run_reconcile(&command, context.journal)?;
+                refresh_operational_recovery(context)?;
+                routed
+            }
             "context.compile" => {
                 handle_context_compile(&command, context.journal, context.provider_registry)?
             }
             "tool.authorization.resolve" => {
                 handle_tool_authorization_resolve(output, &command, context).await?;
+                refresh_operational_recovery(context)?;
                 expected_host_sequence += 1;
                 continue;
             }
@@ -403,11 +441,121 @@ async fn run_command_loop(
     Ok(())
 }
 
+fn operational_recovery_guard(
+    command: &Envelope,
+    context: &RuntimeCommandContext<'_>,
+) -> Result<Option<RuntimeOutputDraft>, Box<dyn std::error::Error>> {
+    let Some(run_id) = command.run_id else {
+        return Ok(None);
+    };
+    let run_id_text = run_id.to_string();
+    let Some(recovery) = context.operational_recovery_runs.get(&run_id_text) else {
+        return Ok(None);
+    };
+    let is_assignment_child = context
+        .assignment_recovery_report
+        .assignments
+        .iter()
+        .any(|assignment| assignment.child_run_id.as_deref() == Some(run_id_text.as_str()));
+    if !is_assignment_child {
+        return Ok(None);
+    }
+    let allowed = match command.name.as_str() {
+        "run.get" => true,
+        "run.start" => recovery.gate != OperationalRecoveryGate::Quarantined,
+        "run.reconcile" => recovery.gate == OperationalRecoveryGate::WaitingForReconciliation,
+        "tool.authorization.resolve" => {
+            recovery.gate == OperationalRecoveryGate::WaitingForApproval
+        }
+        _ => false,
+    };
+    if allowed {
+        return Ok(None);
+    }
+    let (code, class, retryable) = match recovery.gate {
+        OperationalRecoveryGate::AwaitingProviderBinding => (
+            "RUN_RECOVERY_AWAITING_PROVIDER_BINDING",
+            RuntimeErrorClass::ProviderAuth,
+            true,
+        ),
+        OperationalRecoveryGate::WaitingForApproval => (
+            "RUN_RECOVERY_APPROVAL_REQUIRED",
+            RuntimeErrorClass::ToolPermission,
+            false,
+        ),
+        OperationalRecoveryGate::WaitingForReconciliation => (
+            "RUN_RECOVERY_RECONCILIATION_REQUIRED",
+            RuntimeErrorClass::SourceConflict,
+            false,
+        ),
+        OperationalRecoveryGate::RecoveryReady => (
+            "RUN_RECOVERY_OPERATION_REQUIRED",
+            RuntimeErrorClass::Protocol,
+            false,
+        ),
+        OperationalRecoveryGate::Quarantined => (
+            "RUN_RECOVERY_QUARANTINED",
+            RuntimeErrorClass::SourceConflict,
+            false,
+        ),
+        OperationalRecoveryGate::TerminalProjectionOnly => (
+            "RUN_RECOVERY_TERMINAL",
+            RuntimeErrorClass::Validation,
+            false,
+        ),
+    };
+    let message = operational_recovery_public_message(recovery.gate);
+    let mut rejected = response_draft(
+        command,
+        if command.name.starts_with("run.") {
+            "run.rejected"
+        } else {
+            "runtime.error"
+        },
+        RuntimeError {
+            code: code.to_owned(),
+            class,
+            retryable,
+            public_message: message.to_owned(),
+            stage: "operational_recovery.gate".to_owned(),
+            attempt: 0,
+            diagnostic_id: Uuid::new_v4(),
+        },
+    )?;
+    rejected.run_id = Some(run_id);
+    Ok(Some(rejected))
+}
+
+fn operational_recovery_public_message(gate: OperationalRecoveryGate) -> &'static str {
+    match gate {
+        OperationalRecoveryGate::AwaitingProviderBinding => {
+            "\u{8be5}\u{8fd0}\u{884c}\u{6b63}\u{5728}\u{7b49}\u{5f85}\u{5b8c}\u{5168}\u{5339}\u{914d}\u{7684}\u{6a21}\u{578b}\u{670d}\u{52a1}\u{914d}\u{7f6e}\u{ff0c}\u{5c1a}\u{672a}\u{7ee7}\u{7eed}\u{6267}\u{884c}\u{3002}"
+        }
+        OperationalRecoveryGate::WaitingForApproval => {
+            "\u{8be5}\u{8fd0}\u{884c}\u{6b63}\u{5728}\u{7b49}\u{5f85}\u{7528}\u{6237}\u{5904}\u{7406}\u{5df2}\u{6709}\u{5ba1}\u{6279}\u{ff0c}\u{4e0d}\u{80fd}\u{6267}\u{884c}\u{5176}\u{4ed6}\u{6062}\u{590d}\u{64cd}\u{4f5c}\u{3002}"
+        }
+        OperationalRecoveryGate::WaitingForReconciliation => {
+            "\u{8be5}\u{8fd0}\u{884c}\u{5b58}\u{5728}\u{7ed3}\u{679c}\u{672a}\u{77e5}\u{7684}\u{5916}\u{90e8}\u{64cd}\u{4f5c}\u{ff0c}\u{5fc5}\u{987b}\u{5148}\u{5b8c}\u{6210}\u{5bf9}\u{8d26}\u{3002}"
+        }
+        OperationalRecoveryGate::RecoveryReady => {
+            "\u{8be5}\u{8fd0}\u{884c}\u{5df2}\u{5177}\u{5907}\u{6062}\u{590d}\u{6761}\u{4ef6}\u{ff0c}\u{4f46}\u{53ea}\u{80fd}\u{7531}\u{53d7}\u{5ba1}\u{8ba1}\u{7684}\u{6062}\u{590d}\u{64cd}\u{4f5c}\u{7ee7}\u{7eed}\u{3002}"
+        }
+        OperationalRecoveryGate::Quarantined => {
+            "\u{8be5}\u{8fd0}\u{884c}\u{7684}\u{6062}\u{590d}\u{8bc1}\u{636e}\u{5b58}\u{5728}\u{51b2}\u{7a81}\u{ff0c}\u{5df2}\u{88ab}\u{9694}\u{79bb}\u{3002}"
+        }
+        OperationalRecoveryGate::TerminalProjectionOnly => {
+            "\u{8be5}\u{8fd0}\u{884c}\u{5df2}\u{7ecf}\u{7ed3}\u{675f}\u{ff0c}\u{53ea}\u{80fd}\u{8bfb}\u{53d6}\u{5176}\u{6301}\u{4e45}\u{5316}\u{7ed3}\u{679c}\u{3002}"
+        }
+    }
+}
+
 struct RuntimeCommandContext<'a> {
     workspace_database_path: Option<&'a str>,
     recovered_run_count: u64,
     journal: &'a mut Option<EventJournal>,
     workspace_binding: Option<&'a WorkspaceBinding>,
+    assignment_recovery_report: &'a AssignmentRecoveryReport,
+    operational_recovery_runs: &'a mut BTreeMap<String, OperationalRecoveryRun>,
     quarantined_assignment_ids: &'a BTreeSet<String>,
     provider_registry: &'a mut ProviderRegistry,
     provider_gateway: &'a Arc<ProviderGateway>,
@@ -614,12 +762,18 @@ fn require_empty_payload(command: &Envelope) -> Result<(), String> {
 
 fn handle_provider_bind(
     command: ProviderBindSensitiveEnvelope,
-    registry: &mut ProviderRegistry,
+    context: &mut RuntimeCommandContext<'_>,
 ) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
     let correlation_id = command.message_id;
     let payload = command.payload;
-    match registry.bind(payload.config, &payload.config_sha256, payload.credential) {
-        Ok(receipt) => correlated_response_draft(correlation_id, "provider.bound", receipt),
+    match context
+        .provider_registry
+        .bind(payload.config, &payload.config_sha256, payload.credential)
+    {
+        Ok(receipt) => {
+            refresh_operational_recovery(context)?;
+            correlated_response_draft(correlation_id, "provider.bound", receipt)
+        }
         Err(error) => {
             eprintln!("provider.bind rejected: {error}");
             correlated_response_draft(
@@ -629,6 +783,34 @@ fn handle_provider_bind(
             )
         }
     }
+}
+
+fn refresh_operational_recovery(
+    context: &mut RuntimeCommandContext<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (Some(database_path), Some(binding), Some(journal)) = (
+        context.workspace_database_path,
+        context.workspace_binding,
+        context.journal.as_mut(),
+    ) else {
+        return Ok(());
+    };
+    let providers = context.provider_registry.bound_identities();
+    let report =
+        OperationalRecoveryScanner::new(journal, context.assignment_recovery_report, &providers)
+            .scan(&binding.workspace_id, &binding.project_id)?;
+    let created_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    OperationalRecoveryRecordingService::new(database_path).record(
+        &binding.workspace_id,
+        &binding.project_id,
+        &report,
+        &created_at,
+    )?;
+    context.operational_recovery_runs.clear();
+    context
+        .operational_recovery_runs
+        .extend(report.runs.into_iter().map(|run| (run.run_id.clone(), run)));
+    Ok(())
 }
 
 fn provider_binding_error(error: &ProviderGatewayError) -> RuntimeError {
@@ -2120,10 +2302,18 @@ async fn write_protocol_error(
     write_handshake_envelope(output, &envelope).await
 }
 
+struct InitializedRuntimeState {
+    journal: EventJournal,
+    recovered_run_count: u64,
+    assignment_report: AssignmentRecoveryReport,
+    operational_runs: BTreeMap<String, OperationalRecoveryRun>,
+    quarantined_assignment_ids: BTreeSet<String>,
+}
+
 fn initialize_runtime(
     path: &str,
     binding: &WorkspaceBinding,
-) -> Result<(EventJournal, u64, BTreeSet<String>), InitializationError> {
+) -> Result<InitializedRuntimeState, InitializationError> {
     let mut journal = EventJournal::open(path).map_err(InitializationError::Storage)?;
     let report = RecoveryCoordinator::recover_and_reconcile(&mut journal)
         .map_err(InitializationError::Recovery)?;
@@ -2132,11 +2322,36 @@ fn initialize_runtime(
             .map_err(InitializationError::AssignmentRecovery)?;
     let quarantined = assignment_report
         .quarantined
+        .iter()
+        .map(|value| value.assignment_id.clone())
+        .collect();
+    let operational_report = OperationalRecoveryScanner::new(&mut journal, &assignment_report, &[])
+        .scan(&binding.workspace_id, &binding.project_id)
+        .map_err(InitializationError::OperationalRecoveryScan)?;
+    let created_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(InitializationError::Time)?;
+    OperationalRecoveryRecordingService::new(path)
+        .record(
+            &binding.workspace_id,
+            &binding.project_id,
+            &operational_report,
+            &created_at,
+        )
+        .map_err(InitializationError::OperationalRecoveryRecording)?;
+    let operational_runs = operational_report
+        .runs
         .into_iter()
-        .map(|value| value.assignment_id)
+        .map(|run| (run.run_id.clone(), run))
         .collect();
     let count = report.recovered_nonterminal_count;
-    Ok((journal, count, quarantined))
+    Ok(InitializedRuntimeState {
+        journal,
+        recovered_run_count: count,
+        assignment_report,
+        operational_runs,
+        quarantined_assignment_ids: quarantined,
+    })
 }
 
 async fn write_initialization_failed(
@@ -2160,6 +2375,21 @@ async fn write_initialization_failed(
             "ASSIGNMENT_RECOVERY_FAILED",
             RuntimeErrorClass::Validation,
             "runtime.initialize.assignment_recovery",
+        ),
+        InitializationError::OperationalRecoveryScan(_) => (
+            "OPERATIONAL_RECOVERY_SCAN_FAILED",
+            RuntimeErrorClass::Validation,
+            "runtime.initialize.operational_recovery.scan",
+        ),
+        InitializationError::OperationalRecoveryRecording(_) => (
+            "OPERATIONAL_RECOVERY_RECORDING_FAILED",
+            RuntimeErrorClass::Storage,
+            "runtime.initialize.operational_recovery.record",
+        ),
+        InitializationError::Time(_) => (
+            "RUNTIME_INITIALIZATION_TIME_FAILED",
+            RuntimeErrorClass::Storage,
+            "runtime.initialize.time",
         ),
     };
     let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
@@ -2211,6 +2441,9 @@ enum InitializationError {
     Storage(EventJournalError),
     Recovery(RecoveryError),
     AssignmentRecovery(AgentAssignmentRecoveryError),
+    OperationalRecoveryScan(OperationalRecoveryScanError),
+    OperationalRecoveryRecording(OperationalRecoveryRecordingError),
+    Time(time::error::Format),
 }
 
 impl std::fmt::Display for InitializationError {
@@ -2221,6 +2454,13 @@ impl std::fmt::Display for InitializationError {
             Self::AssignmentRecovery(error) => {
                 write!(formatter, "assignment recovery: {error}")
             }
+            Self::OperationalRecoveryScan(error) => {
+                write!(formatter, "operational recovery scan: {error}")
+            }
+            Self::OperationalRecoveryRecording(error) => {
+                write!(formatter, "operational recovery recording: {error}")
+            }
+            Self::Time(error) => write!(formatter, "initialization time: {error}"),
         }
     }
 }

@@ -272,6 +272,18 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
+    pub fn bound_identities(&self) -> Vec<ProviderRunIdentity> {
+        self.providers
+            .values()
+            .map(|provider| ProviderRunIdentity {
+                profile_id: provider.config.profile_id.clone(),
+                provider_id: provider.config.provider_id.clone(),
+                model_id: provider.config.model_id.clone(),
+                config_sha256: provider.config_sha256.clone(),
+            })
+            .collect()
+    }
+
     pub fn bind(
         &mut self,
         config: ProviderConfig,
