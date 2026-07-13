@@ -4,18 +4,24 @@ use novelx_protocol::ProviderRunIdentity;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{
     agent_assignment_aggregate::AgentAssignmentStatus,
     agent_assignment_recovery::{
         AssignmentRecoveryClassification, AssignmentRecoveryReport, RecoveredAssignment,
     },
-    agent_loop_journal::AgentLoopJournalRepository,
-    agent_loop_service::{AgentLoopService, LoopPhase},
+    agent_loop_journal::{
+        AgentLoopJournalRepository, AgentLoopProviderAuthorizationSnapshot, PendingInferenceOrigin,
+    },
+    agent_loop_service::{AgentLoopService, InferenceDispatchIdentity, LoopPhase},
     event_journal::{EventJournal, EventJournalError},
     provider_attempt::{
         ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptRecovery,
-        ProviderAttemptState,
+        ProviderAttemptState, provider_attempt_definition_sha256, provider_attempt_evidence_sha256,
+    },
+    provider_retry_aggregate::{
+        ProviderRetryAggregate, ProviderRetryState, provider_retry_failure_observation_sha256,
     },
     run_aggregate::{RunAggregate, RunAggregateError},
     run_state::RunState,
@@ -169,7 +175,28 @@ impl<'a> OperationalRecoveryScanner<'a> {
                         source,
                     }
                 })?;
-                active_loops.push((invocation_id.clone(), record.service, checkpoint));
+                let provider_authorization =
+                    if record.service.phase() == LoopPhase::AwaitingProvider {
+                        Some(
+                            AgentLoopJournalRepository::new(self.journal)
+                                .recover_provider_authorization_snapshot(run_id, invocation_id)
+                                .map_err(|source| {
+                                    OperationalRecoveryScanError::AgentLoopRecoveryFailed {
+                                        run_id: run_id.to_owned(),
+                                        invocation_id: invocation_id.clone(),
+                                        source,
+                                    }
+                                })?,
+                        )
+                    } else {
+                        None
+                    };
+                active_loops.push((
+                    invocation_id.clone(),
+                    record.service,
+                    checkpoint,
+                    provider_authorization,
+                ));
             }
         }
         if active_loops.len() > 1 {
@@ -216,7 +243,7 @@ impl<'a> OperationalRecoveryScanner<'a> {
         let approval_wait = run.state() == RunState::WaitingForApproval
             || active_loop
                 .as_ref()
-                .is_some_and(|(_, service, _)| service.phase() == LoopPhase::AwaitingApproval)
+                .is_some_and(|(_, service, _, _)| service.phase() == LoopPhase::AwaitingApproval)
             || tools.iter().any(|tool| {
                 tool.authorization() == ToolAuthorization::ApprovalRequired
                     && tool.state() == ToolState::Requested
@@ -229,7 +256,7 @@ impl<'a> OperationalRecoveryScanner<'a> {
         });
         let terminal_tool_without_verified_manifest =
             tools.iter().any(|tool| tool.state().is_terminal());
-        let local_continuation = active_loop.as_ref().is_some_and(|(_, service, _)| {
+        let local_continuation = active_loop.as_ref().is_some_and(|(_, service, _, _)| {
             matches!(
                 service.phase(),
                 LoopPhase::AwaitingToolResults
@@ -297,6 +324,7 @@ impl<'a> OperationalRecoveryScanner<'a> {
         };
 
         let action = classify_action(
+            self.journal,
             gate,
             run,
             active_loop.as_ref(),
@@ -326,8 +354,8 @@ impl<'a> OperationalRecoveryScanner<'a> {
             source_fingerprint,
             gate,
             action,
-            active_agent_loop_id: active_loop.as_ref().map(|(id, _, _)| id.clone()),
-            active_agent_loop_phase: active_loop.map(|(_, service, _)| service.phase()),
+            active_agent_loop_id: active_loop.as_ref().map(|(id, _, _, _)| id.clone()),
+            active_agent_loop_phase: active_loop.map(|(_, service, _, _)| service.phase()),
             provider_attempt_states: attempts
                 .iter()
                 .map(ProviderAttemptAggregate::state)
@@ -367,9 +395,15 @@ fn action_wait_reason(action: &OperationalRecoveryAction) -> &'static str {
 }
 
 fn classify_action(
+    journal: &EventJournal,
     gate: OperationalRecoveryGate,
     run: &RunAggregate,
-    active_loop: Option<&(String, AgentLoopService, String)>,
+    active_loop: Option<&(
+        String,
+        AgentLoopService,
+        String,
+        Option<AgentLoopProviderAuthorizationSnapshot>,
+    )>,
     provider_attempt_ids: &[String],
     attempts: &[ProviderAttemptAggregate],
 ) -> OperationalRecoveryAction {
@@ -379,7 +413,8 @@ fn classify_action(
     if gate != OperationalRecoveryGate::RecoveryReady {
         return OperationalRecoveryAction::NoExecutableProjection;
     }
-    let Some((invocation_id, service, checkpoint_sha256)) = active_loop else {
+    let Some((invocation_id, service, checkpoint_sha256, provider_authorization)) = active_loop
+    else {
         return if attempts.is_empty() {
             OperationalRecoveryAction::ProviderDispatchRequired {
                 invocation_id: None,
@@ -401,16 +436,39 @@ fn classify_action(
                         && attempt.definition().request_number == dispatch.request_number
                 })
                 .collect::<Vec<_>>();
-            if same_request.len() > 1 {
+            let Some((attempt_id, attempt)) =
+                same_request.iter().copied().find(|(attempt_id, attempt)| {
+                    *attempt_id == &dispatch.attempt_id.to_string()
+                        && attempt.definition().inference_id == dispatch.inference_id.to_string()
+                        && attempt.definition().context_compilation_id
+                            == dispatch.context_compilation_id
+                        && attempt.definition().attempt_number == dispatch.attempt_number
+                })
+            else {
+                return if same_request.is_empty() {
+                    OperationalRecoveryAction::ProviderDispatchRequired {
+                        invocation_id: Some(invocation_id.clone()),
+                    }
+                } else {
+                    OperationalRecoveryAction::PersistedEvidenceConflict {
+                        invocation_id: invocation_id.clone(),
+                    }
+                };
+            };
+            if (same_request.len() > 1 || dispatch.attempt_number > 1)
+                && !authoritative_retry_lineage(
+                    journal,
+                    provider_authorization.as_ref(),
+                    dispatch,
+                    &same_request,
+                    attempt_id,
+                    attempt,
+                )
+            {
                 return OperationalRecoveryAction::PersistedEvidenceConflict {
                     invocation_id: invocation_id.clone(),
                 };
             }
-            let Some((attempt_id, attempt)) = same_request.into_iter().next() else {
-                return OperationalRecoveryAction::ProviderDispatchRequired {
-                    invocation_id: Some(invocation_id.clone()),
-                };
-            };
             let identity_matches = attempt_id == &dispatch.attempt_id.to_string()
                 && attempt.definition().inference_id == dispatch.inference_id.to_string()
                 && attempt.definition().context_compilation_id == dispatch.context_compilation_id
@@ -444,6 +502,8 @@ fn classify_action(
                                 .transport_payload_sha256
                                 .clone(),
                         }
+                    } else if attempt.state() == ProviderAttemptState::Failed && identity_matches {
+                        OperationalRecoveryAction::NoExecutableProjection
                     } else {
                         OperationalRecoveryAction::PersistedEvidenceConflict {
                             invocation_id: invocation_id.clone(),
@@ -486,11 +546,169 @@ fn classify_action(
     }
 }
 
+fn authoritative_retry_lineage(
+    journal: &EventJournal,
+    snapshot: Option<&AgentLoopProviderAuthorizationSnapshot>,
+    dispatch: &InferenceDispatchIdentity,
+    same_request: &[(&String, &ProviderAttemptAggregate)],
+    current_attempt_id: &String,
+    current_attempt: &ProviderAttemptAggregate,
+) -> bool {
+    let Some(snapshot) = snapshot else {
+        return false;
+    };
+    let Some(binding) = snapshot.last_retry_binding() else {
+        return false;
+    };
+    if snapshot.pending_inference_origin() != PendingInferenceOrigin::InferenceRetried
+        || snapshot.last_retry_binding_sha256().is_none()
+        || snapshot.pending_inference() != dispatch
+        || binding.next != *dispatch
+        // ProviderRetryAggregate currently exposes only the latest retry hop. Until it exposes a
+        // strictly replayed full-lineage snapshot, attempt 3+ cannot be proven end-to-end here.
+        || dispatch.attempt_number != 2
+        || !matches!(
+            current_attempt.state(),
+            ProviderAttemptState::Requested
+                | ProviderAttemptState::Responded
+                | ProviderAttemptState::Failed
+        )
+        || current_attempt_id != &dispatch.attempt_id.to_string()
+        || same_request.len() != usize::from(dispatch.attempt_number)
+    {
+        return false;
+    }
+
+    let current_definition = current_attempt.definition();
+    let mut attempt_numbers = BTreeSet::new();
+    let mut first_attempt = None;
+    for (attempt_id, attempt) in same_request {
+        let definition = attempt.definition();
+        if definition.invocation_id != current_definition.invocation_id
+            || definition.inference_id != current_definition.inference_id
+            || definition.request_number != current_definition.request_number
+            || definition.context_compilation_id != current_definition.context_compilation_id
+            || definition.provider != current_definition.provider
+            || definition.canonical_context_sha256 != current_definition.canonical_context_sha256
+            || definition.transport_payload_sha256 != current_definition.transport_payload_sha256
+            || definition.output_reserve_tokens != current_definition.output_reserve_tokens
+            || definition.request_timeout_ms != current_definition.request_timeout_ms
+            || definition.total_deadline_ms != current_definition.total_deadline_ms
+            || definition.max_attempts != current_definition.max_attempts
+            || definition.max_total_delay_ms != current_definition.max_total_delay_ms
+            || definition.attempt_number == 0
+            || definition.attempt_number > dispatch.attempt_number
+            || !attempt_numbers.insert(definition.attempt_number)
+        {
+            return false;
+        }
+        if definition.attempt_number == 1 {
+            first_attempt = Uuid::parse_str(attempt_id).ok();
+        }
+        if *attempt_id == current_attempt_id {
+            if definition.attempt_number != dispatch.attempt_number {
+                return false;
+            }
+        } else if attempt.state() != ProviderAttemptState::Failed
+            || definition.attempt_number >= dispatch.attempt_number
+            || !attempt.failure().is_some_and(|failure| failure.retryable)
+        {
+            return false;
+        }
+    }
+    if attempt_numbers != (1..=dispatch.attempt_number).collect::<BTreeSet<_>>() {
+        return false;
+    }
+
+    let Ok(retry) = ProviderRetryAggregate::recover(
+        journal,
+        &current_definition.run_id,
+        &current_definition.inference_id,
+    ) else {
+        return false;
+    };
+    let Some(schedule) = retry.schedule() else {
+        return false;
+    };
+    let Some(observation) = retry.failure_observation() else {
+        return false;
+    };
+    let retry_definition = retry.definition();
+    if retry.state() != ProviderRetryState::AwaitingAttempt
+        || retry.awaiting_at().is_none()
+        || retry_definition.run_id != current_definition.run_id
+        || retry_definition.invocation_id != current_definition.invocation_id
+        || retry_definition.inference_id != current_definition.inference_id
+        || retry_definition.request_number != current_definition.request_number
+        || retry_definition.context_compilation_id != current_definition.context_compilation_id
+        || retry_definition.provider != current_definition.provider
+        || retry_definition.canonical_context_sha256 != current_definition.canonical_context_sha256
+        || retry_definition.transport_payload_sha256 != current_definition.transport_payload_sha256
+        || retry_definition.request_timeout_ms != current_definition.request_timeout_ms
+        || retry_definition.total_deadline_ms != current_definition.total_deadline_ms
+        || retry_definition.policy.max_attempts != current_definition.max_attempts
+        || retry_definition.policy.max_total_delay_ms != current_definition.max_total_delay_ms
+        || retry_definition.first_attempt_number != 1
+        || Some(retry_definition.first_attempt_id) != first_attempt
+        || schedule.next_attempt_id != dispatch.attempt_id
+        || schedule.next_attempt_number != dispatch.attempt_number
+        || schedule.schedule_id.to_string() != binding.schedule_id
+        || schedule.schedule_sha256 != binding.schedule_sha256
+        || schedule.parent_failure_evidence_sha256 != binding.parent_attempt_evidence_sha256
+        || schedule.parent_failure_evidence_sha256 != observation.evidence_sha256
+        || schedule.parent_failure_observation_sha256
+            != provider_retry_failure_observation_sha256(observation).unwrap_or_default()
+        || binding.previous_attempt_id != observation.attempt_id
+        || binding.previous_attempt_number != observation.attempt_number
+        || binding.next != *dispatch
+    {
+        return false;
+    }
+
+    let parent_attempt_id = observation.attempt_id.to_string();
+    let Some((parent_id, parent)) = same_request
+        .iter()
+        .copied()
+        .find(|(attempt_id, _)| attempt_id.as_str() == parent_attempt_id)
+    else {
+        return false;
+    };
+    let parent_definition = parent.definition();
+    parent_id == &observation.attempt_id.to_string()
+        && parent.state() == ProviderAttemptState::Failed
+        && parent.failure() == Some(&observation.failure)
+        && observation.failure.retryable
+        && parent_definition.attempt_number == observation.attempt_number
+        && parent.aggregate_sequence() == observation.attempt_aggregate_sequence
+        && provider_attempt_definition_sha256(parent).ok().as_deref()
+            == Some(observation.attempt_definition_sha256.as_str())
+        && provider_attempt_evidence_sha256(parent).ok().as_deref()
+            == Some(observation.evidence_sha256.as_str())
+        && parent_definition.run_id == current_definition.run_id
+        && parent_definition.invocation_id == current_definition.invocation_id
+        && parent_definition.inference_id == current_definition.inference_id
+        && parent_definition.request_number == current_definition.request_number
+        && parent_definition.context_compilation_id == current_definition.context_compilation_id
+        && parent_definition.provider == current_definition.provider
+        && parent_definition.canonical_context_sha256 == current_definition.canonical_context_sha256
+        && parent_definition.transport_payload_sha256 == current_definition.transport_payload_sha256
+        && parent_definition.output_reserve_tokens == current_definition.output_reserve_tokens
+        && parent_definition.request_timeout_ms == current_definition.request_timeout_ms
+        && parent_definition.total_deadline_ms == current_definition.total_deadline_ms
+        && parent_definition.max_attempts == current_definition.max_attempts
+        && parent_definition.max_total_delay_ms == current_definition.max_total_delay_ms
+}
+
 #[allow(clippy::too_many_arguments)]
 fn source_fingerprint(
     run: &RunAggregate,
     assignment: Option<&RecoveredAssignment>,
-    active_loop: Option<&(String, AgentLoopService, String)>,
+    active_loop: Option<&(
+        String,
+        AgentLoopService,
+        String,
+        Option<AgentLoopProviderAuthorizationSnapshot>,
+    )>,
     provider_attempt_ids: &[String],
     attempts: &[ProviderAttemptAggregate],
     tool_call_ids: &[String],
@@ -543,7 +761,7 @@ fn source_fingerprint(
             "classification": assignment_classification_name(&value.classification),
         })
     });
-    let loop_evidence = active_loop.map(|(id, service, checkpoint_sha256)| {
+    let loop_evidence = active_loop.map(|(id, service, checkpoint_sha256, _)| {
         json!({
             "invocationId": id,
             "phase": loop_phase_name(service.phase()),
