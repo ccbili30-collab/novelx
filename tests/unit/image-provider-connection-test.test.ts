@@ -57,6 +57,15 @@ describe("Image Provider connection test", () => {
       ok: false,
       error: { code: "IMAGE_PROVIDER_GENERATION_FAILED" },
     });
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("too large", {
+      status: 200,
+      headers: { "content-length": String(41 * 1024 * 1024) },
+    })));
+    await expect(testImageProviderConnection(profile())).resolves.toMatchObject({
+      ok: false,
+      error: { code: "IMAGE_PROVIDER_PROTOCOL_FAILED" },
+    });
   });
 });
 

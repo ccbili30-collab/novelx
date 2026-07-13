@@ -18,14 +18,14 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates schema 20 project-file, task-note, projection, playthrough, import, player, and Decomposer audit storage", () => {
+  it("creates schema 21 creative, audit, import, playthrough, task-note, and image asset storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 20 });
+      .toEqual({ version: 21 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
@@ -56,6 +56,8 @@ describe("local workspace persistence", () => {
       "decomposer_run_sources",
       "import_candidate_change_set_links",
       "project_file_versions",
+      "image_generation_jobs",
+      "image_assets",
     ]));
     expect(listIndexes(workspace)).toEqual(expect.arrayContaining([
       "creative_documents_resource_idx",
@@ -65,6 +67,8 @@ describe("local workspace persistence", () => {
       "creative_commits_branch_idx",
       "projection_runs_commit_idx",
       "projection_artifacts_run_idx",
+      "image_generation_jobs_status_idx",
+      "image_assets_sha256_idx",
     ]));
     expect(workspace.db.prepare("SELECT id, kind, sealed_at FROM creative_commits").all()).toMatchObject([
       { kind: "initialization", sealed_at: null },
