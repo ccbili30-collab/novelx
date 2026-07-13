@@ -16,17 +16,17 @@ use std::{
 };
 
 use novelx_protocol::{
-    ContextBudgetAllocation, ContextBudgetCategory, ContextCompilationReceipt, ContextDisclosure,
-    ContextRepresentation, Envelope, MessageType, PROTOCOL_VERSION, ProviderRunIdentity,
-    RuntimeApplicationIdentity, RuntimeInitialize, TokenizerIdentity, TokenizerKind,
-    ToolPermissionPolicy, ToolSourceScope,
+    ContextCompilationReceipt, ContextDisclosure, ContextItem, ContextMessageRole, Envelope,
+    MessageType, PROTOCOL_VERSION, ProviderRunIdentity, RuntimeApplicationIdentity,
+    RuntimeInitialize, ToolPermissionPolicy, ToolSourceScope,
 };
 use novelx_runtime::{
     agent_loop_journal::{AgentLoopEventMetadata, AgentLoopJournalRepository},
     agent_loop_service::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, InferenceDispatchIdentity, LoopPhase,
     },
-    event_journal::{EventJournal, NewRuntimeEvent},
+    context_compile_service::ContextCompileService,
+    event_journal::{EventJournal, RuntimeEvent},
     operational_recovery_aggregate::{
         OperationalRecoveryEffectClass, OperationalRecoveryOperation, OperationalRecoveryOutcome,
         OperationalRecoveryRepository,
@@ -35,6 +35,9 @@ use novelx_runtime::{
         ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptMetadata,
         ProviderAttemptState,
     },
+    provider_effect_capability::{
+        OperationalRecoveryActorBinding, ProviderEffectAuthorityBinding, ProviderEffectGrantReceipt,
+    },
     provider_gateway::{
         ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderGateway,
         ProviderInferenceMessage, ProviderInferenceRequest, ProviderInferenceRole,
@@ -42,19 +45,24 @@ use novelx_runtime::{
     },
     run_aggregate::{EventMetadata, RunAggregate},
     runtime_test_failpoint::{DIRECTORY_ENV, NAME_ENV, TOKEN_ENV},
+    workspace_event_journal::WorkspaceEventJournal,
 };
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 const SECRET: &str = "provider-recovery-killpoint-secret";
 const WORKSPACE_ID: &str = "workspace-1";
 const PROJECT_ID: &str = "project-1";
 const EXECUTION_STARTED: &str = "provider_dispatch.execution_started";
-const SENT_BEFORE_HTTP: &str = "provider_attempt.sent_before_http";
-const RESPONSE_BEFORE_TERMINAL: &str = "provider_attempt.response_before_terminal";
+const SENT_BEFORE_HTTP: &str = "provider_attempt.authorized_sent_before_http";
+const RESPONSE_BEFORE_TERMINAL: &str = "provider_attempt.authorized_response_before_terminal";
+const RESPONDED_BEFORE_RECOVERY_OUTCOME: &str =
+    "provider_dispatch.responded_before_recovery_outcome";
 const RECOVERY_BEFORE_HOST_RESPONSE: &str = "provider_bind.recovery_persisted_before_response";
+const RUNTIME_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -103,6 +111,7 @@ fn kill_after_execution_started_recovers_requested_and_sends_exactly_once() {
         fixture.attempt_event_types(&seeded),
         vec!["provider.requested", "provider.sent", "provider.responded"]
     );
+    fixture.assert_authorized_sent(&seeded);
     assert!(matches!(
         fixture
             .dispatch_operation_by_id(&seeded.run_id, &operation_id)
@@ -140,6 +149,7 @@ fn kill_after_sent_before_http_never_resends_and_closes_unknown() {
         fixture.attempt_event_types(&seeded),
         vec!["provider.requested", "provider.sent"]
     );
+    fixture.assert_authorized_sent(&seeded);
     let (operation_id, before) = fixture.dispatch_operation(&seeded.run_id);
     assert!(before.execution.is_some());
     assert!(before.outcome.is_none());
@@ -160,6 +170,7 @@ fn kill_after_sent_before_http_never_resends_and_closes_unknown() {
         fixture.attempt_event_types(&seeded),
         vec!["provider.requested", "provider.sent"]
     );
+    fixture.assert_authorized_sent(&seeded);
     assert!(matches!(
         fixture
             .dispatch_operation_by_id(&seeded.run_id, &operation_id)
@@ -196,6 +207,7 @@ fn kill_after_http_response_before_responded_never_resends_and_closes_unknown() 
         fixture.attempt_event_types(&seeded),
         vec!["provider.requested", "provider.sent"]
     );
+    fixture.assert_authorized_sent(&seeded);
     let (operation_id, before) = fixture.dispatch_operation(&seeded.run_id);
     assert!(before.execution.is_some());
     assert!(before.outcome.is_none());
@@ -223,6 +235,64 @@ fn kill_after_http_response_before_responded_never_resends_and_closes_unknown() 
         Some(OperationalRecoveryOutcome::OutcomeUnknown { .. })
     ));
     assert_eq!(fixture.loop_phase(&seeded), LoopPhase::AwaitingProvider);
+    assert_eq!(provider.request_bodies().len(), 1);
+}
+
+#[test]
+fn kill_after_responded_before_recovery_outcome_projects_success_without_resend() {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let fixture = Fixture::new();
+    let provider = LoopbackProvider::start();
+    let configured = ConfiguredProvider::new(provider.base_url.clone());
+    let seeded = fixture.seed_requested(&configured);
+    let arm = fixture.arm(RESPONDED_BEFORE_RECOVERY_OUTCOME);
+    let mut crashed = RuntimeProcess::spawn(Some(&arm));
+    crashed.initialize(&fixture.path);
+    crashed.send_provider_bind(2, &configured);
+    arm.wait_until_reached(&mut crashed);
+    assert_eq!(
+        provider.request_count.load(Ordering::SeqCst),
+        1,
+        "Responded evidence can exist only after the real HTTP effect completed"
+    );
+    let _ = crashed.kill_exact();
+
+    assert_eq!(
+        fixture.attempt_state(&seeded),
+        ProviderAttemptState::Responded
+    );
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        vec!["provider.requested", "provider.sent", "provider.responded"]
+    );
+    fixture.assert_authorized_sent(&seeded);
+    let (operation_id, before) = fixture.dispatch_operation(&seeded.run_id);
+    assert!(before.execution.is_some());
+    assert!(
+        before.outcome.is_none(),
+        "the failpoint must precede Operational Recovery outcome persistence"
+    );
+
+    let mut resumed = RuntimeProcess::spawn(None);
+    resumed.initialize(&fixture.path);
+    resumed.bind_provider(2, &configured);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        provider.request_count.load(Ordering::SeqCst),
+        1,
+        "persisted Responded evidence must be projected without another HTTP effect"
+    );
+    resumed.shutdown(3);
+
+    assert!(matches!(
+        fixture
+            .dispatch_operation_by_id(&seeded.run_id, &operation_id)
+            .outcome,
+        Some(OperationalRecoveryOutcome::Succeeded { .. })
+    ));
+    assert_eq!(fixture.loop_phase(&seeded), LoopPhase::Completed);
     assert_eq!(provider.request_bodies().len(), 1);
 }
 
@@ -257,6 +327,7 @@ fn kill_after_recovery_persisted_before_host_response_is_restart_idempotent() {
         fixture.attempt_event_types(&seeded),
         vec!["provider.requested", "provider.sent", "provider.responded"]
     );
+    fixture.assert_authorized_sent(&seeded);
     let (operation_id, persisted) = fixture.dispatch_operation(&seeded.run_id);
     assert!(matches!(
         persisted.outcome,
@@ -287,8 +358,17 @@ fn kill_after_recovery_persisted_before_host_response_is_restart_idempotent() {
 
 struct RuntimeProcess {
     child: Child,
-    output: BufReader<std::process::ChildStdout>,
+    output: mpsc::Receiver<RuntimeOutput>,
+    output_reader: Option<std::thread::JoinHandle<()>>,
+    stderr: Arc<Mutex<String>>,
+    stderr_reader: Option<std::thread::JoinHandle<()>>,
     finished: bool,
+}
+
+enum RuntimeOutput {
+    Envelope(Envelope),
+    Closed,
+    Failed(String),
 }
 
 impl RuntimeProcess {
@@ -315,19 +395,68 @@ impl RuntimeProcess {
                 .env_remove(DIRECTORY_ENV);
         }
         let mut child = command.spawn().expect("Runtime child must spawn");
-        let mut output = BufReader::new(child.stdout.take().expect("Runtime stdout must be piped"));
-        let hello = read_envelope(&mut output);
-        assert_eq!(hello.name, "runtime.hello");
-        Self {
+        let stdout = child.stdout.take().expect("Runtime stdout must be piped");
+        let (output_sender, output) = mpsc::channel();
+        let output_reader = std::thread::spawn(move || {
+            let mut output = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match output.read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = output_sender.send(RuntimeOutput::Closed);
+                        return;
+                    }
+                    Ok(_) => match serde_json::from_str(line.trim()) {
+                        Ok(envelope) => {
+                            if output_sender
+                                .send(RuntimeOutput::Envelope(envelope))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = output_sender.send(RuntimeOutput::Failed(format!(
+                                "Runtime stdout was not a protocol envelope: {error}; line={line:?}"
+                            )));
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        let _ = output_sender.send(RuntimeOutput::Failed(format!(
+                            "Runtime stdout read failed: {error}"
+                        )));
+                        return;
+                    }
+                }
+            }
+        });
+        let mut stderr_stream = child.stderr.take().expect("Runtime stderr must be piped");
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let captured_stderr = Arc::clone(&stderr);
+        let stderr_reader = std::thread::spawn(move || {
+            let mut value = String::new();
+            let _ = stderr_stream.read_to_string(&mut value);
+            *captured_stderr
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = value;
+        });
+        let mut process = Self {
             child,
             output,
+            output_reader: Some(output_reader),
+            stderr,
+            stderr_reader: Some(stderr_reader),
             finished: false,
-        }
+        };
+        let hello = process.read_envelope("runtime.hello");
+        assert_eq!(hello.name, "runtime.hello");
+        process
     }
 
     fn initialize(&mut self, database_path: &Path) {
         write_envelope(&mut self.child, &initialize_envelope(database_path));
-        let ready = read_envelope(&mut self.output);
+        let ready = self.read_envelope("runtime.ready");
         assert_eq!(ready.name, "runtime.ready", "{:?}", ready.payload);
     }
 
@@ -354,7 +483,7 @@ impl RuntimeProcess {
 
     fn bind_provider(&mut self, sequence: u64, provider: &ConfiguredProvider) {
         self.send_provider_bind(sequence, provider);
-        let bound = read_envelope(&mut self.output);
+        let bound = self.read_envelope("provider.bound");
         assert_eq!(bound.name, "provider.bound", "{:?}", bound.payload);
     }
 
@@ -368,11 +497,36 @@ impl RuntimeProcess {
         )
         .unwrap();
         write_envelope(&mut self.child, &shutdown);
-        assert_eq!(read_envelope(&mut self.output).name, "runtime.stopped");
+        assert_eq!(
+            self.read_envelope("runtime.stopped").name,
+            "runtime.stopped"
+        );
         drop(self.child.stdin.take());
         let status = self.child.wait().expect("Runtime shutdown must wait");
         self.finished = true;
+        self.join_readers();
         assert!(status.success());
+    }
+
+    fn read_envelope(&mut self, expected_stage: &'static str) -> Envelope {
+        match self.output.recv_timeout(RUNTIME_RESPONSE_TIMEOUT) {
+            Ok(RuntimeOutput::Envelope(envelope)) => envelope,
+            Ok(RuntimeOutput::Closed) => {
+                self.fail_and_cleanup(expected_stage, "Runtime stdout closed before the response")
+            }
+            Ok(RuntimeOutput::Failed(error)) => self.fail_and_cleanup(expected_stage, &error),
+            Err(mpsc::RecvTimeoutError::Timeout) => self.fail_and_cleanup(
+                expected_stage,
+                &format!(
+                    "Runtime response exceeded the {:?} hard timeout",
+                    RUNTIME_RESPONSE_TIMEOUT
+                ),
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => self.fail_and_cleanup(
+                expected_stage,
+                "Runtime stdout reader exited before the response",
+            ),
+        }
     }
 
     fn kill_exact(&mut self) -> Vec<Envelope> {
@@ -391,25 +545,69 @@ impl RuntimeProcess {
             .wait()
             .expect("killed Runtime child must be reaped");
         self.finished = true;
+        self.join_readers();
         assert!(!status.success());
-        let mut remaining = String::new();
-        self.output
-            .read_to_string(&mut remaining)
-            .expect("killed Runtime stdout must close");
-        remaining
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line).expect("Runtime output must remain envelopes"))
-            .collect()
+        self.remaining_envelopes()
     }
 
     fn unexpected_exit(&mut self, status: ExitStatus) -> ! {
-        let mut stderr = String::new();
-        if let Some(stream) = self.child.stderr.as_mut() {
-            let _ = stream.read_to_string(&mut stderr);
-        }
         self.finished = true;
+        self.join_readers();
+        let stderr = self.stderr_snapshot();
         panic!("Runtime exited before failpoint marker: {status}; stderr={stderr}");
+    }
+
+    fn fail_and_cleanup(&mut self, expected_stage: &'static str, reason: &str) -> ! {
+        let (status, termination_error) = match self
+            .child
+            .try_wait()
+            .expect("Runtime status must be readable during timeout cleanup")
+        {
+            Some(status) => (status, None),
+            None => {
+                let termination_error = self.child.kill().err().map(|error| error.to_string());
+                let status = self
+                    .child
+                    .wait()
+                    .expect("timed-out Runtime child must be reaped");
+                (status, termination_error)
+            }
+        };
+        self.finished = true;
+        self.join_readers();
+        let stderr = self.stderr_snapshot();
+        panic!(
+            "Runtime failed while waiting for `{expected_stage}`: {reason}; status={status}; terminationError={termination_error:?}; stderr={stderr}"
+        );
+    }
+
+    fn join_readers(&mut self) {
+        if let Some(reader) = self.output_reader.take() {
+            reader.join().expect("Runtime stdout reader must exit");
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            reader.join().expect("Runtime stderr reader must exit");
+        }
+    }
+
+    fn remaining_envelopes(&self) -> Vec<Envelope> {
+        self.output
+            .try_iter()
+            .filter_map(|output| match output {
+                RuntimeOutput::Envelope(envelope) => Some(envelope),
+                RuntimeOutput::Closed => None,
+                RuntimeOutput::Failed(error) => {
+                    panic!("Runtime stdout failed after process termination: {error}")
+                }
+            })
+            .collect()
+    }
+
+    fn stderr_snapshot(&self) -> String {
+        self.stderr
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 }
 
@@ -430,6 +628,12 @@ impl Drop for RuntimeProcess {
             }
         }
         self.finished = true;
+        if let Some(reader) = self.output_reader.take() {
+            let _ = reader.join();
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
@@ -621,14 +825,10 @@ impl Fixture {
         let invocation_id = format!("{run_id}:steward");
         let inference_id = Uuid::new_v4();
         let attempt_id = Uuid::new_v4();
-        let compilation_id = Uuid::new_v4();
-        let receipt = compilation_receipt(compilation_id);
         let bound = provider.registry.resolve(&provider.identity).unwrap();
-        let prepared = gateway
-            .prepare_inference(bound, authoritative_request(receipt.clone()))
-            .unwrap();
         let mut identity = pinned_identity();
         identity.provider = provider.identity.clone();
+        let context_policy = identity.context_policy.clone();
         let source_scope = ToolSourceScope {
             source_checkpoint_id: identity.source_checkpoint_id.clone(),
             resource_ids: identity.scope_resource_ids.clone(),
@@ -652,38 +852,21 @@ impl Fixture {
             .unwrap();
         run.start(&mut journal, metadata("run-start", "run-start-key"))
             .unwrap();
-        let normalized = serde_json::json!({
-            "messages": [{"role": "user", "content": "权威正文"}],
-            "tools": [],
-        });
-        let normalized_sha256 = format!(
-            "{:x}",
-            Sha256::digest(
-                r#"{"messages":[{"role":"user","content":"权威正文"}],"tools":[]}"#.as_bytes()
+        let receipt = ContextCompileService::new(&mut journal, &provider.registry)
+            .compile(
+                run_uuid,
+                Uuid::new_v4(),
+                context_command(
+                    &invocation_id,
+                    provider.identity.clone(),
+                    context_policy,
+                    bound.config(),
+                ),
             )
-        );
-        let sequence = current_run_sequence(&journal, &run_id);
-        journal
-            .append(
-                NewRuntimeEvent {
-                    run_id: run_id.clone(),
-                    aggregate_type: "context".to_owned(),
-                    aggregate_id: format!("{invocation_id}:1"),
-                    message_id: "context-message-1".to_owned(),
-                    idempotency_key: "context-key-1".to_owned(),
-                    event_type: "context.compiled".to_owned(),
-                    event_version: 1,
-                    payload: serde_json::json!({
-                        "requestSha256": "9".repeat(64),
-                        "receipt": receipt,
-                        "normalizedInput": normalized,
-                        "normalizedInputSha256": normalized_sha256,
-                    }),
-                    created_at: "2026-07-13T00:00:01Z".to_owned(),
-                },
-                sequence,
-                0,
-            )
+            .unwrap();
+        let compilation_id = receipt.compilation_id;
+        let prepared = gateway
+            .prepare_inference(bound, authoritative_request(receipt.clone()))
             .unwrap();
         let loop_service = AgentLoopService::new(
             AgentLoopIdentity {
@@ -736,13 +919,20 @@ impl Fixture {
             max_total_delay_ms: bound.config().retry_policy.max_total_delay_ms,
         };
         let sequence = current_run_sequence(&journal, &run_id);
+        let requested_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let inference_idempotency_key = format!("{run_id}:inference:1");
         ProviderAttemptAggregate::create(
             &mut journal,
             &run_id,
             &attempt_id,
             definition,
             sequence,
-            provider_metadata("provider-requested", "provider-requested-key"),
+            ProviderAttemptMetadata {
+                message_id: "provider-requested",
+                idempotency_key: &inference_idempotency_key,
+                created_at: &requested_at,
+                reason: None,
+            },
         )
         .unwrap();
         SeededRun {
@@ -763,13 +953,116 @@ impl Fixture {
     }
 
     fn attempt_event_types(&self, seeded: &SeededRun) -> Vec<String> {
+        self.attempt_events(seeded)
+            .into_iter()
+            .map(|event| event.event_type)
+            .collect()
+    }
+
+    fn attempt_events(&self, seeded: &SeededRun) -> Vec<RuntimeEvent> {
         EventJournal::open(&self.path)
             .unwrap()
             .read_aggregate(&seeded.run_id, "provider_attempt", &seeded.attempt_id, 0)
             .unwrap()
+    }
+
+    fn assert_authorized_sent(&self, seeded: &SeededRun) {
+        let sent = self
+            .attempt_events(seeded)
             .into_iter()
-            .map(|event| event.event_type)
-            .collect()
+            .find(|event| event.event_type == "provider.sent")
+            .expect("authorized recovery dispatch must persist provider.sent");
+        assert_eq!(
+            sent.event_version, 2,
+            "recovery must use authorized Sent v2"
+        );
+        let grant: ProviderEffectGrantReceipt =
+            serde_json::from_value(sent.payload["grant"].clone()).unwrap();
+        grant.validate().unwrap();
+        assert_eq!(grant.material().workspace_id, WORKSPACE_ID);
+        assert_eq!(grant.material().project_id, PROJECT_ID);
+        assert_eq!(grant.material().run_id.to_string(), seeded.run_id);
+        assert_eq!(grant.material().attempt_id.to_string(), seeded.attempt_id);
+        let ProviderEffectAuthorityBinding::OperationalRecovery(authority) =
+            &grant.material().authority
+        else {
+            panic!("recovery dispatch used a non-recovery Provider effect grant");
+        };
+        let (expected_operation_id, operation) = self.dispatch_operation(&seeded.run_id);
+        assert_eq!(authority.operation_id, expected_operation_id);
+        let claim = operation
+            .claim
+            .as_ref()
+            .expect("grant operation must retain its claim");
+        let execution = operation
+            .execution
+            .as_ref()
+            .expect("grant operation must retain its execution");
+        assert_eq!(authority.operation_id, operation.observation.operation_id);
+        assert_eq!(authority.claim_id, claim.claim_id);
+        assert_eq!(authority.execution_id, execution.execution_id);
+        assert_eq!(authority.fencing_token, claim.fencing_token);
+        assert_eq!(authority.fencing_token, execution.fencing_token);
+        assert_eq!(authority.action_spec_sha256, claim.action_spec_sha256);
+        let action = claim
+            .action_spec
+            .as_ref()
+            .expect("Provider recovery claim must retain its action");
+        assert_eq!(
+            authority.action_spec_sha256,
+            action.action_spec_sha256().unwrap()
+        );
+        let recovery_event = WorkspaceEventJournal::open(&self.path)
+            .unwrap()
+            .read_stream(
+                WORKSPACE_ID,
+                "operational_recovery",
+                &format!("run:{}", seeded.run_id),
+                0,
+            )
+            .unwrap()
+            .into_iter()
+            .find(|event| event.stream_sequence == authority.recovery_stream_sequence)
+            .expect("grant recovery revision must exist in the authoritative stream");
+        assert_eq!(
+            recovery_event.payload["aggregate_revision"].as_u64(),
+            Some(authority.recovery_stream_sequence)
+        );
+        assert_eq!(
+            recovery_event.payload["event_hash"].as_str(),
+            Some(authority.recovery_last_event_sha256.as_str())
+        );
+        match &authority.actor {
+            OperationalRecoveryActorBinding::OriginalOwner {
+                owner_lease_epoch,
+                execution_started_at,
+            } => {
+                assert_eq!(owner_lease_epoch, &grant.material().lease_epoch);
+                assert_eq!(execution_started_at, &execution.started_at);
+            }
+            OperationalRecoveryActorBinding::ResumeAuthorized {
+                resumer_lease_epoch,
+                authorization_id,
+                authorization_sha256,
+                authorization_generation,
+                authorized_at,
+            } => {
+                let authorization = operation
+                    .latest_provider_dispatch_resume()
+                    .expect("resumed recovery grant must retain its authorization");
+                assert_eq!(resumer_lease_epoch, &grant.material().lease_epoch);
+                assert_eq!(authorization_id, &authorization.authorization_id);
+                assert_eq!(
+                    authorization_sha256,
+                    &canonical_json_sha256(serde_json::to_value(authorization).unwrap())
+                );
+                assert_eq!(
+                    *authorization_generation,
+                    authorization.authorization_generation
+                );
+                assert_eq!(authorized_at, &authorization.authorized_at);
+            }
+        }
     }
 
     fn dispatch_operation(&self, run_id: &str) -> (String, OperationalRecoveryOperation) {
@@ -847,12 +1140,6 @@ fn write_json(child: &mut Child, value: serde_json::Value) {
     stdin.flush().unwrap();
 }
 
-fn read_envelope(output: &mut BufReader<std::process::ChildStdout>) -> Envelope {
-    let mut line = String::new();
-    output.read_line(&mut line).unwrap();
-    serde_json::from_str(line.trim()).unwrap()
-}
-
 fn test_provider_config(base_url: String) -> ProviderConfig {
     ProviderConfig {
         schema_version: 1,
@@ -868,7 +1155,7 @@ fn test_provider_config(base_url: String) -> ProviderConfig {
         reasoning: false,
         input: vec![ProviderInputCapability::Text],
         request_timeout_ms: 2_000,
-        total_deadline_ms: 3_000,
+        total_deadline_ms: 60_000,
         retry_policy: ProviderRetryPolicy {
             max_attempts: 1,
             max_total_delay_ms: 0,
@@ -876,36 +1163,41 @@ fn test_provider_config(base_url: String) -> ProviderConfig {
     }
 }
 
-fn compilation_receipt(compilation_id: Uuid) -> ContextCompilationReceipt {
-    ContextCompilationReceipt {
-        compilation_id,
+fn context_command(
+    invocation_id: &str,
+    provider: ProviderRunIdentity,
+    context_policy: novelx_protocol::VersionedPolicyIdentity,
+    config: &ProviderConfig,
+) -> novelx_protocol::ContextCompile {
+    let content = "权威正文";
+    novelx_protocol::ContextCompile {
+        compile_idempotency_key: "context-key-1".to_owned(),
+        invocation_id: invocation_id.to_owned(),
         request_number: 1,
+        provider,
+        context_policy,
         compiler_version: "1.0.0".to_owned(),
-        tokenizer: TokenizerIdentity {
-            kind: TokenizerKind::FallbackEstimate,
-            id: "unicode-mixed".to_owned(),
-            version: "1.0.0".to_owned(),
-            provider_id: Some("deepseek".to_owned()),
-            model_id: Some("deepseek-chat".to_owned()),
-        },
-        representation: ContextRepresentation::NormalizedMessages,
-        canonical_context_sha256: "1".repeat(64),
-        serialized_input_bytes: 1_024,
-        estimated_input_tokens: 256,
-        exact_input_tokens: None,
-        context_window: 64_000,
+        context_window: config.context_window,
+        configured_max_output_tokens: config.max_tokens,
         safety_reserve_tokens: 6_400,
-        output_reserve_tokens: 8_000,
-        available_input_tokens: 49_600,
-        accepted: true,
-        incomplete: false,
-        budget: vec![ContextBudgetAllocation {
-            category: ContextBudgetCategory::SessionHistory,
-            estimated_tokens: 256,
-        }],
-        included_item_ids: vec!["current-user-turn".to_owned()],
-        omitted_item_ids: vec![],
-        disclosure: ContextDisclosure::AgentInternal,
+        items: vec![
+            ContextItem::SessionMessage {
+                item_id: "current-user-turn".to_owned(),
+                message_id: "current-user-message".to_owned(),
+                role: ContextMessageRole::User,
+                content: content.to_owned(),
+                content_sha256: format!("{:x}", Sha256::digest(content.as_bytes())),
+                created_at: "2026-07-13T00:00:00Z".to_owned(),
+                disclosure: ContextDisclosure::AgentInternal,
+                required: true,
+            },
+            ContextItem::OutputReserve {
+                item_id: "output-reserve".to_owned(),
+                requested_tokens: config.max_tokens.unwrap_or(8_000),
+                policy_id: "auto".to_owned(),
+                disclosure: ContextDisclosure::AgentInternal,
+            },
+        ],
     }
 }
 
@@ -931,22 +1223,35 @@ fn metadata<'a>(message_id: &'a str, idempotency_key: &'a str) -> EventMetadata<
     }
 }
 
-fn provider_metadata<'a>(
-    message_id: &'a str,
-    idempotency_key: &'a str,
-) -> ProviderAttemptMetadata<'a> {
-    ProviderAttemptMetadata {
-        message_id,
-        idempotency_key,
-        created_at: "2026-07-13T00:00:02Z",
-        reason: None,
-    }
-}
-
 fn current_run_sequence(journal: &EventJournal, run_id: &str) -> u64 {
     journal
         .read_run(run_id, 0)
         .unwrap()
         .last()
         .map_or(0, |event| event.run_sequence)
+}
+
+fn canonical_json_sha256(value: serde_json::Value) -> String {
+    fn canonicalize(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(canonicalize).collect())
+            }
+            serde_json::Value::Object(values) => {
+                let mut entries = values.into_iter().collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                serde_json::Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, canonicalize(value)))
+                        .collect(),
+                )
+            }
+            scalar => scalar,
+        }
+    }
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&canonicalize(value)).unwrap())
+    )
 }

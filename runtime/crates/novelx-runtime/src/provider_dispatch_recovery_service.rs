@@ -276,20 +276,28 @@ impl ProviderDispatchRecoveryService {
                 let mut journal = EventJournal::open(&self.database_path)?;
                 ProviderInferenceService::finalize_authorized_attempt_in(&mut journal, dispatched)
             };
-            if let Err(error) = finalized {
-                let state_after = {
-                    let journal = EventJournal::open(&self.database_path)?;
-                    ProviderAttemptAggregate::recover(
-                        &journal,
-                        &request.run_id,
-                        &dispatch.attempt_id,
-                    )?
-                    .state()
-                };
-                if state_after == ProviderAttemptState::Requested {
-                    return Err(ProviderDispatchRecoveryError::PreDispatchBlocked(Box::new(
-                        error,
-                    )));
+            match finalized {
+                Ok(_) => {
+                    #[cfg(feature = "runtime-test-failpoints")]
+                    crate::runtime_test_failpoint::hit(
+                        "provider_dispatch.responded_before_recovery_outcome",
+                    );
+                }
+                Err(error) => {
+                    let state_after = {
+                        let journal = EventJournal::open(&self.database_path)?;
+                        ProviderAttemptAggregate::recover(
+                            &journal,
+                            &request.run_id,
+                            &dispatch.attempt_id,
+                        )?
+                        .state()
+                    };
+                    if state_after == ProviderAttemptState::Requested {
+                        return Err(ProviderDispatchRecoveryError::PreDispatchBlocked(Box::new(
+                            error,
+                        )));
+                    }
                 }
             }
         }
