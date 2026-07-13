@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use novelx_protocol::{
@@ -825,65 +826,97 @@ async fn handle_provider_bind(
 async fn refresh_operational_recovery(
     context: &mut RuntimeCommandContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(spec) = prepare_operational_recovery_pass(context) else {
+        return Ok(());
+    };
+    let report = tokio::spawn(run_operational_recovery_pass(spec)).await??;
+    context.operational_recovery_runs.clear();
+    context
+        .operational_recovery_runs
+        .extend(report.into_iter().map(|run| (run.run_id.clone(), run)));
+    Ok(())
+}
+
+struct OperationalRecoveryPassSpec {
+    database_path: PathBuf,
+    workspace_id: String,
+    project_id: String,
+    assignment_report: AssignmentRecoveryReport,
+    providers: ProviderRegistry,
+    gateway: ProviderGateway,
+    cancellation_hub: RuntimeCancellationHub,
+    exclusive_lease: Arc<WorkspaceRuntimeLease>,
+}
+
+fn prepare_operational_recovery_pass(
+    context: &RuntimeCommandContext<'_>,
+) -> Option<OperationalRecoveryPassSpec> {
     let (Some(database_path), Some(binding), Some(exclusive_lease)) = (
         context.workspace_database_path,
         context.workspace_binding,
         context.workspace_runtime_lease,
     ) else {
-        return Ok(());
+        return None;
     };
-    let providers = context.provider_registry.bound_identities();
-    OperationalRecoverySupervisor::new(database_path).run_local_recovery_pass(
-        &binding.workspace_id,
-        &binding.project_id,
-        &providers,
-        exclusive_lease.as_ref(),
-    )?;
-    let dispatch_database_path = database_path.to_owned();
-    let dispatch_workspace_id = binding.workspace_id.clone();
-    let dispatch_project_id = binding.project_id.clone();
-    let dispatch_providers = context.provider_registry.clone();
-    let dispatch_gateway = context.provider_gateway.as_ref().clone();
-    let dispatch_cancellation_hub = context.runtime_cancellation_hub.clone();
-    let dispatch_lease = Arc::clone(exclusive_lease);
-    tokio::spawn(async move {
-        ProviderDispatchRecoverySupervisor::new(dispatch_database_path)
-            .run_provider_dispatch_pass(
-                &dispatch_workspace_id,
-                &dispatch_project_id,
-                &dispatch_providers,
-                &dispatch_gateway,
-                &dispatch_cancellation_hub,
-                &dispatch_lease,
-            )
-            .await
+
+    Some(OperationalRecoveryPassSpec {
+        database_path: PathBuf::from(database_path),
+        workspace_id: binding.workspace_id.clone(),
+        project_id: binding.project_id.clone(),
+        assignment_report: context.assignment_recovery_report.clone(),
+        providers: context.provider_registry.clone(),
+        gateway: context.provider_gateway.as_ref().clone(),
+        cancellation_hub: context.runtime_cancellation_hub.clone(),
+        exclusive_lease: Arc::clone(exclusive_lease),
     })
-    .await??;
-    OperationalRecoverySupervisor::new(database_path).run_local_recovery_pass(
-        &binding.workspace_id,
-        &binding.project_id,
-        &providers,
-        exclusive_lease.as_ref(),
+}
+
+async fn run_operational_recovery_pass(
+    spec: OperationalRecoveryPassSpec,
+) -> Result<Vec<OperationalRecoveryRun>, String> {
+    run_operational_recovery_pass_inner(spec)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn run_operational_recovery_pass_inner(
+    spec: OperationalRecoveryPassSpec,
+) -> Result<Vec<OperationalRecoveryRun>, Box<dyn std::error::Error>> {
+    let bound_providers = spec.providers.bound_identities();
+    OperationalRecoverySupervisor::new(&spec.database_path).run_local_recovery_pass(
+        &spec.workspace_id,
+        &spec.project_id,
+        &bound_providers,
+        spec.exclusive_lease.as_ref(),
     )?;
-    let journal = context
-        .journal
-        .as_mut()
-        .ok_or("workspace journal missing after operational recovery")?;
+    ProviderDispatchRecoverySupervisor::new(&spec.database_path)
+        .run_provider_dispatch_pass(
+            &spec.workspace_id,
+            &spec.project_id,
+            &spec.providers,
+            &spec.gateway,
+            &spec.cancellation_hub,
+            &spec.exclusive_lease,
+        )
+        .await?;
+    OperationalRecoverySupervisor::new(&spec.database_path).run_local_recovery_pass(
+        &spec.workspace_id,
+        &spec.project_id,
+        &bound_providers,
+        spec.exclusive_lease.as_ref(),
+    )?;
+    let mut journal = EventJournal::open(&spec.database_path)?;
     let report =
-        OperationalRecoveryScanner::new(journal, context.assignment_recovery_report, &providers)
-            .scan(&binding.workspace_id, &binding.project_id)?;
+        OperationalRecoveryScanner::new(&mut journal, &spec.assignment_report, &bound_providers)
+            .scan(&spec.workspace_id, &spec.project_id)?;
     let created_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
-    OperationalRecoveryRecordingService::new(database_path).record(
-        &binding.workspace_id,
-        &binding.project_id,
+    OperationalRecoveryRecordingService::new(&spec.database_path).record(
+        &spec.workspace_id,
+        &spec.project_id,
         &report,
         &created_at,
     )?;
-    context.operational_recovery_runs.clear();
-    context
-        .operational_recovery_runs
-        .extend(report.runs.into_iter().map(|run| (run.run_id.clone(), run)));
-    Ok(())
+    Ok(report.runs)
 }
 
 fn provider_binding_error(error: &ProviderGatewayError) -> RuntimeError {
