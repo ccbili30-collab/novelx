@@ -182,17 +182,11 @@ fn extreme_expected_sequences_return_errors_without_panicking() {
     let candidate = event("run-max", "run", "run-max", "m-max", "k-max", 1);
     assert!(matches!(
         journal.append(candidate.clone(), u64::MAX, 0),
-        Err(EventJournalError::RunSequenceConflict {
-            expected: u64::MAX,
-            actual: 0
-        })
+        Err(EventJournalError::SequenceOutOfRange)
     ));
     assert!(matches!(
         journal.append(candidate, 0, u64::MAX),
-        Err(EventJournalError::AggregateSequenceConflict {
-            expected: u64::MAX,
-            actual: 0
-        })
+        Err(EventJournalError::SequenceOutOfRange)
     ));
 }
 
@@ -279,7 +273,10 @@ fn migrates_a_real_0001_database_and_preserves_rows_constraints_and_ledger() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(migrations, vec![(1, 64), (2, 64), (3, 64)]);
+    assert_eq!(
+        migrations,
+        vec![(1, 64), (2, 64), (3, 64), (4, 64), (5, 64), (6, 64)]
+    );
     let indexes: Vec<String> = connection
         .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='runtime_events' ORDER BY name")
         .unwrap()

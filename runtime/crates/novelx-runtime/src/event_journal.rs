@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use novelx_protocol::MAX_SAFE_SEQUENCE;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -9,6 +10,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 const MIGRATION_0001: &str = include_str!("../migrations/0001_event_journal.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_stream_addressing.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_artifact_store.sql");
+const MIGRATION_0004: &str = include_str!("../migrations/0004_workspace_event_journal.sql");
+const MIGRATION_0005: &str = include_str!("../migrations/0005_global_event_clock.sql");
+const MIGRATION_0006: &str = include_str!("../migrations/0006_durable_global_event_order.sql");
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewRuntimeEvent {
@@ -44,6 +48,14 @@ pub struct AppendRuntimeEventOutcome {
     pub inserted: bool,
 }
 
+/// A durable global position exists only for events appended after migration 0006.
+/// Pre-migration events are deliberately not assigned a fabricated cross-table order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlobalEventOrder {
+    Ordered(u64),
+    LegacyUnordered,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AggregateAddress {
     pub run_id: String,
@@ -69,12 +81,22 @@ pub enum EventJournalError {
     AggregateSequenceConflict { expected: u64, actual: u64 },
     #[error("runtime global event sequence conflict: expected {expected}, actual {actual}")]
     GlobalSequenceConflict { expected: u64, actual: u64 },
+    #[error("runtime event `{message_id}` predates durable global ordering")]
+    GlobalEventLegacyUnordered { message_id: String },
+    #[error("runtime event `{message_id}` is missing its durable global order")]
+    GlobalEventOrderMissing { message_id: String },
     #[error("runtime migration {version} checksum mismatch")]
     MigrationChecksumMismatch { version: u32 },
     #[error("runtime migration 0002 verification failed")]
     MigrationVerificationFailed,
     #[error("runtime event journal schema integrity check failed")]
     SchemaIntegrityFailed,
+    #[error(
+        "legacy global event clock {clock} exceeds the {event_count} stored events; migration cannot establish an honest ordering boundary"
+    )]
+    LegacyGlobalClockInvalid { clock: u64, event_count: u64 },
+    #[error("runtime database instance id is missing or is not a canonical UUID")]
+    InvalidDatabaseInstanceId,
     #[error("runtime event payload is not valid JSON: {0}")]
     InvalidPayload(#[from] serde_json::Error),
     #[error("runtime event journal storage failed: {0}")]
@@ -88,6 +110,7 @@ pub enum EventJournalError {
 pub struct EventJournal {
     connection: Connection,
     database_path: PathBuf,
+    database_instance_id: String,
 }
 
 impl EventJournal {
@@ -106,16 +129,56 @@ impl EventJournal {
         apply_simple_migration(&mut connection, 1, MIGRATION_0001)?;
         apply_addressing_migration(&mut connection)?;
         apply_simple_migration(&mut connection, 3, MIGRATION_0003)?;
+        apply_simple_migration(&mut connection, 4, MIGRATION_0004)?;
+        apply_simple_migration(&mut connection, 5, MIGRATION_0005)?;
+        apply_global_ordering_migration(&mut connection)?;
         verify_schema_integrity(&connection)?;
+        let database_instance_id = load_database_instance_id(&connection)?;
         let database_path = std::fs::canonicalize(path)?;
         Ok(Self {
             connection,
             database_path,
+            database_instance_id,
         })
     }
 
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    pub fn database_instance_id(&self) -> &str {
+        &self.database_instance_id
+    }
+
+    pub fn current_global_sequence(&self) -> Result<u64, EventJournalError> {
+        current_global_sequence(&self.connection)
+    }
+
+    pub fn global_order_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<GlobalEventOrder>, EventJournalError> {
+        require_non_empty("message_id", message_id)?;
+        global_order_for_runtime_message(&self.connection, message_id)
+    }
+
+    /// Performs the O(n) data scan required at process startup before `runtime.ready`.
+    /// Normal command-path opens deliberately perform only O(1) structural checks.
+    pub fn verify_deep_data_integrity(&mut self) -> Result<(), EventJournalError> {
+        let verification = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        verify_deep_data_integrity(&verification)?;
+        verification.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
     }
 
     pub fn append(
@@ -165,6 +228,11 @@ impl EventJournal {
         expected_global_sequence: Option<u64>,
     ) -> Result<AppendRuntimeEventOutcome, EventJournalError> {
         validate(&event)?;
+        validate_sequence(expected_run_sequence, true)?;
+        validate_sequence(expected_aggregate_sequence, true)?;
+        if let Some(expected_global_sequence) = expected_global_sequence {
+            validate_sequence(expected_global_sequence, true)?;
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -176,6 +244,11 @@ impl EventJournal {
                 expected_run_sequence,
                 expected_aggregate_sequence,
             ) {
+                validate_idempotent_global_order(
+                    &transaction,
+                    &existing.message_id,
+                    expected_global_sequence,
+                )?;
                 transaction.commit()?;
                 return Ok(AppendRuntimeEventOutcome {
                     event: existing,
@@ -195,6 +268,11 @@ impl EventJournal {
                 expected_run_sequence,
                 expected_aggregate_sequence,
             ) {
+                validate_idempotent_global_order(
+                    &transaction,
+                    &existing.message_id,
+                    expected_global_sequence,
+                )?;
                 transaction.commit()?;
                 return Ok(AppendRuntimeEventOutcome {
                     event: existing,
@@ -206,15 +284,16 @@ impl EventJournal {
             });
         }
 
-        if let Some(expected_global_sequence) = expected_global_sequence {
-            let actual_global = current_global_sequence(&transaction)?;
-            if actual_global != expected_global_sequence {
-                return Err(EventJournalError::GlobalSequenceConflict {
-                    expected: expected_global_sequence,
-                    actual: actual_global,
-                });
-            }
+        let actual_global = current_global_sequence(&transaction)?;
+        if let Some(expected_global_sequence) = expected_global_sequence
+            && actual_global != expected_global_sequence
+        {
+            return Err(EventJournalError::GlobalSequenceConflict {
+                expected: expected_global_sequence,
+                actual: actual_global,
+            });
         }
+        checked_next(actual_global)?;
 
         let actual_run = current_run_sequence(&transaction, &event.run_id)?;
         if actual_run != expected_run_sequence {
@@ -371,6 +450,80 @@ fn apply_addressing_migration(connection: &mut Connection) -> Result<(), EventJo
     Ok(())
 }
 
+fn apply_global_ordering_migration(connection: &mut Connection) -> Result<(), EventJournalError> {
+    let migration_checksum = checksum(MIGRATION_0006);
+    if verify_existing_migration(connection, 6, &migration_checksum)? {
+        return Ok(());
+    }
+
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if verify_existing_migration(&transaction, 6, &migration_checksum)? {
+        transaction.commit()?;
+        return Ok(());
+    }
+    verify_legacy_global_clock_schema(&transaction)?;
+    let legacy_runtime_count: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM runtime_events", [], |row| row.get(0))?;
+    let legacy_workspace_count: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM workspace_events", [], |row| {
+            row.get(0)
+        })?;
+    let legacy_clock: i64 = transaction.query_row(
+        "SELECT sequence FROM runtime_global_event_clock WHERE singleton_id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let legacy_event_count = legacy_runtime_count
+        .checked_add(legacy_workspace_count)
+        .ok_or(EventJournalError::SequenceOutOfRange)?;
+    for value in [
+        legacy_runtime_count,
+        legacy_workspace_count,
+        legacy_event_count,
+    ] {
+        validate_sql_sequence(value, true)?;
+    }
+    verify_persisted_event_sequence_bounds(&transaction)?;
+    if legacy_clock < 0 || legacy_clock > legacy_event_count {
+        return Err(EventJournalError::LegacyGlobalClockInvalid {
+            clock: u64::try_from(legacy_clock).unwrap_or(u64::MAX),
+            event_count: u64::try_from(legacy_event_count)
+                .map_err(|_| EventJournalError::SequenceOutOfRange)?,
+        });
+    }
+
+    transaction.execute_batch(MIGRATION_0006)?;
+    let database_instance_id = uuid::Uuid::new_v4().to_string();
+    transaction.execute(
+        "INSERT INTO runtime_database_identity (singleton_id, database_instance_id) VALUES (1, ?1)",
+        [&database_instance_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO runtime_legacy_unordered_events (event_kind, message_id) \
+         SELECT 'runtime', message_id FROM runtime_events",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO runtime_legacy_unordered_events (event_kind, message_id) \
+         SELECT 'workspace', message_id FROM workspace_events",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO runtime_global_event_ordering (\
+         singleton_id, ordering_version, ordered_sequence_base,\
+         legacy_runtime_event_count, legacy_workspace_event_count\
+         ) VALUES (1, 1, ?1, ?2, ?3)",
+        params![
+            legacy_event_count,
+            legacy_runtime_count,
+            legacy_workspace_count
+        ],
+    )?;
+    record_migration(&transaction, 6, &migration_checksum)?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn verify_existing_migration(
     connection: &Connection,
     version: u32,
@@ -469,7 +622,7 @@ fn current_run_sequence(
         [run_id],
         |row| row.get(0),
     )?;
-    u64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)
+    validate_sql_sequence(value, true)
 }
 
 fn current_aggregate_sequence(
@@ -484,16 +637,93 @@ fn current_aggregate_sequence(
         params![run_id, aggregate_type, aggregate_id],
         |row| row.get(0),
     )?;
-    u64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)
+    validate_sql_sequence(value, true)
 }
 
-fn current_global_sequence(transaction: &Transaction<'_>) -> Result<u64, EventJournalError> {
-    let value: i64 = transaction.query_row(
-        "SELECT sequence FROM runtime_global_event_clock WHERE singleton_id = 1",
+fn current_global_sequence(connection: &Connection) -> Result<u64, EventJournalError> {
+    let value: i64 = connection.query_row(
+        "SELECT COALESCE(\
+            (SELECT MAX(global_sequence) FROM runtime_global_event_ledger),\
+            (SELECT ordered_sequence_base FROM runtime_global_event_ordering WHERE singleton_id = 1)\
+         )",
         [],
         |row| row.get(0),
     )?;
-    u64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)
+    validate_sql_sequence(value, true)
+}
+
+fn global_order_for_runtime_message(
+    connection: &Connection,
+    message_id: &str,
+) -> Result<Option<GlobalEventOrder>, EventJournalError> {
+    let position: Option<(Option<i64>, i64)> = connection
+        .query_row(
+            "SELECT ledger.global_sequence, EXISTS(\
+                 SELECT 1 FROM runtime_legacy_unordered_events legacy \
+                 WHERE legacy.event_kind = 'runtime' AND legacy.message_id = event.message_id\
+             ) FROM runtime_events event \
+             LEFT JOIN runtime_global_event_ledger ledger \
+               ON ledger.event_kind = 'runtime' AND ledger.runtime_message_id = event.message_id \
+             WHERE event.message_id = ?1",
+            [message_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    position
+        .map(|(position, legacy)| match (position, legacy) {
+            (Some(value), 0) => validate_sql_sequence(value, false).map(GlobalEventOrder::Ordered),
+            (None, 1) => Ok(GlobalEventOrder::LegacyUnordered),
+            (None, 0) => Err(EventJournalError::GlobalEventOrderMissing {
+                message_id: message_id.to_owned(),
+            }),
+            _ => Err(EventJournalError::SchemaIntegrityFailed),
+        })
+        .transpose()
+}
+
+fn validate_idempotent_global_order(
+    connection: &Connection,
+    message_id: &str,
+    expected_global_sequence: Option<u64>,
+) -> Result<(), EventJournalError> {
+    let Some(expected) = expected_global_sequence else {
+        return Ok(());
+    };
+    match global_order_for_runtime_message(connection, message_id)? {
+        Some(GlobalEventOrder::Ordered(sequence)) => {
+            let actual = sequence
+                .checked_sub(1)
+                .ok_or(EventJournalError::SequenceOutOfRange)?;
+            if actual != expected {
+                return Err(EventJournalError::GlobalSequenceConflict { expected, actual });
+            }
+            Ok(())
+        }
+        Some(GlobalEventOrder::LegacyUnordered) => {
+            Err(EventJournalError::GlobalEventLegacyUnordered {
+                message_id: message_id.to_owned(),
+            })
+        }
+        None => Err(EventJournalError::GlobalEventOrderMissing {
+            message_id: message_id.to_owned(),
+        }),
+    }
+}
+
+fn load_database_instance_id(connection: &Connection) -> Result<String, EventJournalError> {
+    let value: String = connection
+        .query_row(
+            "SELECT database_instance_id FROM runtime_database_identity WHERE singleton_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| EventJournalError::InvalidDatabaseInstanceId)?;
+    let parsed =
+        uuid::Uuid::parse_str(&value).map_err(|_| EventJournalError::InvalidDatabaseInstanceId)?;
+    if parsed.to_string() != value {
+        return Err(EventJournalError::InvalidDatabaseInstanceId);
+    }
+    Ok(value)
 }
 
 fn find_by_message_id(
@@ -561,23 +791,47 @@ fn map_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeEvent> {
 }
 
 fn checked_next(value: u64) -> Result<u64, EventJournalError> {
-    value
+    validate_sequence(value, true)?;
+    let next = value
         .checked_add(1)
-        .ok_or(EventJournalError::SequenceOutOfRange)
+        .ok_or(EventJournalError::SequenceOutOfRange)?;
+    validate_sequence(next, false)?;
+    Ok(next)
 }
 
 fn to_sql_integer(value: u64) -> Result<i64, EventJournalError> {
+    validate_sequence(value, true)?;
     i64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)
 }
 
 fn from_sql_integer(value: i64, column: usize) -> rusqlite::Result<u64> {
-    u64::try_from(value).map_err(|error| {
+    let value = u64::try_from(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             column,
             rusqlite::types::Type::Integer,
             Box::new(error),
         )
-    })
+    })?;
+    if value == 0 || value > MAX_SAFE_SEQUENCE {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Integer,
+            Box::new(EventJournalError::SequenceOutOfRange),
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_sequence(value: u64, allow_zero: bool) -> Result<u64, EventJournalError> {
+    if value > MAX_SAFE_SEQUENCE || (!allow_zero && value == 0) {
+        return Err(EventJournalError::SequenceOutOfRange);
+    }
+    Ok(value)
+}
+
+fn validate_sql_sequence(value: i64, allow_zero: bool) -> Result<u64, EventJournalError> {
+    let value = u64::try_from(value).map_err(|_| EventJournalError::SequenceOutOfRange)?;
+    validate_sequence(value, allow_zero)
 }
 
 fn checksum(sql: &str) -> String {
@@ -601,8 +855,22 @@ fn verify_migration_ledger_schema(connection: &Connection) -> Result<(), EventJo
     verify_columns(connection, "runtime_schema_migrations", &expected)
 }
 
-fn verify_schema_integrity(connection: &Connection) -> Result<(), EventJournalError> {
+pub(crate) fn verify_schema_integrity(connection: &Connection) -> Result<(), EventJournalError> {
     verify_migration_ledger_schema(connection)?;
+    for (object_type, name, migration) in [
+        ("table", "runtime_events", MIGRATION_0002),
+        ("index", "runtime_events_aggregate_replay", MIGRATION_0002),
+        ("index", "runtime_events_run_type_order", MIGRATION_0002),
+        ("trigger", "runtime_events_no_update", MIGRATION_0002),
+        ("trigger", "runtime_events_no_delete", MIGRATION_0002),
+        ("table", "workspace_events", MIGRATION_0004),
+        ("index", "workspace_events_stream_replay", MIGRATION_0004),
+        ("index", "workspace_events_type_order", MIGRATION_0004),
+        ("trigger", "workspace_events_no_update", MIGRATION_0004),
+        ("trigger", "workspace_events_no_delete", MIGRATION_0004),
+    ] {
+        verify_migration_object_sql(connection, object_type, name, migration)?;
+    }
     let expected_columns = [
         ("run_id", "TEXT", true, 1),
         ("run_sequence", "INTEGER", true, 2),
@@ -653,9 +921,346 @@ fn verify_schema_integrity(connection: &Connection) -> Result<(), EventJournalEr
         "runtime_events_run_type_order",
         &["run_id", "aggregate_type", "run_sequence"],
     )?;
-    verify_trigger(connection, "runtime_events_no_update", "update")?;
-    verify_trigger(connection, "runtime_events_no_delete", "delete")?;
+    verify_durable_global_schema(connection)?;
     Ok(())
+}
+
+fn verify_legacy_global_clock_schema(connection: &Connection) -> Result<(), EventJournalError> {
+    for (object_type, name) in [
+        ("table", "runtime_global_event_clock"),
+        ("trigger", "runtime_events_advance_global_clock"),
+        ("trigger", "workspace_events_advance_global_clock"),
+        ("trigger", "runtime_global_event_clock_no_delete"),
+    ] {
+        verify_migration_object_sql(connection, object_type, name, MIGRATION_0005)?;
+    }
+    let row_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_global_event_clock WHERE singleton_id = 1 AND sequence >= 0",
+        [],
+        |row| row.get(0),
+    )?;
+    let total_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_global_event_clock",
+        [],
+        |row| row.get(0),
+    )?;
+    if row_count != 1 || total_count != 1 {
+        return Err(EventJournalError::SchemaIntegrityFailed);
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_durable_global_schema(
+    connection: &Connection,
+) -> Result<(), EventJournalError> {
+    for (object_type, name) in [
+        ("table", "runtime_database_identity"),
+        ("table", "runtime_global_event_ordering"),
+        ("table", "runtime_global_event_ledger"),
+        ("table", "runtime_legacy_unordered_events"),
+        ("trigger", "runtime_database_identity_no_insert"),
+        ("trigger", "runtime_database_identity_no_update"),
+        ("trigger", "runtime_database_identity_no_delete"),
+        ("trigger", "runtime_global_event_ordering_no_insert"),
+        ("trigger", "runtime_global_event_ordering_no_update"),
+        ("trigger", "runtime_global_event_ordering_no_delete"),
+        ("trigger", "runtime_legacy_unordered_events_no_insert"),
+        ("trigger", "runtime_legacy_unordered_events_no_update"),
+        ("trigger", "runtime_legacy_unordered_events_no_delete"),
+        ("trigger", "runtime_events_safe_sequence_insert"),
+        ("trigger", "workspace_events_safe_sequence_insert"),
+        ("trigger", "runtime_global_event_ledger_validate_insert"),
+        ("trigger", "runtime_events_record_global_order"),
+        ("trigger", "workspace_events_record_global_order"),
+        ("trigger", "runtime_global_event_ledger_no_update"),
+        ("trigger", "runtime_global_event_ledger_no_delete"),
+    ] {
+        verify_migration_object_sql(connection, object_type, name, MIGRATION_0006)?;
+    }
+    for legacy_name in [
+        "runtime_global_event_clock",
+        "runtime_events_advance_global_clock",
+        "workspace_events_advance_global_clock",
+        "runtime_global_event_clock_no_delete",
+    ] {
+        let exists: Option<i64> = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE name = ?1",
+                [legacy_name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
+            return Err(EventJournalError::SchemaIntegrityFailed);
+        }
+    }
+
+    let _ = load_database_instance_id(connection)?;
+    let identity_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_database_identity",
+        [],
+        |row| row.get(0),
+    )?;
+    let (ordering_count, version, base, legacy_runtime, legacy_workspace): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(ordering_version), 0),\
+         COALESCE(MAX(ordered_sequence_base), -1),\
+         COALESCE(MAX(legacy_runtime_event_count), -1),\
+         COALESCE(MAX(legacy_workspace_event_count), -1)\
+         FROM runtime_global_event_ordering",
+        [],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
+    let safe_base = validate_sql_sequence(base, true)?;
+    let safe_legacy_runtime = validate_sql_sequence(legacy_runtime, true)?;
+    let safe_legacy_workspace = validate_sql_sequence(legacy_workspace, true)?;
+    if identity_count != 1
+        || ordering_count != 1
+        || version != 1
+        || safe_legacy_runtime
+            .checked_add(safe_legacy_workspace)
+            .filter(|total| *total <= MAX_SAFE_SEQUENCE)
+            != Some(safe_base)
+    {
+        return Err(EventJournalError::SchemaIntegrityFailed);
+    }
+    Ok(())
+}
+
+fn verify_deep_data_integrity(connection: &Connection) -> Result<(), EventJournalError> {
+    verify_schema_integrity(connection)?;
+    verify_persisted_event_sequence_bounds(connection)?;
+    let (base, legacy_runtime, legacy_workspace): (i64, i64, i64) = connection.query_row(
+        "SELECT ordered_sequence_base, legacy_runtime_event_count,\
+         legacy_workspace_event_count FROM runtime_global_event_ordering WHERE singleton_id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let base = i64::try_from(validate_sql_sequence(base, true)?)
+        .map_err(|_| EventJournalError::SequenceOutOfRange)?;
+    validate_sql_sequence(legacy_runtime, true)?;
+    validate_sql_sequence(legacy_workspace, true)?;
+
+    let runtime_total: i64 =
+        connection.query_row("SELECT COUNT(*) FROM runtime_events", [], |row| row.get(0))?;
+    let workspace_total: i64 =
+        connection.query_row("SELECT COUNT(*) FROM workspace_events", [], |row| {
+            row.get(0)
+        })?;
+    let runtime_total_safe = validate_sql_sequence(runtime_total, true)?;
+    let workspace_total_safe = validate_sql_sequence(workspace_total, true)?;
+    if runtime_total_safe
+        .checked_add(workspace_total_safe)
+        .filter(|total| *total <= MAX_SAFE_SEQUENCE)
+        .is_none()
+    {
+        return Err(EventJournalError::SequenceOutOfRange);
+    }
+    let runtime_unordered: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_events event \
+         LEFT JOIN runtime_global_event_ledger ledger \
+           ON ledger.event_kind = 'runtime' AND ledger.runtime_message_id = event.message_id \
+         WHERE ledger.global_sequence IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    let workspace_unordered: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM workspace_events event \
+         LEFT JOIN runtime_global_event_ledger ledger \
+           ON ledger.event_kind = 'workspace' AND ledger.workspace_message_id = event.message_id \
+         WHERE ledger.global_sequence IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    let legacy_runtime_rows: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_legacy_unordered_events legacy \
+         INNER JOIN runtime_events event ON event.message_id = legacy.message_id \
+         WHERE legacy.event_kind = 'runtime'",
+        [],
+        |row| row.get(0),
+    )?;
+    let legacy_workspace_rows: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_legacy_unordered_events legacy \
+         INNER JOIN workspace_events event ON event.message_id = legacy.message_id \
+         WHERE legacy.event_kind = 'workspace'",
+        [],
+        |row| row.get(0),
+    )?;
+    let legacy_marker_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_legacy_unordered_events",
+        [],
+        |row| row.get(0),
+    )?;
+    let (ledger_count, ledger_min, ledger_max): (i64, Option<i64>, Option<i64>) = connection
+        .query_row(
+            "SELECT COUNT(*), MIN(global_sequence), MAX(global_sequence)\
+             FROM runtime_global_event_ledger",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    validate_sql_sequence(runtime_unordered, true)?;
+    validate_sql_sequence(workspace_unordered, true)?;
+    validate_sql_sequence(legacy_runtime_rows, true)?;
+    validate_sql_sequence(legacy_workspace_rows, true)?;
+    validate_sql_sequence(legacy_marker_count, true)?;
+    validate_sql_sequence(ledger_count, true)?;
+    let expected_ledger_count = runtime_total
+        .checked_add(workspace_total)
+        .and_then(|total| total.checked_sub(base))
+        .ok_or(EventJournalError::SchemaIntegrityFailed)?;
+    if runtime_unordered != legacy_runtime
+        || workspace_unordered != legacy_workspace
+        || legacy_runtime_rows != legacy_runtime
+        || legacy_workspace_rows != legacy_workspace
+        || legacy_marker_count != base
+        || ledger_count != expected_ledger_count
+    {
+        return Err(EventJournalError::SchemaIntegrityFailed);
+    }
+    if ledger_count == 0 {
+        if ledger_min.is_some() || ledger_max.is_some() {
+            return Err(EventJournalError::SchemaIntegrityFailed);
+        }
+    } else {
+        let min = ledger_min.ok_or(EventJournalError::SchemaIntegrityFailed)?;
+        let max = ledger_max.ok_or(EventJournalError::SchemaIntegrityFailed)?;
+        validate_sql_sequence(min, false)?;
+        validate_sql_sequence(max, false)?;
+        if min
+            != base
+                .checked_add(1)
+                .ok_or(EventJournalError::SequenceOutOfRange)?
+            || max
+                != base
+                    .checked_add(ledger_count)
+                    .ok_or(EventJournalError::SequenceOutOfRange)?
+        {
+            return Err(EventJournalError::SchemaIntegrityFailed);
+        }
+    }
+
+    let foreign_key_violation: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if foreign_key_violation.is_some() {
+        return Err(EventJournalError::SchemaIntegrityFailed);
+    }
+    Ok(())
+}
+
+fn verify_persisted_event_sequence_bounds(
+    connection: &Connection,
+) -> Result<(), EventJournalError> {
+    let maximum =
+        i64::try_from(MAX_SAFE_SEQUENCE).map_err(|_| EventJournalError::SequenceOutOfRange)?;
+    let unsafe_sequence_exists: i64 = connection.query_row(
+        "SELECT EXISTS(\
+             SELECT 1 FROM runtime_events \
+             WHERE run_sequence NOT BETWEEN 1 AND ?1 \
+                OR aggregate_sequence NOT BETWEEN 1 AND ?1\
+         ) OR EXISTS(\
+             SELECT 1 FROM workspace_events \
+             WHERE workspace_sequence NOT BETWEEN 1 AND ?1 \
+                OR stream_sequence NOT BETWEEN 1 AND ?1\
+         )",
+        [maximum],
+        |row| row.get(0),
+    )?;
+    if unsafe_sequence_exists != 0 {
+        return Err(EventJournalError::SequenceOutOfRange);
+    }
+    Ok(())
+}
+
+fn verify_migration_object_sql(
+    connection: &Connection,
+    object_type: &str,
+    name: &str,
+    migration: &str,
+) -> Result<(), EventJournalError> {
+    let actual: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            params![object_type, name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let expected = extract_migration_object_sql(migration, object_type, name)
+        .ok_or(EventJournalError::SchemaIntegrityFailed)?;
+    if actual.as_deref().map(normalize_schema_sql).as_deref() != Some(expected.as_str()) {
+        return Err(EventJournalError::SchemaIntegrityFailed);
+    }
+    Ok(())
+}
+
+fn extract_migration_object_sql(migration: &str, object_type: &str, name: &str) -> Option<String> {
+    let marker = format!("CREATE {} {name}", object_type.to_ascii_uppercase());
+    let start = migration.find(&marker)?;
+    let tail = &migration[start..];
+    let terminator = match object_type {
+        "trigger" => "\nEND;",
+        "table" => "\n) STRICT;",
+        "index" => ";",
+        _ => return None,
+    };
+    let end = tail.find(terminator)? + terminator.len();
+    Some(normalize_schema_sql(&tail[..end]))
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    let mut source = sql.trim();
+    while let Some(without_semicolon) = source.strip_suffix(';') {
+        source = without_semicolon.trim_end();
+    }
+    let mut normalized = String::with_capacity(source.len());
+    let mut characters = source.chars().peekable();
+    let mut quote: Option<char> = None;
+    let mut pending_space = false;
+    while let Some(character) = characters.next() {
+        if let Some(terminator) = quote {
+            normalized.push(character);
+            if character == terminator {
+                if terminator != ']' && characters.peek() == Some(&terminator) {
+                    normalized.push(characters.next().expect("peeked escaped quote"));
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        if character.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        pending_space = false;
+        normalized.push(character);
+        quote = match character {
+            '\'' | '"' | '`' => Some(character),
+            '[' => Some(']'),
+            _ => None,
+        };
+    }
+    normalized
 }
 
 fn verify_columns(
@@ -750,32 +1355,4 @@ fn index_columns(connection: &Connection, name: &str) -> Result<Vec<String>, Eve
         .map_err(|_| EventJournalError::SchemaIntegrityFailed)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| EventJournalError::SchemaIntegrityFailed)
-}
-
-fn verify_trigger(
-    connection: &Connection,
-    name: &str,
-    operation: &str,
-) -> Result<(), EventJournalError> {
-    let sql: Option<String> = connection
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1 AND tbl_name = 'runtime_events'",
-            [name],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| EventJournalError::SchemaIntegrityFailed)?;
-    let normalized = sql
-        .ok_or(EventJournalError::SchemaIntegrityFailed)?
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    let expected = format!(
-        "create trigger {name} before {operation} on runtime_events begin select raise(abort, 'runtime_event_immutable'); end"
-    );
-    if normalized != expected {
-        return Err(EventJournalError::SchemaIntegrityFailed);
-    }
-    Ok(())
 }

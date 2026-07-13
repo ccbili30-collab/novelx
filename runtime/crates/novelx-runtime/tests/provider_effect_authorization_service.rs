@@ -257,7 +257,7 @@ fn returns_the_current_run_stream_and_global_fences_without_using_run_aggregate_
 
     let mut workspace = WorkspaceEventJournal::open(&fixture.database).unwrap();
     workspace
-        .append(
+        .append_at_global_sequence(
             NewWorkspaceEvent {
                 workspace_id: "concurrent-noise".to_owned(),
                 stream_type: "test".to_owned(),
@@ -269,6 +269,7 @@ fn returns_the_current_run_stream_and_global_fences_without_using_run_aggregate_
                 payload: serde_json::json!({"sequence": 1}),
                 created_at: now_string(),
             },
+            0,
             0,
             current_global_sequence,
         )

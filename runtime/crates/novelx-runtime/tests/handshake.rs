@@ -3,8 +3,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
 use novelx_protocol::{
-    ChildRunSpec, Envelope, MessageType, PROTOCOL_VERSION, RevisionReference, RunPrepare,
-    RunSnapshot, RunStart, RuntimeApplicationIdentity, RuntimeError, RuntimeErrorClass,
+    ChildRunSpec, Envelope, MAX_SAFE_SEQUENCE, MessageType, PROTOCOL_VERSION, RevisionReference,
+    RunPrepare, RunSnapshot, RunStart, RuntimeApplicationIdentity, RuntimeError, RuntimeErrorClass,
     RuntimeHello, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
     child_run_pinned_identity_sha256,
 };
@@ -21,6 +21,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
+
+const MIGRATION_0005: &str = include_str!("../migrations/0005_global_event_clock.sql");
 
 #[test]
 fn completes_one_correlated_initialize_and_waits_for_eof() {
@@ -807,6 +809,124 @@ fn damaged_storage_emits_initialization_failed_without_ready() {
     );
 }
 
+#[test]
+fn deep_data_corruption_is_rejected_before_runtime_ready() {
+    let fixture = Fixture::new();
+    WorkspaceEventJournal::open(&fixture.database_path)
+        .unwrap()
+        .append(
+            NewWorkspaceEvent {
+                workspace_id: "deep-startup-workspace".to_owned(),
+                stream_type: "test".to_owned(),
+                stream_id: "deep-startup-stream".to_owned(),
+                message_id: "deep-startup-message".to_owned(),
+                idempotency_key: "deep-startup-key".to_owned(),
+                event_type: "test.deep_startup".to_owned(),
+                event_version: 1,
+                payload: serde_json::json!({"事实": "启动前必须深检"}),
+                created_at: "2026-07-13T00:00:00Z".to_owned(),
+            },
+            0,
+            0,
+        )
+        .unwrap();
+    Connection::open(&fixture.database_path)
+        .unwrap()
+        .execute_batch(
+            "DROP TRIGGER runtime_global_event_ledger_no_delete; \
+             DELETE FROM runtime_global_event_ledger \
+             WHERE workspace_message_id = 'deep-startup-message'; \
+             CREATE TRIGGER runtime_global_event_ledger_no_delete \
+             BEFORE DELETE ON runtime_global_event_ledger \
+             BEGIN \
+                 SELECT RAISE(ABORT, 'runtime_global_event_ledger is append-only'); \
+             END;",
+        )
+        .unwrap();
+
+    let (mut child, _hello) = spawn_and_read_hello();
+    let initialize = initialize_envelope_with_path(
+        PROTOCOL_VERSION,
+        "runtime.initialize",
+        Some(fixture.database_path.to_string_lossy().into_owned()),
+    );
+    write_envelope(&mut child, &initialize);
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let envelopes = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Envelope>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(envelopes[0].name, "runtime.initialization_failed");
+    assert_eq!(envelopes[0].correlation_id, Some(initialize.message_id));
+    assert!(
+        envelopes
+            .iter()
+            .all(|envelope| envelope.name != "runtime.ready")
+    );
+}
+
+#[test]
+fn v5_events_with_any_unsafe_sequence_are_rejected_before_runtime_ready() {
+    for sequence_kind in [
+        "run_sequence",
+        "aggregate_sequence",
+        "workspace_sequence",
+        "stream_sequence",
+    ] {
+        let fixture = Fixture::new();
+        downgrade_empty_database_to_v5(&fixture.database_path);
+        insert_v5_event_with_unsafe_sequence(&fixture.database_path, sequence_kind);
+
+        let (mut child, _hello) = spawn_and_read_hello();
+        let initialize = initialize_envelope_with_path(
+            PROTOCOL_VERSION,
+            "runtime.initialize",
+            Some(fixture.database_path.to_string_lossy().into_owned()),
+        );
+        write_envelope(&mut child, &initialize);
+        drop(child.stdin.take());
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !output.status.success(),
+            "unsafe v5 {sequence_kind} unexpectedly reached a successful shutdown"
+        );
+        let envelopes = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Envelope>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            envelopes.len(),
+            1,
+            "unsafe v5 {sequence_kind} emitted unexpected envelopes"
+        );
+        assert_eq!(envelopes[0].name, "runtime.initialization_failed");
+        assert_eq!(envelopes[0].correlation_id, Some(initialize.message_id));
+        assert!(
+            envelopes
+                .iter()
+                .all(|envelope| envelope.name != "runtime.ready"),
+            "unsafe v5 {sequence_kind} reached runtime.ready"
+        );
+        let migration_count: i64 = Connection::open(&fixture.database_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_schema_migrations WHERE version = 6",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            migration_count, 0,
+            "unsafe v5 {sequence_kind} was accepted through migration 0006"
+        );
+    }
+}
+
 fn spawn_and_read_hello() -> (Child, Envelope) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_novelx-runtime"))
         .stdin(Stdio::piped())
@@ -1217,6 +1337,81 @@ fn apply_step(
             reason: None,
         },
     )
+    .unwrap();
+}
+
+fn downgrade_empty_database_to_v5(path: &std::path::Path) {
+    drop(EventJournal::open(path).unwrap());
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER runtime_database_identity_no_insert; \
+             DROP TRIGGER runtime_database_identity_no_update; \
+             DROP TRIGGER runtime_database_identity_no_delete; \
+             DROP TRIGGER runtime_global_event_ordering_no_insert; \
+             DROP TRIGGER runtime_global_event_ordering_no_update; \
+             DROP TRIGGER runtime_global_event_ordering_no_delete; \
+             DROP TRIGGER runtime_legacy_unordered_events_no_insert; \
+             DROP TRIGGER runtime_legacy_unordered_events_no_update; \
+             DROP TRIGGER runtime_legacy_unordered_events_no_delete; \
+             DROP TRIGGER runtime_events_safe_sequence_insert; \
+             DROP TRIGGER workspace_events_safe_sequence_insert; \
+             DROP TRIGGER runtime_global_event_ledger_validate_insert; \
+             DROP TRIGGER runtime_events_record_global_order; \
+             DROP TRIGGER workspace_events_record_global_order; \
+             DROP TRIGGER runtime_global_event_ledger_no_update; \
+             DROP TRIGGER runtime_global_event_ledger_no_delete; \
+             DROP TABLE runtime_global_event_ledger; \
+             DROP TABLE runtime_global_event_ordering; \
+             DROP TABLE runtime_legacy_unordered_events; \
+             DROP TABLE runtime_database_identity; \
+             DELETE FROM runtime_schema_migrations WHERE version = 6;",
+        )
+        .unwrap();
+    connection.execute_batch(MIGRATION_0005).unwrap();
+}
+
+fn insert_v5_event_with_unsafe_sequence(path: &std::path::Path, sequence_kind: &str) {
+    let connection = Connection::open(path).unwrap();
+    let unsafe_value = i64::try_from(MAX_SAFE_SEQUENCE + 1).unwrap();
+    match sequence_kind {
+        "run_sequence" => connection.execute(
+            "INSERT INTO runtime_events (run_id, run_sequence, aggregate_type, aggregate_id, \
+             aggregate_sequence, message_id, idempotency_key, event_type, event_version, \
+             payload_json, created_at) VALUES ('unsafe-run', ?1, 'run', 'unsafe-run', 1, \
+             'unsafe-run-message', 'unsafe-run-key', 'unsafe.run', 1, '{}', \
+             '2026-07-13T00:00:00Z')",
+            [unsafe_value],
+        ),
+        "aggregate_sequence" => connection.execute(
+            "INSERT INTO runtime_events (run_id, run_sequence, aggregate_type, aggregate_id, \
+             aggregate_sequence, message_id, idempotency_key, event_type, event_version, \
+             payload_json, created_at) VALUES ('unsafe-aggregate', 1, 'run', \
+             'unsafe-aggregate', ?1, 'unsafe-aggregate-message', 'unsafe-aggregate-key', \
+             'unsafe.aggregate', 1, '{}', '2026-07-13T00:00:00Z')",
+            [unsafe_value],
+        ),
+        "workspace_sequence" => connection.execute(
+            "INSERT INTO workspace_events (workspace_id, workspace_sequence, stream_type, \
+             stream_id, stream_sequence, message_id, idempotency_key, event_type, event_version, \
+             payload_json, created_at) VALUES ('unsafe-workspace', ?1, 'test', 'unsafe', 1, \
+             'unsafe-workspace-message', 'unsafe-workspace-key', 'unsafe.workspace', 1, '{}', \
+             '2026-07-13T00:00:00Z')",
+            [unsafe_value],
+        ),
+        "stream_sequence" => connection.execute(
+            "INSERT INTO workspace_events (workspace_id, workspace_sequence, stream_type, \
+             stream_id, stream_sequence, message_id, idempotency_key, event_type, event_version, \
+             payload_json, created_at) VALUES ('unsafe-stream', 1, 'test', 'unsafe', ?1, \
+             'unsafe-stream-message', 'unsafe-stream-key', 'unsafe.stream', 1, '{}', \
+             '2026-07-13T00:00:00Z')",
+            [unsafe_value],
+        ),
+        other => panic!("unknown sequence kind: {other}"),
+    }
     .unwrap();
 }
 

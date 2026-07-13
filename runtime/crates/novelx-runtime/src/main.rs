@@ -3372,6 +3372,9 @@ fn initialize_runtime(
             .map_err(InitializationError::WorkspaceLease)?,
     );
     let mut journal = EventJournal::open(path).map_err(InitializationError::Storage)?;
+    journal
+        .verify_deep_data_integrity()
+        .map_err(InitializationError::Storage)?;
     let report = RecoveryCoordinator::recover_and_reconcile(&mut journal)
         .map_err(InitializationError::Recovery)?;
     let assignment_report =

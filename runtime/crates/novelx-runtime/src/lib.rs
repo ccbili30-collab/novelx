@@ -46,6 +46,7 @@ pub mod provider_retry_aggregate;
 pub mod provider_tool_materializer;
 pub mod recovery;
 pub mod run_aggregate;
+pub mod run_cancellation_service;
 pub mod run_command_service;
 pub mod run_pin_validator;
 pub mod run_reconciliation_service;
