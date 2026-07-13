@@ -12,6 +12,7 @@ pub enum PreSendGateState {
     CancelledBeforeSent,
     SentReserved,
     SentCommitted,
+    DispatchBoundaryUnknown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +123,9 @@ impl PreSendLinearizationGate {
             )),
             PreSendGateState::SentReserved => Err(PreSendGateError::SentAlreadyReserved),
             PreSendGateState::SentCommitted => Err(PreSendGateError::SentAlreadyCommitted),
+            PreSendGateState::DispatchBoundaryUnknown => {
+                Err(PreSendGateError::DispatchBoundaryUnknown)
+            }
         }
     }
 
@@ -148,6 +152,10 @@ impl PreSendLinearizationGate {
                 CancellationLinearization::SignalledAfterSentReservation
             }
             PreSendGateState::SentCommitted => {
+                state.cancellation_cause.get_or_insert(cause);
+                CancellationLinearization::SignalledAfterSentCommit
+            }
+            PreSendGateState::DispatchBoundaryUnknown => {
                 state.cancellation_cause.get_or_insert(cause);
                 CancellationLinearization::SignalledAfterSentCommit
             }
@@ -201,6 +209,26 @@ impl PreSendLinearizationGate {
             _private: (),
         })
     }
+
+    fn fail_closed_after_unreadable_evidence(
+        &self,
+        reservation_id: Uuid,
+    ) -> Result<(), PreSendGateError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| PreSendGateError::StatePoisoned)?;
+        if state.phase != PreSendGateState::SentReserved
+            || state.reservation_id != Some(reservation_id)
+        {
+            return Err(PreSendGateError::ReservationInvalid);
+        }
+        state.phase = PreSendGateState::DispatchBoundaryUnknown;
+        state.reservation_id = None;
+        self.inner.http_cancellation.send_replace(true);
+        Ok(())
+    }
 }
 
 #[must_use = "a Sent reservation must be committed or explicitly released"]
@@ -211,10 +239,20 @@ pub struct SentReservation {
 }
 
 impl SentReservation {
-    pub fn commit(mut self) -> Result<SentCommitReceipt, PreSendGateError> {
-        let receipt = self.gate.commit(self.reservation_id)?;
-        self.active = false;
-        Ok(receipt)
+    pub(crate) fn commit(mut self) -> Result<SentCommitReceipt, PreSendGateError> {
+        match self.gate.commit(self.reservation_id) {
+            Ok(receipt) => {
+                self.active = false;
+                Ok(receipt)
+            }
+            Err(error) => {
+                let _ = self
+                    .gate
+                    .fail_closed_after_unreadable_evidence(self.reservation_id);
+                self.active = false;
+                Err(error)
+            }
+        }
     }
 
     #[allow(dead_code)] // Migration step 2 will call this after Provider arming fails.
@@ -224,6 +262,13 @@ impl SentReservation {
         let receipt = self.gate.release_after_arm_failure(self.reservation_id)?;
         self.active = false;
         Ok(receipt)
+    }
+
+    pub(crate) fn fail_closed_after_unreadable_evidence(mut self) -> Result<(), PreSendGateError> {
+        self.gate
+            .fail_closed_after_unreadable_evidence(self.reservation_id)?;
+        self.active = false;
+        Ok(())
     }
 }
 
@@ -274,6 +319,8 @@ pub enum PreSendGateError {
     SentAlreadyReserved,
     #[error("Provider Sent is already committed")]
     SentAlreadyCommitted,
+    #[error("Provider dispatch boundary is unknown and cannot be reopened")]
+    DispatchBoundaryUnknown,
     #[error("Provider Sent reservation is invalid")]
     ReservationInvalid,
 }

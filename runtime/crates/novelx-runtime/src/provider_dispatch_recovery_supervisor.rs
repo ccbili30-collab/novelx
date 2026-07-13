@@ -28,9 +28,10 @@ use crate::{
     },
     provider_attempt::{ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState},
     provider_dispatch_recovery_service::{
-        DispatchEvidence, ProviderDispatchAuthorizedResumeRequest, ProviderDispatchRecoveryError,
-        ProviderDispatchRecoveryRequest, ProviderDispatchRecoveryService,
-        ProviderDispatchRecoveryTerminal,
+        DispatchEvidence, ProviderDispatchAuthorizedResumeRequest,
+        ProviderDispatchInterruptedBeforeSent, ProviderDispatchRecoveryError,
+        ProviderDispatchRecoveryRequest, ProviderDispatchRecoveryResult,
+        ProviderDispatchRecoveryService, ProviderDispatchRecoveryTerminal,
     },
     provider_dispatch_resume_authorization_service::{
         ProviderDispatchResumeAuthorizationError, ProviderDispatchResumeAuthorizationRequest,
@@ -38,6 +39,7 @@ use crate::{
     },
     provider_gateway::{ProviderGateway, ProviderRegistry},
     provider_inference_service::ProviderInferenceServiceError,
+    runtime_cancellation_hub::{RuntimeCancellationHub, RuntimeCancellationHubError},
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
     workspace_runtime_lease::WorkspaceRuntimeLease,
 };
@@ -59,6 +61,7 @@ pub struct ProviderDispatchRecoverySupervisorRun {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderDispatchRecoverySupervisorOutcome {
     Completed(ProviderDispatchRecoveryTerminal),
+    InterruptedBeforeSent(ProviderDispatchInterruptedBeforeSent),
     AwaitingAttemptOwner,
     StaleOperationClosed,
     AwaitingClaimExpiry,
@@ -83,6 +86,7 @@ impl ProviderDispatchRecoverySupervisor {
         project_id: &str,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
+        cancellation_hub: &RuntimeCancellationHub,
         exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorReport, ProviderDispatchRecoverySupervisorError>
     {
@@ -122,6 +126,7 @@ impl ProviderDispatchRecoverySupervisor {
                     &bound_providers,
                     providers,
                     gateway,
+                    cancellation_hub,
                     exclusive_lease,
                 )
                 .await?,
@@ -142,6 +147,7 @@ impl ProviderDispatchRecoverySupervisor {
         bound_providers: &[ProviderRunIdentity],
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
+        cancellation_hub: &RuntimeCancellationHub,
         exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
@@ -218,6 +224,7 @@ impl ProviderDispatchRecoverySupervisor {
                         current_gate,
                         providers,
                         gateway,
+                        cancellation_hub,
                         exclusive_lease,
                     )
                     .await;
@@ -274,6 +281,7 @@ impl ProviderDispatchRecoverySupervisor {
                     bound_providers,
                     providers,
                     gateway,
+                    cancellation_hub,
                     exclusive_lease,
                 )
                 .await;
@@ -298,6 +306,7 @@ impl ProviderDispatchRecoverySupervisor {
             bound_providers,
             providers,
             gateway,
+            cancellation_hub,
             exclusive_lease,
         )
         .await
@@ -313,6 +322,7 @@ impl ProviderDispatchRecoverySupervisor {
         bound_providers: &[ProviderRunIdentity],
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
+        cancellation_hub: &RuntimeCancellationHub,
         exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
@@ -355,6 +365,7 @@ impl ProviderDispatchRecoverySupervisor {
             execution_id,
             providers,
             gateway,
+            cancellation_hub,
             exclusive_lease,
         )
         .await
@@ -369,6 +380,7 @@ impl ProviderDispatchRecoverySupervisor {
         current_gate: OperationalRecoveryGate,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
+        cancellation_hub: &RuntimeCancellationHub,
         exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
@@ -425,6 +437,7 @@ impl ProviderDispatchRecoverySupervisor {
                     execution.execution_id.clone(),
                     providers,
                     gateway,
+                    cancellation_hub,
                     exclusive_lease,
                 )
                 .await;
@@ -447,6 +460,7 @@ impl ProviderDispatchRecoverySupervisor {
                 },
                 providers,
                 gateway,
+                cancellation_hub,
                 exclusive_lease,
             )
             .await;
@@ -461,11 +475,7 @@ impl ProviderDispatchRecoverySupervisor {
             }
             Err(error) => return Err(error.into()),
         };
-        Ok(result(
-            run_id,
-            operation_id,
-            ProviderDispatchRecoverySupervisorOutcome::Completed(receipt.terminal),
-        ))
+        Ok(result(run_id, operation_id, supervisor_outcome(receipt)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -477,6 +487,7 @@ impl ProviderDispatchRecoverySupervisor {
         execution_id: String,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
+        cancellation_hub: &RuntimeCancellationHub,
         exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
@@ -490,6 +501,7 @@ impl ProviderDispatchRecoverySupervisor {
                 },
                 providers,
                 gateway,
+                cancellation_hub,
                 exclusive_lease,
             )
             .await;
@@ -504,11 +516,7 @@ impl ProviderDispatchRecoverySupervisor {
             }
             Err(error) => return Err(error.into()),
         };
-        Ok(result(
-            run_id,
-            operation_id,
-            ProviderDispatchRecoverySupervisorOutcome::Completed(receipt.terminal),
-        ))
+        Ok(result(run_id, operation_id, supervisor_outcome(receipt)))
     }
 
     fn scan_consistently(
@@ -563,11 +571,26 @@ fn result(
     }
 }
 
+fn supervisor_outcome(
+    recovery: ProviderDispatchRecoveryResult,
+) -> ProviderDispatchRecoverySupervisorOutcome {
+    match recovery {
+        ProviderDispatchRecoveryResult::Completed(receipt) => {
+            ProviderDispatchRecoverySupervisorOutcome::Completed(receipt.terminal)
+        }
+        ProviderDispatchRecoveryResult::InterruptedBeforeSent(interrupted) => {
+            ProviderDispatchRecoverySupervisorOutcome::InterruptedBeforeSent(interrupted)
+        }
+    }
+}
+
 fn provider_attempt_is_in_flight(error: &ProviderDispatchRecoveryError) -> bool {
     matches!(
         error,
         ProviderDispatchRecoveryError::Provider(
             ProviderInferenceServiceError::AttemptInFlight { .. }
+        ) | ProviderDispatchRecoveryError::CancellationHub(
+            RuntimeCancellationHubError::RegistrationAlreadyActive
         )
     )
 }

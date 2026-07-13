@@ -63,6 +63,7 @@ use novelx_runtime::run_state::RunState;
 use novelx_runtime::runtime_actor::{
     RuntimeActor, RuntimeActorHandle, RuntimeOutputDraft, RuntimeTaskKey, RuntimeTaskProgressSender,
 };
+use novelx_runtime::runtime_cancellation_hub::RuntimeCancellationHub;
 use novelx_runtime::tool_protocol_mapper::ToolProtocolMapper;
 use novelx_runtime::workspace_runtime_lease::{WorkspaceRuntimeLease, WorkspaceRuntimeLeaseError};
 use novelx_runtime::{
@@ -245,6 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut provider_registry = ProviderRegistry::default();
     let provider_gateway = Arc::new(ProviderGateway::new()?);
+    let runtime_cancellation_hub = RuntimeCancellationHub::new();
     let (actor, actor_handle) = RuntimeActor::new(output, 2, 64);
     let actor_task = tokio::spawn(actor.run());
     let mut command_context = RuntimeCommandContext {
@@ -258,6 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         quarantined_assignment_ids: &quarantined_assignment_ids,
         provider_registry: &mut provider_registry,
         provider_gateway: &provider_gateway,
+        runtime_cancellation_hub: &runtime_cancellation_hub,
         project_root: project_root.as_ref(),
     };
     let loop_result = run_command_loop(&mut lines, &actor_handle, &mut command_context).await;
@@ -588,6 +591,7 @@ struct RuntimeCommandContext<'a> {
     quarantined_assignment_ids: &'a BTreeSet<String>,
     provider_registry: &'a mut ProviderRegistry,
     provider_gateway: &'a Arc<ProviderGateway>,
+    runtime_cancellation_hub: &'a RuntimeCancellationHub,
     project_root: Option<&'a ProjectRoot>,
 }
 
@@ -840,6 +844,7 @@ async fn refresh_operational_recovery(
     let dispatch_project_id = binding.project_id.clone();
     let dispatch_providers = context.provider_registry.clone();
     let dispatch_gateway = context.provider_gateway.as_ref().clone();
+    let dispatch_cancellation_hub = context.runtime_cancellation_hub.clone();
     let dispatch_lease = Arc::clone(exclusive_lease);
     tokio::spawn(async move {
         ProviderDispatchRecoverySupervisor::new(dispatch_database_path)
@@ -848,6 +853,7 @@ async fn refresh_operational_recovery(
                 &dispatch_project_id,
                 &dispatch_providers,
                 &dispatch_gateway,
+                &dispatch_cancellation_hub,
                 &dispatch_lease,
             )
             .await

@@ -36,7 +36,8 @@ use novelx_runtime::{
     },
     provider_dispatch_recovery_service::{
         ProviderDispatchAuthorizedResumeRequest, ProviderDispatchRecoveryError,
-        ProviderDispatchRecoveryRequest, ProviderDispatchRecoveryService,
+        ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryRequest,
+        ProviderDispatchRecoveryResult, ProviderDispatchRecoveryService,
         ProviderDispatchRecoveryTerminal,
     },
     provider_dispatch_recovery_supervisor::{
@@ -62,6 +63,7 @@ use novelx_runtime::{
         derive_retry_schedule, provider_retry_policy_sha256,
     },
     run_aggregate::{EventMetadata, RunAggregate},
+    runtime_cancellation_hub::{CancellationCause, RuntimeCancellationHub},
     workspace_runtime_lease::WorkspaceRuntimeLease,
 };
 use sha2::{Digest, Sha256};
@@ -89,11 +91,20 @@ async fn requested_dispatches_once_and_terminal_reentry_never_sends_again() {
     let service = ProviderDispatchRecoveryService::new(&fixture.path);
 
     let first = service
-        .execute_requested(seeded.request.clone(), &providers, &gateway, &seeded.lease)
+        .execute_requested(
+            seeded.request.clone(),
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &seeded.lease,
+        )
         .await
         .unwrap();
     server.await.unwrap();
-    assert_eq!(first.terminal, ProviderDispatchRecoveryTerminal::Responded);
+    assert_eq!(
+        completed_ref(&first).terminal,
+        ProviderDispatchRecoveryTerminal::Responded
+    );
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
     fixture.assert_authorized_sent(&seeded, None);
     assert_eq!(
@@ -106,6 +117,7 @@ async fn requested_dispatches_once_and_terminal_reentry_never_sends_again() {
             seeded.request.clone(),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
@@ -136,6 +148,7 @@ async fn retry_attempt_two_is_supervised_through_authorized_recovery_and_reentry
             PROJECT_ID,
             &providers,
             &gateway,
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
@@ -167,12 +180,13 @@ async fn retry_attempt_two_is_supervised_through_authorized_recovery_and_reentry
             seeded.request.clone(),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
         .unwrap();
     assert_eq!(
-        repeated.terminal,
+        completed_ref(&repeated).terminal,
         ProviderDispatchRecoveryTerminal::Responded
     );
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
@@ -205,6 +219,7 @@ async fn retry_attempt_two_responded_before_outcome_is_projected_without_network
             PROJECT_ID,
             &providers,
             &gateway,
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
@@ -254,6 +269,7 @@ async fn retry_attempt_two_failed_before_outcome_is_projected_failed_safe_withou
             PROJECT_ID,
             &providers,
             &gateway,
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
@@ -347,13 +363,14 @@ async fn sent_attempt_is_evidence_first_and_never_requires_provider_binding_or_n
             seeded.request.clone(),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
         .unwrap();
 
     assert_eq!(
-        receipt.terminal,
+        completed_ref(&receipt).terminal,
         ProviderDispatchRecoveryTerminal::OutcomeUnknown
     );
     assert_eq!(request_count.load(Ordering::SeqCst), 0);
@@ -383,13 +400,14 @@ async fn responded_attempt_is_evidence_first_and_never_requires_provider_binding
             seeded.request.clone(),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
         .unwrap();
 
     assert_eq!(
-        receipt.terminal,
+        completed_ref(&receipt).terminal,
         ProviderDispatchRecoveryTerminal::Responded
     );
     assert_eq!(request_count.load(Ordering::SeqCst), 0);
@@ -417,13 +435,19 @@ async fn authentication_rejection_finishes_failed_safe_after_one_real_http_reque
     let seeded = fixture.seed_requested(&providers, &provider, &gateway, "runtime-401");
 
     let receipt = ProviderDispatchRecoveryService::new(&fixture.path)
-        .execute_requested(seeded.request.clone(), &providers, &gateway, &seeded.lease)
+        .execute_requested(
+            seeded.request.clone(),
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &seeded.lease,
+        )
         .await
         .unwrap();
 
     server.await.unwrap();
     assert_eq!(
-        receipt.terminal,
+        completed_ref(&receipt).terminal,
         ProviderDispatchRecoveryTerminal::FailedSafe
     );
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
@@ -432,6 +456,125 @@ async fn authentication_rejection_finishes_failed_safe_after_one_real_http_reque
         fixture.outcome(&seeded),
         Some(OperationalRecoveryOutcome::FailedSafe { .. })
     ));
+}
+
+#[tokio::test]
+async fn cancellation_after_sent_reservation_keeps_one_sent_and_projects_outcome_unknown() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Delayed {
+        delay: Duration::from_secs(30),
+        response: json_response(200, successful_body("must be ignored after cancellation")),
+    })
+    .await;
+    let (providers, provider) = bound_registry(base_url, 60_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded =
+        fixture.seed_requested(&providers, &provider, &gateway, "runtime-post-sent-cancel");
+
+    let recovery_service = ProviderDispatchRecoveryService::new(&fixture.path);
+    let recovery = recovery_service.execute_requested(
+        seeded.request.clone(),
+        &providers,
+        &gateway,
+        &fixture.cancellation_hub,
+        &seeded.lease,
+    );
+    let cancel = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while request_count.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("authorized HTTP request did not cross the transport boundary");
+        fixture
+            .cancellation_hub
+            .signal_global(CancellationCause::RuntimeShutdown)
+            .unwrap()
+    };
+    let (result, cancellation) = tokio::join!(recovery, cancel);
+
+    assert_eq!(cancellation.post_sent_signalled(), 1);
+    let result = result.unwrap();
+    assert_eq!(
+        completed_ref(&result).terminal,
+        ProviderDispatchRecoveryTerminal::OutcomeUnknown
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        [
+            "provider.requested",
+            "provider.sent",
+            "provider.outcome_unknown"
+        ]
+    );
+    assert!(matches!(
+        fixture.outcome(&seeded),
+        Some(OperationalRecoveryOutcome::OutcomeUnknown { .. })
+    ));
+    assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn run_cancel_interrupts_only_the_target_recovery_while_parallel_run_dispatches() {
+    let target_fixture = Fixture::new();
+    let other_fixture = Fixture::new();
+    let cancellation_hub = RuntimeCancellationHub::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("other run completed"),
+    )))
+    .await;
+    let (providers, provider) = bound_registry(base_url, 30_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let target =
+        target_fixture.seed_requested(&providers, &provider, &gateway, "runtime-target-run");
+    let other = other_fixture.seed_requested(&providers, &provider, &gateway, "runtime-other-run");
+    cancellation_hub
+        .signal_run_cancel(WORKSPACE_ID, &target.run_id)
+        .unwrap();
+
+    let target_service = ProviderDispatchRecoveryService::new(&target_fixture.path);
+    let other_service = ProviderDispatchRecoveryService::new(&other_fixture.path);
+    let target_recovery = target_service.execute_requested(
+        target.request.clone(),
+        &providers,
+        &gateway,
+        &cancellation_hub,
+        &target.lease,
+    );
+    let other_recovery = other_service.execute_requested(
+        other.request.clone(),
+        &providers,
+        &gateway,
+        &cancellation_hub,
+        &other.lease,
+    );
+    let (target_result, other_result) = tokio::join!(target_recovery, other_recovery);
+    server.await.unwrap();
+
+    let ProviderDispatchRecoveryResult::InterruptedBeforeSent(interrupted) = target_result.unwrap()
+    else {
+        panic!("target Run must be interrupted before Sent");
+    };
+    assert_eq!(interrupted.cause, CancellationCause::RunCancel);
+    assert!(!interrupted.resumable);
+    assert_eq!(
+        completed_ref(&other_result.unwrap()).terminal,
+        ProviderDispatchRecoveryTerminal::Responded
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        target_fixture.attempt_state(&target),
+        ProviderAttemptState::Requested
+    );
+    assert_eq!(
+        other_fixture.attempt_state(&other),
+        ProviderAttemptState::Responded
+    );
+    assert_eq!(cancellation_hub.registered_count().unwrap(), 0);
 }
 
 #[tokio::test]
@@ -451,6 +594,7 @@ async fn missing_provider_binding_blocks_before_dispatch_without_terminalizing_r
             seeded.request.clone(),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
@@ -468,7 +612,25 @@ async fn missing_provider_binding_blocks_before_dispatch_without_terminalizing_r
         ProviderAttemptState::Requested
     );
     assert_eq!(fixture.outcome(&seeded), None);
-    server.abort();
+    assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
+
+    let retried = ProviderDispatchRecoveryService::new(&fixture.path)
+        .execute_requested(
+            seeded.request.clone(),
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &seeded.lease,
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(
+        completed_ref(&retried).terminal,
+        ProviderDispatchRecoveryTerminal::Responded
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
 }
 
 #[tokio::test]
@@ -487,7 +649,13 @@ async fn wrong_database_lease_and_wrong_execution_fence_fail_before_network() {
     let service = ProviderDispatchRecoveryService::new(&fixture.path);
 
     let wrong_database = service
-        .execute_requested(seeded.request.clone(), &providers, &gateway, &wrong_lease)
+        .execute_requested(
+            seeded.request.clone(),
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &wrong_lease,
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -498,7 +666,13 @@ async fn wrong_database_lease_and_wrong_execution_fence_fail_before_network() {
     let mut wrong_fence_request = seeded.request.clone();
     wrong_fence_request.execution_id = Uuid::new_v4().to_string();
     let wrong_fence = service
-        .execute_requested(wrong_fence_request, &providers, &gateway, &seeded.lease)
+        .execute_requested(
+            wrong_fence_request,
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &seeded.lease,
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -530,18 +704,30 @@ async fn concurrent_execute_is_single_flight_and_never_marks_the_live_request_ou
     let first_request = seeded.request.clone();
     let second_request = seeded.request.clone();
 
-    let first = first_service.execute_requested(first_request, &providers, &gateway, &seeded.lease);
+    let first = first_service.execute_requested(
+        first_request,
+        &providers,
+        &gateway,
+        &fixture.cancellation_hub,
+        &seeded.lease,
+    );
     let second = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
         second_service
-            .execute_requested(second_request, &providers, &gateway, &seeded.lease)
+            .execute_requested(
+                second_request,
+                &providers,
+                &gateway,
+                &fixture.cancellation_hub,
+                &seeded.lease,
+            )
             .await
     };
     let (first, second) = tokio::join!(first, second);
 
     server.await.unwrap();
     assert_eq!(
-        first.unwrap().terminal,
+        completed_ref(&first.unwrap()).terminal,
         ProviderDispatchRecoveryTerminal::Responded
     );
     assert!(matches!(
@@ -580,7 +766,13 @@ async fn recovery_cannot_terminalize_an_attempt_owned_by_the_live_provider_path(
     let recovery_call = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
         recovery
-            .execute_requested(seeded.request.clone(), &providers, &gateway, &seeded.lease)
+            .execute_requested(
+                seeded.request.clone(),
+                &providers,
+                &gateway,
+                &fixture.cancellation_hub,
+                &seeded.lease,
+            )
             .await
     };
     let (direct_result, recovery_result) = tokio::join!(direct_call, recovery_call);
@@ -608,12 +800,13 @@ async fn recovery_cannot_terminalize_an_attempt_owned_by_the_live_provider_path(
             seeded.request.clone(),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
         .unwrap();
     assert_eq!(
-        recovered.terminal,
+        completed_ref(&recovered).terminal,
         ProviderDispatchRecoveryTerminal::Responded
     );
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
@@ -639,7 +832,13 @@ async fn requested_attempt_requires_new_owner_authorization_and_dispatches_exact
     let recovery = ProviderDispatchRecoveryService::new(&fixture.path);
 
     let unauthorized = recovery
-        .execute_requested(seeded.request.clone(), &providers, &gateway, &seeded.lease)
+        .execute_requested(
+            seeded.request.clone(),
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &seeded.lease,
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -655,11 +854,20 @@ async fn requested_attempt_requires_new_owner_authorization_and_dispatches_exact
         authorization_id: authorization.authorization_id,
     };
     let first = recovery
-        .resume_authorized(resume_request.clone(), &providers, &gateway, &seeded.lease)
+        .resume_authorized(
+            resume_request.clone(),
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &seeded.lease,
+        )
         .await
         .unwrap();
     server.await.unwrap();
-    assert_eq!(first.terminal, ProviderDispatchRecoveryTerminal::Responded);
+    assert_eq!(
+        completed_ref(&first).terminal,
+        ProviderDispatchRecoveryTerminal::Responded
+    );
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
     fixture.assert_authorized_sent(&seeded, Some(&authorization_id));
 
@@ -668,6 +876,7 @@ async fn requested_attempt_requires_new_owner_authorization_and_dispatches_exact
             resume_request,
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
@@ -696,13 +905,14 @@ async fn sent_attempt_new_owner_authorization_finalizes_unknown_without_provider
             authorized_request(&seeded, authorization.authorization_id),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
         .unwrap();
 
     assert_eq!(
-        receipt.terminal,
+        completed_ref(&receipt).terminal,
         ProviderDispatchRecoveryTerminal::OutcomeUnknown
     );
     assert_eq!(request_count.load(Ordering::SeqCst), 0);
@@ -733,13 +943,14 @@ async fn responded_attempt_new_owner_authorization_finalizes_without_provider_or
             authorized_request(&seeded, authorization.authorization_id),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
         .unwrap();
 
     assert_eq!(
-        receipt.terminal,
+        completed_ref(&receipt).terminal,
         ProviderDispatchRecoveryTerminal::Responded
     );
     assert_eq!(request_count.load(Ordering::SeqCst), 0);
@@ -770,13 +981,14 @@ async fn failed_attempt_new_owner_authorization_finalizes_without_provider_or_ne
             authorized_request(&seeded, authorization.authorization_id),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
         .unwrap();
 
     assert_eq!(
-        receipt.terminal,
+        completed_ref(&receipt).terminal,
         ProviderDispatchRecoveryTerminal::FailedSafe
     );
     assert_eq!(request_count.load(Ordering::SeqCst), 0);
@@ -808,6 +1020,7 @@ async fn authorization_is_rejected_when_attempt_evidence_changes_before_resume()
             authorized_request(&seeded, authorization.authorization_id),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
@@ -834,7 +1047,13 @@ async fn terminal_outcome_is_readable_by_new_owner_without_resume_authorization(
     let gateway = ProviderGateway::new().unwrap();
     let seeded = fixture.seed_requested(&providers, &provider, &gateway, "terminal-owner-a");
     let original = ProviderDispatchRecoveryService::new(&fixture.path)
-        .execute_requested(seeded.request.clone(), &providers, &gateway, &seeded.lease)
+        .execute_requested(
+            seeded.request.clone(),
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &seeded.lease,
+        )
         .await
         .unwrap();
     server.await.unwrap();
@@ -845,6 +1064,7 @@ async fn terminal_outcome_is_readable_by_new_owner_without_resume_authorization(
             seeded.request.clone(),
             &ProviderRegistry::default(),
             &ProviderGateway::new().unwrap(),
+            &fixture.cancellation_hub,
             &seeded.lease,
         )
         .await
@@ -866,6 +1086,7 @@ async fn terminal_outcome_is_readable_by_new_owner_without_resume_authorization(
 struct Fixture {
     _temp: TempDir,
     path: std::path::PathBuf,
+    cancellation_hub: RuntimeCancellationHub,
 }
 
 struct SeededRecovery {
@@ -919,7 +1140,11 @@ impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("runtime.db");
-        Self { _temp: temp, path }
+        Self {
+            _temp: temp,
+            path,
+            cancellation_hub: RuntimeCancellationHub::new(),
+        }
     }
 
     fn lease(&self, instance_id: &str) -> Arc<WorkspaceRuntimeLease> {
@@ -1844,6 +2069,16 @@ impl Fixture {
         .state()
     }
 
+    fn attempt_event_types(&self, seeded: &SeededRecovery) -> Vec<String> {
+        EventJournal::open(&self.path)
+            .unwrap()
+            .read_aggregate(&seeded.run_id, "provider_attempt", &seeded.attempt_id, 0)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.event_type)
+            .collect()
+    }
+
     fn assert_authorized_sent(
         &self,
         seeded: &SeededRecovery,
@@ -1950,6 +2185,15 @@ fn claim_request(run_id: &str, operation_id: &str) -> OperationalRecoveryClaimRe
         run_id: run_id.to_owned(),
         expected_operation_id: operation_id.to_owned(),
         lease_duration_seconds: 30,
+    }
+}
+
+fn completed_ref(result: &ProviderDispatchRecoveryResult) -> &ProviderDispatchRecoveryReceipt {
+    match result {
+        ProviderDispatchRecoveryResult::Completed(receipt) => receipt,
+        ProviderDispatchRecoveryResult::InterruptedBeforeSent(interrupted) => {
+            panic!("expected completed recovery, got interruption: {interrupted:?}")
+        }
     }
 }
 

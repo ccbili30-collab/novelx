@@ -20,8 +20,8 @@ use crate::{
     },
     event_journal::{EventJournal, EventJournalError},
     provider_attempt::{
-        ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState,
-        provider_attempt_definition_sha256, provider_attempt_evidence_sha256,
+        ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptError,
+        ProviderAttemptState, provider_attempt_definition_sha256, provider_attempt_evidence_sha256,
     },
     provider_effect_capability::{
         AgentLoopContinuationAuthorityBinding, AgentLoopRetryAuthorityBinding,
@@ -102,6 +102,22 @@ impl ProviderLiveEffectAuthorization {
 
     pub const fn expected_global_sequence(&self) -> u64 {
         self.expected_global_sequence
+    }
+
+    pub(crate) fn recovery_probe(
+        &self,
+    ) -> (
+        String,
+        String,
+        ProviderAttemptDefinition,
+        ProviderAttemptExecutionGuard,
+    ) {
+        (
+            self.execution.run_id.clone(),
+            self.execution.attempt_id.clone(),
+            self.attempt.definition().clone(),
+            self.execution_guard.clone(),
+        )
     }
 
     pub(crate) fn into_parts(

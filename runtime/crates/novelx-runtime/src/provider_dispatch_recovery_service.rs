@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
@@ -32,8 +31,14 @@ use crate::{
     provider_gateway::{ProviderGateway, ProviderRegistry},
     provider_inference_service::{
         ProviderAttemptExecutionGuard, ProviderInferenceService, ProviderInferenceServiceError,
+        ProviderRecoveryArmError, RecoveryAuthorizedArmOutcome,
     },
+    provider_pre_send_gate::{PreSendGateError, PreSendGateState},
     run_aggregate::RunAggregateError,
+    runtime_cancellation_hub::{
+        CancellationCause, RecoveryTaskIdentity, RecoveryTaskRegistration, RuntimeCancellationHub,
+        RuntimeCancellationHubError,
+    },
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
     workspace_runtime_lease::WorkspaceRuntimeLease,
 };
@@ -70,6 +75,22 @@ pub struct ProviderDispatchRecoveryReceipt {
     pub evidence_sha256: String,
     pub final_checkpoint_sha256: String,
     pub manifest_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderDispatchInterruptedBeforeSent {
+    pub cause: CancellationCause,
+    pub operation_id: String,
+    pub execution_id: String,
+    pub attempt_id: String,
+    pub transport_boundary_crossed: bool,
+    pub resumable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderDispatchRecoveryResult {
+    Completed(ProviderDispatchRecoveryReceipt),
+    InterruptedBeforeSent(ProviderDispatchInterruptedBeforeSent),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -120,6 +141,40 @@ pub struct ProviderDispatchRecoveryService {
     database_path: PathBuf,
 }
 
+struct PostSentRegistrationCleanup<'a> {
+    cancellation_hub: &'a RuntimeCancellationHub,
+    registration: Option<RecoveryTaskRegistration>,
+}
+
+impl<'a> PostSentRegistrationCleanup<'a> {
+    fn new(
+        cancellation_hub: &'a RuntimeCancellationHub,
+        registration: RecoveryTaskRegistration,
+    ) -> Self {
+        Self {
+            cancellation_hub,
+            registration: Some(registration),
+        }
+    }
+
+    fn unregister(mut self) -> Result<(), RuntimeCancellationHubError> {
+        let registration = self
+            .registration
+            .take()
+            .ok_or(RuntimeCancellationHubError::StateInvariant)?;
+        self.cancellation_hub.unregister(&registration)?;
+        Ok(())
+    }
+}
+
+impl Drop for PostSentRegistrationCleanup<'_> {
+    fn drop(&mut self) {
+        if let Some(registration) = self.registration.take() {
+            let _ = self.cancellation_hub.unregister(&registration);
+        }
+    }
+}
+
 impl ProviderDispatchRecoveryService {
     pub fn new(database_path: impl AsRef<Path>) -> Self {
         Self {
@@ -132,10 +187,18 @@ impl ProviderDispatchRecoveryService {
         request: ProviderDispatchRecoveryRequest,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
+        cancellation_hub: &RuntimeCancellationHub,
         exclusive_lease: &Arc<WorkspaceRuntimeLease>,
-    ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
-        self.execute(request, None, providers, gateway, exclusive_lease)
-            .await
+    ) -> Result<ProviderDispatchRecoveryResult, ProviderDispatchRecoveryError> {
+        self.execute(
+            request,
+            None,
+            providers,
+            gateway,
+            cancellation_hub,
+            exclusive_lease,
+        )
+        .await
     }
 
     pub async fn resume_authorized(
@@ -143,8 +206,9 @@ impl ProviderDispatchRecoveryService {
         request: ProviderDispatchAuthorizedResumeRequest,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
+        cancellation_hub: &RuntimeCancellationHub,
         exclusive_lease: &Arc<WorkspaceRuntimeLease>,
-    ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
+    ) -> Result<ProviderDispatchRecoveryResult, ProviderDispatchRecoveryError> {
         if request.authorization_id.trim().is_empty() {
             return Err(ProviderDispatchRecoveryError::ResumeAuthorizationMissing);
         }
@@ -153,6 +217,7 @@ impl ProviderDispatchRecoveryService {
             Some(request.authorization_id.as_str()),
             providers,
             gateway,
+            cancellation_hub,
             exclusive_lease,
         )
         .await
@@ -164,8 +229,9 @@ impl ProviderDispatchRecoveryService {
         resume_authorization_id: Option<&str>,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
+        cancellation_hub: &RuntimeCancellationHub,
         exclusive_lease: &Arc<WorkspaceRuntimeLease>,
-    ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
+    ) -> Result<ProviderDispatchRecoveryResult, ProviderDispatchRecoveryError> {
         if !exclusive_lease.protects_database(&self.database_path) {
             return Err(ProviderDispatchRecoveryError::WorkspaceLeaseMismatch);
         }
@@ -216,12 +282,14 @@ impl ProviderDispatchRecoveryService {
             };
         dispatch.verify_attempt(&request.run_id, &attempt_before)?;
         if operation.outcome.is_some() {
-            return self.finish_from_attempt(
-                request,
-                &dispatch,
-                resume_authorization_id,
-                exclusive_lease,
-            );
+            return Ok(ProviderDispatchRecoveryResult::Completed(
+                self.finish_from_attempt(
+                    request,
+                    &dispatch,
+                    resume_authorization_id,
+                    exclusive_lease,
+                )?,
+            ));
         }
         if operation.disposition.is_some() {
             return Err(ProviderDispatchRecoveryError::OperationNotExecutable);
@@ -235,12 +303,31 @@ impl ProviderDispatchRecoveryService {
         )?;
         if attempt_before.state() == ProviderAttemptState::Requested {
             let run_id = Uuid::parse_str(&request.run_id)?;
-            let authorization = ProviderRecoveryEffectAuthorizationService::new(
+            let task_identity = RecoveryTaskIdentity::new(
+                request.workspace_id.clone(),
+                request.run_id.clone(),
+                request.operation_id.clone(),
+                request.execution_id.clone(),
+                dispatch.attempt_id.clone(),
+            )?;
+            let registration = cancellation_hub.register(task_identity)?;
+            let authorizer = match ProviderRecoveryEffectAuthorizationService::new(
                 &self.database_path,
                 request.workspace_id.clone(),
                 recovery.subject.project_id.clone(),
-            )?
-            .authorize_recovery(
+            ) {
+                Ok(authorizer) => authorizer,
+                Err(error) => {
+                    if let Some(cause) = abandon_before_sent_cause(cancellation_hub, &registration)?
+                    {
+                        return Ok(ProviderDispatchRecoveryResult::InterruptedBeforeSent(
+                            interrupted_before_sent(&request, &dispatch, cause),
+                        ));
+                    }
+                    return Err(error.into());
+                }
+            };
+            let authorization = match authorizer.authorize_recovery(
                 ProviderRecoveryEffectAuthorizationRequest {
                     run_id,
                     operation_id: request.operation_id.clone(),
@@ -250,22 +337,80 @@ impl ProviderDispatchRecoveryService {
                 providers,
                 gateway,
                 Arc::clone(exclusive_lease),
-            )?;
+            ) {
+                Ok(authorization) => authorization,
+                Err(error) => {
+                    if let Some(cause) = abandon_before_sent_cause(cancellation_hub, &registration)?
+                    {
+                        return Ok(ProviderDispatchRecoveryResult::InterruptedBeforeSent(
+                            interrupted_before_sent(&request, &dispatch, cause),
+                        ));
+                    }
+                    return Err(error.into());
+                }
+            };
+            let reservation = match registration.reserve_sent() {
+                Ok(reservation) => reservation,
+                Err(RuntimeCancellationHubError::Gate(PreSendGateError::CancelledBeforeSent(
+                    cause,
+                ))) => {
+                    cancellation_hub.unregister(&registration)?;
+                    return Ok(ProviderDispatchRecoveryResult::InterruptedBeforeSent(
+                        interrupted_before_sent(&request, &dispatch, cause),
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
             let armed = {
                 let mut journal = EventJournal::open(&self.database_path)?;
                 ProviderInferenceService::new(&mut journal, providers, gateway)
-                    .arm_authorized_dispatch(authorization, &self.database_path, false)
+                    .arm_authorized_recovery_dispatch(
+                        authorization,
+                        &self.database_path,
+                        reservation,
+                    )
             };
             let armed = match armed {
-                Ok(armed) => armed,
+                Ok(RecoveryAuthorizedArmOutcome::Armed(armed)) => *armed,
+                Ok(RecoveryAuthorizedArmOutcome::PersistedSentOrTerminal(state)) => {
+                    debug_assert_ne!(state, ProviderAttemptState::Requested);
+                    let post_sent_cleanup =
+                        PostSentRegistrationCleanup::new(cancellation_hub, registration.clone());
+                    let receipt = self.finish_from_attempt(
+                        request,
+                        &dispatch,
+                        resume_authorization_id,
+                        exclusive_lease,
+                    );
+                    post_sent_cleanup.unregister()?;
+                    return Ok(ProviderDispatchRecoveryResult::Completed(receipt?));
+                }
+                Err(ProviderRecoveryArmError::VerifiedRequestedNotSent(error)) => {
+                    if let Some(cause) = abandon_before_sent_cause(cancellation_hub, &registration)?
+                    {
+                        return Ok(ProviderDispatchRecoveryResult::InterruptedBeforeSent(
+                            interrupted_before_sent(&request, &dispatch, cause),
+                        ));
+                    }
+                    return self.handle_dispatch_error(&request, &dispatch, *error);
+                }
                 Err(error) => {
-                    return self.handle_dispatch_error(&request, &dispatch, error);
+                    if registration.snapshot().is_ok_and(|snapshot| {
+                        matches!(
+                            snapshot.state(),
+                            PreSendGateState::CancelledBeforeSent
+                                | PreSendGateState::SentCommitted
+                                | PreSendGateState::DispatchBoundaryUnknown
+                        )
+                    }) {
+                        let _ = cancellation_hub.unregister(&registration);
+                    }
+                    return Err(error.into());
                 }
             };
-            // Startup recovery currently has no user-facing cancellation source. The receiver is
-            // still threaded through the Gateway so a real source can replace this local open
-            // channel without changing the authorized effect boundary.
-            let (_cancellation_sender, mut cancellation) = watch::channel(false);
+            let post_sent_cleanup =
+                PostSentRegistrationCleanup::new(cancellation_hub, registration.clone());
+            let mut cancellation = registration.http_cancellation_receiver();
             let dispatched = ProviderInferenceService::dispatch_authorized_attempt(
                 gateway,
                 armed,
@@ -300,8 +445,18 @@ impl ProviderDispatchRecoveryService {
                     }
                 }
             }
+            let receipt = self.finish_from_attempt(
+                request,
+                &dispatch,
+                resume_authorization_id,
+                exclusive_lease,
+            );
+            post_sent_cleanup.unregister()?;
+            return Ok(ProviderDispatchRecoveryResult::Completed(receipt?));
         }
-        self.finish_from_attempt(request, &dispatch, resume_authorization_id, exclusive_lease)
+        Ok(ProviderDispatchRecoveryResult::Completed(
+            self.finish_from_attempt(request, &dispatch, resume_authorization_id, exclusive_lease)?,
+        ))
     }
 
     fn handle_dispatch_error(
@@ -309,7 +464,7 @@ impl ProviderDispatchRecoveryService {
         request: &ProviderDispatchRecoveryRequest,
         dispatch: &DispatchEvidence,
         error: ProviderInferenceServiceError,
-    ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
+    ) -> Result<ProviderDispatchRecoveryResult, ProviderDispatchRecoveryError> {
         let journal = EventJournal::open(&self.database_path)?;
         let state =
             ProviderAttemptAggregate::recover(&journal, &request.run_id, &dispatch.attempt_id)?
@@ -629,6 +784,32 @@ fn outcome_matches_manifest(
     }
 }
 
+fn interrupted_before_sent(
+    request: &ProviderDispatchRecoveryRequest,
+    dispatch: &DispatchEvidence,
+    cause: CancellationCause,
+) -> ProviderDispatchInterruptedBeforeSent {
+    ProviderDispatchInterruptedBeforeSent {
+        cause,
+        operation_id: request.operation_id.clone(),
+        execution_id: request.execution_id.clone(),
+        attempt_id: dispatch.attempt_id.clone(),
+        transport_boundary_crossed: false,
+        resumable: !matches!(cause, CancellationCause::RunCancel),
+    }
+}
+
+fn abandon_before_sent_cause(
+    cancellation_hub: &RuntimeCancellationHub,
+    registration: &RecoveryTaskRegistration,
+) -> Result<Option<CancellationCause>, ProviderDispatchRecoveryError> {
+    let receipt = cancellation_hub.abandon_before_sent(registration)?;
+    if !receipt.was_registered() {
+        return Err(RuntimeCancellationHubError::StateInvariant.into());
+    }
+    Ok(receipt.cancellation_cause())
+}
+
 fn canonical_sha256(value: &serde_json::Value) -> Result<String, serde_json::Error> {
     fn canonicalize(value: serde_json::Value) -> serde_json::Value {
         match value {
@@ -712,6 +893,12 @@ pub enum ProviderDispatchRecoveryError {
     Run(#[from] RunAggregateError),
     #[error(transparent)]
     Provider(#[from] ProviderInferenceServiceError),
+    #[error(transparent)]
+    RecoveryArm(#[from] ProviderRecoveryArmError),
+    #[error(transparent)]
+    CancellationHub(#[from] RuntimeCancellationHubError),
+    #[error(transparent)]
+    PreSendGate(#[from] PreSendGateError),
     #[error(transparent)]
     Uuid(#[from] uuid::Error),
     #[error(transparent)]

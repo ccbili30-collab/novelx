@@ -5,6 +5,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::sync::watch;
+use uuid::Uuid;
 
 use crate::provider_pre_send_gate::{
     CancellationLinearization, PreSendGateError, PreSendGateSnapshot, PreSendGateState,
@@ -87,14 +88,21 @@ struct HubState {
     registrations: HashMap<RecoveryTaskIdentity, RegistrationEntry>,
     attempt_owners: HashMap<AttemptOwnerKey, RecoveryTaskIdentity>,
     execution_owners: HashMap<ExecutionOwnerKey, RecoveryTaskIdentity>,
-    global_cancellation: Option<CancellationCause>,
-    run_cancellations: HashMap<RunKey, CancellationCause>,
+    global_cancellation: Option<StickyCancellation>,
+    run_cancellations: HashMap<RunKey, StickyCancellation>,
+    next_signal_sequence: u64,
 }
 
 #[derive(Clone)]
 struct RegistrationEntry {
     gate: PreSendLinearizationGate,
-    registered: bool,
+    registration_id: Uuid,
+}
+
+#[derive(Clone, Copy)]
+struct StickyCancellation {
+    cause: CancellationCause,
+    sequence: u64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -133,12 +141,8 @@ impl RuntimeCancellationHub {
             .inner
             .lock()
             .map_err(|_| RuntimeCancellationHubError::StatePoisoned)?;
-        if let Some(existing) = state.registrations.get_mut(&identity) {
-            existing.registered = true;
-            return Ok(RecoveryTaskRegistration {
-                identity,
-                gate: existing.gate.clone(),
-            });
+        if state.registrations.contains_key(&identity) {
+            return Err(RuntimeCancellationHubError::RegistrationAlreadyActive);
         }
         let attempt_key = AttemptOwnerKey::from(&identity);
         let execution_key = ExecutionOwnerKey::from(&identity);
@@ -146,13 +150,16 @@ impl RuntimeCancellationHub {
         reject_identity_conflict(state.execution_owners.get(&execution_key), &identity)?;
 
         let run_key = RunKey::from(&identity);
-        let initial_cancellation = state
-            .global_cancellation
-            .or_else(|| state.run_cancellations.get(&run_key).copied());
+        let initial_cancellation = earliest_cancellation(
+            state.global_cancellation,
+            state.run_cancellations.get(&run_key).copied(),
+        )
+        .map(|signal| signal.cause);
         let gate = initial_cancellation.map_or_else(
             PreSendLinearizationGate::open,
             PreSendLinearizationGate::cancelled,
         );
+        let registration_id = Uuid::new_v4();
         state.attempt_owners.insert(attempt_key, identity.clone());
         state
             .execution_owners
@@ -161,48 +168,94 @@ impl RuntimeCancellationHub {
             identity.clone(),
             RegistrationEntry {
                 gate: gate.clone(),
-                registered: true,
+                registration_id,
             },
         );
-        Ok(RecoveryTaskRegistration { identity, gate })
+        Ok(RecoveryTaskRegistration {
+            identity,
+            gate,
+            registration_id,
+        })
     }
 
     pub fn unregister(
         &self,
-        identity: &RecoveryTaskIdentity,
+        registration: &RecoveryTaskRegistration,
     ) -> Result<UnregisterReceipt, RuntimeCancellationHubError> {
         let mut state = self
             .inner
             .lock()
             .map_err(|_| RuntimeCancellationHubError::StatePoisoned)?;
+        let identity = registration.identity();
         let attempt_key = AttemptOwnerKey::from(identity);
         let execution_key = ExecutionOwnerKey::from(identity);
-        if !state.registrations.contains_key(identity) {
+        let Some(entry) = state.registrations.get(identity) else {
             reject_identity_conflict(state.attempt_owners.get(&attempt_key), identity)?;
             reject_identity_conflict(state.execution_owners.get(&execution_key), identity)?;
             return Ok(UnregisterReceipt {
                 was_registered: false,
             });
-        }
-        let entry = state
-            .registrations
-            .get_mut(identity)
-            .ok_or(RuntimeCancellationHubError::StateInvariant)?;
-        if !entry.registered {
-            return Ok(UnregisterReceipt {
-                was_registered: false,
-            });
+        };
+        if entry.registration_id != registration.registration_id {
+            return Err(RuntimeCancellationHubError::StaleRegistration);
         }
         let phase = entry.gate.snapshot()?.state();
         if !matches!(
             phase,
-            PreSendGateState::CancelledBeforeSent | PreSendGateState::SentCommitted
+            PreSendGateState::CancelledBeforeSent
+                | PreSendGateState::SentCommitted
+                | PreSendGateState::DispatchBoundaryUnknown
         ) {
             return Err(RuntimeCancellationHubError::UnregisterBeforeTerminal(phase));
         }
-        entry.registered = false;
+        verify_owner(&state.attempt_owners, &attempt_key, identity)?;
+        verify_owner(&state.execution_owners, &execution_key, identity)?;
+        state.registrations.remove(identity);
+        state.attempt_owners.remove(&attempt_key);
+        state.execution_owners.remove(&execution_key);
         Ok(UnregisterReceipt {
             was_registered: true,
+        })
+    }
+
+    pub(crate) fn abandon_before_sent(
+        &self,
+        registration: &RecoveryTaskRegistration,
+    ) -> Result<AbandonBeforeSentReceipt, RuntimeCancellationHubError> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| RuntimeCancellationHubError::StatePoisoned)?;
+        let identity = registration.identity();
+        let attempt_key = AttemptOwnerKey::from(identity);
+        let execution_key = ExecutionOwnerKey::from(identity);
+        let Some(entry) = state.registrations.get(identity) else {
+            reject_identity_conflict(state.attempt_owners.get(&attempt_key), identity)?;
+            reject_identity_conflict(state.execution_owners.get(&execution_key), identity)?;
+            return Ok(AbandonBeforeSentReceipt {
+                was_registered: false,
+                cancellation_cause: None,
+            });
+        };
+        if entry.registration_id != registration.registration_id {
+            return Err(RuntimeCancellationHubError::StaleRegistration);
+        }
+        let snapshot = entry.gate.snapshot()?;
+        let phase = snapshot.state();
+        if !matches!(
+            phase,
+            PreSendGateState::Open | PreSendGateState::CancelledBeforeSent
+        ) {
+            return Err(RuntimeCancellationHubError::AbandonAfterSentBoundary(phase));
+        }
+        verify_owner(&state.attempt_owners, &attempt_key, identity)?;
+        verify_owner(&state.execution_owners, &execution_key, identity)?;
+        state.registrations.remove(identity);
+        state.attempt_owners.remove(&attempt_key);
+        state.execution_owners.remove(&execution_key);
+        Ok(AbandonBeforeSentReceipt {
+            was_registered: true,
+            cancellation_cause: snapshot.cancellation_cause(),
         })
     }
 
@@ -217,8 +270,15 @@ impl RuntimeCancellationHub {
             .inner
             .lock()
             .map_err(|_| RuntimeCancellationHubError::StatePoisoned)?;
-        let effective_cause = *state.global_cancellation.get_or_insert(cause);
-        signal_matching(state.registrations.iter(), effective_cause, |_| true)
+        let effective = match state.global_cancellation {
+            Some(signal) => signal,
+            None => {
+                let signal = next_sticky_signal(&mut state, cause)?;
+                state.global_cancellation = Some(signal);
+                signal
+            }
+        };
+        signal_matching(state.registrations.iter(), effective.cause, |_| true)
     }
 
     pub fn signal_run_cancel(
@@ -236,15 +296,17 @@ impl RuntimeCancellationHub {
             workspace_id: workspace_id.to_owned(),
             run_id: run_id.to_owned(),
         };
-        state
-            .run_cancellations
-            .entry(run_key)
-            .or_insert(CancellationCause::RunCancel);
-        signal_matching(
-            state.registrations.iter(),
-            CancellationCause::RunCancel,
-            |identity| identity.workspace_id == workspace_id && identity.run_id == run_id,
-        )
+        let effective = match state.run_cancellations.get(&run_key).copied() {
+            Some(signal) => signal,
+            None => {
+                let signal = next_sticky_signal(&mut state, CancellationCause::RunCancel)?;
+                state.run_cancellations.insert(run_key, signal);
+                signal
+            }
+        };
+        signal_matching(state.registrations.iter(), effective.cause, |identity| {
+            identity.workspace_id == workspace_id && identity.run_id == run_id
+        })
     }
 
     pub fn registered_count(&self) -> Result<usize, RuntimeCancellationHubError> {
@@ -253,9 +315,7 @@ impl RuntimeCancellationHub {
             .lock()
             .map_err(|_| RuntimeCancellationHubError::StatePoisoned)?
             .registrations
-            .values()
-            .filter(|entry| entry.registered)
-            .count())
+            .len())
     }
 }
 
@@ -269,6 +329,7 @@ impl Default for RuntimeCancellationHub {
 pub struct RecoveryTaskRegistration {
     identity: RecoveryTaskIdentity,
     gate: PreSendLinearizationGate,
+    registration_id: Uuid,
 }
 
 impl RecoveryTaskRegistration {
@@ -292,6 +353,22 @@ impl RecoveryTaskRegistration {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnregisterReceipt {
     was_registered: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AbandonBeforeSentReceipt {
+    was_registered: bool,
+    cancellation_cause: Option<CancellationCause>,
+}
+
+impl AbandonBeforeSentReceipt {
+    pub(crate) const fn was_registered(self) -> bool {
+        self.was_registered
+    }
+
+    pub(crate) const fn cancellation_cause(self) -> Option<CancellationCause> {
+        self.cancellation_cause
+    }
 }
 
 impl UnregisterReceipt {
@@ -332,7 +409,7 @@ fn signal_matching<'a>(
     matches: impl Fn(&RecoveryTaskIdentity) -> bool,
 ) -> Result<CancellationSignalReceipt, RuntimeCancellationHubError> {
     let mut receipt = CancellationSignalReceipt::default();
-    for (_, entry) in entries.filter(|(identity, entry)| entry.registered && matches(identity)) {
+    for (_, entry) in entries.filter(|(identity, _)| matches(identity)) {
         receipt.matching_tasks += 1;
         match entry.gate.cancel(cause)? {
             CancellationLinearization::CancelledBeforeSent => receipt.cancelled_before_sent += 1,
@@ -346,6 +423,47 @@ fn signal_matching<'a>(
         }
     }
     Ok(receipt)
+}
+
+fn earliest_cancellation(
+    global: Option<StickyCancellation>,
+    run: Option<StickyCancellation>,
+) -> Option<StickyCancellation> {
+    match (global, run) {
+        (Some(global), Some(run)) => Some(if global.sequence <= run.sequence {
+            global
+        } else {
+            run
+        }),
+        (Some(global), None) => Some(global),
+        (None, Some(run)) => Some(run),
+        (None, None) => None,
+    }
+}
+
+fn next_sticky_signal(
+    state: &mut HubState,
+    cause: CancellationCause,
+) -> Result<StickyCancellation, RuntimeCancellationHubError> {
+    state.next_signal_sequence = state
+        .next_signal_sequence
+        .checked_add(1)
+        .ok_or(RuntimeCancellationHubError::SignalSequenceExhausted)?;
+    Ok(StickyCancellation {
+        cause,
+        sequence: state.next_signal_sequence,
+    })
+}
+
+fn verify_owner<K: Eq + std::hash::Hash>(
+    owners: &HashMap<K, RecoveryTaskIdentity>,
+    key: &K,
+    identity: &RecoveryTaskIdentity,
+) -> Result<(), RuntimeCancellationHubError> {
+    if owners.get(key) != Some(identity) {
+        return Err(RuntimeCancellationHubError::StateInvariant);
+    }
+    Ok(())
 }
 
 fn reject_identity_conflict(
@@ -412,10 +530,113 @@ pub enum RuntimeCancellationHubError {
     IdentityConflict,
     #[error("Runtime cancellation Hub state invariant failed")]
     StateInvariant,
+    #[error("Recovery task registration handle is stale")]
+    StaleRegistration,
+    #[error("Recovery task registration is already active")]
+    RegistrationAlreadyActive,
+    #[error("Runtime cancellation Hub signal sequence is exhausted")]
+    SignalSequenceExhausted,
     #[error("Recovery task cannot unregister before a terminal pre-send gate state: {0:?}")]
     UnregisterBeforeTerminal(PreSendGateState),
+    #[error("Recovery task cannot be abandoned after entering the Sent boundary: {0:?}")]
+    AbandonAfterSentBoundary(PreSendGateState),
     #[error("global cancellation requires RuntimeShutdown or HostDisconnected")]
     GlobalCauseRequired,
     #[error(transparent)]
     Gate(#[from] PreSendGateError),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    use super::*;
+
+    #[test]
+    fn unreadable_dispatch_boundary_is_terminal_and_token_owned_cleanup_is_bounded() {
+        let hub = RuntimeCancellationHub::new();
+        let identity = RecoveryTaskIdentity::new(
+            "workspace-a",
+            "run-a",
+            "operation-a",
+            "execution-a",
+            "attempt-a",
+        )
+        .unwrap();
+        let registration = hub.register(identity.clone()).unwrap();
+        registration
+            .reserve_sent()
+            .unwrap()
+            .fail_closed_after_unreadable_evidence()
+            .unwrap();
+        assert_eq!(
+            registration.snapshot().unwrap().state(),
+            PreSendGateState::DispatchBoundaryUnknown
+        );
+        assert!(hub.unregister(&registration).unwrap().was_registered());
+        assert_eq!(hub.registered_count().unwrap(), 0);
+
+        let replacement = hub.register(identity).unwrap();
+        assert_eq!(
+            hub.unregister(&registration),
+            Err(RuntimeCancellationHubError::StaleRegistration)
+        );
+        assert_eq!(hub.registered_count().unwrap(), 1);
+        hub.signal_global(CancellationCause::RuntimeShutdown)
+            .unwrap();
+        hub.unregister(&replacement).unwrap();
+        assert_eq!(hub.registered_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn abandon_and_cancel_race_reports_the_winning_linearization() {
+        for iteration in 0..256 {
+            let hub = RuntimeCancellationHub::new();
+            let registration = hub
+                .register(
+                    RecoveryTaskIdentity::new(
+                        "workspace-a",
+                        format!("run-{iteration}"),
+                        format!("operation-{iteration}"),
+                        format!("execution-{iteration}"),
+                        format!("attempt-{iteration}"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let barrier = Arc::new(Barrier::new(3));
+
+            let abandon_hub = hub.clone();
+            let abandon_registration = registration.clone();
+            let abandon_barrier = Arc::clone(&barrier);
+            let abandon = thread::spawn(move || {
+                abandon_barrier.wait();
+                abandon_hub.abandon_before_sent(&abandon_registration)
+            });
+
+            let cancel_hub = hub.clone();
+            let cancel_barrier = Arc::clone(&barrier);
+            let cancel = thread::spawn(move || {
+                cancel_barrier.wait();
+                cancel_hub.signal_global(CancellationCause::RuntimeShutdown)
+            });
+
+            barrier.wait();
+            let abandoned = abandon.join().unwrap().unwrap();
+            let signalled = cancel.join().unwrap().unwrap();
+            assert!(abandoned.was_registered());
+            match abandoned.cancellation_cause() {
+                Some(CancellationCause::RuntimeShutdown) => {
+                    assert_eq!(signalled.matching_tasks(), 1);
+                    assert_eq!(signalled.cancelled_before_sent(), 1);
+                }
+                None => assert_eq!(signalled.matching_tasks(), 0),
+                Some(other) => panic!("unexpected cancellation cause: {other:?}"),
+            }
+            assert_eq!(hub.registered_count().unwrap(), 0);
+        }
+    }
 }

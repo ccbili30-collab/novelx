@@ -39,7 +39,7 @@ fn cancellation_before_reservation_proves_zero_sent_and_reservation_cannot_be_co
 }
 
 #[tokio::test]
-async fn sent_reservation_wins_but_later_cancellation_reaches_http_and_cannot_rewind_state() {
+async fn sent_reservation_holds_the_boundary_until_its_owner_resolves_it() {
     let hub = RuntimeCancellationHub::new();
     let registration = hub.register(identity("run-a", "attempt-a")).unwrap();
     let mut http_cancellation = registration.http_cancellation_receiver();
@@ -56,23 +56,20 @@ async fn sent_reservation_wins_but_later_cancellation_reaches_http_and_cannot_re
         registration.snapshot().unwrap().state(),
         PreSendGateState::SentReserved
     );
-    assert_eq!(
-        reservation.commit().unwrap().cancellation_cause(),
-        Some(CancellationCause::HostDisconnected)
-    );
+    drop(reservation);
     assert_eq!(
         registration.snapshot().unwrap().state(),
-        PreSendGateState::SentCommitted
+        PreSendGateState::CancelledBeforeSent
     );
     assert_eq!(
         hub.signal_global(CancellationCause::RuntimeShutdown)
             .unwrap()
-            .post_sent_signalled(),
+            .already_cancelled_before_sent(),
         1
     );
     assert_eq!(
         registration.snapshot().unwrap().state(),
-        PreSendGateState::SentCommitted
+        PreSendGateState::CancelledBeforeSent
     );
 }
 
@@ -149,16 +146,15 @@ fn run_cancel_is_sticky_only_for_the_exact_workspace_and_run() {
 }
 
 #[test]
-fn registration_and_unregistration_are_idempotent_but_identity_aliases_fail_closed() {
+fn registration_is_single_owner_and_identity_aliases_fail_closed() {
     let hub = RuntimeCancellationHub::new();
     let exact = identity("run-a", "attempt-a");
     let first = hub.register(exact.clone()).unwrap();
-    let replay = hub.register(exact.clone()).unwrap();
+    assert!(matches!(
+        hub.register(exact.clone()),
+        Err(RuntimeCancellationHubError::RegistrationAlreadyActive)
+    ));
     let reservation = first.reserve_sent().unwrap();
-    assert_eq!(
-        replay.snapshot().unwrap().state(),
-        PreSendGateState::SentReserved
-    );
     assert_eq!(hub.registered_count().unwrap(), 1);
 
     let conflicting_attempt_owner = RecoveryTaskIdentity::new(
@@ -187,19 +183,34 @@ fn registration_and_unregistration_are_idempotent_but_identity_aliases_fail_clos
     ));
 
     assert!(matches!(
-        hub.unregister(&exact),
+        hub.unregister(&first),
         Err(RuntimeCancellationHubError::UnregisterBeforeTerminal(
             PreSendGateState::SentReserved
         ))
     ));
-    reservation.commit().unwrap();
-    assert!(hub.unregister(&exact).unwrap().was_registered());
-    assert!(!hub.unregister(&exact).unwrap().was_registered());
+    drop(reservation);
+    hub.signal_global(CancellationCause::RuntimeShutdown)
+        .unwrap();
+    assert!(matches!(
+        hub.register(exact.clone()),
+        Err(RuntimeCancellationHubError::RegistrationAlreadyActive)
+    ));
+    assert_eq!(hub.registered_count().unwrap(), 1);
+    assert!(hub.unregister(&first).unwrap().was_registered());
+    assert!(!hub.unregister(&first).unwrap().was_registered());
     assert_eq!(hub.registered_count().unwrap(), 0);
+    let replacement = hub.register(exact).unwrap();
     assert_eq!(
-        hub.register(exact).unwrap().snapshot().unwrap().state(),
-        PreSendGateState::SentCommitted
+        replacement.snapshot().unwrap().state(),
+        PreSendGateState::CancelledBeforeSent
     );
+    assert_eq!(hub.registered_count().unwrap(), 1);
+    assert_eq!(
+        hub.unregister(&first),
+        Err(RuntimeCancellationHubError::StaleRegistration)
+    );
+    assert_eq!(hub.registered_count().unwrap(), 1);
+    assert!(hub.unregister(&replacement).unwrap().was_registered());
 }
 
 #[test]
@@ -236,10 +247,10 @@ fn cancel_vs_reserve_is_linearizable_under_real_thread_races() {
                     PreSendGateState::SentReserved
                 );
                 assert!(*registration.http_cancellation_receiver().borrow());
-                reservation.commit().unwrap();
+                drop(reservation);
                 assert_eq!(
                     registration.snapshot().unwrap().state(),
-                    PreSendGateState::SentCommitted
+                    PreSendGateState::CancelledBeforeSent
                 );
             }
             Err(RuntimeCancellationHubError::Gate(PreSendGateError::CancelledBeforeSent(
@@ -252,6 +263,104 @@ fn cancel_vs_reserve_is_linearizable_under_real_thread_races() {
             }
             Err(error) => panic!("unexpected reserve result: {error}"),
         }
+    }
+}
+
+#[test]
+fn terminal_unregister_deletes_registration_and_owner_indexes_without_tombstones() {
+    let hub = RuntimeCancellationHub::new();
+    for iteration in 0..1_024 {
+        let run_id = format!("run-{iteration}");
+        let attempt_id = format!("attempt-{iteration}");
+        let registration = hub.register(identity(&run_id, &attempt_id)).unwrap();
+        hub.signal_run_cancel("workspace-a", &run_id).unwrap();
+        assert!(hub.unregister(&registration).unwrap().was_registered());
+    }
+    assert_eq!(hub.registered_count().unwrap(), 0);
+
+    let original = identity("owner-reuse", "shared-attempt");
+    let registration = hub.register(original).unwrap();
+    hub.signal_run_cancel("workspace-a", "owner-reuse").unwrap();
+    hub.unregister(&registration).unwrap();
+    let replacement = RecoveryTaskIdentity::new(
+        "workspace-a",
+        "owner-reuse",
+        "replacement-operation",
+        "replacement-execution",
+        "shared-attempt",
+    )
+    .unwrap();
+    assert!(hub.register(replacement).is_ok());
+}
+
+#[test]
+fn late_registration_uses_the_earliest_sticky_signal_across_global_and_run_scopes() {
+    let run_first = RuntimeCancellationHub::new();
+    run_first.signal_run_cancel("workspace-a", "run-a").unwrap();
+    run_first
+        .signal_global(CancellationCause::HostDisconnected)
+        .unwrap();
+    assert_eq!(
+        run_first
+            .register(identity("run-a", "attempt-a"))
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .cancellation_cause(),
+        Some(CancellationCause::RunCancel)
+    );
+
+    let global_first = RuntimeCancellationHub::new();
+    global_first
+        .signal_global(CancellationCause::HostDisconnected)
+        .unwrap();
+    global_first
+        .signal_run_cancel("workspace-a", "run-a")
+        .unwrap();
+    global_first
+        .signal_global(CancellationCause::RuntimeShutdown)
+        .unwrap();
+    assert_eq!(
+        global_first
+            .register(identity("run-a", "attempt-a"))
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .cancellation_cause(),
+        Some(CancellationCause::HostDisconnected)
+    );
+}
+
+#[test]
+fn register_vs_signal_is_linearizable_and_late_handles_cannot_escape_sticky_cancellation() {
+    for iteration in 0..256 {
+        let hub = RuntimeCancellationHub::new();
+        let barrier = Arc::new(Barrier::new(3));
+        let register_hub = hub.clone();
+        let register_barrier = Arc::clone(&barrier);
+        let register = thread::spawn(move || {
+            register_barrier.wait();
+            register_hub.register(identity("run-race", &format!("attempt-{iteration}")))
+        });
+        let signal_hub = hub.clone();
+        let signal_barrier = Arc::clone(&barrier);
+        let signal = thread::spawn(move || {
+            signal_barrier.wait();
+            signal_hub.signal_global(CancellationCause::RuntimeShutdown)
+        });
+        barrier.wait();
+        let registration = register.join().unwrap().unwrap();
+        signal.join().unwrap().unwrap();
+        assert_eq!(
+            registration.snapshot().unwrap().state(),
+            PreSendGateState::CancelledBeforeSent
+        );
+        assert_eq!(
+            registration.snapshot().unwrap().cancellation_cause(),
+            Some(CancellationCause::RuntimeShutdown)
+        );
+        hub.unregister(&registration).unwrap();
+        assert_eq!(hub.registered_count().unwrap(), 0);
     }
 }
 

@@ -41,6 +41,7 @@ use novelx_runtime::{
         PreparedProviderAttempt, ProviderInferenceExecution, ProviderInferenceService,
     },
     run_aggregate::{EventMetadata, RunAggregate},
+    runtime_cancellation_hub::{CancellationCause, RuntimeCancellationHub},
     workspace_runtime_lease::WorkspaceRuntimeLease,
 };
 use sha2::{Digest, Sha256};
@@ -65,7 +66,14 @@ async fn requested_is_scanned_claimed_started_and_dispatched_over_real_http() {
     let lease = fixture.lease("runtime-owner-a");
 
     let report = ProviderDispatchRecoverySupervisor::new(&fixture.path)
-        .run_provider_dispatch_pass(WORKSPACE_ID, PROJECT_ID, &providers, &gateway, &lease)
+        .run_provider_dispatch_pass(
+            WORKSPACE_ID,
+            PROJECT_ID,
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &lease,
+        )
         .await
         .unwrap();
     server.await.unwrap();
@@ -92,6 +100,57 @@ async fn requested_is_scanned_claimed_started_and_dispatched_over_real_http() {
 }
 
 #[tokio::test]
+async fn sticky_shutdown_interrupts_a_late_requested_registration_before_sent_and_http() {
+    let fixture = Fixture::new();
+    let (base_url, requests, server) = spawn_server("must not be requested").await;
+    let (providers, provider) = bound_registry(base_url);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway);
+    let lease = fixture.lease("runtime-owner-a");
+    fixture
+        .cancellation_hub
+        .signal_global(CancellationCause::RuntimeShutdown)
+        .unwrap();
+
+    let report = ProviderDispatchRecoverySupervisor::new(&fixture.path)
+        .run_provider_dispatch_pass(
+            WORKSPACE_ID,
+            PROJECT_ID,
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &lease,
+        )
+        .await
+        .unwrap();
+
+    let run = only_run(&report.runs);
+    let ProviderDispatchRecoverySupervisorOutcome::InterruptedBeforeSent(interrupted) =
+        &run.outcome
+    else {
+        panic!("expected pre-Sent interruption, got {:?}", run.outcome);
+    };
+    assert_eq!(interrupted.cause, CancellationCause::RuntimeShutdown);
+    assert_eq!(interrupted.attempt_id, seeded.attempt_id);
+    assert!(!interrupted.transport_boundary_crossed);
+    assert!(interrupted.resumable);
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.attempt_state(&seeded),
+        ProviderAttemptState::Requested
+    );
+    assert_eq!(fixture.attempt_event_types(&seeded), ["provider.requested"]);
+    assert!(
+        fixture
+            .operation(&seeded.run_id, &run.operation_id)
+            .outcome
+            .is_none()
+    );
+    assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
+    server.abort();
+}
+
+#[tokio::test]
 async fn old_owner_requested_execution_is_authorized_and_dispatched_by_new_runtime() {
     let fixture = Fixture::new();
     let (base_url, requests, server) = spawn_server("跨进程 Requested 恢复").await;
@@ -103,7 +162,14 @@ async fn old_owner_requested_execution_is_authorized_and_dispatched_by_new_runti
     let new_lease = fixture.lease("runtime-owner-b");
 
     let report = ProviderDispatchRecoverySupervisor::new(&fixture.path)
-        .run_provider_dispatch_pass(WORKSPACE_ID, PROJECT_ID, &providers, &gateway, &new_lease)
+        .run_provider_dispatch_pass(
+            WORKSPACE_ID,
+            PROJECT_ID,
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &new_lease,
+        )
         .await
         .unwrap();
     server.await.unwrap();
@@ -161,6 +227,7 @@ async fn direct_split_dispatch_fences_the_supervisor_until_the_direct_response_i
                 PROJECT_ID,
                 &providers,
                 &gateway,
+                &fixture.cancellation_hub,
                 &started.lease,
             )
             .await
@@ -210,6 +277,7 @@ async fn direct_split_dispatch_fences_the_supervisor_until_the_direct_response_i
             PROJECT_ID,
             &providers,
             &gateway,
+            &fixture.cancellation_hub,
             &started.lease,
         )
         .await
@@ -248,7 +316,14 @@ async fn old_owner_sent_execution_is_closed_unknown_without_network() {
     let new_lease = fixture.lease("runtime-owner-b");
 
     let report = ProviderDispatchRecoverySupervisor::new(&fixture.path)
-        .run_provider_dispatch_pass(WORKSPACE_ID, PROJECT_ID, &providers, &gateway, &new_lease)
+        .run_provider_dispatch_pass(
+            WORKSPACE_ID,
+            PROJECT_ID,
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &new_lease,
+        )
         .await
         .unwrap();
 
@@ -288,6 +363,7 @@ async fn requested_started_execution_waits_when_exact_provider_binding_is_missin
             PROJECT_ID,
             &ProviderRegistry::default(),
             &gateway,
+            &fixture.cancellation_hub,
             &new_lease,
         )
         .await
@@ -327,6 +403,7 @@ async fn unstarted_requested_claim_is_not_marked_stale_while_provider_is_unbound
             PROJECT_ID,
             &ProviderRegistry::default(),
             &gateway,
+            &fixture.cancellation_hub,
             &lease,
         )
         .await
@@ -360,7 +437,14 @@ async fn active_unstarted_local_projection_is_left_for_the_local_supervisor() {
     let operation_id = fixture.claim_local_projection(&seeded, &lease);
 
     let report = ProviderDispatchRecoverySupervisor::new(&fixture.path)
-        .run_provider_dispatch_pass(WORKSPACE_ID, PROJECT_ID, &providers, &gateway, &lease)
+        .run_provider_dispatch_pass(
+            WORKSPACE_ID,
+            PROJECT_ID,
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &lease,
+        )
         .await
         .unwrap();
 
@@ -380,6 +464,7 @@ async fn active_unstarted_local_projection_is_left_for_the_local_supervisor() {
 struct Fixture {
     _temp: TempDir,
     path: std::path::PathBuf,
+    cancellation_hub: RuntimeCancellationHub,
 }
 
 struct SeededRun {
@@ -397,7 +482,11 @@ impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("runtime.db");
-        Self { _temp: temp, path }
+        Self {
+            _temp: temp,
+            path,
+            cancellation_hub: RuntimeCancellationHub::new(),
+        }
     }
 
     fn lease(&self, owner: &str) -> Arc<WorkspaceRuntimeLease> {

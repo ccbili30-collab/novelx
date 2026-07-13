@@ -27,6 +27,7 @@ use crate::provider_gateway::{
     ProviderGatewayError, ProviderInferenceOutcome, ProviderInferenceReceipt,
     ProviderInferenceRequest, ProviderRegistry,
 };
+use crate::provider_pre_send_gate::{PreSendGateError, SentReservation};
 use crate::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use crate::run_state::RunState;
 
@@ -90,6 +91,73 @@ pub(crate) struct AuthorizedDispatchedProviderAttempt {
     result: Result<ProviderInferenceOutcome, ProviderGatewayError>,
     dispatched_effect: DispatchedProviderEffect,
     execution_guard: ProviderAttemptExecutionGuard,
+}
+
+pub(crate) enum RecoveryAuthorizedArmOutcome {
+    Armed(Box<AuthorizedProviderAttemptDispatch>),
+    PersistedSentOrTerminal(ProviderAttemptState),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryArmEvidenceClassification {
+    VerifiedRequestedNotSent,
+    PersistedSentOrTerminal(ProviderAttemptState),
+    EvidenceChanged,
+    EvidenceUnreadable,
+}
+
+#[derive(Clone, Copy)]
+enum RecoveryArmEvidenceProbe {
+    Readable {
+        definition_matches: bool,
+        state: ProviderAttemptState,
+    },
+    Unreadable,
+}
+
+fn classify_recovery_arm_evidence(
+    probe: RecoveryArmEvidenceProbe,
+) -> RecoveryArmEvidenceClassification {
+    match probe {
+        RecoveryArmEvidenceProbe::Unreadable => {
+            RecoveryArmEvidenceClassification::EvidenceUnreadable
+        }
+        RecoveryArmEvidenceProbe::Readable {
+            definition_matches: false,
+            ..
+        } => RecoveryArmEvidenceClassification::EvidenceChanged,
+        RecoveryArmEvidenceProbe::Readable {
+            definition_matches: true,
+            state: ProviderAttemptState::Requested,
+        } => RecoveryArmEvidenceClassification::VerifiedRequestedNotSent,
+        RecoveryArmEvidenceProbe::Readable {
+            definition_matches: true,
+            state,
+        } => RecoveryArmEvidenceClassification::PersistedSentOrTerminal(state),
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ProviderRecoveryArmError {
+    #[error("Provider recovery arm failed before the durable Sent boundary: {0}")]
+    VerifiedRequestedNotSent(Box<ProviderInferenceServiceError>),
+    #[error(
+        "Provider recovery arm failed and the authoritative Provider Attempt evidence is unreadable"
+    )]
+    EvidenceUnreadable {
+        arm_error: Box<ProviderInferenceServiceError>,
+        evidence_error: Box<ProviderAttemptError>,
+    },
+    #[error("Provider recovery arm lost its exact Attempt execution guard")]
+    GuardMismatch {
+        arm_error: Box<ProviderInferenceServiceError>,
+    },
+    #[error("Provider recovery arm evidence changed while the exact execution guard was held")]
+    EvidenceChanged {
+        arm_error: Box<ProviderInferenceServiceError>,
+    },
+    #[error(transparent)]
+    Gate(#[from] PreSendGateError),
 }
 
 #[derive(Clone)]
@@ -250,6 +318,75 @@ impl<'a> ProviderInferenceService<'a> {
             armed_effect,
             execution_guard,
         })
+    }
+
+    /// Arms the durable recovery dispatch and commits its process-local pre-send reservation as
+    /// one capability-scoped operation. Callers cannot commit a reservation without first
+    /// persisting the matching authorized `provider.sent` event.
+    pub(crate) fn arm_authorized_recovery_dispatch(
+        &mut self,
+        authorization: ProviderLiveEffectAuthorization,
+        lease_database_path: impl AsRef<std::path::Path>,
+        reservation: SentReservation,
+    ) -> Result<RecoveryAuthorizedArmOutcome, ProviderRecoveryArmError> {
+        let (run_id, attempt_id, expected_definition, recovery_guard) =
+            authorization.recovery_probe();
+        match self.arm_authorized_dispatch(authorization, lease_database_path, false) {
+            Ok(armed) => {
+                reservation.commit()?;
+                Ok(RecoveryAuthorizedArmOutcome::Armed(Box::new(armed)))
+            }
+            Err(error) => {
+                if !recovery_guard.protects(self.journal, &run_id, &attempt_id) {
+                    reservation.fail_closed_after_unreadable_evidence()?;
+                    return Err(ProviderRecoveryArmError::GuardMismatch {
+                        arm_error: Box::new(error),
+                    });
+                }
+                let recovered =
+                    ProviderAttemptAggregate::recover(self.journal, &run_id, &attempt_id);
+                let classification = match recovered.as_ref() {
+                    Ok(attempt) => {
+                        classify_recovery_arm_evidence(RecoveryArmEvidenceProbe::Readable {
+                            definition_matches: attempt.definition() == &expected_definition,
+                            state: attempt.state(),
+                        })
+                    }
+                    Err(_) => classify_recovery_arm_evidence(RecoveryArmEvidenceProbe::Unreadable),
+                };
+                match classification {
+                    RecoveryArmEvidenceClassification::EvidenceChanged => {
+                        reservation.fail_closed_after_unreadable_evidence()?;
+                        Err(ProviderRecoveryArmError::EvidenceChanged {
+                            arm_error: Box::new(error),
+                        })
+                    }
+                    RecoveryArmEvidenceClassification::VerifiedRequestedNotSent => {
+                        reservation.release_after_arm_failure()?;
+                        Err(ProviderRecoveryArmError::VerifiedRequestedNotSent(
+                            Box::new(error),
+                        ))
+                    }
+                    RecoveryArmEvidenceClassification::PersistedSentOrTerminal(state) => {
+                        reservation.commit()?;
+                        Ok(RecoveryAuthorizedArmOutcome::PersistedSentOrTerminal(state))
+                    }
+                    RecoveryArmEvidenceClassification::EvidenceUnreadable => {
+                        let evidence_error = match recovered {
+                            Err(error) => error,
+                            Ok(_) => unreachable!(
+                                "unreadable classification requires an authoritative recovery error"
+                            ),
+                        };
+                        reservation.fail_closed_after_unreadable_evidence()?;
+                        Err(ProviderRecoveryArmError::EvidenceUnreadable {
+                            arm_error: Box::new(error),
+                            evidence_error: Box::new(evidence_error),
+                        })
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) async fn dispatch_authorized_attempt(
@@ -737,6 +874,59 @@ impl<'a> ProviderInferenceService<'a> {
             execution_guard: _execution_guard,
         } = dispatched;
         finalize_attempt_parts(journal, execution, attempt, result)
+    }
+}
+
+#[cfg(test)]
+mod recovery_arm_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn requested_is_the_only_readable_state_that_may_release_the_sent_reservation() {
+        assert_eq!(
+            classify_recovery_arm_evidence(RecoveryArmEvidenceProbe::Readable {
+                definition_matches: true,
+                state: ProviderAttemptState::Requested,
+            }),
+            RecoveryArmEvidenceClassification::VerifiedRequestedNotSent
+        );
+        for state in [
+            ProviderAttemptState::Sent,
+            ProviderAttemptState::Responded,
+            ProviderAttemptState::Failed,
+            ProviderAttemptState::OutcomeUnknown,
+        ] {
+            assert_eq!(
+                classify_recovery_arm_evidence(RecoveryArmEvidenceProbe::Readable {
+                    definition_matches: true,
+                    state,
+                }),
+                RecoveryArmEvidenceClassification::PersistedSentOrTerminal(state)
+            );
+        }
+    }
+
+    #[test]
+    fn changed_or_unreadable_evidence_is_always_fail_closed() {
+        for state in [
+            ProviderAttemptState::Requested,
+            ProviderAttemptState::Sent,
+            ProviderAttemptState::Responded,
+            ProviderAttemptState::Failed,
+            ProviderAttemptState::OutcomeUnknown,
+        ] {
+            assert_eq!(
+                classify_recovery_arm_evidence(RecoveryArmEvidenceProbe::Readable {
+                    definition_matches: false,
+                    state,
+                }),
+                RecoveryArmEvidenceClassification::EvidenceChanged
+            );
+        }
+        assert_eq!(
+            classify_recovery_arm_evidence(RecoveryArmEvidenceProbe::Unreadable),
+            RecoveryArmEvidenceClassification::EvidenceUnreadable
+        );
     }
 }
 
