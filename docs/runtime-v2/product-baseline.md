@@ -3,6 +3,9 @@
 Status: product contract, not an implementation-complete claim  
 Scope: NovelX Desktop only; Android synchronization and marketplace distribution are outside this baseline
 
+Long-term product source of truth: `docs/product/novelx-desktop-product-requirements.md`
+Long-term architecture source of truth: `docs/architecture/novelx-desktop-long-term-architecture.md`
+
 ## 1. Product position
 
 Runtime V2 is the governed Agent kernel of NovelX Desktop. NovelX is a creation workbench for novels, worlds, original characters, story projects, imported sources and playable story branches. The Steward（大管家）is the user's primary Agent. It can discuss, inspect, plan, delegate, create candidate changes and coordinate specialist Agents, while the Harness（运行框架）enforces source access, permissions, versioning, review and audit.
