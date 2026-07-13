@@ -1,6 +1,7 @@
-use std::{fs::File, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use novelx_protocol::ProviderRunIdentity;
+use novelx_runtime::event_journal::EventJournal;
 use tempfile::TempDir;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
@@ -20,7 +21,9 @@ use provider_effect_capability::{
     ProviderEffectGrantMaterial, ProviderEffectGrantReceipt, ProviderEffectRetryScheduleBinding,
     canonical_database_path_sha256,
 };
-use workspace_runtime_lease::{WorkspaceRuntimeLease, WorkspaceRuntimeLeaseError};
+use workspace_runtime_lease::{
+    BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease, WorkspaceRuntimeLeaseError,
+};
 
 macro_rules! assert_not_impl {
     ($type:ty, $trait:path) => {
@@ -151,8 +154,13 @@ fn issued_at_must_equal_the_persisted_authority_time() {
 fn lease_epoch_is_non_reusable_and_capability_arc_keeps_the_os_lock_alive() {
     let directory = TempDir::new().unwrap();
     let database = directory.path().join("workspace.db");
-    File::create(&database).unwrap();
-    let first = Arc::new(WorkspaceRuntimeLease::acquire(&database, "same-label").unwrap());
+    EventJournal::open(&database).unwrap();
+    let first = Arc::new(
+        WorkspaceRuntimeLease::acquire(&database, "same-label")
+            .unwrap()
+            .bind_database(&database)
+            .unwrap(),
+    );
     let material = initial_material(&database, &first);
     let receipt = ProviderEffectGrantReceipt::derive(material.clone()).unwrap();
     let capability = ProviderEffectCapability::activate(
@@ -170,7 +178,12 @@ fn lease_epoch_is_non_reusable_and_capability_arc_keeps_the_os_lock_alive() {
     ));
 
     drop(capability);
-    let replacement = Arc::new(WorkspaceRuntimeLease::acquire(&database, "same-label").unwrap());
+    let replacement = Arc::new(
+        WorkspaceRuntimeLease::acquire(&database, "same-label")
+            .unwrap()
+            .bind_database(&database)
+            .unwrap(),
+    );
     assert_ne!(replacement.lease_epoch(), material.lease_epoch);
     assert!(matches!(
         ProviderEffectCapability::activate(receipt, &material, &database, Arc::clone(&replacement),),
@@ -182,8 +195,13 @@ fn lease_epoch_is_non_reusable_and_capability_arc_keeps_the_os_lock_alive() {
 fn lease_stays_live_across_consumed_armed_and_dispatched_lifecycle() {
     let directory = TempDir::new().unwrap();
     let database = directory.path().join("workspace.db");
-    File::create(&database).unwrap();
-    let lease = Arc::new(WorkspaceRuntimeLease::acquire(&database, "lifecycle").unwrap());
+    EventJournal::open(&database).unwrap();
+    let lease = Arc::new(
+        WorkspaceRuntimeLease::acquire(&database, "lifecycle")
+            .unwrap()
+            .bind_database(&database)
+            .unwrap(),
+    );
     let material = initial_material(&database, &lease);
     let receipt = ProviderEffectGrantReceipt::derive(material.clone()).unwrap();
     let capability = ProviderEffectCapability::activate(
@@ -357,15 +375,20 @@ fn initial_continuation_and_retry_authorities_are_mutually_exclusive_and_stable(
 struct Fixture {
     _directory: TempDir,
     database: std::path::PathBuf,
-    lease: Arc<WorkspaceRuntimeLease>,
+    lease: Arc<BoundWorkspaceRuntimeLease>,
 }
 
 impl Fixture {
     fn new(label: &str) -> Self {
         let directory = TempDir::new().unwrap();
         let database = directory.path().join("workspace.db");
-        File::create(&database).unwrap();
-        let lease = Arc::new(WorkspaceRuntimeLease::acquire(&database, label).unwrap());
+        EventJournal::open(&database).unwrap();
+        let lease = Arc::new(
+            WorkspaceRuntimeLease::acquire(&database, label)
+                .unwrap()
+                .bind_database(&database)
+                .unwrap(),
+        );
         Self {
             _directory: directory,
             database,
@@ -468,7 +491,10 @@ impl Fixture {
     }
 }
 
-fn initial_material(database: &Path, lease: &WorkspaceRuntimeLease) -> ProviderEffectGrantMaterial {
+fn initial_material(
+    database: &Path,
+    lease: &BoundWorkspaceRuntimeLease,
+) -> ProviderEffectGrantMaterial {
     let now = OffsetDateTime::now_utc();
     ProviderEffectGrantMaterial {
         schema_version: ProviderEffectGrantMaterial::schema_version(),

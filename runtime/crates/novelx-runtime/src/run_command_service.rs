@@ -10,6 +10,7 @@ use crate::provider_gateway::{ProviderGatewayError, ProviderRegistry};
 use crate::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use crate::run_pin_validator::{RunPinValidationError, RunPinValidator};
 use crate::run_state::RunState;
+use crate::workspace_runtime_lease::BoundWorkspaceRuntimeLease;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceBinding {
@@ -148,6 +149,7 @@ impl<'a> RunCommandService<'a> {
         run_id: Uuid,
         command_message_id: Uuid,
         cancel: RunCancel,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<RunSnapshot, RunCommandFailure> {
         let journal = self.journal.as_mut().ok_or_else(|| {
             failure(
@@ -177,6 +179,7 @@ impl<'a> RunCommandService<'a> {
         let message_id = command_message_id.to_string();
         run.cancel(
             journal,
+            exclusive_lease,
             EventMetadata {
                 message_id: &message_id,
                 idempotency_key: &cancel.cancel_idempotency_key,
@@ -424,6 +427,9 @@ fn aggregate_failure(stage: &str, error: RunAggregateError) -> RunCommandFailure
         ),
         RunAggregateError::Journal(EventJournalError::MessageIdConflict { .. }) => {
             ("MESSAGE_ID_CONFLICT", RuntimeErrorClass::Protocol)
+        }
+        RunAggregateError::WorkspaceLease(error) => {
+            (error.protocol_code(), RuntimeErrorClass::Storage)
         }
         RunAggregateError::UnknownEvent(_)
         | RunAggregateError::UnknownEventVersion { .. }

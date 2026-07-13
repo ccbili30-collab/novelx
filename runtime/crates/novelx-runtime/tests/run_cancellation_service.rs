@@ -478,6 +478,7 @@ fn legacy_cancellation_is_a_typed_fail_closed_blocker() {
     let mut journal = EventJournal::open(&fixture.database).unwrap();
     run.request_cancellation_reconciliation(
         &mut journal,
+        fixture.lease.as_ref(),
         &["attempt-legacy".to_owned()],
         "legacy unknown result",
         metadata("legacy-request", "2026-07-13T13:00:00Z"),
@@ -1195,6 +1196,7 @@ impl Fixture {
             RunState::Cancelled => run
                 .cancel(
                     &mut journal,
+                    self.lease.as_ref(),
                     metadata(&format!("{run_id}-cancelled"), "2026-07-13T09:00:03Z"),
                 )
                 .unwrap(),

@@ -4,6 +4,7 @@ use novelx_protocol::RevisionReference;
 use novelx_runtime::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent};
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use novelx_runtime::run_state::{RunState, TransitionError};
+use novelx_runtime::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease};
 use serde_json::json;
 use support::pinned_identity;
 use tempfile::TempDir;
@@ -320,8 +321,12 @@ fn illegal_or_second_terminal_transition_writes_nothing() {
     assert_eq!(run.last_sequence(), 1);
     assert_eq!(journal.read_run("run-1", 0).unwrap().len(), 1);
 
-    run.cancel(&mut journal, metadata("message-3", Some("user request")))
-        .unwrap();
+    run.cancel(
+        &mut journal,
+        &fixture.lease,
+        metadata("message-3", Some("user request")),
+    )
+    .unwrap();
     assert!(matches!(
         run.fail(&mut journal, metadata("message-4", None)),
         Err(RunAggregateError::Transition(
@@ -468,15 +473,22 @@ fn transition_payload(previous: &str, current: &str) -> serde_json::Value {
 struct Fixture {
     _temp: TempDir,
     database_path: std::path::PathBuf,
+    lease: BoundWorkspaceRuntimeLease,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("runtime.db");
+        EventJournal::open(&database_path).unwrap();
+        let lease = WorkspaceRuntimeLease::acquire(&database_path, "run-recovery")
+            .unwrap()
+            .bind_database(&database_path)
+            .unwrap();
         Self {
             _temp: temp,
             database_path,
+            lease,
         }
     }
 

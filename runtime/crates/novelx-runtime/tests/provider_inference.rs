@@ -1,12 +1,19 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
 use std::time::Duration;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
+mod support;
 
 use novelx_protocol::{
-    ContextBudgetAllocation, ContextBudgetCategory, ContextCompilationReceipt, ContextDisclosure,
-    ContextRepresentation, ProviderRunIdentity, TokenizerIdentity, TokenizerKind,
+    ContextBudgetAllocation, ContextBudgetCategory, ContextCompilationReceipt, ContextCompile,
+    ContextDisclosure, ContextItem, ContextMessageRole, ContextRepresentation,
+    ProviderInferenceCompleted, ProviderRunIdentity, RunPermissionMode, TokenizerIdentity,
+    TokenizerKind, ToolPermissionPolicy, ToolSourceScope,
 };
 use novelx_runtime::provider_gateway::{
     PreparedProviderHttpDispatch, ProviderApiFlavor, ProviderAuthScheme, ProviderConfig,
@@ -15,7 +22,24 @@ use novelx_runtime::provider_gateway::{
     ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
 };
 use novelx_runtime::provider_retry_after::ProviderRetryAfterKind;
-use sha2::Digest;
+use novelx_runtime::{
+    agent_loop_journal::{AgentLoopEventMetadata, AgentLoopJournalRepository},
+    agent_loop_service::{
+        AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, InferenceDispatchIdentity,
+    },
+    context_compile_service::ContextCompileService,
+    event_journal::EventJournal,
+    live_agent_loop_runner::{
+        LiveAgentLoopError, LiveAgentLoopOutcome, LiveAgentLoopProgress, LiveAgentLoopRunner,
+    },
+    project_path::ProjectRoot,
+    provider_effect_authorization_service::ProviderEffectAuthorizationError,
+    provider_inference_service::{ProviderInferenceExecution, ProviderInferenceServiceError},
+    run_aggregate::{EventMetadata, RunAggregate},
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
+};
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
@@ -48,33 +72,27 @@ async fn posts_a_real_loopback_request_bound_to_the_compiled_context_receipt() {
     let (base_url, requests, server) =
         spawn_http_server(vec![ServerReply::Immediate(response)]).await;
     let (registry, identity) = bound_registry(base_url, 2_000);
-    let gateway = ProviderGateway::new().unwrap();
+    let fixture = LiveProviderFixture::new(&registry, identity.clone());
+    let receipt = fixture.receipt.clone();
+    let outcome = completed(fixture.run(registry).await.result.unwrap());
 
-    let outcome = gateway
-        .infer(
-            registry.resolve(&identity).unwrap(),
-            inference_request(compilation_receipt()),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(outcome.text.as_deref(), Some("银湾仍在潮声中。"));
+    assert_eq!(outcome.output.as_ref().unwrap().text, "银湾仍在潮声中。");
     assert_eq!(
-        outcome.receipt.context_compilation_id,
-        compilation_receipt().compilation_id
+        outcome.identity.context_compilation_id,
+        receipt.compilation_id
     );
-    assert_eq!(outcome.receipt.canonical_context_sha256, "1".repeat(64));
-    assert_eq!(outcome.receipt.requested_model_id, "deepseek-chat");
-    assert_eq!(outcome.receipt.actual_model_id, "deepseek-chat");
-    assert_eq!(outcome.receipt.finish_reason, "stop");
-    assert_eq!(outcome.receipt.usage.input_tokens, 321);
-    assert_eq!(outcome.receipt.usage.output_tokens, 45);
-    assert_eq!(outcome.receipt.usage.total_tokens, 366);
-    assert_eq!(outcome.receipt.provider_request_count, 1);
-    assert_eq!(outcome.receipt.response_id_sha256.len(), 64);
+    assert_eq!(fixture.execution.provider.model_id, "deepseek-chat");
+    assert_eq!(outcome.model_id, "deepseek-chat");
+    assert_eq!(outcome.stop_reason, "stop");
+    assert_eq!(outcome.usage.input_tokens, 321);
+    assert_eq!(outcome.usage.output_tokens, 45);
+    assert_eq!(outcome.usage.total_tokens, 366);
+    assert_eq!(outcome.response_id_sha256.len(), 64);
 
     server.await.unwrap();
-    let captured = requests.lock().unwrap().join("\n");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let captured = requests.join("\n");
     assert!(captured.starts_with("POST /v1/chat/completions HTTP/1.1"));
     assert!(captured.contains("authorization: Bearer provider-inference-sensitive-key"));
     assert!(captured.contains("\"model\":\"deepseek-chat\""));
@@ -125,16 +143,17 @@ async fn prebuilt_send_kernel_executes_exactly_one_request_and_parses_response()
     )])
     .await;
     let (registry, identity) = bound_registry(base_url, 2_000);
+    let fixture = LiveProviderFixture::new(&registry, identity.clone());
     let provider = registry.resolve(&identity).unwrap();
     let gateway = ProviderGateway::new().unwrap();
     let prepared = gateway
-        .prepare_inference(provider, inference_request(compilation_receipt()))
+        .prepare_inference(provider, fixture.execution.request.clone())
         .unwrap();
     let expected_payload_sha256 = prepared.transport_payload_sha256().to_owned();
 
-    let outcome = gateway.infer_prepared(provider, prepared).await.unwrap();
+    let outcome = completed(fixture.run(registry).await.result.unwrap());
 
-    assert_eq!(outcome.text.as_deref(), Some("完成"));
+    assert_eq!(outcome.output.as_ref().unwrap().text, "完成");
     server.await.unwrap();
     let captured = requests.lock().unwrap();
     assert_eq!(captured.len(), 1);
@@ -183,77 +202,31 @@ fn invalid_base_url_and_sensitive_header_fail_before_http_dispatch_exists() {
 
 #[tokio::test]
 async fn sends_strict_openai_compatible_tool_continuation_messages() {
-    let response = json_response(
+    let tool_response = json_response(
+        200,
+        r#"{"id":"response-tools","model":"deepseek-chat","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_project_file","arguments":"{\"path\":\"设定/海岸线.md\",\"offsetChars\":0,\"maxChars\":4000}"}},{"id":"call-2","type":"function","function":{"name":"stat_project_file","arguments":"{\"path\":\"设定/海岸线.md\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+    );
+    let completion_response = json_response(
         200,
         r#"{"id":"response-2","model":"deepseek-chat","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"已读取。"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#,
     );
-    let (base_url, requests, server) =
-        spawn_http_server(vec![ServerReply::Immediate(response)]).await;
+    let (base_url, requests, server) = spawn_http_server(vec![
+        ServerReply::Immediate(tool_response),
+        ServerReply::Immediate(completion_response),
+    ])
+    .await;
     let (registry, identity) = bound_registry(base_url, 2_000);
-    let mut request = inference_request(compilation_receipt());
-    request.messages.extend([
-        ProviderInferenceMessage {
-            role: ProviderInferenceRole::Assistant,
-            content: String::new(),
-            tool_calls: vec![
-                ProviderInferenceToolCall {
-                    id: "call-1".to_owned(),
-                    call_type: "function".to_owned(),
-                    function: ProviderInferenceFunctionCall {
-                        name: "read_project_file".to_owned(),
-                        arguments: serde_json::to_string(&serde_json::json!({
-                            "path": "设定/海岸线.md",
-                            "offsetChars": 0,
-                            "maxChars": 4000
-                        }))
-                        .unwrap(),
-                    },
-                },
-                ProviderInferenceToolCall {
-                    id: "call-2".to_owned(),
-                    call_type: "function".to_owned(),
-                    function: ProviderInferenceFunctionCall {
-                        name: "stat_project_file".to_owned(),
-                        arguments: serde_json::to_string(&serde_json::json!({
-                            "path": "设定/海岸线.md"
-                        }))
-                        .unwrap(),
-                    },
-                },
-            ],
-            tool_call_id: None,
-        },
-        ProviderInferenceMessage {
-            role: ProviderInferenceRole::Tool,
-            content: serde_json::to_string(&serde_json::json!({
-                "content": "银湾海岸",
-                "complete": true
-            }))
-            .unwrap(),
-            tool_calls: vec![],
-            tool_call_id: Some("call-1".to_owned()),
-        },
-        ProviderInferenceMessage {
-            role: ProviderInferenceRole::Tool,
-            content: serde_json::to_string(&serde_json::json!({
-                "kind": "file",
-                "size": 18
-            }))
-            .unwrap(),
-            tool_calls: vec![],
-            tool_call_id: Some("call-2".to_owned()),
-        },
-    ]);
-
-    let outcome = ProviderGateway::new()
-        .unwrap()
-        .infer(registry.resolve(&identity).unwrap(), request)
-        .await
-        .unwrap();
-    assert_eq!(outcome.text.as_deref(), Some("已读取。"));
+    let fixture = LiveProviderFixture::new(&registry, identity);
+    let setting = fixture.project.path().join("设定");
+    std::fs::create_dir_all(&setting).unwrap();
+    std::fs::write(setting.join("海岸线.md"), "银湾海岸").unwrap();
+    let outcome = completed(fixture.run(registry).await.result.unwrap());
+    assert_eq!(outcome.output.as_ref().unwrap().text, "已读取。");
 
     server.await.unwrap();
-    let captured = requests.lock().unwrap().join("\n");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let captured = &requests[1];
     let body: serde_json::Value = serde_json::from_str(
         captured
             .split_once("\r\n\r\n")
@@ -288,10 +261,11 @@ async fn sends_strict_openai_compatible_tool_continuation_messages() {
     assert_eq!(tool["role"], "tool");
     assert_eq!(tool["tool_call_id"], "call-1");
     assert!(tool.get("name").is_none());
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(tool["content"].as_str().unwrap()).unwrap(),
-        serde_json::json!({ "content": "银湾海岸", "complete": true })
-    );
+    let tool_content =
+        serde_json::from_str::<serde_json::Value>(tool["content"].as_str().unwrap()).unwrap();
+    assert_eq!(tool_content["content"], "银湾海岸");
+    assert_eq!(tool_content["complete"], true);
+    assert_eq!(tool_content["path"], "设定/海岸线.md");
     let second_tool = &body["messages"][3];
     assert_eq!(second_tool["role"], "tool");
     assert_eq!(second_tool["tool_call_id"], "call-2");
@@ -339,11 +313,13 @@ async fn rejects_orphaned_or_unfinished_tool_messages_before_provider_io() {
         let mut request = inference_request(compilation_receipt());
         request.messages.push(malformed);
 
-        let error = ProviderGateway::new()
+        let prepared = ProviderGateway::new()
             .unwrap()
-            .infer(registry.resolve(&identity).unwrap(), request)
-            .await
-            .unwrap_err();
+            .prepare_inference(registry.resolve(&identity).unwrap(), request);
+        let error = match prepared {
+            Ok(_) => panic!("malformed tool exchange reached a prepared Provider request"),
+            Err(error) => error,
+        };
         assert!(matches!(
             error,
             ProviderGatewayError::ContextReceiptMismatch
@@ -360,14 +336,14 @@ async fn rejects_a_compilation_receipt_for_another_model_before_network_io() {
     let mut receipt = compilation_receipt();
     receipt.tokenizer.model_id = Some("another-model".to_owned());
 
-    let error = ProviderGateway::new()
-        .unwrap()
-        .infer(
-            registry.resolve(&identity).unwrap(),
-            inference_request(receipt),
-        )
-        .await
-        .unwrap_err();
+    let prepared = ProviderGateway::new().unwrap().prepare_inference(
+        registry.resolve(&identity).unwrap(),
+        inference_request(receipt),
+    );
+    let error = match prepared {
+        Ok(_) => panic!("foreign-model Context receipt reached a prepared Provider request"),
+        Err(error) => error,
+    };
 
     assert!(matches!(
         error,
@@ -393,14 +369,8 @@ async fn validates_actual_model_and_finish_reason() {
         let (base_url, _, server) =
             spawn_http_server(vec![ServerReply::Immediate(json_response(200, body))]).await;
         let (registry, identity) = bound_registry(base_url, 2_000);
-        let error = ProviderGateway::new()
-            .unwrap()
-            .infer(
-                registry.resolve(&identity).unwrap(),
-                inference_request(compilation_receipt()),
-            )
-            .await
-            .unwrap_err();
+        let fixture = LiveProviderFixture::new(&registry, identity);
+        let error = gateway_error(fixture.run(registry).await.result.unwrap_err());
         assert_eq!(
             std::mem::discriminant(&error),
             std::mem::discriminant(&expected)
@@ -432,14 +402,8 @@ async fn classifies_auth_rate_limit_and_invalid_json_without_retrying_them_as_su
     ] {
         let (base_url, _, server) = spawn_http_server(vec![reply]).await;
         let (registry, identity) = bound_registry(base_url, 2_000);
-        let error = ProviderGateway::new()
-            .unwrap()
-            .infer(
-                registry.resolve(&identity).unwrap(),
-                inference_request(compilation_receipt()),
-            )
-            .await
-            .unwrap_err();
+        let fixture = LiveProviderFixture::new(&registry, identity);
+        let error = gateway_error(fixture.run(registry).await.result.unwrap_err());
         assert_eq!(
             std::mem::discriminant(&error),
             std::mem::discriminant(&expected)
@@ -454,14 +418,8 @@ async fn captures_one_valid_retry_after_header_without_retaining_its_raw_value()
         json_response_with_headers(429, r#"{"error":"slow down"}"#, &["Retry-After: 120"]);
     let (base_url, _, server) = spawn_http_server(vec![ServerReply::Immediate(response)]).await;
     let (registry, identity) = bound_registry(base_url, 2_000);
-    let error = ProviderGateway::new()
-        .unwrap()
-        .infer(
-            registry.resolve(&identity).unwrap(),
-            inference_request(compilation_receipt()),
-        )
-        .await
-        .unwrap_err();
+    let fixture = LiveProviderFixture::new(&registry, identity);
+    let error = gateway_error(fixture.run(registry).await.result.unwrap_err());
     let ProviderGatewayError::RateLimited(receipt) = error else {
         panic!("expected a typed rate-limit receipt");
     };
@@ -482,14 +440,8 @@ async fn duplicate_or_invalid_retry_after_headers_never_authorize_a_retry_delay(
         let response = json_response_with_headers(429, r#"{"error":"slow down"}"#, &headers);
         let (base_url, _, server) = spawn_http_server(vec![ServerReply::Immediate(response)]).await;
         let (registry, identity) = bound_registry(base_url, 2_000);
-        let error = ProviderGateway::new()
-            .unwrap()
-            .infer(
-                registry.resolve(&identity).unwrap(),
-                inference_request(compilation_receipt()),
-            )
-            .await
-            .unwrap_err();
+        let fixture = LiveProviderFixture::new(&registry, identity);
+        let error = gateway_error(fixture.run(registry).await.result.unwrap_err());
         let ProviderGatewayError::RateLimited(receipt) = error else {
             panic!("expected a typed rate-limit receipt");
         };
@@ -507,14 +459,8 @@ async fn preserves_the_actual_auth_and_redirect_http_status_for_audit() {
         ))])
         .await;
         let (registry, identity) = bound_registry(base_url, 2_000);
-        let error = ProviderGateway::new()
-            .unwrap()
-            .infer(
-                registry.resolve(&identity).unwrap(),
-                inference_request(compilation_receipt()),
-            )
-            .await
-            .unwrap_err();
+        let fixture = LiveProviderFixture::new(&registry, identity);
+        let error = gateway_error(fixture.run(registry).await.result.unwrap_err());
         match (expected, error) {
             ("auth", ProviderGatewayError::AuthenticationRejected(actual)) => {
                 assert_eq!(actual, status);
@@ -537,14 +483,8 @@ async fn classifies_request_timeout() {
     .await;
     let (registry, identity) = bound_registry(base_url, 1_000);
 
-    let error = ProviderGateway::new()
-        .unwrap()
-        .infer(
-            registry.resolve(&identity).unwrap(),
-            inference_request(compilation_receipt()),
-        )
-        .await
-        .unwrap_err();
+    let fixture = LiveProviderFixture::new(&registry, identity);
+    let error = gateway_error(fixture.run(registry).await.result.unwrap_err());
 
     assert!(matches!(error, ProviderGatewayError::Timeout));
     server.await.unwrap();
@@ -557,47 +497,48 @@ async fn treats_length_finish_reason_as_incomplete_output() {
         spawn_http_server(vec![ServerReply::Immediate(json_response(200, body))]).await;
     let (registry, identity) = bound_registry(base_url, 2_000);
 
-    let error = ProviderGateway::new()
-        .unwrap()
-        .infer(
-            registry.resolve(&identity).unwrap(),
-            inference_request(compilation_receipt()),
-        )
-        .await
-        .unwrap_err();
+    let fixture = LiveProviderFixture::new(&registry, identity);
+    let error = gateway_error(fixture.run(registry).await.result.unwrap_err());
 
     assert!(matches!(error, ProviderGatewayError::OutputIncomplete));
     server.await.unwrap();
 }
 
 #[tokio::test]
-async fn parses_pure_and_mixed_structured_tool_calls_without_executing_them() {
+async fn parses_pure_and_mixed_structured_tool_calls_through_the_authorized_tool_round() {
     for (content, expected_text) in [
         ("null", None),
         (r#""I will inspect it.""#, Some("I will inspect it.")),
     ] {
         let body = format!(
-            r#"{{"id":"response-tools","model":"deepseek-chat","choices":[{{"finish_reason":"tool_calls","message":{{"role":"assistant","content":{content},"tool_calls":[{{"id":"call-1","type":"function","function":{{"name":"read_project","arguments":"{{\"path\":\"README.md\",\"depth\":2}}"}}}}]}}}}],"usage":{{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}}}"#
+            r#"{{"id":"response-tools","model":"deepseek-chat","choices":[{{"finish_reason":"tool_calls","message":{{"role":"assistant","content":{content},"tool_calls":[{{"id":"call-1","type":"function","function":{{"name":"read_project_file","arguments":"{{\"path\":\"README.md\",\"offsetChars\":0,\"maxChars\":4000}}"}}}}]}}}}],"usage":{{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}}}"#
         );
-        let (base_url, _, server) =
-            spawn_http_server(vec![ServerReply::Immediate(json_response(200, &body))]).await;
+        let (base_url, _, server) = spawn_http_server(vec![
+            ServerReply::Immediate(json_response(200, &body)),
+            ServerReply::Immediate(json_response(200, successful_body())),
+        ])
+        .await;
         let (registry, identity) = bound_registry(base_url, 2_000);
-        let outcome = ProviderGateway::new()
-            .unwrap()
-            .infer(
-                registry.resolve(&identity).unwrap(),
-                inference_request(compilation_receipt()),
-            )
-            .await
-            .unwrap();
+        let fixture = LiveProviderFixture::new(&registry, identity);
+        std::fs::write(fixture.project.path().join("README.md"), "NovelX").unwrap();
+        let run = fixture.run(registry).await;
+        completed(run.result.unwrap());
+        let outcome = first_provider_completion(&run.progress);
 
-        assert_eq!(outcome.text.as_deref(), expected_text);
+        assert_eq!(
+            outcome.output.as_ref().map(|output| output.text.as_str()),
+            expected_text
+        );
         assert_eq!(outcome.tool_calls.len(), 1);
         assert_eq!(outcome.tool_calls[0].id, "call-1");
-        assert_eq!(outcome.tool_calls[0].name, "read_project");
+        assert_eq!(outcome.tool_calls[0].name, "read_project_file");
         assert_eq!(
             outcome.tool_calls[0].arguments,
-            serde_json::json!({"depth": 2, "path": "README.md"})
+            serde_json::json!({
+                "maxChars": 4000,
+                "offsetChars": 0,
+                "path": "README.md"
+            })
         );
         assert_eq!(outcome.tool_calls[0].arguments_sha256.len(), 64);
         server.await.unwrap();
@@ -621,14 +562,8 @@ async fn rejects_malformed_or_inconsistent_tool_call_responses() {
         let (base_url, _, server) =
             spawn_http_server(vec![ServerReply::Immediate(json_response(200, &body))]).await;
         let (registry, identity) = bound_registry(base_url, 2_000);
-        let error = ProviderGateway::new()
-            .unwrap()
-            .infer(
-                registry.resolve(&identity).unwrap(),
-                inference_request(compilation_receipt()),
-            )
-            .await
-            .unwrap_err();
+        let fixture = LiveProviderFixture::new(&registry, identity);
+        let error = gateway_error(fixture.run(registry).await.result.unwrap_err());
         assert!(matches!(error, ProviderGatewayError::ResponseMalformed));
         server.await.unwrap();
     }
@@ -643,22 +578,258 @@ async fn never_exposes_the_api_key_in_receipts_or_debug_output() {
     .await;
     let (registry, identity) = bound_registry(base_url, 2_000);
 
-    let outcome = ProviderGateway::new()
-        .unwrap()
-        .infer(
-            registry.resolve(&identity).unwrap(),
-            inference_request(compilation_receipt()),
-        )
-        .await
-        .unwrap();
+    let fixture = LiveProviderFixture::new(&registry, identity);
+    let outcome = completed(fixture.run(registry).await.result.unwrap());
 
-    assert!(
-        !serde_json::to_string(&outcome.receipt)
-            .unwrap()
-            .contains(API_KEY)
-    );
+    assert!(!serde_json::to_string(&outcome).unwrap().contains(API_KEY));
     assert!(!format!("{outcome:?}").contains(API_KEY));
     server.await.unwrap();
+}
+
+const WORKSPACE_ID: &str = "workspace-1";
+const PROJECT_ID: &str = "project-1";
+
+struct LiveProviderFixture {
+    _workspace: TempDir,
+    project: TempDir,
+    database: PathBuf,
+    lease: Arc<BoundWorkspaceRuntimeLease>,
+    execution: ProviderInferenceExecution,
+    receipt: ContextCompilationReceipt,
+}
+
+struct LiveProviderRun {
+    result: Result<LiveAgentLoopOutcome, LiveAgentLoopError>,
+    progress: Vec<LiveAgentLoopProgress>,
+}
+
+impl LiveProviderFixture {
+    fn new(providers: &ProviderRegistry, provider: ProviderRunIdentity) -> Self {
+        let workspace = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let database = workspace.path().join("runtime.db");
+        let mut journal = EventJournal::open(&database).unwrap();
+        let lease = Arc::new(
+            WorkspaceRuntimeLease::acquire(
+                &database,
+                format!("provider-black-box-{}", Uuid::new_v4()),
+            )
+            .unwrap()
+            .bind_database(&database)
+            .unwrap(),
+        );
+        let run_id = Uuid::new_v4();
+        let run_id_text = run_id.to_string();
+        let invocation_id = format!("{run_id}:steward");
+        let mut pinned = support::pinned_identity();
+        pinned.provider = provider.clone();
+        pinned.mode = RunPermissionMode::Free;
+        let context_policy = pinned.context_policy.clone();
+        let source_scope = ToolSourceScope {
+            source_checkpoint_id: pinned.source_checkpoint_id.clone(),
+            resource_ids: pinned.scope_resource_ids.clone(),
+            scope_sha256: pinned.resource_scope_sha256.clone(),
+        };
+        let permission = ToolPermissionPolicy {
+            mode: pinned.mode,
+            policy_id: pinned.tool_policy.id.clone(),
+            policy_version: pinned.tool_policy.version.clone(),
+            policy_sha256: pinned.tool_policy.sha256.clone(),
+        };
+        let mut run = RunAggregate::create(
+            &mut journal,
+            &run_id_text,
+            pinned,
+            runtime_metadata("provider-black-box-run-create"),
+        )
+        .unwrap();
+        run.prepare(
+            &mut journal,
+            runtime_metadata("provider-black-box-run-prepare"),
+        )
+        .unwrap();
+        run.start(
+            &mut journal,
+            runtime_metadata("provider-black-box-run-start"),
+        )
+        .unwrap();
+        let receipt = ContextCompileService::new(&mut journal, providers)
+            .compile(
+                run_id,
+                Uuid::new_v4(),
+                live_context_command(&invocation_id, provider.clone(), context_policy),
+            )
+            .unwrap();
+        let dispatch = InferenceDispatchIdentity {
+            inference_id: Uuid::new_v4(),
+            attempt_id: Uuid::new_v4(),
+            request_number: 1,
+            context_compilation_id: receipt.compilation_id,
+            attempt_number: 1,
+            inference_idempotency_key: format!("{run_id}:inference:1"),
+        };
+        let loop_service = AgentLoopService::new(
+            AgentLoopIdentity {
+                run_id,
+                project_id: PROJECT_ID.to_owned(),
+                invocation_id: invocation_id.clone(),
+                initial_context_compilation_id: receipt.compilation_id,
+                source_scope,
+                permission,
+            },
+            live_loop_policy(),
+            dispatch.clone(),
+        )
+        .unwrap();
+        AgentLoopJournalRepository::new(&mut journal)
+            .create(
+                &loop_service,
+                "provider-black-box-loop-create",
+                AgentLoopEventMetadata {
+                    message_id: "provider-black-box-loop-create",
+                    created_at: "2026-07-13T00:00:03Z",
+                },
+            )
+            .unwrap();
+        let execution = ProviderInferenceExecution {
+            run_id: run_id_text,
+            attempt_id: dispatch.attempt_id.to_string(),
+            inference_id: dispatch.inference_id.to_string(),
+            invocation_id,
+            inference_idempotency_key: dispatch.inference_idempotency_key,
+            attempt_number: dispatch.attempt_number,
+            provider,
+            request: inference_request(receipt.clone()),
+        };
+        Self {
+            _workspace: workspace,
+            project,
+            database,
+            lease,
+            execution,
+            receipt,
+        }
+    }
+
+    async fn run(&self, providers: ProviderRegistry) -> LiveProviderRun {
+        let runner = LiveAgentLoopRunner::open(
+            &self.database,
+            WORKSPACE_ID.to_owned(),
+            Arc::clone(&self.lease),
+            ProjectRoot::open(self.project.path().to_str().unwrap()).unwrap(),
+            PROJECT_ID.to_owned(),
+            providers,
+            ProviderGateway::new().unwrap(),
+            live_loop_policy(),
+        )
+        .unwrap();
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&progress);
+        let (_cancel_tx, mut cancellation) = tokio::sync::watch::channel(false);
+        let result = runner
+            .run(
+                self.execution.clone(),
+                None,
+                move |event| {
+                    let captured = Arc::clone(&captured);
+                    async move {
+                        captured.lock().unwrap().push(event);
+                        Ok(())
+                    }
+                },
+                &mut cancellation,
+            )
+            .await;
+        let progress = progress.lock().unwrap().clone();
+        LiveProviderRun { result, progress }
+    }
+}
+
+const fn live_loop_policy() -> AgentLoopPolicy {
+    AgentLoopPolicy {
+        maximum_tool_rounds: 4,
+        tool_schema_version: 1,
+    }
+}
+
+fn live_context_command(
+    invocation_id: &str,
+    provider: ProviderRunIdentity,
+    context_policy: novelx_protocol::VersionedPolicyIdentity,
+) -> ContextCompile {
+    let content = "继续银湾故事";
+    ContextCompile {
+        compile_idempotency_key: "provider-black-box-context".to_owned(),
+        invocation_id: invocation_id.to_owned(),
+        request_number: 1,
+        provider,
+        context_policy,
+        compiler_version: "1.0.0".to_owned(),
+        context_window: 64_000,
+        configured_max_output_tokens: Some(8_000),
+        safety_reserve_tokens: 6_400,
+        items: vec![
+            ContextItem::SessionMessage {
+                item_id: "current-user-turn".to_owned(),
+                message_id: "provider-black-box-user".to_owned(),
+                role: ContextMessageRole::User,
+                content: content.to_owned(),
+                content_sha256: sha(content.as_bytes()),
+                created_at: "2026-07-13T00:00:00Z".to_owned(),
+                disclosure: ContextDisclosure::ProjectPrivate,
+                required: true,
+            },
+            ContextItem::OutputReserve {
+                item_id: "output-reserve".to_owned(),
+                requested_tokens: 8_000,
+                policy_id: "auto".to_owned(),
+                disclosure: ContextDisclosure::AgentInternal,
+            },
+        ],
+    }
+}
+
+fn runtime_metadata(message_id: &'static str) -> EventMetadata<'static> {
+    EventMetadata {
+        message_id,
+        idempotency_key: message_id,
+        created_at: "2026-07-13T00:00:00Z",
+        reason: None,
+    }
+}
+
+fn completed(outcome: LiveAgentLoopOutcome) -> ProviderInferenceCompleted {
+    match outcome {
+        LiveAgentLoopOutcome::Completed { completion, .. } => completion,
+        other => panic!("expected completed live Provider loop, got {other:?}"),
+    }
+}
+
+fn gateway_error(error: LiveAgentLoopError) -> ProviderGatewayError {
+    match error {
+        LiveAgentLoopError::Provider(ProviderInferenceServiceError::Gateway(error)) => error,
+        LiveAgentLoopError::Provider(ProviderInferenceServiceError::DeliveryUnknown(error)) => {
+            *error
+        }
+        LiveAgentLoopError::ProviderAuthorization(ProviderEffectAuthorizationError::Provider(
+            error,
+        )) => error,
+        other => panic!("expected a typed Provider Gateway error, got {other:?}"),
+    }
+}
+
+fn first_provider_completion(progress: &[LiveAgentLoopProgress]) -> &ProviderInferenceCompleted {
+    progress
+        .iter()
+        .find_map(|event| match event {
+            LiveAgentLoopProgress::ProviderCompleted(completion) => Some(completion),
+            _ => None,
+        })
+        .expect("live Provider loop did not emit a Provider completion")
+}
+
+fn sha(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn inference_request(compilation: ContextCompilationReceipt) -> ProviderInferenceRequest {

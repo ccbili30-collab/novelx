@@ -211,7 +211,7 @@ impl<'a> OperationalRecoveryScanner<'a> {
                     |source| OperationalRecoveryScanError::ProviderAttemptRecoveryFailed {
                         run_id: run_id.to_owned(),
                         attempt_id: attempt_id.clone(),
-                        source,
+                        source: Box::new(source),
                     },
                 )?,
             );
@@ -1025,7 +1025,7 @@ pub enum OperationalRecoveryScanError {
         run_id: String,
         attempt_id: String,
         #[source]
-        source: ProviderAttemptError,
+        source: Box<ProviderAttemptError>,
     },
     #[error("tool call `{tool_call_id}` in run `{run_id}` recovery failed: {source}")]
     ToolRecoveryFailed {

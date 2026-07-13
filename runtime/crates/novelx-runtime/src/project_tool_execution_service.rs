@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use novelx_protocol::{
     ProviderInferenceToolCall, ToolAuthorizationResolve, ToolPermissionPolicy,
@@ -21,6 +24,7 @@ use crate::tool_coordination_service::{
     ToolCoordinationError, ToolCoordinationService, ToolCoordinationSnapshot,
     ToolCoordinationStatus,
 };
+use crate::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectToolExecutionOutcome {
@@ -34,6 +38,7 @@ pub struct ProjectToolExecutionService {
     database_path: PathBuf,
     project_id: String,
     dispatcher: ProjectToolDispatcher,
+    workspace_runtime_lease: Arc<BoundWorkspaceRuntimeLease>,
 }
 
 impl ProjectToolExecutionService {
@@ -41,11 +46,13 @@ impl ProjectToolExecutionService {
         database_path: impl AsRef<Path>,
         project_root: ProjectRoot,
         project_id: String,
+        workspace_runtime_lease: Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<Self, ProjectToolExecutionError> {
         if project_id.trim().is_empty() {
             return Err(ProjectToolExecutionError::IdentityInvalid);
         }
         let database_path = database_path.as_ref().to_path_buf();
+        workspace_runtime_lease.verify_database_authority(&database_path)?;
         EventJournal::open(&database_path)?;
         ArtifactStore::open(&database_path)?;
         let dispatcher = ProjectToolDispatcher::new(project_root)?;
@@ -53,6 +60,7 @@ impl ProjectToolExecutionService {
             database_path,
             project_id,
             dispatcher,
+            workspace_runtime_lease,
         })
     }
 
@@ -102,6 +110,7 @@ impl ProjectToolExecutionService {
         let snapshot = {
             let mut journal = EventJournal::open(&self.database_path)?;
             let mut artifacts = ArtifactStore::open(&self.database_path)?;
+            self.verify_write_authority()?;
             ToolCoordinationService::new(&mut journal, &mut artifacts).resolve_from_host(
                 run_id,
                 resolution,
@@ -129,6 +138,7 @@ impl ProjectToolExecutionService {
         let snapshot = {
             let mut journal = EventJournal::open(&self.database_path)?;
             let mut artifacts = ArtifactStore::open(&self.database_path)?;
+            self.verify_write_authority()?;
             ToolCoordinationService::new(&mut journal, &mut artifacts).resolve_from_host(
                 run_id,
                 resolution,
@@ -157,6 +167,7 @@ impl ProjectToolExecutionService {
         calls: &[ProviderInferenceToolCall],
     ) -> Result<Vec<MaterializedProviderToolCall>, ProjectToolExecutionError> {
         let mut artifacts = ArtifactStore::open(&self.database_path)?;
+        self.verify_write_authority()?;
         Ok(ProviderToolMaterializer::new(&mut artifacts).materialize(
             run_id,
             invocation_id,
@@ -211,6 +222,7 @@ impl ProjectToolExecutionService {
     ) -> Result<ToolCoordinationSnapshot, ProjectToolExecutionError> {
         let mut journal = EventJournal::open(&self.database_path)?;
         let mut artifacts = ArtifactStore::open(&self.database_path)?;
+        self.verify_write_authority()?;
         Ok(
             ToolCoordinationService::new(&mut journal, &mut artifacts).request(
                 run_id,
@@ -250,6 +262,7 @@ impl ProjectToolExecutionService {
         let running = {
             let mut journal = EventJournal::open(&self.database_path)?;
             let mut artifacts = ArtifactStore::open(&self.database_path)?;
+            self.verify_write_authority()?;
             ToolCoordinationService::new(&mut journal, &mut artifacts).start(
                 run_id,
                 call.tool_call_id,
@@ -268,18 +281,23 @@ impl ProjectToolExecutionService {
             .get(call.arguments.artifact_id)?
             .ok_or(ProjectToolExecutionError::ArgumentsMissing)?
             .content;
+        self.verify_write_authority()?;
         match self.dispatcher.dispatch(&call.tool_name, arguments).await {
             Ok(result) => {
-                let receipt = ArtifactStore::open(&self.database_path)?
-                    .put_json(
+                let receipt = {
+                    let mut artifacts = ArtifactStore::open(&self.database_path)?;
+                    self.verify_write_authority()?;
+                    artifacts.put_json(
                         execution_artifact_id(run_id, call.tool_call_id, "result"),
                         run_id,
                         &result,
                     )?
-                    .receipt;
+                }
+                .receipt;
                 let snapshot = {
                     let mut journal = EventJournal::open(&self.database_path)?;
                     let mut artifacts = ArtifactStore::open(&self.database_path)?;
+                    self.verify_write_authority()?;
                     ToolCoordinationService::new(&mut journal, &mut artifacts).succeed(
                         run_id,
                         call.tool_call_id,
@@ -296,16 +314,20 @@ impl ProjectToolExecutionService {
             }
             Err(error) => {
                 let failure = dispatch_failure(&error);
-                let receipt = ArtifactStore::open(&self.database_path)?
-                    .put_json(
+                let receipt = {
+                    let mut artifacts = ArtifactStore::open(&self.database_path)?;
+                    self.verify_write_authority()?;
+                    artifacts.put_json(
                         execution_artifact_id(run_id, call.tool_call_id, "failure"),
                         run_id,
                         &failure,
                     )?
-                    .receipt;
+                }
+                .receipt;
                 let snapshot = {
                     let mut journal = EventJournal::open(&self.database_path)?;
                     let mut artifacts = ArtifactStore::open(&self.database_path)?;
+                    self.verify_write_authority()?;
                     ToolCoordinationService::new(&mut journal, &mut artifacts).fail(
                         run_id,
                         call.tool_call_id,
@@ -321,6 +343,12 @@ impl ProjectToolExecutionService {
                 Ok(outcome(call, snapshot))
             }
         }
+    }
+
+    fn verify_write_authority(&self) -> Result<(), ProjectToolExecutionError> {
+        self.workspace_runtime_lease
+            .verify_database_authority(&self.database_path)
+            .map_err(Into::into)
     }
 }
 
@@ -361,6 +389,8 @@ pub enum ProjectToolExecutionError {
     Coordination(#[from] ToolCoordinationError),
     #[error(transparent)]
     Dispatcher(#[from] ProjectToolDispatchError),
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
 }
 
 impl ProjectToolExecutionError {
@@ -377,6 +407,7 @@ impl ProjectToolExecutionError {
             Self::Materialization(_) => ProjectToolExecutionErrorClass::ToolArguments,
             Self::Coordination(error) => coordination_class(error),
             Self::Dispatcher(_) => ProjectToolExecutionErrorClass::Initialization,
+            Self::WorkspaceLease(_) => ProjectToolExecutionErrorClass::Storage,
         }
     }
 
@@ -392,6 +423,7 @@ impl ProjectToolExecutionError {
             Self::Materialization(_) => "PROJECT_TOOL_MATERIALIZATION_FAILED",
             Self::Coordination(_) => "PROJECT_TOOL_COORDINATION_REJECTED",
             Self::Dispatcher(_) => "PROJECT_TOOL_DISPATCHER_INITIALIZATION_FAILED",
+            Self::WorkspaceLease(error) => error.protocol_code(),
         }
     }
 }

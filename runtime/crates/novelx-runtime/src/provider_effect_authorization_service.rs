@@ -41,7 +41,7 @@ use crate::{
     run_aggregate::{RunAggregate, RunAggregateError},
     run_state::RunState,
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 #[path = "provider_recovery_effect_authorization_service.rs"]
@@ -170,12 +170,10 @@ impl ProviderEffectAuthorizationService {
         request: ProviderLiveEffectAuthorizationRequest,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderLiveEffectAuthorization, ProviderEffectAuthorizationError> {
         validate_request(&request)?;
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(ProviderEffectAuthorizationError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let clock = WorkspaceEventJournal::open(&self.database_path)?;
         let before = clock.current_global_sequence()?;
         let journal = EventJournal::open(&self.database_path)?;
@@ -716,8 +714,8 @@ fn current_run_stream_sequence(
 pub enum ProviderEffectAuthorizationError {
     #[error("Provider live effect authorization identity is invalid")]
     IdentityInvalid,
-    #[error("Provider live effect authorization lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("Provider live effect authorization workspace/project binding does not match the Run")]
     WorkspaceBindingMismatch,
     #[error("Provider live effect authorization requires a Running Run, found {0:?}")]

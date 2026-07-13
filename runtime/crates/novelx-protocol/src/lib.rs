@@ -1793,6 +1793,46 @@ pub type ProviderInferenceAccepted = ProviderInferenceIdentity;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolAuthorizationEvidenceReference {
+    pub tool_call_id: Uuid,
+    pub aggregate_sequence: u64,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceContinuationProposal {
+    pub continuation_id: Uuid,
+    pub run_id: Uuid,
+    pub invocation_id: String,
+    pub parent_inference_identity: ProviderInferenceIdentity,
+    pub continuation_inference_identity: ProviderInferenceIdentity,
+    pub continuation_identity_sha256: String,
+    pub triggering_tool_call_ids: Vec<Uuid>,
+    pub authorization_evidence: Vec<ToolAuthorizationEvidenceReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderInferenceContinuationAcknowledge {
+    pub continuation_id: Uuid,
+    pub continuation_identity_sha256: String,
+    pub parent_inference_identity: ProviderInferenceIdentity,
+    pub authorization_evidence: Vec<ToolAuthorizationEvidenceReference>,
+}
+
+pub type ProviderInferenceContinuationAccepted = ProviderInferenceContinuationProposal;
+
+pub fn provider_inference_identity_sha256(
+    identity: &ProviderInferenceIdentity,
+) -> Result<String, serde_json::Error> {
+    let value = serde_json::to_value(identity)?;
+    let canonical = serde_json::to_vec(&canonicalize_json(value))?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderInferenceUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,

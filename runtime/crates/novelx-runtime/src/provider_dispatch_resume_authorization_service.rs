@@ -16,7 +16,7 @@ use crate::{
     },
     provider_dispatch_recovery_service::{DispatchEvidence, ProviderDispatchRecoveryError},
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,11 +41,9 @@ impl ProviderDispatchResumeAuthorizationService {
     pub fn authorize(
         &self,
         request: ProviderDispatchResumeAuthorizationRequest,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<ProviderDispatchResumeAuthorization, ProviderDispatchResumeAuthorizationError> {
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(ProviderDispatchResumeAuthorizationError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let clock = WorkspaceEventJournal::open(&self.database_path)?;
         let before = clock.current_global_sequence()?;
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
@@ -94,7 +92,7 @@ impl ProviderDispatchResumeAuthorizationService {
         let definition_sha256 = provider_attempt_definition_sha256(&attempt)?;
         let evidence_sha256 = provider_attempt_evidence_sha256(&attempt)?;
         if let Some(existing) = operation.latest_provider_dispatch_resume()
-            && existing.resumer_instance_id == exclusive_lease.instance_id()
+            && existing.resumer_instance_id == exclusive_lease.owner_id()
             && existing.action_spec_sha256 == claim.action_spec_sha256
             && existing.attempt_id == dispatch.attempt_id
             && existing.attempt_state == attempt.state()
@@ -118,7 +116,7 @@ impl ProviderDispatchResumeAuthorizationService {
         let authorization = ProviderDispatchResumeAuthorization::derive(
             request.operation_id.clone(),
             execution,
-            exclusive_lease.instance_id().to_owned(),
+            exclusive_lease.owner_id().to_owned(),
             claim.action_spec_sha256.clone(),
             dispatch.attempt_id,
             attempt.state(),
@@ -161,8 +159,8 @@ impl ProviderDispatchResumeAuthorizationService {
 
 #[derive(Debug, Error)]
 pub enum ProviderDispatchResumeAuthorizationError {
-    #[error("Provider dispatch resume workspace lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("Provider dispatch recovery operation is missing")]
     OperationMissing,
     #[error("Provider dispatch recovery Claim is missing")]

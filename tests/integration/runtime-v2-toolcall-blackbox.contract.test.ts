@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RuntimeV2ToolCallBlackboxDriver } from "../support/runtimeV2ToolCallBlackboxDriver";
 
-const enabledCases = new Set(
-  (process.env.NOVELX_TOOLCALL_BLACKBOX_CASES ?? "").split(",").map((value) => value.trim()).filter(Boolean),
-);
-
 const cases = [
   ["core_tools", "executes and journals list/read/search/glob/stat, then sends strict tool_call_id results on the second Provider turn"],
   ["unicode", "preserves Chinese project file names and Chinese UTF-8 content across Runtime, tool result and Provider request"],
@@ -17,14 +13,28 @@ const cases = [
   ["invalid_utf8", "reports invalid UTF-8 as a typed file failure instead of fabricating text"],
   ["incomplete", "returns explicit incomplete receipts for file, byte, character, timeout and result budgets"],
 ] as const;
+const debugCases = readDebugCases();
 
 describe("Runtime V2 real cross-process ToolCall contract", () => {
   for (const [caseId, title] of cases) {
-    it.skipIf(!enabledCases.has(caseId))(`${caseId}: ${title}`, async () => {
+    it.skipIf(debugCases !== null && !debugCases.has(caseId))(`${caseId}: ${title}`, async () => {
       await expect(runLiveCase(caseId)).resolves.toBeUndefined();
     }, 60_000);
   }
 });
+
+function readDebugCases(): ReadonlySet<typeof cases[number][0]> | null {
+  if (process.env.NOVELX_TEST_STAGE !== "toolcall-debug") return null;
+  const selected = (process.env.NOVELX_TOOLCALL_BLACKBOX_DEBUG_CASES ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (selected.length === 0) throw new Error("ToolCall debug stage requires at least one selected case.");
+  const known = new Set<string>(cases.map(([caseId]) => caseId));
+  const unknown = selected.filter((caseId) => !known.has(caseId));
+  if (unknown.length > 0) throw new Error(`Unknown ToolCall debug cases: ${unknown.join(", ")}.`);
+  return new Set(selected as Array<typeof cases[number][0]>);
+}
 
 async function runLiveCase(caseId: typeof cases[number][0]): Promise<void> {
   if (caseId === "core_tools" || caseId === "unicode") {
@@ -63,6 +73,8 @@ async function runLiveCase(caseId: typeof cases[number][0]): Promise<void> {
       }
       await driver.waitForToolEvents("tool.succeeded", 5);
       await driver.waitForSecondProviderRequest();
+      const proposal = driver.events.find((event) => event.name === "provider.inference.continuation.proposed");
+      expect(proposal).toMatchObject({ correlationId: null, payload: { triggeringToolCallIds: expect.any(Array), authorizationEvidence: expect.any(Array) } });
       return;
     } finally {
       await driver.close();
@@ -86,6 +98,7 @@ async function runLiveCase(caseId: typeof cases[number][0]): Promise<void> {
       expect(serialized).toContain("provider-denied-1");
       expect(serialized).toContain("TOOL_DENIED");
       expect(driver.events.filter((event) => event.name === "tool.succeeded")).toHaveLength(0);
+      expect(driver.events.some((event) => event.name === "provider.inference.continuation.proposed")).toBe(true);
       return;
     } finally {
       await driver.close();

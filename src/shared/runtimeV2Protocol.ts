@@ -956,6 +956,52 @@ export const runtimeV2ProviderInferenceAcceptedEnvelopeSchema = runtimeV2Envelop
   payload: runtimeV2ProviderInferenceIdentitySchema,
 }).strict().superRefine(requireMatchingInferenceRun);
 
+export const runtimeV2ToolAuthorizationEvidenceReferenceSchema = z.object({
+  toolCallId: z.uuid(),
+  aggregateSequence: z.number().int().positive().safe(),
+  idempotencyKey: identityStringSchema,
+}).strict();
+
+export const runtimeV2ProviderInferenceContinuationProposalPayloadSchema = z.object({
+  continuationId: z.uuid(),
+  runId: z.uuid(),
+  invocationId: identityStringSchema,
+  parentInferenceIdentity: runtimeV2ProviderInferenceIdentitySchema,
+  continuationInferenceIdentity: runtimeV2ProviderInferenceIdentitySchema,
+  continuationIdentitySha256: sha256Schema,
+  triggeringToolCallIds: z.array(z.uuid()).min(1),
+  authorizationEvidence: z.array(runtimeV2ToolAuthorizationEvidenceReferenceSchema).min(1),
+}).strict().superRefine((payload, context) => {
+  if (payload.continuationId !== payload.continuationInferenceIdentity.inferenceId) {
+    context.addIssue({ code: "custom", path: ["continuationId"], message: "Continuation id must equal its persisted inference id." });
+  }
+  if (payload.runId !== payload.parentInferenceIdentity.runId || payload.runId !== payload.continuationInferenceIdentity.runId) {
+    context.addIssue({ code: "custom", path: ["runId"], message: "Continuation identities must belong to the proposal run." });
+  }
+});
+
+export const runtimeV2ProviderInferenceContinuationProposedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("event"), name: z.literal("provider.inference.continuation.proposed"),
+  correlationId: z.null(), runId: z.uuid(), payload: runtimeV2ProviderInferenceContinuationProposalPayloadSchema,
+}).strict().superRefine(requireMatchingInferenceRun);
+
+export const runtimeV2ProviderInferenceContinuationAcknowledgePayloadSchema = z.object({
+  continuationId: z.uuid(),
+  continuationIdentitySha256: sha256Schema,
+  parentInferenceIdentity: runtimeV2ProviderInferenceIdentitySchema,
+  authorizationEvidence: z.array(runtimeV2ToolAuthorizationEvidenceReferenceSchema).min(1),
+}).strict();
+
+export const runtimeV2ProviderInferenceContinuationAcknowledgeEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("command"), name: z.literal("provider.inference.continuation.acknowledge"),
+  correlationId: z.null(), runId: z.uuid(), payload: runtimeV2ProviderInferenceContinuationAcknowledgePayloadSchema,
+}).strict();
+
+export const runtimeV2ProviderInferenceContinuationAcceptedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("response"), name: z.literal("provider.inference.continuation.accepted"),
+  correlationId: z.uuid(), runId: z.uuid(), payload: runtimeV2ProviderInferenceContinuationProposalPayloadSchema,
+}).strict().superRefine(requireMatchingInferenceRun);
+
 export const runtimeV2ProviderInferenceCompletedPayloadSchema = runtimeV2ProviderInferenceIdentitySchema.extend({
   providerId: identityStringSchema,
   modelId: identityStringSchema,
@@ -1236,6 +1282,10 @@ export type RuntimeV2ProviderRejectedEnvelope = z.infer<typeof runtimeV2Provider
 export type RuntimeV2ProviderInferenceStartPayload = z.infer<typeof runtimeV2ProviderInferenceStartPayloadSchema>;
 export type RuntimeV2ProviderInferenceStartEnvelope = z.infer<typeof runtimeV2ProviderInferenceStartEnvelopeSchema>;
 export type RuntimeV2ProviderInferenceAcceptedEnvelope = z.infer<typeof runtimeV2ProviderInferenceAcceptedEnvelopeSchema>;
+export type RuntimeV2ProviderInferenceContinuationProposalPayload = z.infer<typeof runtimeV2ProviderInferenceContinuationProposalPayloadSchema>;
+export type RuntimeV2ProviderInferenceContinuationProposedEnvelope = z.infer<typeof runtimeV2ProviderInferenceContinuationProposedEnvelopeSchema>;
+export type RuntimeV2ProviderInferenceContinuationAcknowledgePayload = z.infer<typeof runtimeV2ProviderInferenceContinuationAcknowledgePayloadSchema>;
+export type RuntimeV2ProviderInferenceContinuationAcceptedEnvelope = z.infer<typeof runtimeV2ProviderInferenceContinuationAcceptedEnvelopeSchema>;
 export type RuntimeV2ProviderInferenceCompletedPayload = z.infer<typeof runtimeV2ProviderInferenceCompletedPayloadSchema>;
 export type RuntimeV2ProviderInferenceCompletedEnvelope = z.infer<typeof runtimeV2ProviderInferenceCompletedEnvelopeSchema>;
 export type RuntimeV2ProviderInferenceFailedPayload = z.infer<typeof runtimeV2ProviderInferenceFailedPayloadSchema>;
@@ -1402,6 +1452,14 @@ export function parseRuntimeV2ProviderInferenceStartEnvelope(value: unknown): Ru
 
 export function parseRuntimeV2ProviderInferenceAcceptedEnvelope(value: unknown): RuntimeV2ProviderInferenceAcceptedEnvelope {
   return parseVersionedEnvelope(value, runtimeV2ProviderInferenceAcceptedEnvelopeSchema);
+}
+
+export function parseRuntimeV2ProviderInferenceContinuationProposedEnvelope(value: unknown): RuntimeV2ProviderInferenceContinuationProposedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ProviderInferenceContinuationProposedEnvelopeSchema);
+}
+
+export function parseRuntimeV2ProviderInferenceContinuationAcceptedEnvelope(value: unknown): RuntimeV2ProviderInferenceContinuationAcceptedEnvelope {
+  return parseVersionedEnvelope(value, runtimeV2ProviderInferenceContinuationAcceptedEnvelopeSchema);
 }
 
 export function parseRuntimeV2ProviderInferenceCompletedEnvelope(value: unknown): RuntimeV2ProviderInferenceCompletedEnvelope {

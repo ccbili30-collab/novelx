@@ -8,6 +8,7 @@ use crate::provider_attempt::{
 };
 use crate::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use crate::run_state::RunState;
+use crate::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryClassification {
@@ -48,6 +49,7 @@ pub struct RecoveryCoordinator;
 impl RecoveryCoordinator {
     pub fn recover_and_reconcile(
         journal: &mut EventJournal,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<RecoveryReport, RecoveryError> {
         let attempts = journal.list_aggregates("provider_attempt")?;
         for address in attempts {
@@ -56,7 +58,7 @@ impl RecoveryCoordinator {
                     .map_err(|source| RecoveryError::ProviderAttemptRecoveryFailed {
                         run_id: address.run_id.clone(),
                         attempt_id: address.aggregate_id.clone(),
-                        source,
+                        source: Box::new(source),
                     })?;
             if !matches!(attempt.recovery(), ProviderAttemptRecovery::OutcomeUnknown) {
                 continue;
@@ -83,6 +85,7 @@ impl RecoveryCoordinator {
             let message_id = Uuid::new_v4().to_string();
             let idempotency_key = format!("recovery:{}:run-reconciliation", address.aggregate_id);
             let created_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+            exclusive_lease.verify_database_authority(journal.database_path())?;
             run.wait_for_reconciliation(
                 journal,
                 EventMetadata {
@@ -129,7 +132,7 @@ impl RecoveryCoordinator {
                     .map_err(|source| RecoveryError::ProviderAttemptRecoveryFailed {
                         run_id: address.run_id.clone(),
                         attempt_id: address.aggregate_id.clone(),
-                        source,
+                        source: Box::new(source),
                     })?;
             provider_attempts.push(RecoveredProviderAttempt {
                 run_id: address.run_id,
@@ -201,6 +204,8 @@ fn attempt_was_reconciled(
 
 #[derive(Debug, Error)]
 pub enum RecoveryError {
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("run aggregate address mismatch for run `{run_id}` and aggregate `{aggregate_id}`")]
     RunAddressMismatch {
         run_id: String,
@@ -217,7 +222,7 @@ pub enum RecoveryError {
         run_id: String,
         attempt_id: String,
         #[source]
-        source: ProviderAttemptError,
+        source: Box<ProviderAttemptError>,
     },
     #[error("provider attempt `{attempt_id}` references missing run `{run_id}`")]
     ProviderAttemptRunMissing { run_id: String, attempt_id: String },

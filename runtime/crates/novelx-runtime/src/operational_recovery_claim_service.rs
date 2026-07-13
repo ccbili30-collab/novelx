@@ -20,7 +20,7 @@ use crate::{
         OperationalRecoveryScanError, OperationalRecoveryScanner,
     },
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 pub const OPERATIONAL_RECOVERY_EXECUTOR_VERSION: &str = "runtime-v2-local-projection-v1";
@@ -70,7 +70,7 @@ impl OperationalRecoveryClaimService {
         &self,
         request: OperationalRecoveryClaimRequest,
         bound_providers: &[ProviderRunIdentity],
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryClaimError> {
         self.claim_for_gate(
             request,
@@ -84,7 +84,7 @@ impl OperationalRecoveryClaimService {
         &self,
         request: OperationalRecoveryClaimRequest,
         bound_providers: &[ProviderRunIdentity],
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryClaimError> {
         self.claim_for_gate(
             request,
@@ -98,12 +98,10 @@ impl OperationalRecoveryClaimService {
         &self,
         request: OperationalRecoveryClaimRequest,
         bound_providers: &[ProviderRunIdentity],
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         expected_gate: OperationalRecoveryGate,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryClaimError> {
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(OperationalRecoveryClaimError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         validate_lease_duration(request.lease_duration_seconds)?;
         let claimed = OffsetDateTime::now_utc();
         let lease_seconds = i64::try_from(request.lease_duration_seconds)
@@ -134,7 +132,7 @@ impl OperationalRecoveryClaimService {
         )?;
         let claim = OperationalRecoveryClaim::derive(
             observation.operation_id.clone(),
-            exclusive_lease.instance_id().to_owned(),
+            exclusive_lease.owner_id().to_owned(),
             1,
             observation.source_fingerprint.clone(),
             claimed_at.clone(),
@@ -170,11 +168,9 @@ impl OperationalRecoveryClaimService {
         &self,
         request: OperationalRecoveryStartRequest,
         bound_providers: &[ProviderRunIdentity],
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryClaimError> {
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(OperationalRecoveryClaimError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let (run, after) = self.scan_run(
             &request.workspace_id,
             &request.project_id,
@@ -246,11 +242,9 @@ impl OperationalRecoveryClaimService {
         &self,
         request: OperationalRecoveryTransferRequest,
         bound_providers: &[ProviderRunIdentity],
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryClaimError> {
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(OperationalRecoveryClaimError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         validate_lease_duration(request.lease_duration_seconds)?;
         let (run, after) = self.scan_run(
             &request.workspace_id,
@@ -287,7 +281,7 @@ impl OperationalRecoveryClaimService {
             .map_err(|_| OperationalRecoveryClaimError::LeaseDurationInvalid)?;
         let claim = OperationalRecoveryClaim::derive(
             observation.operation_id.clone(),
-            exclusive_lease.instance_id().to_owned(),
+            exclusive_lease.owner_id().to_owned(),
             previous
                 .fencing_token
                 .checked_add(1)
@@ -321,7 +315,7 @@ impl OperationalRecoveryClaimService {
         expected_operation_id: &str,
         run: OperationalRecoveryRun,
         scan_global_sequence: u64,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         claimable_gates: &[OperationalRecoveryGate],
     ) -> Result<OperationalRecoveryObservation, OperationalRecoveryClaimError> {
         let actual = OperationalRecoveryObservation::derive(
@@ -372,7 +366,7 @@ impl OperationalRecoveryClaimService {
             actual.source_fingerprint,
             current_claim_id,
             current_fencing_token,
-            exclusive_lease.instance_id().to_owned(),
+            exclusive_lease.owner_id().to_owned(),
             detected_at.clone(),
             scan_global_sequence,
         )?;
@@ -491,8 +485,8 @@ pub enum OperationalRecoveryClaimError {
     ActionFenceMismatch,
     #[error("operational recovery action is not a local-only executable projection")]
     ActionNotLocallyExecutable,
-    #[error("operational recovery workspace lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("operational recovery claim owner is not the exclusive workspace runtime owner")]
     ExclusiveOwnerMismatch,
     #[error("operational recovery lease duration is outside the server policy")]

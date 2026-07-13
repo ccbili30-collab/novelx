@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
 import { RuntimeV2ProcessSupervisor, type RuntimeV2RuntimeEvent } from "../../src/main/runtimeV2ProcessSupervisor";
@@ -34,7 +33,6 @@ export class RuntimeV2ToolCallBlackboxDriver {
   }
 
   async startToolScenario(calls: ProviderToolCallSpec[]): Promise<void> {
-    ensureRuntimeBuilt();
     this.provider = await RuntimeV2LoopbackProvider.start([
       { body: toolTurn(calls) },
       { body: completionProviderResponse("已读取海岸线设定。") },
@@ -65,7 +63,6 @@ export class RuntimeV2ToolCallBlackboxDriver {
   }
 
   async runMissingProviderScenario() {
-    ensureRuntimeBuilt();
     const config = runtimeProviderConfig("http://127.0.0.1:9/v1");
     const start = runStartPayload(this.options.mode, canonicalAuditHash(config));
     this.supervisor = this.createSupervisor(this.root);
@@ -75,7 +72,6 @@ export class RuntimeV2ToolCallBlackboxDriver {
   }
 
   async runMissingRootScenario(): Promise<void> {
-    ensureRuntimeBuilt();
     this.supervisor = this.createSupervisor(null);
     await this.supervisor.start();
   }
@@ -140,14 +136,6 @@ export class RuntimeV2ToolCallBlackboxDriver {
       startupTimeoutMs: 10_000, commandTimeoutMs: 10_000, stopTimeoutMs: 2_000,
     });
   }
-}
-
-function ensureRuntimeBuilt(): void {
-  const build = spawnSync("cargo", ["build", "--manifest-path", path.join(runtimeRoot, "Cargo.toml"), "--bin", "novelx-runtime"], {
-    cwd: runtimeRoot, encoding: "utf8", windowsHide: true,
-  });
-  if (build.error) throw build.error;
-  if (build.status !== 0) throw new Error(`Runtime build failed.\n${build.stdout}\n${build.stderr}`);
 }
 
 function defaultToolCalls(): ProviderToolCallSpec[] {

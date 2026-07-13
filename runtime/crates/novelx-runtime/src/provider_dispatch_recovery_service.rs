@@ -41,7 +41,7 @@ use crate::{
         RuntimeCancellationHubError,
     },
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -191,7 +191,7 @@ impl ProviderDispatchRecoveryService {
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
         cancellation_hub: &RuntimeCancellationHub,
-        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: &Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoveryResult, ProviderDispatchRecoveryError> {
         self.execute(
             request,
@@ -210,7 +210,7 @@ impl ProviderDispatchRecoveryService {
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
         cancellation_hub: &RuntimeCancellationHub,
-        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: &Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoveryResult, ProviderDispatchRecoveryError> {
         if request.authorization_id.trim().is_empty() {
             return Err(ProviderDispatchRecoveryError::ResumeAuthorizationMissing);
@@ -233,11 +233,9 @@ impl ProviderDispatchRecoveryService {
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
         cancellation_hub: &RuntimeCancellationHub,
-        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: &Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoveryResult, ProviderDispatchRecoveryError> {
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(ProviderDispatchRecoveryError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let recovery = OperationalRecoveryRepository::open(&self.database_path)?
             .load(&request.workspace_id, &request.run_id)?;
         let operation = recovery
@@ -508,7 +506,7 @@ impl ProviderDispatchRecoveryService {
         request: ProviderDispatchRecoveryRequest,
         dispatch: &DispatchEvidence,
         resume_authorization_id: Option<&str>,
-        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: &Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
         let journal = EventJournal::open(&self.database_path)?;
         let attempt =
@@ -560,7 +558,7 @@ impl ProviderDispatchRecoveryService {
         manifest: &ProviderDispatchRecoveryManifest,
         attempt: &ProviderAttemptAggregate,
         resume_authorization_id: Option<&str>,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<(), ProviderDispatchRecoveryError> {
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
         let aggregate = repository.load(&request.workspace_id, &request.run_id)?;
@@ -755,7 +753,7 @@ fn verify_dispatch_actor(
     attempt: &ProviderAttemptAggregate,
     dispatch: &DispatchEvidence,
     resume_authorization_id: Option<&str>,
-    exclusive_lease: &WorkspaceRuntimeLease,
+    exclusive_lease: &BoundWorkspaceRuntimeLease,
 ) -> Result<(), ProviderDispatchRecoveryError> {
     let claim = operation
         .claim
@@ -939,8 +937,8 @@ fn canonical_sha256(value: &serde_json::Value) -> Result<String, serde_json::Err
 
 #[derive(Debug, Error)]
 pub enum ProviderDispatchRecoveryError {
-    #[error("Provider dispatch recovery workspace lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("Provider dispatch recovery operation is missing")]
     OperationMissing,
     #[error("Provider dispatch recovery Claim is missing")]

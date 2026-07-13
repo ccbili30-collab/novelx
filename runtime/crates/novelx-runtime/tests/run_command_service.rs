@@ -8,6 +8,7 @@ use novelx_runtime::provider_gateway::{
 };
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::run_command_service::{RunCommandService, WorkspaceBinding};
+use novelx_runtime::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease};
 use serde_json::json;
 use support::pinned_identity;
 use tempfile::TempDir;
@@ -109,6 +110,7 @@ fn cancellation_is_persisted_and_idempotent_across_transport_retries() {
     let fixture = Fixture::new();
     let run_id = Uuid::new_v4();
     let mut journal = Some(fixture.open());
+    let lease = fixture.lease("run-command-cancel");
     let workspace_binding = binding();
     let (first, retried) = {
         let mut service = RunCommandService::new(&mut journal, Some(&workspace_binding));
@@ -120,9 +122,11 @@ fn cancellation_is_persisted_and_idempotent_across_transport_retries() {
             reason: "用户停止任务".to_owned(),
         };
         let first = service
-            .cancel(run_id, Uuid::new_v4(), cancel.clone())
+            .cancel(run_id, Uuid::new_v4(), cancel.clone(), &lease)
             .unwrap();
-        let retried = service.cancel(run_id, Uuid::new_v4(), cancel).unwrap();
+        let retried = service
+            .cancel(run_id, Uuid::new_v4(), cancel, &lease)
+            .unwrap();
         (first, retried)
     };
 
@@ -327,5 +331,12 @@ impl Fixture {
 
     fn open(&self) -> EventJournal {
         EventJournal::open(&self.path).unwrap()
+    }
+
+    fn lease(&self, owner: &str) -> BoundWorkspaceRuntimeLease {
+        WorkspaceRuntimeLease::acquire(&self.path, owner)
+            .unwrap()
+            .bind_database(&self.path)
+            .unwrap()
     }
 }

@@ -10,6 +10,7 @@ pub mod agent_assignment_recovery;
 pub mod agent_loop_journal;
 pub mod agent_loop_service;
 pub mod artifact_store;
+pub mod assist_continuation_handshake_service;
 pub mod context_compile_service;
 pub mod context_compiler;
 pub mod continuation_context_service;

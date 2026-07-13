@@ -24,6 +24,7 @@ use novelx_runtime::{
     run_command_service::WorkspaceBinding,
     run_state::RunState,
     workspace_event_journal::WorkspaceEventJournal,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -301,6 +302,7 @@ struct Fixture {
     _temp: TempDir,
     database: std::path::PathBuf,
     binding: WorkspaceBinding,
+    lease: BoundWorkspaceRuntimeLease,
 }
 
 impl Fixture {
@@ -342,13 +344,20 @@ impl Fixture {
 
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("workspace.db");
+        EventJournal::open(&database).unwrap();
+        let lease = WorkspaceRuntimeLease::acquire(&database, "assignment-command-service")
+            .unwrap()
+            .bind_database(&database)
+            .unwrap();
         Self {
-            database: temp.path().join("workspace.db"),
+            database,
             _temp: temp,
             binding: WorkspaceBinding {
                 workspace_id: "workspace-1".into(),
                 project_id: "project-1".into(),
             },
+            lease,
         }
     }
 
@@ -559,6 +568,7 @@ impl Fixture {
                 child
                     .cancel(
                         &mut runtime,
+                        &self.lease,
                         run_metadata(&key, Some("assignment cancelled")),
                     )
                     .unwrap();

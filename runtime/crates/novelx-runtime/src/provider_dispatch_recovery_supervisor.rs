@@ -42,7 +42,7 @@ use crate::{
     provider_inference_service::ProviderInferenceServiceError,
     runtime_cancellation_hub::{RuntimeCancellationHub, RuntimeCancellationHubError},
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 const DEFAULT_CLAIM_LEASE_SECONDS: u64 = 60;
@@ -88,14 +88,12 @@ impl ProviderDispatchRecoverySupervisor {
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
         cancellation_hub: &RuntimeCancellationHub,
-        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: &Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorReport, ProviderDispatchRecoverySupervisorError>
     {
         require_text("workspace_id", workspace_id)?;
         require_text("project_id", project_id)?;
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(ProviderDispatchRecoverySupervisorError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let bound_providers = providers.bound_identities();
         let report = self.scan_consistently(workspace_id, project_id, &bound_providers)?;
         let created_at = timestamp()?;
@@ -103,6 +101,7 @@ impl ProviderDispatchRecoverySupervisor {
             workspace_id,
             project_id,
             &report,
+            exclusive_lease.as_ref(),
             &created_at,
         )?;
         let operation_by_run = recorded
@@ -149,7 +148,7 @@ impl ProviderDispatchRecoverySupervisor {
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
         cancellation_hub: &RuntimeCancellationHub,
-        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: &Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
         let aggregate =
@@ -324,7 +323,7 @@ impl ProviderDispatchRecoverySupervisor {
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
         cancellation_hub: &RuntimeCancellationHub,
-        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: &Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
         let aggregate =
@@ -382,7 +381,7 @@ impl ProviderDispatchRecoverySupervisor {
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
         cancellation_hub: &RuntimeCancellationHub,
-        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: &Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
         let aggregate =
@@ -497,7 +496,7 @@ impl ProviderDispatchRecoverySupervisor {
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
         cancellation_hub: &RuntimeCancellationHub,
-        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: &Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
         let receipt = ProviderDispatchRecoveryService::new(&self.database_path)
@@ -594,7 +593,7 @@ fn persist_interruption_before_return(
     run_id: &str,
     operation_id: &str,
     recovery: ProviderDispatchRecoveryResult,
-    exclusive_lease: &WorkspaceRuntimeLease,
+    exclusive_lease: &BoundWorkspaceRuntimeLease,
 ) -> Result<ProviderDispatchRecoverySupervisorOutcome, ProviderDispatchRecoverySupervisorError> {
     match recovery {
         ProviderDispatchRecoveryResult::Completed(receipt) => Ok(
@@ -652,8 +651,8 @@ fn timestamp() -> Result<String, time::error::Format> {
 pub enum ProviderDispatchRecoverySupervisorError {
     #[error("Provider dispatch recovery Supervisor field `{0}` must not be empty")]
     EmptyField(&'static str),
-    #[error("Provider dispatch recovery Supervisor lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("Provider dispatch recovery source changed during scan: {before} -> {after}")]
     SourceChangedDuringScan { before: u64, after: u64 },
     #[error("Provider dispatch recovery Supervisor invariant failed: {0}")]

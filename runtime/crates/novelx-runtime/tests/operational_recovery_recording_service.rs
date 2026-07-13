@@ -9,6 +9,7 @@ use novelx_runtime::{
         OperationalRecoveryRun,
     },
     run_state::RunState,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use tempfile::TempDir;
 
@@ -18,10 +19,22 @@ fn repeated_recording_of_identical_evidence_writes_no_new_events() {
     let service = OperationalRecoveryRecordingService::new(&fixture.path);
     let report = report("a", OperationalRecoveryGate::AwaitingProviderBinding);
     let first = service
-        .record("workspace-1", "project-1", &report, "2026-07-13T00:00:00Z")
+        .record(
+            "workspace-1",
+            "project-1",
+            &report,
+            &fixture.lease,
+            "2026-07-13T00:00:00Z",
+        )
         .unwrap();
     let second = service
-        .record("workspace-1", "project-1", &report, "2026-07-13T01:00:00Z")
+        .record(
+            "workspace-1",
+            "project-1",
+            &report,
+            &fixture.lease,
+            "2026-07-13T01:00:00Z",
+        )
         .unwrap();
     assert_eq!(first, second);
     assert_eq!(first[0].aggregate_revision, 2);
@@ -48,6 +61,7 @@ fn changed_evidence_records_a_new_operation_without_executing_it() {
             "workspace-1",
             "project-1",
             &report("a", OperationalRecoveryGate::AwaitingProviderBinding),
+            &fixture.lease,
             "2026-07-13T00:00:00Z",
         )
         .unwrap();
@@ -56,6 +70,7 @@ fn changed_evidence_records_a_new_operation_without_executing_it() {
             "workspace-1",
             "project-1",
             &report("b", OperationalRecoveryGate::RecoveryReady),
+            &fixture.lease,
             "2026-07-13T00:01:00Z",
         )
         .unwrap();
@@ -80,7 +95,13 @@ fn quarantine_is_persisted_with_the_scanner_invariant_codes() {
     let mut report = report("c", OperationalRecoveryGate::Quarantined);
     report.runs[0].reasons = vec!["multiple_active_agent_loops".to_owned()];
     let recorded = service
-        .record("workspace-1", "project-1", &report, "2026-07-13T00:00:00Z")
+        .record(
+            "workspace-1",
+            "project-1",
+            &report,
+            &fixture.lease,
+            "2026-07-13T00:00:00Z",
+        )
         .unwrap();
     let aggregate = OperationalRecoveryRepository::open(&fixture.path)
         .unwrap()
@@ -129,6 +150,7 @@ fn report(digit: &str, gate: OperationalRecoveryGate) -> OperationalRecoveryRepo
 struct Fixture {
     _temp: TempDir,
     path: std::path::PathBuf,
+    lease: BoundWorkspaceRuntimeLease,
 }
 
 impl Fixture {
@@ -136,6 +158,14 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("runtime.db");
         novelx_runtime::event_journal::EventJournal::open(&path).unwrap();
-        Self { _temp: temp, path }
+        let lease = WorkspaceRuntimeLease::acquire(&path, "recovery-recording-service")
+            .unwrap()
+            .bind_database(&path)
+            .unwrap();
+        Self {
+            _temp: temp,
+            path,
+            lease,
+        }
     }
 }

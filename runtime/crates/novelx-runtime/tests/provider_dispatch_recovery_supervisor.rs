@@ -15,7 +15,7 @@ use novelx_runtime::{
     agent_loop_service::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, InferenceDispatchIdentity,
     },
-    context_compile_service::{ContextCompileService, recover_compilation_receipt},
+    context_compile_service::ContextCompileService,
     event_journal::EventJournal,
     operational_recovery_aggregate::{
         OperationalRecoveryInterruptionCause, OperationalRecoveryOutcome,
@@ -34,7 +34,10 @@ use novelx_runtime::{
         ProviderAttemptMetadata, ProviderAttemptState, ProviderResponseReceipt,
         provider_attempt_definition_sha256, provider_attempt_evidence_sha256,
     },
-    provider_dispatch_recovery_service::ProviderDispatchRecoveryTerminal,
+    provider_dispatch_recovery_service::{
+        ProviderDispatchRecoveryRequest, ProviderDispatchRecoveryResult,
+        ProviderDispatchRecoveryService, ProviderDispatchRecoveryTerminal,
+    },
     provider_dispatch_recovery_supervisor::{
         ProviderDispatchRecoverySupervisor, ProviderDispatchRecoverySupervisorOutcome,
     },
@@ -43,13 +46,10 @@ use novelx_runtime::{
         ProviderInferenceMessage, ProviderInferenceRequest, ProviderInferenceRole,
         ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
     },
-    provider_inference_service::{
-        PreparedProviderAttempt, ProviderInferenceExecution, ProviderInferenceService,
-    },
     run_aggregate::{EventMetadata, RunAggregate},
     runtime_cancellation_hub::{CancellationCause, RuntimeCancellationHub},
     workspace_event_journal::WorkspaceEventJournal,
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
@@ -180,7 +180,7 @@ async fn sticky_shutdown_interrupts_a_late_requested_registration_before_sent_an
         recorded.attempt_evidence_sha256,
         provider_attempt_evidence_sha256(&attempt).unwrap()
     );
-    assert_eq!(recorded.recorder_instance_id, lease.instance_id());
+    assert_eq!(recorded.recorder_instance_id, lease.owner_id());
     assert_eq!(recorded.lease_epoch, lease.lease_epoch());
     assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
     server.abort();
@@ -426,7 +426,7 @@ async fn old_owner_requested_execution_records_interruption_under_authorized_new
     let gateway = ProviderGateway::new().unwrap();
     let seeded = fixture.seed_requested(&providers, &provider, &gateway);
     let started = fixture.start_provider_dispatch(&seeded, "runtime-owner-a");
-    let original_owner = started.lease.instance_id().to_owned();
+    let original_owner = started.lease.owner_id().to_owned();
     drop(started.lease);
     let new_lease = fixture.lease("runtime-owner-b");
     fixture
@@ -467,7 +467,7 @@ async fn old_owner_requested_execution_records_interruption_under_authorized_new
     assert_eq!(operation.interruptions.len(), 1);
     let recorded = &operation.interruptions[0];
     assert_eq!(recorded.owner_instance_id, original_owner);
-    assert_eq!(recorded.recorder_instance_id, new_lease.instance_id());
+    assert_eq!(recorded.recorder_instance_id, new_lease.owner_id());
     assert_eq!(recorded.lease_epoch, new_lease.lease_epoch());
     assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
     server.abort();
@@ -482,21 +482,20 @@ async fn direct_split_dispatch_fences_the_supervisor_until_the_direct_response_i
     let gateway = ProviderGateway::new().unwrap();
     let seeded = fixture.seed_requested(&providers, &provider, &gateway);
     let started = fixture.start_provider_dispatch(&seeded, "runtime-owner-a");
-    let direct_execution = fixture.provider_execution(&seeded);
-    let prepared = {
-        let mut journal = EventJournal::open(&fixture.path).unwrap();
-        ProviderInferenceService::new(&mut journal, &providers, &gateway)
-            .prepare_attempt(direct_execution)
-            .unwrap()
-    };
-    let PreparedProviderAttempt::Dispatch(prepared) = prepared else {
-        panic!("Requested attempt must require a direct Provider dispatch");
-    };
-
-    let direct_dispatch = ProviderInferenceService::dispatch_attempt(
+    let operation = fixture.operation(&seeded.run_id, &started.operation_id);
+    let execution_id = operation.execution.as_ref().unwrap().execution_id.clone();
+    let direct_service = ProviderDispatchRecoveryService::new(&fixture.path);
+    let direct_dispatch = direct_service.execute_requested(
+        ProviderDispatchRecoveryRequest {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            run_id: seeded.run_id.clone(),
+            operation_id: started.operation_id.clone(),
+            execution_id,
+        },
+        &providers,
         &gateway,
-        providers.resolve(&provider).unwrap(),
-        *prepared,
+        &fixture.cancellation_hub,
+        &started.lease,
     );
     let supervise_while_in_flight = async {
         tokio::time::timeout(std::time::Duration::from_secs(2), request_received)
@@ -514,12 +513,17 @@ async fn direct_split_dispatch_fences_the_supervisor_until_the_direct_response_i
             )
             .await
             .unwrap();
+        assert_eq!(fixture.attempt_state(&seeded), ProviderAttemptState::Sent);
+        assert_eq!(
+            fixture.attempt_event_types(&seeded),
+            ["provider.requested", "provider.sent"]
+        );
         release_response
             .send(())
             .expect("paused Provider response receiver was dropped");
         report
     };
-    let (dispatched, first_report) = tokio::join!(direct_dispatch, supervise_while_in_flight);
+    let (direct_result, first_report) = tokio::join!(direct_dispatch, supervise_while_in_flight);
 
     let first_run = only_run(&first_report.runs);
     assert_eq!(first_run.operation_id, started.operation_id);
@@ -528,26 +532,13 @@ async fn direct_split_dispatch_fences_the_supervisor_until_the_direct_response_i
         ProviderDispatchRecoverySupervisorOutcome::AwaitingAttemptOwner
     );
     assert_eq!(requests.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.attempt_state(&seeded), ProviderAttemptState::Sent);
-    assert_eq!(
-        fixture.attempt_event_types(&seeded),
-        ["provider.requested", "provider.sent"]
-    );
-    assert!(
-        fixture
-            .operation(&seeded.run_id, &started.operation_id)
-            .outcome
-            .is_none()
-    );
-
-    let direct_outcome = {
-        let mut journal = EventJournal::open(&fixture.path).unwrap();
-        ProviderInferenceService::new(&mut journal, &providers, &gateway)
-            .finalize_attempt(dispatched)
-            .unwrap()
-    };
+    let direct_result = direct_result.unwrap();
+    assert!(matches!(
+        direct_result,
+        ProviderDispatchRecoveryResult::Completed(ref receipt)
+            if receipt.terminal == ProviderDispatchRecoveryTerminal::Responded
+    ));
     server.await.unwrap();
-    assert_eq!(direct_outcome.text.as_deref(), Some("直接路径完成真实派发"));
     assert_eq!(
         fixture.attempt_state(&seeded),
         ProviderAttemptState::Responded
@@ -565,17 +556,9 @@ async fn direct_split_dispatch_fences_the_supervisor_until_the_direct_response_i
         .await
         .unwrap();
     let second_run = only_run(&second_report.runs);
-    assert_eq!(second_run.operation_id, started.operation_id);
-    assert_eq!(
-        second_run.outcome,
-        ProviderDispatchRecoverySupervisorOutcome::Completed(
-            ProviderDispatchRecoveryTerminal::Responded
-        )
-    );
-    assert_eq!(requests.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        fixture.attempt_event_types(&seeded),
-        ["provider.requested", "provider.sent", "provider.responded"]
+    assert_ne!(
+        second_run.operation_id, started.operation_id,
+        "the authorized recovery dispatch terminalizes its own operation; the next scan records fresh terminal evidence"
     );
     assert!(matches!(
         fixture
@@ -583,6 +566,21 @@ async fn direct_split_dispatch_fences_the_supervisor_until_the_direct_response_i
             .outcome,
         Some(OperationalRecoveryOutcome::Succeeded { .. })
     ));
+    assert_eq!(
+        second_run.outcome,
+        ProviderDispatchRecoverySupervisorOutcome::Waiting(OperationalRecoveryGate::RecoveryReady)
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        ["provider.requested", "provider.sent", "provider.responded"]
+    );
+    assert!(
+        fixture
+            .operation(&seeded.run_id, &second_run.operation_id)
+            .outcome
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -757,13 +755,14 @@ struct SeededRun {
 
 struct StartedDispatch {
     operation_id: String,
-    lease: Arc<WorkspaceRuntimeLease>,
+    lease: Arc<BoundWorkspaceRuntimeLease>,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("runtime.db");
+        drop(EventJournal::open(&path).unwrap());
         Self {
             _temp: temp,
             path,
@@ -771,8 +770,13 @@ impl Fixture {
         }
     }
 
-    fn lease(&self, owner: &str) -> Arc<WorkspaceRuntimeLease> {
-        Arc::new(WorkspaceRuntimeLease::acquire(&self.path, owner).unwrap())
+    fn lease(&self, owner: &str) -> Arc<BoundWorkspaceRuntimeLease> {
+        Arc::new(
+            WorkspaceRuntimeLease::acquire(&self.path, owner)
+                .unwrap()
+                .bind_database(&self.path)
+                .unwrap(),
+        )
     }
 
     fn seed_requested(
@@ -902,7 +906,12 @@ impl Fixture {
         }
     }
 
-    fn scan_record(&self, seeded: &SeededRun, expected_gate: OperationalRecoveryGate) -> String {
+    fn scan_record(
+        &self,
+        seeded: &SeededRun,
+        expected_gate: OperationalRecoveryGate,
+        lease: &BoundWorkspaceRuntimeLease,
+    ) -> String {
         let assignments = recover_agent_assignments(&self.path, WORKSPACE_ID, PROJECT_ID).unwrap();
         let report = {
             let mut journal = EventJournal::open(&self.path).unwrap();
@@ -921,7 +930,13 @@ impl Fixture {
             .unwrap();
         assert_eq!(run.gate, expected_gate);
         OperationalRecoveryRecordingService::new(&self.path)
-            .record(WORKSPACE_ID, PROJECT_ID, &report, "2026-07-13T00:00:03Z")
+            .record(
+                WORKSPACE_ID,
+                PROJECT_ID,
+                &report,
+                lease,
+                "2026-07-13T00:00:03Z",
+            )
             .unwrap()
             .into_iter()
             .find(|record| record.run_id == seeded.run_id)
@@ -929,8 +944,16 @@ impl Fixture {
             .operation_id
     }
 
-    fn claim_provider_dispatch(&self, seeded: &SeededRun, lease: &WorkspaceRuntimeLease) -> String {
-        let operation_id = self.scan_record(seeded, OperationalRecoveryGate::ProviderDispatchReady);
+    fn claim_provider_dispatch(
+        &self,
+        seeded: &SeededRun,
+        lease: &BoundWorkspaceRuntimeLease,
+    ) -> String {
+        let operation_id = self.scan_record(
+            seeded,
+            OperationalRecoveryGate::ProviderDispatchReady,
+            lease,
+        );
         OperationalRecoveryClaimService::new(&self.path)
             .claim_provider_dispatch_ready(
                 claim_request(&seeded.run_id, &operation_id),
@@ -970,8 +993,12 @@ impl Fixture {
         }
     }
 
-    fn claim_local_projection(&self, seeded: &SeededRun, lease: &WorkspaceRuntimeLease) -> String {
-        let operation_id = self.scan_record(seeded, OperationalRecoveryGate::RecoveryReady);
+    fn claim_local_projection(
+        &self,
+        seeded: &SeededRun,
+        lease: &BoundWorkspaceRuntimeLease,
+    ) -> String {
+        let operation_id = self.scan_record(seeded, OperationalRecoveryGate::RecoveryReady, lease);
         OperationalRecoveryClaimService::new(&self.path)
             .claim_ready(
                 claim_request(&seeded.run_id, &operation_id),
@@ -1045,31 +1072,6 @@ impl Fixture {
             .into_iter()
             .map(|event| event.event_type)
             .collect()
-    }
-
-    fn provider_execution(&self, seeded: &SeededRun) -> ProviderInferenceExecution {
-        let journal = EventJournal::open(&self.path).unwrap();
-        let attempt =
-            ProviderAttemptAggregate::recover(&journal, &seeded.run_id, &seeded.attempt_id)
-                .unwrap();
-        let definition = attempt.definition();
-        ProviderInferenceExecution {
-            run_id: seeded.run_id.clone(),
-            attempt_id: seeded.attempt_id.clone(),
-            inference_id: definition.inference_id.clone(),
-            invocation_id: definition.invocation_id.clone(),
-            inference_idempotency_key: format!("{}:inference:1", seeded.run_id),
-            attempt_number: definition.attempt_number,
-            provider: seeded.provider.clone(),
-            request: authoritative_request(
-                recover_compilation_receipt(
-                    &journal,
-                    &seeded.run_id,
-                    definition.context_compilation_id,
-                )
-                .unwrap(),
-            ),
-        }
     }
 
     fn operation(

@@ -48,7 +48,7 @@ use crate::{
     run_aggregate::{RunAggregate, RunAggregateError},
     run_state::RunState,
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 use super::ProviderLiveEffectAuthorization;
@@ -92,12 +92,10 @@ impl ProviderRecoveryEffectAuthorizationService {
         request: ProviderRecoveryEffectAuthorizationRequest,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: Arc<WorkspaceRuntimeLease>,
+        exclusive_lease: Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<ProviderLiveEffectAuthorization, ProviderRecoveryEffectAuthorizationError> {
         validate_request(&request)?;
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(ProviderRecoveryEffectAuthorizationError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
 
         let clock = WorkspaceEventJournal::open(&self.database_path)?;
         let before_global = clock.current_global_sequence()?;
@@ -386,7 +384,7 @@ fn recovery_actor(
     attempt: &ProviderAttemptAggregate,
     definition_sha256: &str,
     evidence_sha256: &str,
-    exclusive_lease: &WorkspaceRuntimeLease,
+    exclusive_lease: &BoundWorkspaceRuntimeLease,
 ) -> Result<(OperationalRecoveryActorBinding, String), ProviderRecoveryEffectAuthorizationError> {
     let execution = operation
         .execution
@@ -441,7 +439,7 @@ fn validate_resume_authorization(
     attempt: &ProviderAttemptAggregate,
     definition_sha256: &str,
     evidence_sha256: &str,
-    exclusive_lease: &WorkspaceRuntimeLease,
+    exclusive_lease: &BoundWorkspaceRuntimeLease,
 ) -> Result<(), ProviderRecoveryEffectAuthorizationError> {
     let claim = operation
         .claim
@@ -456,7 +454,7 @@ fn validate_resume_authorization(
         || authorization.execution_id != execution.execution_id
         || authorization.claim_id != claim.claim_id
         || authorization.original_owner_instance_id != execution.owner_instance_id
-        || authorization.resumer_instance_id != exclusive_lease.instance_id()
+        || authorization.resumer_instance_id != exclusive_lease.owner_id()
         || authorization.fencing_token != execution.fencing_token
         || authorization.action_spec_sha256 != claim.action_spec_sha256
         || authorization.attempt_id != attempt.attempt_id()
@@ -802,8 +800,8 @@ fn sha256(bytes: &[u8]) -> String {
 pub enum ProviderRecoveryEffectAuthorizationError {
     #[error("Provider recovery effect authorization identity is invalid")]
     IdentityInvalid,
-    #[error("Provider recovery effect authorization lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("Provider recovery effect authorization workspace/project does not match the Run")]
     WorkspaceBindingMismatch,
     #[error("Provider recovery effect authorization requires a Running Run, found {0:?}")]

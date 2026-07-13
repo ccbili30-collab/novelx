@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -6,7 +5,7 @@ import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   RuntimeV2ProcessSupervisor,
   RuntimeV2SupervisorError,
@@ -32,24 +31,6 @@ const runtimeExecutable = path.join(
 let supervisor: RuntimeV2ProcessSupervisor | null = null;
 const tempRoots: string[] = [];
 const providerServers: ControlledProviderServer[] = [];
-
-beforeAll(() => {
-  const build = spawnSync("cargo", [
-    "build",
-    "--manifest-path",
-    path.join(runtimeRoot, "Cargo.toml"),
-    "--bin",
-    "novelx-runtime",
-  ], {
-    cwd: runtimeRoot,
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (build.error) throw build.error;
-  if (build.status !== 0) {
-    throw new Error(`Runtime V2 Cargo build failed.\n${build.stdout}\n${build.stderr}`);
-  }
-}, 120_000);
 
 afterEach(async () => {
   await supervisor?.stop();

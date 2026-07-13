@@ -8,7 +8,7 @@ use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
-use crate::workspace_runtime_lease::WorkspaceRuntimeLease;
+use crate::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError};
 
 const PROVIDER_EFFECT_SCHEMA_VERSION: u16 = 1;
 const PROVIDER_EFFECT_DISPATCH_NAMESPACE: Uuid =
@@ -198,7 +198,7 @@ impl ProviderEffectGrantReceipt {
 #[allow(dead_code)]
 pub struct ProviderEffectCapability {
     receipt: ProviderEffectGrantReceipt,
-    live_lease: Arc<WorkspaceRuntimeLease>,
+    live_lease: Arc<BoundWorkspaceRuntimeLease>,
     _seal: private::Seal,
 }
 
@@ -218,7 +218,7 @@ impl ProviderEffectCapability {
         receipt: ProviderEffectGrantReceipt,
         expected_material: &ProviderEffectGrantMaterial,
         database_path: impl AsRef<Path>,
-        live_lease: Arc<WorkspaceRuntimeLease>,
+        live_lease: Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<Self, ProviderEffectCapabilityError> {
         Self::activate_at(
             receipt,
@@ -233,7 +233,7 @@ impl ProviderEffectCapability {
         receipt: ProviderEffectGrantReceipt,
         expected_material: &ProviderEffectGrantMaterial,
         database_path: impl AsRef<Path>,
-        live_lease: Arc<WorkspaceRuntimeLease>,
+        live_lease: Arc<BoundWorkspaceRuntimeLease>,
         now: OffsetDateTime,
     ) -> Result<Self, ProviderEffectCapabilityError> {
         validate_for_use(
@@ -289,7 +289,7 @@ impl ProviderEffectCapability {
 #[allow(dead_code)]
 pub struct ConsumedProviderEffect {
     receipt: ProviderEffectGrantReceipt,
-    live_lease: Arc<WorkspaceRuntimeLease>,
+    live_lease: Arc<BoundWorkspaceRuntimeLease>,
     _seal: private::Seal,
 }
 
@@ -325,7 +325,7 @@ impl ConsumedProviderEffect {
 #[allow(dead_code)]
 pub struct ArmedProviderEffect {
     receipt: ProviderEffectGrantReceipt,
-    live_lease: Arc<WorkspaceRuntimeLease>,
+    live_lease: Arc<BoundWorkspaceRuntimeLease>,
     _seal: private::Seal,
 }
 
@@ -354,7 +354,7 @@ impl ArmedProviderEffect {
 #[allow(dead_code)]
 pub struct DispatchedProviderEffect {
     receipt: ProviderEffectGrantReceipt,
-    live_lease: Arc<WorkspaceRuntimeLease>,
+    live_lease: Arc<BoundWorkspaceRuntimeLease>,
     _seal: private::Seal,
 }
 
@@ -368,6 +368,13 @@ impl std::fmt::Debug for DispatchedProviderEffect {
 impl DispatchedProviderEffect {
     pub(crate) fn receipt(&self) -> &ProviderEffectGrantReceipt {
         &self.receipt
+    }
+
+    pub(crate) fn verify_database_authority(
+        &self,
+        database_path: impl AsRef<Path>,
+    ) -> Result<(), BoundWorkspaceRuntimeLeaseError> {
+        self.live_lease.verify_database_authority(database_path)
     }
 }
 
@@ -395,7 +402,7 @@ fn validate_for_use(
     receipt: &ProviderEffectGrantReceipt,
     expected_material: &ProviderEffectGrantMaterial,
     database_path: &Path,
-    live_lease: &WorkspaceRuntimeLease,
+    live_lease: &BoundWorkspaceRuntimeLease,
     now: OffsetDateTime,
 ) -> Result<(), ProviderEffectCapabilityError> {
     receipt.validate()?;
@@ -403,9 +410,7 @@ fn validate_for_use(
     if receipt.material != *expected_material {
         return Err(ProviderEffectCapabilityError::MaterialMismatch);
     }
-    if !live_lease.protects_database(database_path) {
-        return Err(ProviderEffectCapabilityError::WorkspaceLeaseMismatch);
-    }
+    live_lease.verify_database_authority(database_path)?;
     if live_lease.lease_epoch() != receipt.material.lease_epoch {
         return Err(ProviderEffectCapabilityError::LeaseEpochMismatch);
     }
@@ -703,8 +708,8 @@ pub enum ProviderEffectCapabilityError {
     PersistedReceiptMismatch,
     #[error("Provider effect capability material does not match the dispatch")]
     MaterialMismatch,
-    #[error("Provider effect capability workspace lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("Provider effect capability lease epoch does not match the live owner")]
     LeaseEpochMismatch,
     #[error("Provider effect capability database canonical path does not match")]

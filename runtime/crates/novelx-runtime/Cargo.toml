@@ -13,6 +13,11 @@ runtime-test-failpoints = []
 name = "novelx-runtime"
 path = "src/main.rs"
 
+[[bin]]
+name = "novelx-runtime-failpoints"
+path = "src/failpoint_main.rs"
+required-features = ["runtime-test-failpoints"]
+
 [[test]]
 name = "provider_recovery_killpoints"
 path = "tests/provider_recovery_killpoints.rs"

@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import { z } from "zod";
+import { canonicalAuditHash } from "../domain/audit/canonicalAuditHash";
 import {
   RUNTIME_V2_PROTOCOL_VERSION,
   RuntimeV2ProtocolVersionError,
@@ -11,6 +12,8 @@ import {
   parseRuntimeV2ProviderBoundEnvelope,
   parseRuntimeV2ProviderRejectedEnvelope,
   parseRuntimeV2ProviderInferenceAcceptedEnvelope,
+  parseRuntimeV2ProviderInferenceContinuationProposedEnvelope,
+  parseRuntimeV2ProviderInferenceContinuationAcceptedEnvelope,
   parseRuntimeV2ProviderInferenceCompletedEnvelope,
   parseRuntimeV2ProviderInferenceFailedEnvelope,
   parseRuntimeV2ProviderInferenceReconciliationRequiredEnvelope,
@@ -39,6 +42,7 @@ import {
   runtimeV2ContextCompileEnvelopeSchema,
   runtimeV2SensitiveProviderBindEnvelopeSchema,
   runtimeV2ProviderInferenceStartEnvelopeSchema,
+  runtimeV2ProviderInferenceContinuationAcknowledgeEnvelopeSchema,
   runtimeV2RunGetEnvelopeSchema,
   runtimeV2RunCancelEnvelopeSchema,
   runtimeV2RunReconcileEnvelopeSchema,
@@ -72,6 +76,7 @@ import {
   type RuntimeV2ProviderBindingReceipt,
   type RuntimeV2ProviderConfig,
   type RuntimeV2ProviderInferenceAcceptedEnvelope,
+  type RuntimeV2ProviderInferenceContinuationProposedEnvelope,
   type RuntimeV2ProviderInferenceCompletedEnvelope,
   type RuntimeV2ProviderInferenceFailedEnvelope,
   type RuntimeV2ProviderInferenceReconciliationRequiredEnvelope,
@@ -146,6 +151,7 @@ export interface RuntimeV2Handshake {
 }
 
 export type RuntimeV2RuntimeEvent = RuntimeV2ErrorEnvelope
+  | RuntimeV2ProviderInferenceContinuationProposedEnvelope
   | RuntimeV2ProviderInferenceCompletedEnvelope
   | RuntimeV2ProviderInferenceFailedEnvelope
   | RuntimeV2ProviderInferenceReconciliationRequiredEnvelope
@@ -201,6 +207,7 @@ export class RuntimeV2ProcessSupervisor {
   #expectedRuntimeSequence = 3;
   #pending = new Map<string, PendingCommand>();
   #activeInferences = new Map<string, ActiveProviderInference>();
+  #continuationProposals = new Map<string, RuntimeV2ProviderInferenceContinuationProposedEnvelope["payload"]>();
   #runtimeEventListeners = new Set<(event: RuntimeV2RuntimeEvent) => void>();
 
   constructor(options: RuntimeV2ProcessSupervisorOptions) {
@@ -646,7 +653,11 @@ export class RuntimeV2ProcessSupervisor {
                         ? parseRuntimeV2ProviderRejectedEnvelope(value)
                         : name === "provider.inference.accepted"
                           ? parseRuntimeV2ProviderInferenceAcceptedEnvelope(value)
-                          : name === "provider.inference.completed"
+                        : name === "provider.inference.continuation.proposed"
+                          ? parseRuntimeV2ProviderInferenceContinuationProposedEnvelope(value)
+                        : name === "provider.inference.continuation.accepted"
+                          ? parseRuntimeV2ProviderInferenceContinuationAcceptedEnvelope(value)
+                        : name === "provider.inference.completed"
                             ? parseRuntimeV2ProviderInferenceCompletedEnvelope(value)
                             : name === "provider.inference.failed"
                               ? parseRuntimeV2ProviderInferenceFailedEnvelope(value)
@@ -667,6 +678,22 @@ export class RuntimeV2ProcessSupervisor {
       }
       this.#expectedRuntimeSequence += 1;
       const correlationId = response.correlationId;
+      if (response.name === "provider.inference.continuation.proposed") {
+        const proposalEvent = parseRuntimeV2ProviderInferenceContinuationProposedEnvelope(value);
+        const proposal = proposalEvent.payload;
+        if (canonicalAuditHash(proposal.continuationInferenceIdentity) !== proposal.continuationIdentitySha256) {
+          throw new Error(`Continuation identity hash mismatch: ${proposal.continuationId}.`);
+        }
+        const existing = this.#continuationProposals.get(proposal.continuationId);
+        if (existing && JSON.stringify(existing) !== JSON.stringify(proposal)) {
+          throw new Error(`Continuation proposal identity conflict: ${proposal.continuationId}.`);
+        }
+        this.#continuationProposals.set(proposal.continuationId, proposal);
+        this.#activeInferences.set(proposal.continuationId, proposal.continuationInferenceIdentity);
+        this.#emitRuntimeEvent(proposalEvent);
+        void this.#acknowledgeContinuation(proposalEvent).catch((error) => this.#failRuntime(toProtocolError(error)));
+        return;
+      }
       if (isProviderInferenceTerminalEvent(response)) {
         if (!correlationId) throw new Error("Provider inference terminal event is missing correlationId.");
         const active = this.#activeInferences.get(correlationId);
@@ -770,6 +797,26 @@ export class RuntimeV2ProcessSupervisor {
     }
   }
 
+  async #acknowledgeContinuation(
+    proposal: RuntimeV2ProviderInferenceContinuationProposedEnvelope,
+  ): Promise<void> {
+    const response = await this.#sendCommand(
+      "provider.inference.continuation.acknowledge",
+      "provider.inference.continuation.accepted",
+      proposal.runId,
+      {
+        continuationId: proposal.payload.continuationId,
+        continuationIdentitySha256: proposal.payload.continuationIdentitySha256,
+        parentInferenceIdentity: proposal.payload.parentInferenceIdentity,
+        authorizationEvidence: proposal.payload.authorizationEvidence,
+      },
+    );
+    const accepted = parseRuntimeV2ProviderInferenceContinuationAcceptedEnvelope(response);
+    if (JSON.stringify(accepted.payload) !== JSON.stringify(proposal.payload)) {
+      throw new Error(`Continuation acknowledgement receipt mismatch: ${proposal.payload.continuationId}.`);
+    }
+  }
+
   #sendSensitiveProviderBind(
     config: RuntimeV2ProviderConfig,
     configSha256: string,
@@ -824,8 +871,8 @@ export class RuntimeV2ProcessSupervisor {
   }
 
   #sendCommand(
-    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "run.reconcile" | "goal.create" | "goal.get" | "goal.revise" | "goal.completion.propose" | "goal.complete" | "plan.create" | "plan.get" | "plan.revise" | "plan.step.start" | "plan.step.complete" | "agent.assignment.create" | "agent.assignment.get" | "agent.assignment.start" | "agent.assignment.request_cancel" | "agent.assignment.confirm_cancelled" | "agent.assignment.complete" | "agent.assignment.fail" | "context.compile" | "provider.inference.start" | "tool.authorization.resolve",
-    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "agent.assignment.snapshot" | "context.compilation" | "provider.inference.accepted" | "tool.authorization.resolved",
+    name: "runtime.status.get" | "runtime.shutdown" | "run.start" | "run.get" | "run.prepare" | "run.cancel" | "run.reconcile" | "goal.create" | "goal.get" | "goal.revise" | "goal.completion.propose" | "goal.complete" | "plan.create" | "plan.get" | "plan.revise" | "plan.step.start" | "plan.step.complete" | "agent.assignment.create" | "agent.assignment.get" | "agent.assignment.start" | "agent.assignment.request_cancel" | "agent.assignment.confirm_cancelled" | "agent.assignment.complete" | "agent.assignment.fail" | "context.compile" | "provider.inference.start" | "provider.inference.continuation.acknowledge" | "tool.authorization.resolve",
+    expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "agent.assignment.snapshot" | "context.compilation" | "provider.inference.accepted" | "provider.inference.continuation.accepted" | "tool.authorization.resolved",
     runId: string | null,
     payload: object,
     timeoutMs = this.#options.commandTimeoutMs,
@@ -898,6 +945,8 @@ export class RuntimeV2ProcessSupervisor {
                                                 ? runtimeV2AgentAssignmentCompleteEnvelopeSchema.parse(base)
                                                 : name === "agent.assignment.fail"
                                                   ? runtimeV2AgentAssignmentFailEnvelopeSchema.parse(base)
+                : name === "provider.inference.continuation.acknowledge"
+                  ? runtimeV2ProviderInferenceContinuationAcknowledgeEnvelopeSchema.parse(base)
                 : name === "tool.authorization.resolve"
                   ? runtimeV2ToolAuthorizationResolveEnvelopeSchema.parse(base)
                 : name === "context.compile"
@@ -938,6 +987,7 @@ export class RuntimeV2ProcessSupervisor {
     }
     this.#pending.clear();
     this.#activeInferences.clear();
+    this.#continuationProposals.clear();
     this.#options.onRuntimeFailure?.(error);
     if (child && terminateChild) void this.#terminateChild(child);
   }
@@ -981,7 +1031,7 @@ export class RuntimeV2ProcessSupervisor {
 }
 
 interface PendingCommand {
-  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "agent.assignment.snapshot" | "context.compilation" | "provider.bound" | "provider.inference.accepted" | "tool.authorization.resolved";
+  expectedName: "runtime.status" | "runtime.stopped" | "run.snapshot" | "run.reconciled" | "goal.snapshot" | "plan.snapshot" | "agent.assignment.snapshot" | "context.compilation" | "provider.bound" | "provider.inference.accepted" | "provider.inference.continuation.accepted" | "tool.authorization.resolved";
   resolve(value: unknown): void;
   reject(error: RuntimeV2SupervisorError): void;
   timer: NodeJS.Timeout;

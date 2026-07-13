@@ -2,6 +2,7 @@ mod support;
 
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
@@ -17,7 +18,7 @@ use std::{
 
 use novelx_protocol::{
     ContextCompilationReceipt, ContextDisclosure, ContextItem, ContextMessageRole, Envelope,
-    MessageType, PROTOCOL_VERSION, ProviderRunIdentity, RuntimeApplicationIdentity,
+    MessageType, PROTOCOL_VERSION, ProviderRunIdentity, RuntimeApplicationIdentity, RuntimeHello,
     RuntimeInitialize, ToolPermissionPolicy, ToolSourceScope,
 };
 use novelx_runtime::{
@@ -47,6 +48,7 @@ use novelx_runtime::{
     runtime_test_failpoint::{DIRECTORY_ENV, NAME_ENV, OBSERVER_NAME_ENV, TOKEN_ENV},
     workspace_event_journal::WorkspaceEventJournal,
 };
+use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
@@ -68,6 +70,9 @@ const RESPONDED_BEFORE_RECOVERY_OUTCOME: &str =
     "provider_dispatch.responded_before_recovery_outcome";
 const RECOVERY_BEFORE_HOST_RESPONSE: &str = "provider_bind.recovery_persisted_before_response";
 const RUNTIME_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+const DIAGNOSTIC_STDERR_LIMIT: usize = 4_096;
+const FAILPOINT_RUNTIME_CAPABILITY: &str = "runtime_test_failpoints_v1";
+const FAILPOINT_RUNTIME_IDENTITY: &str = "runtime_binary:novelx-runtime-failpoints";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -678,6 +683,7 @@ struct RuntimeProcess {
     output_reader: Option<std::thread::JoinHandle<()>>,
     stderr: Arc<Mutex<String>>,
     stderr_reader: Option<std::thread::JoinHandle<()>>,
+    database_path: Option<PathBuf>,
     finished: bool,
 }
 
@@ -689,7 +695,7 @@ enum RuntimeOutput {
 
 impl RuntimeProcess {
     fn spawn(arm: Option<&FailpointArm>) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_novelx-runtime"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_novelx-runtime-failpoints"));
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -769,14 +775,30 @@ impl RuntimeProcess {
             output_reader: Some(output_reader),
             stderr,
             stderr_reader: Some(stderr_reader),
+            database_path: None,
             finished: false,
         };
         let hello = process.read_envelope("runtime.hello");
         assert_eq!(hello.name, "runtime.hello");
+        let hello: RuntimeHello = serde_json::from_value(hello.payload)
+            .expect("runtime.hello payload must match the protocol");
+        assert!(
+            hello
+                .capabilities
+                .iter()
+                .any(|value| value == FAILPOINT_RUNTIME_CAPABILITY)
+                && hello
+                    .capabilities
+                    .iter()
+                    .any(|value| value == FAILPOINT_RUNTIME_IDENTITY),
+            "binary feature mismatch: killpoint tests require `{FAILPOINT_RUNTIME_CAPABILITY}` and `{FAILPOINT_RUNTIME_IDENTITY}`, actual capabilities={:?}",
+            hello.capabilities
+        );
         process
     }
 
     fn initialize(&mut self, database_path: &Path) {
+        self.database_path = Some(database_path.to_owned());
         write_envelope(&mut self.child, &initialize_envelope(database_path));
         let ready = self.read_envelope("runtime.ready");
         assert_eq!(ready.name, "runtime.ready", "{:?}", ready.payload);
@@ -930,8 +952,12 @@ impl RuntimeProcess {
     fn unexpected_exit(&mut self, status: ExitStatus) -> ! {
         self.finished = true;
         self.join_readers();
-        let stderr = self.stderr_snapshot();
-        panic!("Runtime exited before failpoint marker: {status}; stderr={stderr}");
+        let stderr = self.stderr_diagnostic();
+        let pending_output = self.pending_output_diagnostic();
+        let database = self.preserve_database_diagnostic();
+        panic!(
+            "Runtime exited before failpoint marker: {status}; pendingOutput={pending_output:?}; stderr={stderr}; {database}"
+        );
     }
 
     fn fail_and_cleanup(&mut self, expected_stage: &'static str, reason: &str) -> ! {
@@ -952,10 +978,74 @@ impl RuntimeProcess {
         };
         self.finished = true;
         self.join_readers();
-        let stderr = self.stderr_snapshot();
+        let stderr = self.stderr_diagnostic();
+        let pending_output = self.pending_output_diagnostic();
+        let database = self.preserve_database_diagnostic();
         panic!(
-            "Runtime failed while waiting for `{expected_stage}`: {reason}; status={status}; terminationError={termination_error:?}; stderr={stderr}"
+            "Runtime failed while waiting for `{expected_stage}`: {reason}; status={status}; terminationError={termination_error:?}; pendingOutput={pending_output:?}; stderr={stderr}; {database}"
         );
+    }
+
+    fn pending_output_diagnostic(&self) -> Vec<String> {
+        self.output
+            .try_iter()
+            .map(|output| match output {
+                RuntimeOutput::Envelope(envelope) => format!(
+                    "envelope(name={}, sequence={}, hasCorrelation={}, hasRunId={})",
+                    envelope.name,
+                    envelope.sequence,
+                    envelope.correlation_id.is_some(),
+                    envelope.run_id.is_some()
+                ),
+                RuntimeOutput::Closed => "stdout_closed".to_owned(),
+                RuntimeOutput::Failed(error) => format!(
+                    "stdout_failed(sha256={:x})",
+                    Sha256::digest(error.as_bytes())
+                ),
+            })
+            .collect()
+    }
+
+    fn preserve_database_diagnostic(&self) -> String {
+        let Some(database_path) = self.database_path.as_ref() else {
+            return "databaseDiagnostic=not_initialized".to_owned();
+        };
+        let diagnostic_root = std::env::temp_dir()
+            .join("novelx-runtime-killpoint-diagnostics")
+            .join(Uuid::new_v4().to_string());
+        if let Err(error) = fs::create_dir_all(&diagnostic_root) {
+            return format!("databaseDiagnostic=create_failed({error})");
+        }
+
+        let runtime_events = event_type_counts(database_path, "runtime_events");
+        let workspace_events = event_type_counts(database_path, "workspace_events");
+        let mut preserved = Vec::new();
+        for (source, file_name) in [
+            (database_path.clone(), PathBuf::from("runtime.db")),
+            (
+                database_sidecar(database_path, "-wal"),
+                PathBuf::from("runtime.db-wal"),
+            ),
+            (
+                database_sidecar(database_path, "-shm"),
+                PathBuf::from("runtime.db-shm"),
+            ),
+        ] {
+            if !source.exists() {
+                continue;
+            }
+            match fs::copy(&source, diagnostic_root.join(&file_name)) {
+                Ok(_) => preserved.push(file_name.to_string_lossy().into_owned()),
+                Err(error) => preserved.push(format!(
+                    "{}:copy_failed({error})",
+                    file_name.to_string_lossy()
+                )),
+            }
+        }
+        format!(
+            "databaseDiagnosticPath={}; preservedFiles={preserved:?}; runtimeEventTypes={runtime_events}; workspaceEventTypes={workspace_events}",
+            diagnostic_root.display()
+        )
     }
 
     fn join_readers(&mut self) {
@@ -985,6 +1075,19 @@ impl RuntimeProcess {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone()
+    }
+
+    fn stderr_diagnostic(&self) -> String {
+        let redacted = self.stderr_snapshot().replace(SECRET, "[REDACTED]");
+        if redacted.chars().count() <= DIAGNOSTIC_STDERR_LIMIT {
+            return redacted;
+        }
+        let digest = format!("{:x}", Sha256::digest(redacted.as_bytes()));
+        let prefix = redacted
+            .chars()
+            .take(DIAGNOSTIC_STDERR_LIMIT)
+            .collect::<String>();
+        format!("{prefix}...[truncated; sha256={digest}]")
     }
 }
 
@@ -1045,11 +1148,12 @@ impl FailpointArm {
             {
                 runtime.unexpected_exit(status);
             }
-            assert!(
-                Instant::now() < deadline,
-                "Runtime did not reach failpoint `{}` within the deadline",
-                self.name
-            );
+            if Instant::now() >= deadline {
+                runtime.fail_and_cleanup(
+                    self.name,
+                    "Runtime did not publish the failpoint marker before the hard deadline",
+                );
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -1079,10 +1183,12 @@ impl FailpointArm {
             {
                 runtime.unexpected_exit(status);
             }
-            assert!(
-                Instant::now() < deadline,
-                "Runtime did not publish observer `{observer_name}` within the deadline"
-            );
+            if Instant::now() >= deadline {
+                runtime.fail_and_cleanup(
+                    observer_name,
+                    "Runtime did not publish the observer marker before the hard deadline",
+                );
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -1090,6 +1196,36 @@ impl FailpointArm {
     fn release(&self) {
         fs::write(&self.release_path, b"release\n")
             .expect("Runtime test failpoint release marker must be written");
+    }
+}
+
+fn database_sidecar(database_path: &Path, suffix: &str) -> PathBuf {
+    let mut value: OsString = database_path.as_os_str().to_owned();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn event_type_counts(database_path: &Path, table: &str) -> String {
+    let sql = match table {
+        "runtime_events" => {
+            "SELECT event_type, COUNT(*) FROM runtime_events GROUP BY event_type ORDER BY event_type"
+        }
+        "workspace_events" => {
+            "SELECT event_type, COUNT(*) FROM workspace_events GROUP BY event_type ORDER BY event_type"
+        }
+        _ => return "unsupported_table".to_owned(),
+    };
+    let result = (|| -> Result<Vec<(String, u64)>, rusqlite::Error> {
+        let connection =
+            Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut statement = connection.prepare(sql)?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect()
+    })();
+    match result {
+        Ok(counts) => format!("{counts:?}"),
+        Err(error) => format!("unavailable({error})"),
     }
 }
 

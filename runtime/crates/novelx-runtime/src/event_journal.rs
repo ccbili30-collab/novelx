@@ -107,6 +107,12 @@ pub enum EventJournalError {
     DatabasePath(#[from] std::io::Error),
 }
 
+/// Trusted internal storage boundary.
+///
+/// Mutation methods currently do not accept a [`BoundWorkspaceRuntimeLease`](crate::workspace_runtime_lease::BoundWorkspaceRuntimeLease)
+/// capability directly. Production callers must verify their bound workspace authority before
+/// entering this boundary. Until the capability is enforced here, the crate does not provide
+/// crate-wide write-capability enforcement.
 pub struct EventJournal {
     connection: Connection,
     database_path: PathBuf,

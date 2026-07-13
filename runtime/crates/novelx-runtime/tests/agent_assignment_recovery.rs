@@ -13,6 +13,7 @@ use novelx_runtime::{
     event_journal::{EventJournal, NewRuntimeEvent},
     run_aggregate::{EventMetadata, RunAggregate, RunAggregateError},
     run_state::RunState,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -221,14 +222,22 @@ fn rejects_orphan_hash_mismatch_and_recursive_child_runs() {
 struct Fixture {
     _temp: TempDir,
     database: std::path::PathBuf,
+    lease: BoundWorkspaceRuntimeLease,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("workspace.db");
+        EventJournal::open(&database).unwrap();
+        let lease = WorkspaceRuntimeLease::acquire(&database, "assignment-recovery")
+            .unwrap()
+            .bind_database(&database)
+            .unwrap();
         Self {
-            database: temp.path().join("workspace.db"),
+            database,
             _temp: temp,
+            lease,
         }
     }
 
@@ -340,7 +349,7 @@ impl Fixture {
             run_metadata(&format!("{child_id}-create")),
         )
         .unwrap();
-        advance(&mut child, &mut journal, state, child_id);
+        advance(&mut child, &mut journal, &self.lease, state, child_id);
     }
 
     fn child_spec(
@@ -427,7 +436,13 @@ impl Fixture {
     }
 }
 
-fn advance(child: &mut RunAggregate, journal: &mut EventJournal, state: RunState, id: &str) {
+fn advance(
+    child: &mut RunAggregate,
+    journal: &mut EventJournal,
+    lease: &BoundWorkspaceRuntimeLease,
+    state: RunState,
+    id: &str,
+) {
     if state == RunState::Created {
         return;
     }
@@ -455,7 +470,7 @@ fn advance(child: &mut RunAggregate, journal: &mut EventJournal, state: RunState
             .retry(journal, run_metadata(&format!("{id}-retry")))
             .unwrap(),
         RunState::Cancelled => child
-            .cancel(journal, run_metadata(&format!("{id}-cancel")))
+            .cancel(journal, lease, run_metadata(&format!("{id}-cancel")))
             .unwrap(),
         RunState::Failed => child
             .fail(journal, run_metadata(&format!("{id}-fail")))

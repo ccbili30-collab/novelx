@@ -34,6 +34,7 @@ use novelx_runtime::{
         ProviderResponseReceipt,
     },
     run_aggregate::{EventMetadata, RunAggregate},
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -42,8 +43,11 @@ use uuid::Uuid;
 fn claim_service_rescans_and_claims_the_recorded_ready_operation() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();
-    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
-    let lease = fixture.lease("runtime-instance-1");
+    let (operation_id, lease) = fixture.record_ready(
+        &run_id,
+        std::slice::from_ref(&provider),
+        "runtime-instance-1",
+    );
 
     let aggregate = OperationalRecoveryClaimService::new(&fixture.path)
         .claim_ready(
@@ -54,7 +58,7 @@ fn claim_service_rescans_and_claims_the_recorded_ready_operation() {
         .unwrap();
     let operation = &aggregate.operations[&operation_id];
     let claim = operation.claim.as_ref().unwrap();
-    assert_eq!(claim.owner_instance_id, lease.instance_id());
+    assert_eq!(claim.owner_instance_id, lease.owner_id());
     assert_eq!(claim.fencing_token, 1);
     assert_eq!(
         claim.source_fingerprint,
@@ -143,9 +147,9 @@ fn supervisor_never_dispatches_a_provider_for_an_explicit_execution_action() {
 fn supervisor_resumes_projection_committed_before_the_previous_process_crashed() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();
-    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let (operation_id, old_lease) =
+        fixture.record_ready(&run_id, std::slice::from_ref(&provider), "old-runtime");
     let claims = OperationalRecoveryClaimService::new(&fixture.path);
-    let old_lease = fixture.lease("old-runtime");
     let claimed = claims
         .claim_ready(
             claim_request(&run_id, &operation_id),
@@ -210,7 +214,7 @@ fn supervisor_resumes_projection_committed_before_the_previous_process_crashed()
     assert!(operation.outcome.is_some());
     assert_eq!(
         operation.resumes.last().unwrap().resumer_instance_id,
-        new_lease.instance_id()
+        new_lease.owner_id()
     );
 }
 
@@ -218,9 +222,12 @@ fn supervisor_resumes_projection_committed_before_the_previous_process_crashed()
 fn supervisor_resumes_an_execution_that_crashed_before_local_projection() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();
-    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let (operation_id, old_lease) = fixture.record_ready(
+        &run_id,
+        std::slice::from_ref(&provider),
+        "old-runtime-before-projection",
+    );
     let claims = OperationalRecoveryClaimService::new(&fixture.path);
-    let old_lease = fixture.lease("old-runtime-before-projection");
     let claimed = claims
         .claim_ready(
             claim_request(&run_id, &operation_id),
@@ -267,7 +274,7 @@ fn supervisor_resumes_an_execution_that_crashed_before_local_projection() {
     assert!(operation.outcome.is_some());
     assert_eq!(
         operation.resumes.last().unwrap().resumer_instance_id,
-        new_lease.instance_id()
+        new_lease.owner_id()
     );
 }
 
@@ -275,8 +282,11 @@ fn supervisor_resumes_an_execution_that_crashed_before_local_projection() {
 fn changed_provider_evidence_is_rejected_by_the_fresh_scan() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();
-    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
-    let lease = fixture.lease("runtime-instance-1");
+    let (operation_id, lease) = fixture.record_ready(
+        &run_id,
+        std::slice::from_ref(&provider),
+        "runtime-instance-1",
+    );
 
     fixture.move_run_to_waiting_approval(&run_id);
     assert!(matches!(
@@ -312,15 +322,21 @@ fn provider_dispatch_ready_claim_starts_with_external_effect_class() {
     let report = fixture.scan(std::slice::from_ref(&provider));
     let scanned = report.runs.iter().find(|run| run.run_id == run_id).unwrap();
     assert_eq!(scanned.gate, OperationalRecoveryGate::ProviderDispatchReady);
+    let lease = fixture.lease("provider-dispatch-runtime");
     let recorded = OperationalRecoveryRecordingService::new(&fixture.path)
-        .record("workspace-1", "project-1", &report, "2026-07-13T00:00:00Z")
+        .record(
+            "workspace-1",
+            "project-1",
+            &report,
+            &lease,
+            "2026-07-13T00:00:00Z",
+        )
         .unwrap();
     let operation_id = recorded
         .into_iter()
         .find(|item| item.run_id == run_id)
         .unwrap()
         .operation_id;
-    let lease = fixture.lease("provider-dispatch-runtime");
     let claims = OperationalRecoveryClaimService::new(&fixture.path);
     let claimed = claims
         .claim_provider_dispatch_ready(
@@ -380,9 +396,12 @@ fn unrecorded_ready_observation_cannot_be_claimed() {
 fn execution_start_uses_fresh_scan_and_exact_fence() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();
-    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let (operation_id, lease) = fixture.record_ready(
+        &run_id,
+        std::slice::from_ref(&provider),
+        "runtime-instance-1",
+    );
     let service = OperationalRecoveryClaimService::new(&fixture.path);
-    let lease = fixture.lease("runtime-instance-1");
     let claimed = service
         .claim_ready(
             claim_request(&run_id, &operation_id),
@@ -465,7 +484,7 @@ fn execution_start_uses_fresh_scan_and_exact_fence() {
         .clone();
     let resume = OperationalRecoveryResume::derive(
         &execution,
-        resumed_lease.instance_id().to_owned(),
+        resumed_lease.owner_id().to_owned(),
         "2026-07-13T00:10:00Z".to_owned(),
     )
     .unwrap();
@@ -510,8 +529,11 @@ fn execution_start_uses_fresh_scan_and_exact_fence() {
 fn claim_lease_duration_is_enforced_by_runtime_policy() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();
-    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
-    let lease = fixture.lease("runtime-instance-1");
+    let (operation_id, lease) = fixture.record_ready(
+        &run_id,
+        std::slice::from_ref(&provider),
+        "runtime-instance-1",
+    );
     let mut request = claim_request(&run_id, &operation_id);
     request.lease_duration_seconds = 301;
     assert!(matches!(
@@ -528,9 +550,9 @@ fn claim_lease_duration_is_enforced_by_runtime_policy() {
 fn a_new_runtime_owner_cannot_start_an_old_untransferred_claim() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();
-    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let (operation_id, old_lease) =
+        fixture.record_ready(&run_id, std::slice::from_ref(&provider), "old-runtime");
     let service = OperationalRecoveryClaimService::new(&fixture.path);
-    let old_lease = fixture.lease("old-runtime");
     let claimed = service
         .claim_ready(
             claim_request(&run_id, &operation_id),
@@ -576,9 +598,9 @@ fn a_new_runtime_owner_cannot_start_an_old_untransferred_claim() {
 fn expired_unstarted_claim_transfers_only_to_exclusive_runtime_owner() {
     let fixture = Fixture::new();
     let (run_id, provider) = fixture.create_projectable_run();
-    let operation_id = fixture.record_ready(&run_id, std::slice::from_ref(&provider));
+    let (operation_id, old_lease) =
+        fixture.record_ready(&run_id, std::slice::from_ref(&provider), "old-runtime");
     let service = OperationalRecoveryClaimService::new(&fixture.path);
-    let old_lease = fixture.lease("old-runtime");
     let mut initial = claim_request(&run_id, &operation_id);
     initial.lease_duration_seconds = 1;
     let claimed = service
@@ -592,11 +614,7 @@ fn expired_unstarted_claim_transfers_only_to_exclusive_runtime_owner() {
         .clone();
     drop(old_lease);
     std::thread::sleep(std::time::Duration::from_millis(1_100));
-    let exclusive = novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease::acquire(
-        &fixture.path,
-        "new-runtime",
-    )
-    .unwrap();
+    let exclusive = fixture.lease("new-runtime");
     let transferred = service
         .transfer_expired_unstarted_claim(
             OperationalRecoveryTransferRequest {
@@ -615,7 +633,7 @@ fn expired_unstarted_claim_transfers_only_to_exclusive_runtime_owner() {
         .claim
         .as_ref()
         .unwrap();
-    assert_eq!(current.owner_instance_id, exclusive.instance_id());
+    assert_eq!(current.owner_instance_id, exclusive.owner_id());
     assert_eq!(current.fencing_token, 2);
 }
 
@@ -638,18 +656,15 @@ impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("runtime.db");
+        drop(EventJournal::open(&path).unwrap());
         Self { _temp: temp, path }
     }
 
-    fn lease(
-        &self,
-        instance_id: &str,
-    ) -> novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease {
-        novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease::acquire(
-            &self.path,
-            instance_id,
-        )
-        .unwrap()
+    fn lease(&self, instance_id: &str) -> BoundWorkspaceRuntimeLease {
+        WorkspaceRuntimeLease::acquire(&self.path, instance_id)
+            .unwrap()
+            .bind_database(&self.path)
+            .unwrap()
     }
 
     fn create_projectable_run(&self) -> (String, ProviderRunIdentity) {
@@ -849,15 +864,27 @@ impl Fixture {
             .count()
     }
 
-    fn record_ready(&self, run_id: &str, providers: &[ProviderRunIdentity]) -> String {
+    fn record_ready(
+        &self,
+        run_id: &str,
+        providers: &[ProviderRunIdentity],
+        owner: &str,
+    ) -> (String, BoundWorkspaceRuntimeLease) {
         let report = self.scan(providers);
         let run = report.runs.iter().find(|run| run.run_id == run_id).unwrap();
         assert_eq!(run.gate, OperationalRecoveryGate::RecoveryReady);
         let operation_id = self.operation_id(run);
+        let lease = self.lease(owner);
         OperationalRecoveryRecordingService::new(&self.path)
-            .record("workspace-1", "project-1", &report, "2026-07-13T00:00:00Z")
+            .record(
+                "workspace-1",
+                "project-1",
+                &report,
+                &lease,
+                "2026-07-13T00:00:00Z",
+            )
             .unwrap();
-        operation_id
+        (operation_id, lease)
     }
 
     fn operation_id(

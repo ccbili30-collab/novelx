@@ -3,16 +3,21 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use novelx_protocol::{
-    ContextCompile, ContextDisclosure, ContextItem, ContextMessageRole, ProviderRunIdentity,
-    RunPermissionMode, RunPrepare, RunStart, ToolAuthorizationResolutionDecision,
-    ToolAuthorizationResolve,
+    ContextCompile, ContextDisclosure, ContextItem, ContextMessageRole,
+    ProviderInferenceContinuationAcknowledge, ProviderInferenceContinuationProposal,
+    ProviderRunIdentity, RunPermissionMode, RunPrepare, RunStart,
+    ToolAuthorizationEvidenceReference, ToolAuthorizationResolutionDecision,
+    ToolAuthorizationResolve, provider_inference_identity_sha256,
 };
 use novelx_runtime::{
     agent_loop_journal::{AgentLoopEventMetadata, AgentLoopJournalRepository},
     agent_loop_service::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, InferenceDispatchIdentity, LoopPhase,
     },
-    context_compile_service::ContextCompileService,
+    assist_continuation_handshake_service::{
+        AssistContinuationAcknowledgement, AssistContinuationHandshakeService,
+    },
+    context_compile_service::{ContextCompileService, recover_compilation_receipt},
     event_journal::EventJournal,
     live_agent_loop_runner::{
         LiveAgentLoopError, LiveAgentLoopOutcome, LiveAgentLoopProgress, LiveAgentLoopRunner,
@@ -28,7 +33,7 @@ use novelx_runtime::{
     provider_inference_service::ProviderInferenceExecution,
     run_aggregate::{EventMetadata, RunAggregate},
     run_command_service::{RunCommandService, WorkspaceBinding},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -58,8 +63,13 @@ fn open_rejects_lease_for_a_different_database() {
     let fixture = Fixture::new();
     let other_directory = tempfile::tempdir().unwrap();
     let other_database = other_directory.path().join("other-runtime.db");
-    let wrong_lease =
-        Arc::new(WorkspaceRuntimeLease::acquire(&other_database, "wrong-database-lease").unwrap());
+    EventJournal::open(&other_database).unwrap();
+    let wrong_lease = Arc::new(
+        WorkspaceRuntimeLease::acquire(&other_database, "wrong-database-lease")
+            .unwrap()
+            .bind_database(&other_database)
+            .unwrap(),
+    );
     let result = LiveAgentLoopRunner::open(
         &fixture.database,
         "workspace-1".to_owned(),
@@ -71,10 +81,7 @@ fn open_rejects_lease_for_a_different_database() {
         loop_policy(),
     );
 
-    assert!(matches!(
-        result,
-        Err(LiveAgentLoopError::WorkspaceLeaseInvalid)
-    ));
+    assert!(matches!(result, Err(LiveAgentLoopError::WorkspaceLease(_))));
 }
 
 #[test]
@@ -264,7 +271,7 @@ async fn free_live_loop_executes_read_and_stat_then_sends_results_to_second_infe
         invocation_id: "steward-1".to_owned(),
         inference_idempotency_key: "live-loop-1".to_owned(),
         attempt_number: 1,
-        provider,
+        provider: provider.clone(),
         request: ProviderInferenceRequest {
             compilation: receipt,
             messages: vec![],
@@ -432,7 +439,7 @@ async fn awaiting_provider_resume_reuses_the_persisted_dispatch_identity() {
 async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_round() {
     let fixture = Fixture::new();
     std::fs::write(fixture.project.path().join("世界.md"), "银湾海岸向北延伸。").unwrap();
-    let (base_url, _, server) = spawn_two_round_server().await;
+    let (base_url, bodies, server) = spawn_two_round_server().await;
     let (providers, provider) = registry(base_url);
     let (run_id, receipt) = fixture.seed(&providers, provider.clone(), RunPermissionMode::Assist);
     let invocation_id = "steward-1";
@@ -443,7 +450,7 @@ async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_ro
         invocation_id: invocation_id.to_owned(),
         inference_idempotency_key: "assist-live-1".to_owned(),
         attempt_number: 1,
-        provider,
+        provider: provider.clone(),
         request: ProviderInferenceRequest {
             compilation: receipt,
             messages: vec![],
@@ -479,8 +486,13 @@ async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_ro
         panic!("Assist must wait for approval")
     };
     assert_eq!(tool_call_ids.len(), 2);
-    let tools =
-        ProjectToolExecutionService::open(&fixture.database, root, "project-1".to_owned()).unwrap();
+    let tools = ProjectToolExecutionService::open(
+        &fixture.database,
+        root,
+        "project-1".to_owned(),
+        Arc::clone(&fixture.lease),
+    )
+    .unwrap();
     tools
         .resolve_assist_and_execute(
             &run_id.to_string(),
@@ -497,19 +509,8 @@ async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_ro
         .await
         .unwrap();
 
-    let still_waiting = runner
-        .resume_after_assist(
-            run_id,
-            invocation_id,
-            |_| async { Ok(()) },
-            &mut cancellation,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        still_waiting,
-        LiveAgentLoopOutcome::AwaitingApproval { .. }
-    ));
+    assert!(!runner.assist_ready(run_id, invocation_id).unwrap());
+    assert_eq!(bodies.lock().unwrap().len(), 1);
 
     tools
         .resolve_assist_and_execute(
@@ -526,13 +527,84 @@ async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_ro
         )
         .await
         .unwrap();
+    let prepared = runner
+        .prepare_assist_continuation(run_id, invocation_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        1,
+        "preparing a continuation must not call the Provider before Host acknowledgement"
+    );
+    let continuation_identity = prepared.continuation_inference_identity().clone();
+    let continuation_compilation = recover_compilation_receipt(
+        &EventJournal::open(&fixture.database).unwrap(),
+        &run_id.to_string(),
+        continuation_identity.context_compilation_id,
+    )
+    .unwrap();
+    let bypass = ProviderInferenceExecution {
+        run_id: run_id.to_string(),
+        attempt_id: continuation_identity.attempt_id.to_string(),
+        inference_id: continuation_identity.inference_id.to_string(),
+        invocation_id: invocation_id.to_owned(),
+        inference_idempotency_key: format!(
+            "agent-loop:{invocation_id}:inference:{}",
+            continuation_identity.request_number
+        ),
+        attempt_number: u16::try_from(continuation_identity.attempt_number).unwrap(),
+        provider: provider.clone(),
+        request: ProviderInferenceRequest {
+            compilation: continuation_compilation,
+            messages: vec![],
+            tools: vec![],
+        },
+    };
+    let bypass_error = runner
+        .run(bypass, None, |_| async { Ok(()) }, &mut cancellation)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        bypass_error,
+        LiveAgentLoopError::AssistContinuationAckProofRequired
+    ));
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    let evidence = prepared
+        .tool_call_ids()
+        .iter()
+        .enumerate()
+        .map(|(index, tool_call_id)| ToolAuthorizationEvidenceReference {
+            tool_call_id: *tool_call_id,
+            aggregate_sequence: u64::try_from(index + 1).unwrap(),
+            idempotency_key: format!("assist-evidence-{index}"),
+        })
+        .collect::<Vec<_>>();
+    let proposal = ProviderInferenceContinuationProposal {
+        continuation_id: continuation_identity.inference_id,
+        run_id,
+        invocation_id: invocation_id.to_owned(),
+        parent_inference_identity: prepared.parent_inference_identity().clone(),
+        continuation_identity_sha256: provider_inference_identity_sha256(&continuation_identity)
+            .unwrap(),
+        continuation_inference_identity: continuation_identity,
+        triggering_tool_call_ids: prepared.tool_call_ids().to_vec(),
+        authorization_evidence: evidence,
+    };
+    let acknowledgement = ProviderInferenceContinuationAcknowledge {
+        continuation_id: proposal.continuation_id,
+        continuation_identity_sha256: proposal.continuation_identity_sha256.clone(),
+        parent_inference_identity: proposal.parent_inference_identity.clone(),
+        authorization_evidence: proposal.authorization_evidence.clone(),
+    };
+    let mut handshakes = AssistContinuationHandshakeService::default();
+    handshakes.register(proposal).unwrap();
+    let AssistContinuationAcknowledgement::Accepted { proof, .. } =
+        handshakes.acknowledge(run_id, &acknowledgement).unwrap()
+    else {
+        panic!("first matching acknowledgement must mint one move-only proof")
+    };
     let completed = runner
-        .resume_after_assist(
-            run_id,
-            invocation_id,
-            |_| async { Ok(()) },
-            &mut cancellation,
-        )
+        .run_acknowledged_assist(prepared, proof, |_| async { Ok(()) }, &mut cancellation)
         .await
         .unwrap();
     assert!(
@@ -623,7 +695,7 @@ fn text_outcome(execution: &ProviderInferenceExecution, text: &str) -> ProviderI
 }
 
 struct Fixture {
-    lease: Arc<WorkspaceRuntimeLease>,
+    lease: Arc<BoundWorkspaceRuntimeLease>,
     _temp: tempfile::TempDir,
     project: tempfile::TempDir,
     database: std::path::PathBuf,
@@ -634,8 +706,11 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let database = temp.path().join("runtime.db");
+        EventJournal::open(&database).unwrap();
         let lease = Arc::new(
             WorkspaceRuntimeLease::acquire(&database, format!("live-loop-{}", Uuid::new_v4()))
+                .unwrap()
+                .bind_database(&database)
                 .unwrap(),
         );
         Self {

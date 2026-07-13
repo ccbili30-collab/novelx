@@ -2,7 +2,8 @@ use novelx_protocol::ProviderRunIdentity;
 use novelx_runtime::operational_recovery_action::OperationalRecoveryAction;
 use novelx_runtime::operational_recovery_aggregate::{
     OPERATIONAL_RECOVERY_POLICY_VERSION, OperationalRecoveryAggregateError,
-    OperationalRecoveryClaim, OperationalRecoveryDisposition, OperationalRecoveryEffectClass,
+    OperationalRecoveryClaim, OperationalRecoveryDisposition,
+    OperationalRecoveryDispositionAuthority, OperationalRecoveryEffectClass,
     OperationalRecoveryEventMetadata, OperationalRecoveryExecution,
     OperationalRecoveryExecutionInterruption, OperationalRecoveryInterruptionCause,
     OperationalRecoveryObservation, OperationalRecoveryObservedGate, OperationalRecoveryOutcome,
@@ -11,7 +12,7 @@ use novelx_runtime::operational_recovery_aggregate::{
     ProviderDispatchResumeAuthorization, ProviderDispatchResumeCapability,
 };
 use novelx_runtime::provider_attempt::ProviderAttemptState;
-use novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease;
+use novelx_runtime::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
@@ -56,12 +57,12 @@ fn a_new_exclusive_runtime_can_authorize_resume_of_a_started_local_projection() 
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let old_lease = fixture.lease("old-runtime");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &old_lease, metadata())
         .unwrap();
-    let old_lease = fixture.lease("old-runtime");
-    let claim = claim(&observation, old_lease.instance_id(), 1);
+    let claim = claim(&observation, old_lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -93,7 +94,7 @@ fn a_new_exclusive_runtime_can_authorize_resume_of_a_started_local_projection() 
     let new_lease = fixture.lease("new-runtime");
     let resume = OperationalRecoveryResume::derive(
         &execution,
-        new_lease.instance_id().to_owned(),
+        new_lease.owner_id().to_owned(),
         "2026-07-13T00:02:00Z".to_owned(),
     )
     .unwrap();
@@ -139,12 +140,12 @@ fn provider_dispatch_resume_is_fenced_idempotent_and_generational() {
         OperationalRecoveryObservedGate::ProviderDispatchReady,
         vec![],
     );
+    let old_lease = fixture.lease("old-runtime");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &old_lease, metadata())
         .unwrap();
-    let old_lease = fixture.lease("old-runtime");
-    let claim = provider_dispatch_claim(&observation, old_lease.instance_id(), 1);
+    let claim = provider_dispatch_claim(&observation, old_lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -199,7 +200,7 @@ fn provider_dispatch_resume_is_fenced_idempotent_and_generational() {
     let first = provider_dispatch_resume(
         &observation,
         &execution,
-        first_lease.instance_id(),
+        first_lease.owner_id(),
         ProviderAttemptState::Requested,
         1,
         None,
@@ -243,7 +244,7 @@ fn provider_dispatch_resume_is_fenced_idempotent_and_generational() {
     let second = provider_dispatch_resume(
         &observation,
         &execution,
-        second_lease.instance_id(),
+        second_lease.owner_id(),
         ProviderAttemptState::Sent,
         2,
         Some(&first),
@@ -373,7 +374,7 @@ fn provider_dispatch_resume_rejects_sent_and_terminal_state_rollback_to_requeste
         let rollback = provider_dispatch_resume(
             &observation,
             &execution,
-            lease.instance_id(),
+            lease.owner_id(),
             ProviderAttemptState::Requested,
             1,
             Some(&first),
@@ -404,7 +405,7 @@ fn provider_dispatch_resume_rejects_sequence_evidence_and_time_regressions() {
     let sequence_rollback = provider_dispatch_resume(
         &observation,
         &execution,
-        lease.instance_id(),
+        lease.owner_id(),
         ProviderAttemptState::Sent,
         1,
         Some(&first),
@@ -428,7 +429,7 @@ fn provider_dispatch_resume_rejects_sequence_evidence_and_time_regressions() {
     let changed_evidence = provider_dispatch_resume_with_evidence(
         &observation,
         &execution,
-        lease.instance_id(),
+        lease.owner_id(),
         ProviderAttemptState::Sent,
         2,
         "e".repeat(64),
@@ -453,7 +454,7 @@ fn provider_dispatch_resume_rejects_sequence_evidence_and_time_regressions() {
     let time_rollback = provider_dispatch_resume(
         &observation,
         &execution,
-        lease.instance_id(),
+        lease.owner_id(),
         ProviderAttemptState::Sent,
         2,
         Some(&first),
@@ -486,7 +487,7 @@ fn provider_dispatch_resume_allows_requested_to_responded_forward_progress() {
     let responded = provider_dispatch_resume(
         &observation,
         &execution,
-        lease.instance_id(),
+        lease.owner_id(),
         ProviderAttemptState::Responded,
         3,
         Some(&first),
@@ -523,14 +524,19 @@ fn local_projection_and_provider_dispatch_resume_protocols_reject_each_other() {
         OperationalRecoveryObservedGate::ProviderDispatchReady,
         vec![],
     );
+    let provider_owner_lease = provider_fixture.lease("old-runtime");
     let mut provider_repository =
         OperationalRecoveryRepository::open(&provider_fixture.path).unwrap();
     provider_repository
-        .observe(subject.clone(), provider_observation.clone(), metadata())
+        .observe(
+            subject.clone(),
+            provider_observation.clone(),
+            &provider_owner_lease,
+            metadata(),
+        )
         .unwrap();
-    let provider_owner_lease = provider_fixture.lease("old-runtime");
     let provider_claim =
-        provider_dispatch_claim(&provider_observation, provider_owner_lease.instance_id(), 1);
+        provider_dispatch_claim(&provider_observation, provider_owner_lease.owner_id(), 1);
     provider_repository
         .claim(
             &subject.workspace_id,
@@ -562,7 +568,7 @@ fn local_projection_and_provider_dispatch_resume_protocols_reject_each_other() {
     let provider_lease = provider_fixture.lease("new-runtime");
     let local_resume = OperationalRecoveryResume::derive(
         &provider_execution,
-        provider_lease.instance_id().to_owned(),
+        provider_lease.owner_id().to_owned(),
         "2026-07-13T00:02:00Z".to_owned(),
     )
     .unwrap();
@@ -587,12 +593,17 @@ fn local_projection_and_provider_dispatch_resume_protocols_reject_each_other() {
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let local_owner_lease = local_fixture.lease("old-runtime");
     let mut local_repository = OperationalRecoveryRepository::open(&local_fixture.path).unwrap();
     local_repository
-        .observe(subject.clone(), local_observation.clone(), metadata())
+        .observe(
+            subject.clone(),
+            local_observation.clone(),
+            &local_owner_lease,
+            metadata(),
+        )
         .unwrap();
-    let local_owner_lease = local_fixture.lease("old-runtime");
-    let local_claim = claim(&local_observation, local_owner_lease.instance_id(), 1);
+    let local_claim = claim(&local_observation, local_owner_lease.owner_id(), 1);
     local_repository
         .claim(
             &subject.workspace_id,
@@ -625,7 +636,7 @@ fn local_projection_and_provider_dispatch_resume_protocols_reject_each_other() {
     let provider_authorization = provider_dispatch_resume(
         &local_observation,
         &local_execution,
-        local_lease.instance_id(),
+        local_lease.owner_id(),
         ProviderAttemptState::Requested,
         1,
         None,
@@ -661,19 +672,19 @@ fn one_run_cannot_claim_two_unfinished_recovery_operations() {
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let lease = fixture.lease("runtime-1");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), first.clone(), metadata())
+        .observe(subject.clone(), first.clone(), &lease, metadata())
         .unwrap();
     repository
-        .observe(subject.clone(), second.clone(), metadata())
+        .observe(subject.clone(), second.clone(), &lease, metadata())
         .unwrap();
-    let lease = fixture.lease("runtime-1");
     repository
         .claim(
             &subject.workspace_id,
             &subject.run_id,
-            claim(&first, lease.instance_id(), 1),
+            claim(&first, lease.owner_id(), 1),
             &lease,
             fixture.clock(),
             metadata(),
@@ -683,7 +694,7 @@ fn one_run_cannot_claim_two_unfinished_recovery_operations() {
         repository.claim(
             &subject.workspace_id,
             &subject.run_id,
-            claim(&second, lease.instance_id(), 1),
+            claim(&second, lease.owner_id(), 1),
             &lease,
             fixture.clock(),
             metadata(),
@@ -702,15 +713,19 @@ fn identical_observation_and_wait_are_idempotent_across_reopen() {
         OperationalRecoveryObservedGate::AwaitingProviderBinding,
         vec!["exact_provider_binding_missing"],
     );
+    let lease = fixture.lease("runtime-idempotency");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     let observed = repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &lease, metadata())
         .unwrap();
     assert_eq!(observed.revision, 1);
     let waited = repository
         .wait(
-            &subject.workspace_id,
-            &subject.run_id,
+            OperationalRecoveryDispositionAuthority::new(
+                &subject.workspace_id,
+                &subject.run_id,
+                &lease,
+            ),
             &observation.operation_id,
             OperationalRecoveryWaitingReason::ProviderBinding,
             observation.source_fingerprint.clone(),
@@ -723,7 +738,7 @@ fn identical_observation_and_wait_are_idempotent_across_reopen() {
     let mut reopened = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     assert_eq!(
         reopened
-            .observe(subject.clone(), observation.clone(), metadata())
+            .observe(subject.clone(), observation.clone(), &lease, metadata())
             .unwrap()
             .revision,
         2
@@ -731,8 +746,11 @@ fn identical_observation_and_wait_are_idempotent_across_reopen() {
     assert_eq!(
         reopened
             .wait(
-                &subject.workspace_id,
-                &subject.run_id,
+                OperationalRecoveryDispositionAuthority::new(
+                    &subject.workspace_id,
+                    &subject.run_id,
+                    &lease,
+                ),
                 &observation.operation_id,
                 OperationalRecoveryWaitingReason::ProviderBinding,
                 observation.source_fingerprint.clone(),
@@ -771,12 +789,13 @@ fn changed_evidence_creates_a_new_deterministic_operation() {
         vec![],
     );
     assert_ne!(first.operation_id, second.operation_id);
+    let lease = fixture.lease("runtime-observations");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), first.clone(), metadata())
+        .observe(subject.clone(), first.clone(), &lease, metadata())
         .unwrap();
     let aggregate = repository
-        .observe(subject.clone(), second.clone(), metadata())
+        .observe(subject.clone(), second.clone(), &lease, metadata())
         .unwrap();
     assert_eq!(aggregate.revision, 2);
     assert_eq!(aggregate.operations.len(), 2);
@@ -803,14 +822,18 @@ fn quarantine_is_terminal_for_one_operation_and_requires_codes() {
         OperationalRecoveryObservedGate::Quarantined,
         vec!["multiple_active_agent_loops"],
     );
+    let lease = fixture.lease("runtime-quarantine");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &lease, metadata())
         .unwrap();
     assert!(matches!(
         repository.quarantine(
-            &subject.workspace_id,
-            &subject.run_id,
+            OperationalRecoveryDispositionAuthority::new(
+                &subject.workspace_id,
+                &subject.run_id,
+                &lease,
+            ),
             &observation.operation_id,
             vec![],
             observation.source_fingerprint.clone(),
@@ -820,8 +843,11 @@ fn quarantine_is_terminal_for_one_operation_and_requires_codes() {
     ));
     let quarantined = repository
         .quarantine(
-            &subject.workspace_id,
-            &subject.run_id,
+            OperationalRecoveryDispositionAuthority::new(
+                &subject.workspace_id,
+                &subject.run_id,
+                &lease,
+            ),
             &observation.operation_id,
             vec!["multiple_active_agent_loops".to_owned()],
             observation.source_fingerprint.clone(),
@@ -831,8 +857,11 @@ fn quarantine_is_terminal_for_one_operation_and_requires_codes() {
     assert_eq!(quarantined.revision, 2);
     assert!(matches!(
         repository.wait(
-            &subject.workspace_id,
-            &subject.run_id,
+            OperationalRecoveryDispositionAuthority::new(
+                &subject.workspace_id,
+                &subject.run_id,
+                &lease,
+            ),
             &observation.operation_id,
             OperationalRecoveryWaitingReason::Reconciliation,
             observation.source_fingerprint,
@@ -853,9 +882,10 @@ fn forged_operation_and_subject_conflicts_fail_closed() {
         vec![],
     );
     forged.operation_id = "0".repeat(64);
+    let lease = fixture.lease("runtime-validation");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     assert!(matches!(
-        repository.observe(subject.clone(), forged, metadata()),
+        repository.observe(subject.clone(), forged, &lease, metadata()),
         Err(OperationalRecoveryAggregateError::OperationConflict)
     ));
     let valid = observation(
@@ -865,7 +895,7 @@ fn forged_operation_and_subject_conflicts_fail_closed() {
         vec![],
     );
     repository
-        .observe(subject.clone(), valid, metadata())
+        .observe(subject.clone(), valid, &lease, metadata())
         .unwrap();
     let mut changed = subject;
     changed.project_id = "other-project".to_owned();
@@ -876,7 +906,7 @@ fn forged_operation_and_subject_conflicts_fail_closed() {
         vec![],
     );
     assert!(matches!(
-        repository.observe(changed, changed_observation, metadata()),
+        repository.observe(changed, changed_observation, &lease, metadata()),
         Err(OperationalRecoveryAggregateError::SubjectConflict)
     ));
 }
@@ -891,9 +921,10 @@ fn tampered_payload_breaks_the_hash_chain() {
         OperationalRecoveryObservedGate::WaitingForApproval,
         vec![],
     );
+    let lease = fixture.lease("runtime-tamper");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation, metadata())
+        .observe(subject.clone(), observation, &lease, metadata())
         .unwrap();
     let connection = Connection::open(&fixture.path).unwrap();
     connection
@@ -921,16 +952,16 @@ fn ready_operation_claim_is_fenced_idempotent_and_snapshot_guarded() {
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let lease = fixture.lease("runtime-instance-1");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &lease, metadata())
         .unwrap();
     let clock = novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&fixture.path)
         .unwrap()
         .current_global_sequence()
         .unwrap();
-    let lease = fixture.lease("runtime-instance-1");
-    let first_claim = claim(&observation, lease.instance_id(), 1);
+    let first_claim = claim(&observation, lease.owner_id(), 1);
     let claimed = repository
         .claim(
             &subject.workspace_id,
@@ -987,9 +1018,10 @@ fn claim_rejects_stale_global_snapshot_and_non_ready_operations() {
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let lease = fixture.lease("runtime-instance-1");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), ready.clone(), metadata())
+        .observe(subject.clone(), ready.clone(), &lease, metadata())
         .unwrap();
     let stale_clock =
         novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&fixture.path)
@@ -1005,15 +1037,15 @@ fn claim_rejects_stale_global_snapshot_and_non_ready_operations() {
                 OperationalRecoveryObservedGate::TerminalProjectionOnly,
                 vec![],
             ),
+            &lease,
             metadata(),
         )
         .unwrap();
-    let lease = fixture.lease("runtime-instance-1");
     assert!(matches!(
         repository.claim(
             &subject.workspace_id,
             &subject.run_id,
-            claim(&ready, lease.instance_id(), 1),
+            claim(&ready, lease.owner_id(), 1),
             &lease,
             stale_clock,
             metadata(),
@@ -1030,7 +1062,7 @@ fn claim_rejects_stale_global_snapshot_and_non_ready_operations() {
         vec![],
     );
     repository
-        .observe(subject.clone(), waiting.clone(), metadata())
+        .observe(subject.clone(), waiting.clone(), &lease, metadata())
         .unwrap();
     let clock = novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&fixture.path)
         .unwrap()
@@ -1040,7 +1072,7 @@ fn claim_rejects_stale_global_snapshot_and_non_ready_operations() {
         repository.claim(
             &subject.workspace_id,
             &subject.run_id,
-            claim(&waiting, lease.instance_id(), 1),
+            claim(&waiting, lease.owner_id(), 1),
             &lease,
             clock,
             metadata(),
@@ -1059,12 +1091,12 @@ fn claimed_operation_renews_starts_and_succeeds_with_verified_hashes() {
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let lease = fixture.lease("runtime-instance-1");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &lease, metadata())
         .unwrap();
-    let lease = fixture.lease("runtime-instance-1");
-    let first_claim = claim(&observation, lease.instance_id(), 1);
+    let first_claim = claim(&observation, lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -1161,12 +1193,12 @@ fn expired_or_wrong_fence_cannot_renew_or_start_execution() {
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let lease = fixture.lease("runtime-instance-1");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &lease, metadata())
         .unwrap();
-    let lease = fixture.lease("runtime-instance-1");
-    let first_claim = claim(&observation, lease.instance_id(), 1);
+    let first_claim = claim(&observation, lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -1229,12 +1261,12 @@ fn terminal_outcome_rejects_conflicting_writeback_and_unverified_success() {
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let lease = fixture.lease("runtime-instance-1");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &lease, metadata())
         .unwrap();
-    let lease = fixture.lease("runtime-instance-1");
-    let first_claim = claim(&observation, lease.instance_id(), 1);
+    let first_claim = claim(&observation, lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -1270,7 +1302,7 @@ fn terminal_outcome_rejects_conflicting_writeback_and_unverified_success() {
         "9".repeat(64),
         Some(first_claim.claim_id.clone()),
         Some(first_claim.fencing_token),
-        lease.instance_id().to_owned(),
+        lease.owner_id().to_owned(),
         "2026-07-13T00:02:00Z".to_owned(),
         scan_sequence,
     )
@@ -1345,12 +1377,12 @@ fn expired_unstarted_claim_transfers_with_exclusive_owner_and_increments_fence()
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let old_lease = fixture.lease("runtime-instance-1");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &old_lease, metadata())
         .unwrap();
-    let old_lease = fixture.lease("runtime-instance-1");
-    let first_claim = claim(&observation, old_lease.instance_id(), 1);
+    let first_claim = claim(&observation, old_lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -1362,10 +1394,10 @@ fn expired_unstarted_claim_transfers_with_exclusive_owner_and_increments_fence()
         )
         .unwrap();
     drop(old_lease);
-    let exclusive = WorkspaceRuntimeLease::acquire(&fixture.path, "runtime-instance-2").unwrap();
+    let exclusive = fixture.lease("runtime-instance-2");
     let second_claim = OperationalRecoveryClaim::derive(
         observation.operation_id.clone(),
-        exclusive.instance_id().to_owned(),
+        exclusive.owner_id().to_owned(),
         2,
         observation.source_fingerprint.clone(),
         "2026-07-13T00:05:00Z".to_owned(),
@@ -1427,7 +1459,7 @@ fn expired_unstarted_claim_transfers_with_exclusive_owner_and_increments_fence()
         .unwrap();
     let third_claim = OperationalRecoveryClaim::derive(
         observation.operation_id.clone(),
-        exclusive.instance_id().to_owned(),
+        exclusive.owner_id().to_owned(),
         3,
         observation.source_fingerprint,
         "2026-07-13T00:10:00Z".to_owned(),
@@ -1462,12 +1494,12 @@ fn changed_source_marks_claimed_unstarted_operation_stale_and_blocks_progress() 
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let old_lease = fixture.lease("runtime-instance-1");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &old_lease, metadata())
         .unwrap();
-    let old_lease = fixture.lease("runtime-instance-1");
-    let first_claim = claim(&observation, old_lease.instance_id(), 1);
+    let first_claim = claim(&observation, old_lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -1479,7 +1511,7 @@ fn changed_source_marks_claimed_unstarted_operation_stale_and_blocks_progress() 
         )
         .unwrap();
     drop(old_lease);
-    let exclusive = WorkspaceRuntimeLease::acquire(&fixture.path, "runtime-instance-2").unwrap();
+    let exclusive = fixture.lease("runtime-instance-2");
     let scan_sequence = fixture.clock();
     let stale = OperationalRecoveryStale::derive(
         observation.operation_id.clone(),
@@ -1488,7 +1520,7 @@ fn changed_source_marks_claimed_unstarted_operation_stale_and_blocks_progress() 
         "7".repeat(64),
         Some(first_claim.claim_id.clone()),
         Some(first_claim.fencing_token),
-        exclusive.instance_id().to_owned(),
+        exclusive.owner_id().to_owned(),
         "2026-07-13T00:01:00Z".to_owned(),
         scan_sequence,
     )
@@ -1552,17 +1584,22 @@ fn same_label_reacquisition_cannot_claim_renew_or_start_as_the_previous_epoch() 
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let old_lease = unclaimed_fixture.lease("stable-runtime-label");
     let mut unclaimed_repository =
         OperationalRecoveryRepository::open(&unclaimed_fixture.path).unwrap();
     unclaimed_repository
-        .observe(subject.clone(), unclaimed_observation.clone(), metadata())
+        .observe(
+            subject.clone(),
+            unclaimed_observation.clone(),
+            &old_lease,
+            metadata(),
+        )
         .unwrap();
-    let old_lease = unclaimed_fixture.lease("stable-runtime-label");
-    let old_claim = claim(&unclaimed_observation, old_lease.instance_id(), 1);
-    let old_owner_id = old_lease.instance_id().to_owned();
+    let old_claim = claim(&unclaimed_observation, old_lease.owner_id(), 1);
+    let old_owner_id = old_lease.owner_id().to_owned();
     drop(old_lease);
     let replacement = unclaimed_fixture.lease("stable-runtime-label");
-    assert_ne!(replacement.instance_id(), old_owner_id);
+    assert_ne!(replacement.owner_id(), old_owner_id);
     assert!(matches!(
         unclaimed_repository.claim(
             &subject.workspace_id,
@@ -1583,13 +1620,18 @@ fn same_label_reacquisition_cannot_claim_renew_or_start_as_the_previous_epoch() 
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let old_lease = claimed_fixture.lease("stable-runtime-label");
     let mut claimed_repository =
         OperationalRecoveryRepository::open(&claimed_fixture.path).unwrap();
     claimed_repository
-        .observe(subject.clone(), claimed_observation.clone(), metadata())
+        .observe(
+            subject.clone(),
+            claimed_observation.clone(),
+            &old_lease,
+            metadata(),
+        )
         .unwrap();
-    let old_lease = claimed_fixture.lease("stable-runtime-label");
-    let old_claim = claim(&claimed_observation, old_lease.instance_id(), 1);
+    let old_claim = claim(&claimed_observation, old_lease.owner_id(), 1);
     claimed_repository
         .claim(
             &subject.workspace_id,
@@ -1648,12 +1690,12 @@ fn same_label_local_resumer_must_hold_the_latest_authorized_epoch_to_finish() {
         OperationalRecoveryObservedGate::RecoveryReady,
         vec![],
     );
+    let old_lease = fixture.lease("stable-runtime-label");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &old_lease, metadata())
         .unwrap();
-    let old_lease = fixture.lease("stable-runtime-label");
-    let claim = claim(&observation, old_lease.instance_id(), 1);
+    let claim = claim(&observation, old_lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -1705,7 +1747,7 @@ fn same_label_local_resumer_must_hold_the_latest_authorized_epoch_to_finish() {
     ));
     let first_resume = OperationalRecoveryResume::derive(
         &execution,
-        first_resumer.instance_id().to_owned(),
+        first_resumer.owner_id().to_owned(),
         "2026-07-13T00:02:00Z".to_owned(),
     )
     .unwrap();
@@ -1737,7 +1779,7 @@ fn same_label_local_resumer_must_hold_the_latest_authorized_epoch_to_finish() {
     ));
     let second_resume = OperationalRecoveryResume::derive(
         &execution,
-        second_resumer.instance_id().to_owned(),
+        second_resumer.owner_id().to_owned(),
         "2026-07-13T00:03:00Z".to_owned(),
     )
     .unwrap();
@@ -1779,12 +1821,12 @@ fn same_label_provider_resumer_must_refresh_authorization_before_finishing() {
         OperationalRecoveryObservedGate::ProviderDispatchReady,
         vec![],
     );
+    let old_lease = fixture.lease("stable-runtime-label");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &old_lease, metadata())
         .unwrap();
-    let old_lease = fixture.lease("stable-runtime-label");
-    let claim = provider_dispatch_claim(&observation, old_lease.instance_id(), 1);
+    let claim = provider_dispatch_claim(&observation, old_lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -1837,7 +1879,7 @@ fn same_label_provider_resumer_must_refresh_authorization_before_finishing() {
     let first_authorization = provider_dispatch_resume(
         &observation,
         &execution,
-        first_resumer.instance_id(),
+        first_resumer.owner_id(),
         ProviderAttemptState::Responded,
         3,
         None,
@@ -1872,7 +1914,7 @@ fn same_label_provider_resumer_must_refresh_authorization_before_finishing() {
     let second_authorization = provider_dispatch_resume(
         &observation,
         &execution,
-        second_resumer.instance_id(),
+        second_resumer.owner_id(),
         ProviderAttemptState::Responded,
         3,
         Some(&first_authorization),
@@ -1916,12 +1958,12 @@ fn pre_sent_interruption_is_fenced_idempotent_non_terminal_and_tamper_evident() 
         OperationalRecoveryObservedGate::ProviderDispatchReady,
         vec![],
     );
+    let lease = fixture.lease("runtime-owner");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &lease, metadata())
         .unwrap();
-    let lease = fixture.lease("runtime-owner");
-    let claim = provider_dispatch_claim(&observation, lease.instance_id(), 1);
+    let claim = provider_dispatch_claim(&observation, lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -1962,7 +2004,7 @@ fn pre_sent_interruption_is_fenced_idempotent_non_terminal_and_tamper_evident() 
         None,
         false,
         true,
-        lease.instance_id().to_owned(),
+        lease.owner_id().to_owned(),
         lease.lease_epoch().to_owned(),
         "2026-07-13T00:02:00Z".to_owned(),
     )
@@ -1996,7 +2038,7 @@ fn pre_sent_interruption_is_fenced_idempotent_non_terminal_and_tamper_evident() 
         None,
         false,
         true,
-        lease.instance_id().to_owned(),
+        lease.owner_id().to_owned(),
         lease.lease_epoch().to_owned(),
         "2026-07-13T00:02:30Z".to_owned(),
     )
@@ -2031,7 +2073,7 @@ fn pre_sent_interruption_is_fenced_idempotent_non_terminal_and_tamper_evident() 
         None,
         false,
         true,
-        lease.instance_id().to_owned(),
+        lease.owner_id().to_owned(),
         lease.lease_epoch().to_owned(),
         "2026-07-13T00:03:00Z".to_owned(),
     )
@@ -2090,12 +2132,12 @@ fn run_cancel_interruption_requires_exact_cancelled_safe_terminal_evidence() {
         OperationalRecoveryObservedGate::ProviderDispatchReady,
         vec![],
     );
+    let lease = fixture.lease("runtime-owner");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &lease, metadata())
         .unwrap();
-    let lease = fixture.lease("runtime-owner");
-    let claim = provider_dispatch_claim(&observation, lease.instance_id(), 1);
+    let claim = provider_dispatch_claim(&observation, lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -2136,7 +2178,7 @@ fn run_cancel_interruption_requires_exact_cancelled_safe_terminal_evidence() {
         Some("9".repeat(64)),
         false,
         false,
-        lease.instance_id().to_owned(),
+        lease.owner_id().to_owned(),
         lease.lease_epoch().to_owned(),
         "2026-07-13T00:02:00Z".to_owned(),
     )
@@ -2488,12 +2530,12 @@ fn persisted_provider_dispatch_resume(
         OperationalRecoveryObservedGate::ProviderDispatchReady,
         vec![],
     );
+    let old_lease = fixture.lease("old-runtime");
     let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
     repository
-        .observe(subject.clone(), observation.clone(), metadata())
+        .observe(subject.clone(), observation.clone(), &old_lease, metadata())
         .unwrap();
-    let old_lease = fixture.lease("old-runtime");
-    let claim = provider_dispatch_claim(&observation, old_lease.instance_id(), 1);
+    let claim = provider_dispatch_claim(&observation, old_lease.owner_id(), 1);
     repository
         .claim(
             &subject.workspace_id,
@@ -2526,7 +2568,7 @@ fn persisted_provider_dispatch_resume(
     let first = provider_dispatch_resume(
         &observation,
         &execution,
-        lease.instance_id(),
+        lease.owner_id(),
         state,
         sequence,
         None,
@@ -2567,7 +2609,10 @@ impl Fixture {
             .unwrap()
     }
 
-    fn lease(&self, instance_id: &str) -> WorkspaceRuntimeLease {
-        WorkspaceRuntimeLease::acquire(&self.path, instance_id).unwrap()
+    fn lease(&self, instance_id: &str) -> BoundWorkspaceRuntimeLease {
+        WorkspaceRuntimeLease::acquire(&self.path, instance_id)
+            .unwrap()
+            .bind_database(&self.path)
+            .unwrap()
     }
 }

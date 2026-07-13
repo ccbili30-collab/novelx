@@ -224,6 +224,16 @@ impl BoundWorkspaceRuntimeLease {
         self.database_file.verify_path(database_path.as_ref())
     }
 
+    /// Verify both the caller's database path and the originally bound path against the exact
+    /// operating-system file object held by this lease.
+    pub fn verify_database_authority(
+        &self,
+        database_path: impl AsRef<Path>,
+    ) -> Result<(), BoundWorkspaceRuntimeLeaseError> {
+        self.verify_database_path(database_path)?;
+        self.verify_database_file_current()
+    }
+
     /// The authority hash of this lease-lifetime operating-system file identity.
     ///
     /// Proofs may bind this value together with the lease epoch. It is not a durable database UUID
@@ -431,4 +441,41 @@ pub enum BoundWorkspaceRuntimeLeaseError {
     LeaseOwnerMismatch { expected: String, actual: String },
     #[error("workspace runtime lease epoch does not match")]
     LeaseEpochMismatch { expected: String, actual: String },
+}
+
+impl BoundWorkspaceRuntimeLeaseError {
+    /// Stable Runtime protocol code for the exact failed workspace authority check.
+    ///
+    /// Keep this mapping exhaustive so callers cannot collapse file replacement, path,
+    /// identity, owner, or epoch failures into a generic lease mismatch by accident.
+    pub const fn protocol_code(&self) -> &'static str {
+        match self {
+            Self::WorkspaceLeasePathMismatch { .. } => "WORKSPACE_LEASE_PATH_MISMATCH",
+            Self::DatabaseFileMissing { .. } => "WORKSPACE_DATABASE_FILE_MISSING",
+            Self::DatabasePathNotRegularFile { .. } => "WORKSPACE_DATABASE_PATH_NOT_REGULAR_FILE",
+            Self::DatabaseFileIdentityUnavailable { .. } => {
+                "WORKSPACE_DATABASE_FILE_IDENTITY_UNAVAILABLE"
+            }
+            Self::DatabaseFileReplaced { .. } => "WORKSPACE_DATABASE_FILE_REPLACED",
+            Self::DatabaseIdentityHashInvalid => "WORKSPACE_DATABASE_IDENTITY_HASH_INVALID",
+            Self::DatabaseIdentityAlreadyBound { .. } => {
+                "WORKSPACE_DATABASE_IDENTITY_ALREADY_BOUND"
+            }
+            Self::DatabaseIdentityLockUnavailable { .. } => {
+                "WORKSPACE_DATABASE_IDENTITY_LOCK_UNAVAILABLE"
+            }
+            Self::DatabaseIdentityLockUnsafe { .. } => "WORKSPACE_DATABASE_IDENTITY_LOCK_UNSAFE",
+            Self::GlobalIdentityLockBaseUnavailable { .. } => {
+                "WORKSPACE_GLOBAL_IDENTITY_LOCK_BASE_UNAVAILABLE"
+            }
+            Self::GlobalIdentityLockDirectoryUnavailable { .. } => {
+                "WORKSPACE_GLOBAL_IDENTITY_LOCK_DIRECTORY_UNAVAILABLE"
+            }
+            Self::GlobalIdentityLockDirectoryUnsafe { .. } => {
+                "WORKSPACE_GLOBAL_IDENTITY_LOCK_DIRECTORY_UNSAFE"
+            }
+            Self::LeaseOwnerMismatch { .. } => "WORKSPACE_LEASE_OWNER_MISMATCH",
+            Self::LeaseEpochMismatch { .. } => "WORKSPACE_LEASE_EPOCH_MISMATCH",
+        }
+    }
 }

@@ -18,6 +18,11 @@ pub struct StoredArtifact {
     pub created_at: String,
 }
 
+/// Trusted internal storage boundary.
+///
+/// Writes currently rely on the calling Runtime service to verify its
+/// [`BoundWorkspaceRuntimeLease`](crate::workspace_runtime_lease::BoundWorkspaceRuntimeLease)
+/// immediately before entering this store. This is not yet crate-wide capability enforcement.
 pub struct ArtifactStore {
     connection: Connection,
 }

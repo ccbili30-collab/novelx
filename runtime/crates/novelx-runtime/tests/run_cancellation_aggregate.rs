@@ -7,8 +7,10 @@ use novelx_runtime::run_aggregate::{
     derive_run_cancellation_intent_id,
 };
 use novelx_runtime::run_state::RunState;
+use novelx_runtime::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use support::pinned_identity;
 use tempfile::TempDir;
 
@@ -49,6 +51,7 @@ fn intent_hash_has_a_fixed_utf8_cross_language_vector_and_bounded_inputs() {
     assert!(matches!(
         run.record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "cancel-bounded-request",
@@ -60,6 +63,7 @@ fn intent_hash_has_a_fixed_utf8_cross_language_vector_and_bounded_inputs() {
     assert!(matches!(
         run.record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "cancel-invalid-time",
@@ -74,9 +78,15 @@ fn cancellation_intent_run_state_matrix_allows_only_running_and_retrying() {
     for allowed in [RunState::Running, RunState::Retrying] {
         let fixture = Fixture::new();
         let mut journal = fixture.open();
-        let mut run = run_at_state(&mut journal, "run-matrix-allowed", allowed);
+        let mut run = run_at_state(
+            &mut journal,
+            fixture.lease.as_ref(),
+            "run-matrix-allowed",
+            allowed,
+        );
         run.record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "matrix-allowed-intent",
@@ -103,11 +113,17 @@ fn cancellation_intent_run_state_matrix_allows_only_running_and_retrying() {
     ] {
         let fixture = Fixture::new();
         let mut journal = fixture.open();
-        let mut run = run_at_state(&mut journal, "run-matrix-rejected", rejected);
+        let mut run = run_at_state(
+            &mut journal,
+            fixture.lease.as_ref(),
+            "run-matrix-rejected",
+            rejected,
+        );
         let before = journal.read_run("run-matrix-rejected", 0).unwrap().len();
         assert!(matches!(
             run.record_cancellation_intent(
                 &mut journal,
+                fixture.lease.as_ref(),
                 INTENT_KEY,
                 REASON,
                 "matrix-rejected-intent",
@@ -130,6 +146,7 @@ fn legacy_pending_cancellation_is_a_live_and_replay_barrier_without_mixing_new_i
     let attempts = ["legacy-attempt".to_owned()];
     run.request_cancellation_reconciliation(
         &mut journal,
+        fixture.lease.as_ref(),
         &attempts,
         "legacy unknown outcome",
         EventMetadata {
@@ -155,6 +172,7 @@ fn legacy_pending_cancellation_is_a_live_and_replay_barrier_without_mixing_new_i
     .unwrap();
     run.request_cancellation_reconciliation(
         &mut journal,
+        fixture.lease.as_ref(),
         &attempts,
         "legacy unknown outcome",
         EventMetadata {
@@ -167,7 +185,11 @@ fn legacy_pending_cancellation_is_a_live_and_replay_barrier_without_mixing_new_i
     .unwrap();
     for result in [
         run.retry(&mut journal, metadata("legacy-blocked-retry")),
-        run.cancel(&mut journal, metadata("legacy-blocked-cancel")),
+        run.cancel(
+            &mut journal,
+            fixture.lease.as_ref(),
+            metadata("legacy-blocked-cancel"),
+        ),
         run.fail(&mut journal, metadata("legacy-blocked-fail")),
     ] {
         assert!(matches!(
@@ -178,6 +200,7 @@ fn legacy_pending_cancellation_is_a_live_and_replay_barrier_without_mixing_new_i
     assert!(matches!(
         run.record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "legacy-blocked-new-intent",
@@ -231,6 +254,7 @@ fn legacy_pending_cancellation_is_a_live_and_replay_barrier_without_mixing_new_i
     ordinary
         .request_cancellation_reconciliation(
             &mut journal,
+            fixture.lease.as_ref(),
             &["legacy-attempt-2".to_owned()],
             "legacy unknown outcome",
             metadata("legacy-replay-request"),
@@ -272,6 +296,7 @@ fn intent_is_orthogonal_queryable_transport_idempotent_and_freezes_lifecycle() {
     let intent = run
         .record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "cancel-message-1",
@@ -304,6 +329,7 @@ fn intent_is_orthogonal_queryable_transport_idempotent_and_freezes_lifecycle() {
     let retried = run
         .record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "cancel-message-transport-retry",
@@ -329,7 +355,11 @@ fn intent_is_orthogonal_queryable_transport_idempotent_and_freezes_lifecycle() {
         run.begin_commit(&mut journal, metadata("blocked-commit")),
         run.retry(&mut journal, metadata("blocked-retry")),
         run.block(&mut journal, metadata("blocked-block")),
-        run.cancel(&mut journal, metadata("blocked-cancel")),
+        run.cancel(
+            &mut journal,
+            fixture.lease.as_ref(),
+            metadata("blocked-cancel"),
+        ),
         run.fail(&mut journal, metadata("blocked-fail")),
         run.complete(&mut journal, metadata("blocked-complete")),
     ] {
@@ -341,6 +371,7 @@ fn intent_is_orthogonal_queryable_transport_idempotent_and_freezes_lifecycle() {
     assert!(matches!(
         run.request_cancellation_reconciliation(
             &mut journal,
+            fixture.lease.as_ref(),
             &["attempt-legacy".to_owned()],
             "legacy cancellation",
             metadata("blocked-legacy"),
@@ -396,6 +427,7 @@ fn changed_semantics_and_concurrent_second_intent_fail_closed_without_writing() 
     let first_intent = first
         .record_cancellation_intent(
             &mut first_journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "cancel-first",
@@ -405,6 +437,7 @@ fn changed_semantics_and_concurrent_second_intent_fail_closed_without_writing() 
     assert!(matches!(
         first.record_cancellation_intent(
             &mut first_journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             "Changed reason",
             "cancel-changed-reason",
@@ -415,6 +448,7 @@ fn changed_semantics_and_concurrent_second_intent_fail_closed_without_writing() 
     assert!(matches!(
         first.record_cancellation_intent(
             &mut first_journal,
+            fixture.lease.as_ref(),
             "cancel-intent-2",
             REASON,
             "cancel-second-key",
@@ -425,6 +459,7 @@ fn changed_semantics_and_concurrent_second_intent_fail_closed_without_writing() 
     assert!(matches!(
         stale_second.record_cancellation_intent(
             &mut second_journal,
+            fixture.lease.as_ref(),
             "cancel-concurrent",
             REASON,
             "cancel-concurrent-message",
@@ -452,6 +487,7 @@ fn intent_settlement_and_reconciliation_retries_are_history_stable_across_cas_an
     let intent = first
         .record_cancellation_intent(
             &mut first_journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "history-intent-first",
@@ -462,6 +498,7 @@ fn intent_settlement_and_reconciliation_retries_are_history_stable_across_cas_an
         stale_retry
             .record_cancellation_intent(
                 &mut retry_journal,
+                fixture.lease.as_ref(),
                 INTENT_KEY,
                 REASON,
                 "history-intent-transport-retry",
@@ -588,6 +625,7 @@ fn intent_settlement_and_reconciliation_retries_are_history_stable_across_cas_an
     first
         .record_cancellation_intent(
             &mut first_journal,
+            fixture.lease.as_ref(),
             "history-intent-2",
             "Cancel the second cycle.",
             "history-intent-second-cycle",
@@ -597,6 +635,7 @@ fn intent_settlement_and_reconciliation_retries_are_history_stable_across_cas_an
     assert!(matches!(
         first.record_cancellation_intent(
             &mut first_journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             "Changed semantics for the historical key.",
             "history-reused-key-conflict",
@@ -650,6 +689,7 @@ fn safe_and_unknown_settlements_are_durable_semantically_idempotent_and_auditabl
     let safe_intent = safe_run
         .record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "safe-intent-message",
@@ -697,6 +737,7 @@ fn safe_and_unknown_settlements_are_durable_semantically_idempotent_and_auditabl
     let unknown_intent = unknown_run
         .record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "unknown-intent-message",
@@ -744,6 +785,7 @@ fn safe_and_unknown_settlements_are_durable_semantically_idempotent_and_auditabl
     let retry_intent = retry_run
         .record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "retry-intent-message",
@@ -781,6 +823,7 @@ fn safe_and_unknown_settlements_are_durable_semantically_idempotent_and_auditabl
         retry_run
             .record_cancellation_intent(
                 &mut journal,
+                fixture.lease.as_ref(),
                 INTENT_KEY,
                 REASON,
                 "retry-old-intent-transport-retry",
@@ -800,6 +843,7 @@ fn safe_and_unknown_settlements_are_durable_semantically_idempotent_and_auditabl
     let second_intent = retry_run
         .record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             "cancel-intent-2",
             "Stop the retried provider request.",
             "retry-second-intent-message",
@@ -818,6 +862,7 @@ fn safe_and_unknown_settlements_are_durable_semantically_idempotent_and_auditabl
         retry_run
             .record_cancellation_intent(
                 &mut journal,
+                fixture.lease.as_ref(),
                 INTENT_KEY,
                 REASON,
                 "retry-reused-old-intent",
@@ -961,6 +1006,7 @@ fn reconciled_v2_replay_binds_intent_evidence_disposition_and_rejects_v1_new_pat
         let intent = run
             .record_cancellation_intent(
                 &mut journal,
+                fixture.lease.as_ref(),
                 INTENT_KEY,
                 REASON,
                 "v2-tamper-intent",
@@ -1063,6 +1109,7 @@ fn replay_rejects_tampered_settlement_and_legacy_events_remain_recoverable() {
     let intent = run
         .record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "settlement-intent-message",
@@ -1104,6 +1151,7 @@ fn replay_rejects_tampered_settlement_and_legacy_events_remain_recoverable() {
     lifecycle
         .record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "lifecycle-intent-message",
@@ -1140,6 +1188,7 @@ fn replay_rejects_tampered_settlement_and_legacy_events_remain_recoverable() {
     legacy
         .request_cancellation_reconciliation(
             &mut journal,
+            fixture.lease.as_ref(),
             &["legacy-attempt-1".to_owned()],
             "legacy unknown provider result",
             metadata("legacy-request"),
@@ -1148,6 +1197,7 @@ fn replay_rejects_tampered_settlement_and_legacy_events_remain_recoverable() {
     assert!(matches!(
         legacy.record_cancellation_intent(
             &mut journal,
+            fixture.lease.as_ref(),
             INTENT_KEY,
             REASON,
             "new-intent-during-legacy",
@@ -1220,7 +1270,12 @@ fn running_run(journal: &mut EventJournal, run_id: &str) -> RunAggregate {
     run
 }
 
-fn run_at_state(journal: &mut EventJournal, run_id: &str, target: RunState) -> RunAggregate {
+fn run_at_state(
+    journal: &mut EventJournal,
+    lease: &BoundWorkspaceRuntimeLease,
+    run_id: &str,
+    target: RunState,
+) -> RunAggregate {
     let create_message = format!("{run_id}-matrix-create");
     let mut run = RunAggregate::create(
         journal,
@@ -1238,7 +1293,8 @@ fn run_at_state(journal: &mut EventJournal, run_id: &str, target: RunState) -> R
         return run;
     }
     if target == RunState::Cancelled {
-        run.cancel(journal, metadata("matrix-cancelled")).unwrap();
+        run.cancel(journal, lease, metadata("matrix-cancelled"))
+            .unwrap();
         return run;
     }
     if target == RunState::Failed {
@@ -1288,15 +1344,24 @@ fn metadata(message_id: &str) -> EventMetadata<'_> {
 struct Fixture {
     _temp: TempDir,
     database_path: std::path::PathBuf,
+    lease: Arc<BoundWorkspaceRuntimeLease>,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("runtime.db");
+        EventJournal::open(&database_path).unwrap();
+        let lease = Arc::new(
+            WorkspaceRuntimeLease::acquire(&database_path, "run-cancellation-aggregate")
+                .unwrap()
+                .bind_database(&database_path)
+                .unwrap(),
+        );
         Self {
             _temp: temp,
             database_path,
+            lease,
         }
     }
 

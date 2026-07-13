@@ -24,7 +24,7 @@ use crate::{
     provider_attempt::{ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState},
     provider_tool_materializer::{ProviderToolMaterializer, ProviderToolMaterializerError},
     run_aggregate::{RunAggregate, RunAggregateError},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,7 +87,7 @@ impl OperationalRecoveryProjectionService {
     pub fn project_persisted_provider_result(
         &self,
         request: PersistedProviderProjectionRequest,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<PersistedProviderProjectionManifest, OperationalRecoveryProjectionError> {
         self.project(request, exclusive_lease, ProjectionAuthority::ClaimOwner)
     }
@@ -95,7 +95,7 @@ impl OperationalRecoveryProjectionService {
     pub fn resume_started_persisted_provider_result(
         &self,
         request: PersistedProviderProjectionRequest,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<PersistedProviderProjectionManifest, OperationalRecoveryProjectionError> {
         self.project(
             request,
@@ -107,16 +107,14 @@ impl OperationalRecoveryProjectionService {
     fn project(
         &self,
         request: PersistedProviderProjectionRequest,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         authority: ProjectionAuthority,
     ) -> Result<PersistedProviderProjectionManifest, OperationalRecoveryProjectionError> {
         require_text("workspace_id", &request.workspace_id)?;
         require_text("run_id", &request.run_id)?;
         require_text("operation_id", &request.operation_id)?;
         require_text("execution_id", &request.execution_id)?;
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(OperationalRecoveryProjectionError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let recovery = OperationalRecoveryRepository::open(&self.database_path)?
             .load(&request.workspace_id, &request.run_id)?;
         let operation = recovery
@@ -269,6 +267,7 @@ impl OperationalRecoveryProjectionService {
         };
         let materialized = {
             let mut artifacts = ArtifactStore::open(&self.database_path)?;
+            exclusive_lease.verify_database_authority(&self.database_path)?;
             ProviderToolMaterializer::new(&mut artifacts).materialize(
                 &request.run_id,
                 &invocation_id,
@@ -293,6 +292,7 @@ impl OperationalRecoveryProjectionService {
             _ => return Err(OperationalRecoveryProjectionError::DirectiveInvalid),
         };
         let created_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         loop_record = AgentLoopJournalRepository::new(&mut journal).append_transition(
             &previous,
             &loop_record.service,
@@ -403,8 +403,8 @@ pub enum OperationalRecoveryProjectionError {
     EmptyField(&'static str),
     #[error("operational recovery action is not a persisted Provider result projection")]
     ActionNotProjectable,
-    #[error("operational recovery workspace lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("operational recovery projection requires the current exclusive Claim owner")]
     ExclusiveOwnerMismatch,
     #[error("operational recovery projection requires a persisted resume authorization")]

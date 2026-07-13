@@ -1,6 +1,6 @@
 mod support;
 
-use std::{fs::File, sync::Arc};
+use std::sync::Arc;
 
 use novelx_protocol::{
     ContextCompile, ContextDisclosure, ContextItem, ProviderRunIdentity, RunPermissionMode,
@@ -45,7 +45,7 @@ use novelx_runtime::{
     },
     run_aggregate::{EventMetadata, RunAggregate},
     workspace_event_journal::WorkspaceEventJournal,
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -93,8 +93,12 @@ fn authorizes_the_latest_persisted_resume_after_owner_loss() {
         lease,
     } = fixture.seed(SeedMutation::None);
     drop(lease);
-    let resumer =
-        Arc::new(WorkspaceRuntimeLease::acquire(&fixture.database, "recovery-resumer").unwrap());
+    let resumer = Arc::new(
+        WorkspaceRuntimeLease::acquire(&fixture.database, "recovery-resumer")
+            .unwrap()
+            .bind_database(&fixture.database)
+            .unwrap(),
+    );
     let resume = ProviderDispatchResumeAuthorizationService::new(&fixture.database)
         .authorize(
             ProviderDispatchResumeAuthorizationRequest {
@@ -145,11 +149,16 @@ fn rejects_tampered_action_non_requested_attempt_and_wrong_lease() {
     let fixture = Fixture::new();
     let seeded = fixture.seed(SeedMutation::None);
     let other = fixture._temp.path().join("other.db");
-    File::create(&other).unwrap();
-    let wrong = Arc::new(WorkspaceRuntimeLease::acquire(&other, "wrong-owner").unwrap());
+    EventJournal::open(&other).unwrap();
+    let wrong = Arc::new(
+        WorkspaceRuntimeLease::acquire(&other, "wrong-owner")
+            .unwrap()
+            .bind_database(&other)
+            .unwrap(),
+    );
     assert!(matches!(
         fixture.authorize(&seeded, wrong),
-        Err(ProviderRecoveryEffectAuthorizationError::WorkspaceLeaseMismatch)
+        Err(ProviderRecoveryEffectAuthorizationError::WorkspaceLease(_))
     ));
 }
 
@@ -226,7 +235,7 @@ struct Seeded {
     request: ProviderRecoveryEffectAuthorizationRequest,
     providers: ProviderRegistry,
     gateway: ProviderGateway,
-    lease: Arc<WorkspaceRuntimeLease>,
+    lease: Arc<BoundWorkspaceRuntimeLease>,
 }
 
 struct Fixture {
@@ -249,7 +258,7 @@ impl Fixture {
     fn authorize(
         &self,
         seeded: &Seeded,
-        lease: Arc<WorkspaceRuntimeLease>,
+        lease: Arc<BoundWorkspaceRuntimeLease>,
     ) -> Result<
         novelx_runtime::provider_effect_authorization_service::ProviderLiveEffectAuthorization,
         ProviderRecoveryEffectAuthorizationError,
@@ -268,7 +277,10 @@ impl Fixture {
         let (providers, provider) = registry();
         let gateway = ProviderGateway::new().unwrap();
         let lease = Arc::new(
-            WorkspaceRuntimeLease::acquire(&self.database, "original-recovery-owner").unwrap(),
+            WorkspaceRuntimeLease::acquire(&self.database, "original-recovery-owner")
+                .unwrap()
+                .bind_database(&self.database)
+                .unwrap(),
         );
         let run_id = Uuid::new_v4();
         let mut journal = EventJournal::open(&self.database).unwrap();
@@ -419,7 +431,10 @@ impl Fixture {
         let (providers, provider) = registry();
         let gateway = ProviderGateway::new().unwrap();
         let lease = Arc::new(
-            WorkspaceRuntimeLease::acquire(&self.database, "original-retry-owner").unwrap(),
+            WorkspaceRuntimeLease::acquire(&self.database, "original-retry-owner")
+                .unwrap()
+                .bind_database(&self.database)
+                .unwrap(),
         );
         let run_id = Uuid::new_v4();
         let mut journal = EventJournal::open(&self.database).unwrap();
@@ -708,7 +723,7 @@ impl Fixture {
         &self,
         run_id: &str,
         action: &OperationalRecoveryAction,
-        lease: &WorkspaceRuntimeLease,
+        lease: &BoundWorkspaceRuntimeLease,
     ) -> (String, String) {
         let subject = novelx_runtime::operational_recovery_aggregate::OperationalRecoverySubject {
             workspace_id: WORKSPACE_ID.to_owned(),
@@ -729,13 +744,14 @@ impl Fixture {
             .observe(
                 subject,
                 observation.clone(),
+                lease,
                 OperationalRecoveryEventMetadata { created_at: now() },
             )
             .unwrap();
         let claimed_at = now();
         let claim = OperationalRecoveryClaim::derive(
             observation.operation_id.clone(),
-            lease.instance_id().to_owned(),
+            lease.owner_id().to_owned(),
             1,
             source,
             claimed_at.clone(),

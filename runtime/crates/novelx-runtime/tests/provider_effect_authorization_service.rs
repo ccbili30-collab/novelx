@@ -1,6 +1,6 @@
 mod support;
 
-use std::{fs::File, sync::Arc};
+use std::sync::Arc;
 
 use novelx_protocol::{
     ContextCompile, ContextDisclosure, ContextItem, ProviderInferenceCompleted,
@@ -38,7 +38,7 @@ use novelx_runtime::{
     provider_tool_materializer::MaterializedProviderToolCall,
     run_aggregate::{EventMetadata, RunAggregate},
     workspace_event_journal::{NewWorkspaceEvent, WorkspaceEventJournal},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
@@ -179,11 +179,16 @@ fn rejects_context_payload_provider_and_workspace_lease_mismatches() {
     let fixture = Fixture::new();
     let mut lease = fixture.seed(SeedKind::Initial, SeedMutation::None);
     let other = fixture._temp.path().join("other.db");
-    File::create(&other).unwrap();
-    lease.lease = Arc::new(WorkspaceRuntimeLease::acquire(&other, "other-owner").unwrap());
+    EventJournal::open(&other).unwrap();
+    lease.lease = Arc::new(
+        WorkspaceRuntimeLease::acquire(&other, "other-owner")
+            .unwrap()
+            .bind_database(&other)
+            .unwrap(),
+    );
     assert!(matches!(
         fixture.authorize(&lease),
-        Err(ProviderEffectAuthorizationError::WorkspaceLeaseMismatch)
+        Err(ProviderEffectAuthorizationError::WorkspaceLease(_))
     ));
 }
 
@@ -322,7 +327,7 @@ struct Seeded {
     request: ProviderLiveEffectAuthorizationRequest,
     providers: ProviderRegistry,
     gateway: ProviderGateway,
-    lease: Arc<WorkspaceRuntimeLease>,
+    lease: Arc<BoundWorkspaceRuntimeLease>,
 }
 
 struct Fixture {
@@ -741,8 +746,12 @@ impl Fixture {
                 .unwrap();
         }
         drop(journal);
-        let lease =
-            Arc::new(WorkspaceRuntimeLease::acquire(&self.database, "live-authorizer").unwrap());
+        let lease = Arc::new(
+            WorkspaceRuntimeLease::acquire(&self.database, "live-authorizer")
+                .unwrap()
+                .bind_database(&self.database)
+                .unwrap(),
+        );
         Seeded {
             request: ProviderLiveEffectAuthorizationRequest {
                 run_id,

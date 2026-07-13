@@ -460,17 +460,6 @@ impl ProviderGateway {
             })
     }
 
-    pub async fn infer(
-        &self,
-        provider: &BoundProvider,
-        request: ProviderInferenceRequest,
-    ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
-        // Compatibility-only unsealed path. Production Runtime execution must use
-        // `execute_authorized_http_dispatch` after durable `provider.sent` persistence.
-        let prepared = self.prepare_inference(provider, request)?;
-        self.infer_prepared(provider, prepared).await
-    }
-
     pub fn prepare_inference(
         &self,
         provider: &BoundProvider,
@@ -560,41 +549,6 @@ impl ProviderGateway {
         })
     }
 
-    pub async fn infer_prepared(
-        &self,
-        provider: &BoundProvider,
-        prepared: PreparedProviderInference,
-    ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
-        // Compatibility-only unsealed path. It will be removed once every live caller has been
-        // migrated to the durable Provider effect capability chain.
-        let dispatch = self.prepare_http_dispatch(provider, prepared)?;
-        self.execute_http_dispatch(dispatch).await
-    }
-
-    pub async fn infer_prepared_cancellable(
-        &self,
-        provider: &BoundProvider,
-        prepared: PreparedProviderInference,
-        cancellation: &mut watch::Receiver<bool>,
-    ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
-        // Compatibility-only unsealed path; see `infer_prepared`.
-        if *cancellation.borrow() {
-            return Err(ProviderGatewayError::Cancelled);
-        }
-        let inference = self.infer_prepared(provider, prepared);
-        tokio::pin!(inference);
-        tokio::select! {
-            result = &mut inference => result,
-            changed = cancellation.changed() => {
-                if changed.is_ok() && *cancellation.borrow() {
-                    Err(ProviderGatewayError::Cancelled)
-                } else {
-                    inference.await
-                }
-            }
-        }
-    }
-
     /// Executes the prebuilt request only when its complete non-secret evidence is bound to the
     /// exact move-only effect that crossed durable `provider.sent` persistence.
     ///
@@ -660,9 +614,9 @@ impl ProviderGateway {
         }
     }
 
-    /// Unsealed compatibility kernel. Only `execute_authorized_http_dispatch` may call this from
-    /// the Runtime live path; direct compatibility callers remain until the next sealing batch.
-    pub(crate) async fn execute_http_dispatch(
+    /// Private HTTP kernel. Its only caller is `execute_authorized_http_dispatch`, which consumes
+    /// the move-only Provider effect capability after durable `provider.sent` persistence.
+    async fn execute_http_dispatch(
         &self,
         dispatch: PreparedProviderHttpDispatch,
     ) -> Result<ProviderInferenceOutcome, ProviderGatewayError> {
@@ -1380,7 +1334,9 @@ mod authorized_dispatch_tests {
             ProviderEffectCapability, ProviderEffectGrantMaterial, ProviderEffectGrantReceipt,
             canonical_database_path_sha256,
         },
-        workspace_runtime_lease::{WorkspaceRuntimeLease, WorkspaceRuntimeLeaseError},
+        workspace_runtime_lease::{
+            BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease, WorkspaceRuntimeLeaseError,
+        },
     };
 
     const TEST_API_KEY: &str = "authorized-provider-sensitive-key";
@@ -1576,7 +1532,7 @@ mod authorized_dispatch_tests {
     struct EffectFixture {
         _directory: TempDir,
         database: PathBuf,
-        lease: Arc<WorkspaceRuntimeLease>,
+        lease: Arc<BoundWorkspaceRuntimeLease>,
     }
 
     impl EffectFixture {
@@ -1584,7 +1540,12 @@ mod authorized_dispatch_tests {
             let directory = TempDir::new().unwrap();
             let database = directory.path().join("workspace.db");
             File::create(&database).unwrap();
-            let lease = Arc::new(WorkspaceRuntimeLease::acquire(&database, label).unwrap());
+            let lease = Arc::new(
+                WorkspaceRuntimeLease::acquire(&database, label)
+                    .unwrap()
+                    .bind_database(&database)
+                    .unwrap(),
+            );
             Self {
                 _directory: directory,
                 database,

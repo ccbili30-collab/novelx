@@ -1132,7 +1132,7 @@ mod authorized_sent_tests {
             canonical_database_path_sha256,
         },
         workspace_event_journal::WorkspaceEventJournal,
-        workspace_runtime_lease::WorkspaceRuntimeLease,
+        workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
     };
 
     const RUN_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -1532,7 +1532,7 @@ mod authorized_sent_tests {
     struct AuthorizedFixture {
         _temp: TempDir,
         path: std::path::PathBuf,
-        lease: Arc<WorkspaceRuntimeLease>,
+        lease: Arc<BoundWorkspaceRuntimeLease>,
     }
 
     impl AuthorizedFixture {
@@ -1540,8 +1540,12 @@ mod authorized_sent_tests {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("runtime.db");
             drop(WorkspaceEventJournal::open(&path).unwrap());
-            let lease =
-                Arc::new(WorkspaceRuntimeLease::acquire(&path, "provider-attempt-test").unwrap());
+            let lease = Arc::new(
+                WorkspaceRuntimeLease::acquire(&path, "provider-attempt-test")
+                    .unwrap()
+                    .bind_database(&path)
+                    .unwrap(),
+            );
             Self {
                 _temp: temp,
                 path,

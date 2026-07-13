@@ -23,13 +23,13 @@ use crate::provider_effect_capability::{
     ArmedProviderEffect, DispatchedProviderEffect, ProviderEffectCapabilityError,
 };
 use crate::provider_gateway::{
-    BoundProvider, PreparedProviderHttpDispatch, PreparedProviderInference, ProviderGateway,
-    ProviderGatewayError, ProviderInferenceOutcome, ProviderInferenceReceipt,
-    ProviderInferenceRequest, ProviderRegistry,
+    PreparedProviderHttpDispatch, ProviderGateway, ProviderGatewayError, ProviderInferenceOutcome,
+    ProviderInferenceReceipt, ProviderInferenceRequest, ProviderRegistry,
 };
 use crate::provider_pre_send_gate::{PreSendGateError, SentReservation};
 use crate::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use crate::run_state::RunState;
+use crate::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError};
 
 pub struct ProviderInferenceService<'a> {
     journal: &'a mut EventJournal,
@@ -49,11 +49,6 @@ pub struct ProviderInferenceExecution {
     pub request: ProviderInferenceRequest,
 }
 
-pub enum PreparedProviderAttempt {
-    Recovered(Box<ProviderInferenceOutcome>),
-    Dispatch(Box<ProviderAttemptDispatch>),
-}
-
 /// Result of establishing the durable `provider.requested` boundary.
 ///
 /// `Requested` deliberately carries neither prepared transport state nor an execution guard.
@@ -61,20 +56,6 @@ pub enum PreparedProviderAttempt {
 pub enum EnsuredProviderAttempt {
     Recovered(Box<ProviderInferenceOutcome>),
     Requested,
-}
-
-pub struct ProviderAttemptDispatch {
-    execution: ProviderInferenceExecution,
-    attempt: ProviderAttemptAggregate,
-    prepared: PreparedProviderInference,
-    execution_guard: ProviderAttemptExecutionGuard,
-}
-
-pub struct DispatchedProviderAttempt {
-    execution: ProviderInferenceExecution,
-    attempt: ProviderAttemptAggregate,
-    result: Result<ProviderInferenceOutcome, ProviderGatewayError>,
-    execution_guard: ProviderAttemptExecutionGuard,
 }
 
 pub(crate) struct AuthorizedProviderAttemptDispatch {
@@ -239,32 +220,6 @@ impl<'a> ProviderInferenceService<'a> {
         }
     }
 
-    /// Legacy unsealed compatibility path.
-    ///
-    /// New live dispatch code must establish [`Self::ensure_requested`], obtain a durable
-    /// Provider effect authorization, and cross the authorized `provider.sent` boundary before
-    /// any network effect. This method remains temporarily available while those callers migrate.
-    pub async fn execute(
-        &mut self,
-        execution: ProviderInferenceExecution,
-    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
-        let prepared = self.prepare_attempt(execution)?;
-        self.execute_prepared(prepared).await
-    }
-
-    async fn execute_prepared(
-        &mut self,
-        prepared: PreparedProviderAttempt,
-    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
-        let dispatch = match prepared {
-            PreparedProviderAttempt::Recovered(outcome) => return Ok(*outcome),
-            PreparedProviderAttempt::Dispatch(dispatch) => *dispatch,
-        };
-        let provider = self.providers.resolve(&dispatch.execution.provider)?;
-        let dispatched = Self::dispatch_attempt(self.gateway, provider, dispatch).await;
-        self.finalize_attempt(dispatched)
-    }
-
     /// Crosses the durable authorized send boundary without performing network I/O.
     ///
     /// Every local construction and cancellation check happens before capability consumption and
@@ -424,10 +379,10 @@ impl<'a> ProviderInferenceService<'a> {
             execution,
             attempt,
             result,
-            dispatched_effect: _dispatched_effect,
+            dispatched_effect,
             execution_guard: _execution_guard,
         } = dispatched;
-        finalize_attempt_parts(journal, execution, attempt, result)
+        finalize_attempt_parts(journal, execution, attempt, result, &dispatched_effect)
     }
 
     /// Ensures that the authoritative Provider Attempt exists in `Requested`, or projects an
@@ -440,6 +395,7 @@ impl<'a> ProviderInferenceService<'a> {
     pub fn ensure_requested(
         &mut self,
         execution: ProviderInferenceExecution,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<EnsuredProviderAttempt, ProviderInferenceServiceError> {
         validate_execution(&execution)?;
         let execution_guard = ProviderAttemptExecutionGuard::acquire(
@@ -447,13 +403,14 @@ impl<'a> ProviderInferenceService<'a> {
             &execution.run_id,
             &execution.attempt_id,
         )?;
-        self.ensure_requested_guarded(execution, execution_guard)
+        self.ensure_requested_guarded(execution, execution_guard, exclusive_lease)
     }
 
     fn ensure_requested_guarded(
         &mut self,
         execution: ProviderInferenceExecution,
         execution_guard: ProviderAttemptExecutionGuard,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<EnsuredProviderAttempt, ProviderInferenceServiceError> {
         validate_execution(&execution)?;
         if !execution_guard.protects(self.journal, &execution.run_id, &execution.attempt_id) {
@@ -535,12 +492,14 @@ impl<'a> ProviderInferenceService<'a> {
         let requested_message_id = Uuid::new_v4().to_string();
         let requested_key = execution.inference_idempotency_key.clone();
         let requested_at = timestamp()?;
+        let expected_run_sequence = current_run_sequence(self.journal, &execution.run_id)?;
+        exclusive_lease.verify_database_authority(self.journal.database_path())?;
         let created = ProviderAttemptAggregate::create(
             self.journal,
             &execution.run_id,
             &execution.attempt_id,
             definition,
-            current_run_sequence(self.journal, &execution.run_id)?,
+            expected_run_sequence,
             metadata(&requested_message_id, &requested_key, &requested_at),
         )?;
         match created.state() {
@@ -599,296 +558,6 @@ impl<'a> ProviderInferenceService<'a> {
             max_attempts: provider.config().retry_policy.max_attempts,
             max_total_delay_ms: provider.config().retry_policy.max_total_delay_ms,
         })
-    }
-
-    /// Legacy unsealed compatibility path. It crosses the v1 `provider.sent` boundary directly
-    /// and must not be used by new live dispatch callers.
-    pub fn prepare_attempt(
-        &mut self,
-        execution: ProviderInferenceExecution,
-    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
-        validate_execution(&execution)?;
-        let execution_guard = ProviderAttemptExecutionGuard::acquire(
-            self.journal,
-            &execution.run_id,
-            &execution.attempt_id,
-        )?;
-        self.prepare_attempt_guarded(execution, execution_guard)
-    }
-
-    fn prepare_attempt_guarded(
-        &mut self,
-        execution: ProviderInferenceExecution,
-        execution_guard: ProviderAttemptExecutionGuard,
-    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
-        validate_execution(&execution)?;
-        if !execution_guard.protects(self.journal, &execution.run_id, &execution.attempt_id) {
-            return Err(ProviderInferenceServiceError::AttemptGuardMismatch);
-        }
-        let run = RunAggregate::recover(self.journal, &execution.run_id)?;
-        if run.state() != RunState::Running {
-            if run.state() == RunState::WaitingForReconciliation
-                && !self
-                    .journal
-                    .read_aggregate(
-                        &execution.run_id,
-                        "provider_attempt",
-                        &execution.attempt_id,
-                        0,
-                    )?
-                    .is_empty()
-            {
-                let existing = ProviderAttemptAggregate::recover(
-                    self.journal,
-                    &execution.run_id,
-                    &execution.attempt_id,
-                )?;
-                return match existing.state() {
-                    ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
-                        Err(ProviderInferenceServiceError::OutcomeUnknown)
-                    }
-                    ProviderAttemptState::Responded => recovered_outcome(&existing)
-                        .map(Box::new)
-                        .map(PreparedProviderAttempt::Recovered),
-                    ProviderAttemptState::CancelledBeforeSent => {
-                        Err(ProviderInferenceServiceError::CancelledBeforeDispatch)
-                    }
-                    ProviderAttemptState::Failed => Err(
-                        ProviderInferenceServiceError::ExistingTerminal(existing.recovery()),
-                    ),
-                    ProviderAttemptState::Requested => {
-                        Err(ProviderInferenceServiceError::RunNotRunning(run.state()))
-                    }
-                };
-            }
-            return Err(ProviderInferenceServiceError::RunNotRunning(run.state()));
-        }
-        if run.pinned_identity().provider != execution.provider {
-            return Err(ProviderInferenceServiceError::PinnedProviderMismatch);
-        }
-        if !self
-            .journal
-            .read_aggregate(
-                &execution.run_id,
-                "provider_attempt",
-                &execution.attempt_id,
-                0,
-            )?
-            .is_empty()
-        {
-            let existing = ProviderAttemptAggregate::recover(
-                self.journal,
-                &execution.run_id,
-                &execution.attempt_id,
-            )?;
-            return match existing.state() {
-                ProviderAttemptState::Responded => recovered_outcome(&existing)
-                    .map(Box::new)
-                    .map(PreparedProviderAttempt::Recovered),
-                ProviderAttemptState::CancelledBeforeSent => {
-                    Err(ProviderInferenceServiceError::CancelledBeforeDispatch)
-                }
-                ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
-                    Err(ProviderInferenceServiceError::OutcomeUnknown)
-                }
-                ProviderAttemptState::Failed => Err(
-                    ProviderInferenceServiceError::ExistingTerminal(existing.recovery()),
-                ),
-                ProviderAttemptState::Requested => {
-                    self.prepare_requested_attempt(execution, existing, execution_guard)
-                }
-            };
-        }
-        self.prepare_new_attempt(execution, execution_guard)
-    }
-
-    fn prepare_new_attempt(
-        &mut self,
-        execution: ProviderInferenceExecution,
-        execution_guard: ProviderAttemptExecutionGuard,
-    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
-        let persisted = load_persisted_context(
-            self.journal,
-            &execution.run_id,
-            &execution.request.compilation,
-        )?;
-        let actual_hash = normalized_provider_input_sha256(&persisted.normalized_input)
-            .map_err(|_| ProviderInferenceServiceError::ContextNormalizedInputInvalid)?;
-        if actual_hash != persisted.normalized_input_sha256 {
-            return Err(ProviderInferenceServiceError::ContextNormalizedInputHashMismatch);
-        }
-        let authoritative_request = ProviderInferenceRequest {
-            compilation: persisted.receipt,
-            messages: persisted.normalized_input.messages,
-            tools: persisted.normalized_input.tools,
-        };
-        let provider = self.providers.resolve(&execution.provider)?;
-        let prepared = self
-            .gateway
-            .prepare_inference(provider, authoritative_request)?;
-        let definition = ProviderAttemptDefinition {
-            run_id: execution.run_id.clone(),
-            inference_id: execution.inference_id.clone(),
-            invocation_id: execution.invocation_id.clone(),
-            context_compilation_id: prepared.compilation().compilation_id,
-            canonical_context_sha256: prepared.compilation().canonical_context_sha256.clone(),
-            transport_payload_sha256: prepared.transport_payload_sha256().to_owned(),
-            provider: execution.provider.clone(),
-            request_number: prepared.compilation().request_number,
-            attempt_number: execution.attempt_number,
-            output_reserve_tokens: prepared.compilation().output_reserve_tokens,
-            request_timeout_ms: provider.config().request_timeout_ms,
-            total_deadline_ms: provider.config().total_deadline_ms,
-            max_attempts: provider.config().retry_policy.max_attempts,
-            max_total_delay_ms: provider.config().retry_policy.max_total_delay_ms,
-        };
-        let requested_message_id = Uuid::new_v4().to_string();
-        let requested_key = execution.inference_idempotency_key.clone();
-        let requested_at = timestamp()?;
-        let attempt = ProviderAttemptAggregate::create(
-            self.journal,
-            &execution.run_id,
-            &execution.attempt_id,
-            definition,
-            current_run_sequence(self.journal, &execution.run_id)?,
-            metadata(&requested_message_id, &requested_key, &requested_at),
-        )?;
-        self.arm_dispatch(execution, attempt, prepared, execution_guard)
-    }
-
-    fn prepare_requested_attempt(
-        &mut self,
-        execution: ProviderInferenceExecution,
-        attempt: ProviderAttemptAggregate,
-        execution_guard: ProviderAttemptExecutionGuard,
-    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
-        let persisted = load_persisted_context(
-            self.journal,
-            &execution.run_id,
-            &execution.request.compilation,
-        )?;
-        let actual_hash = normalized_provider_input_sha256(&persisted.normalized_input)
-            .map_err(|_| ProviderInferenceServiceError::ContextNormalizedInputInvalid)?;
-        if actual_hash != persisted.normalized_input_sha256 {
-            return Err(ProviderInferenceServiceError::ContextNormalizedInputHashMismatch);
-        }
-        let provider = self.providers.resolve(&execution.provider)?;
-        let prepared = self.gateway.prepare_inference(
-            provider,
-            ProviderInferenceRequest {
-                compilation: persisted.receipt,
-                messages: persisted.normalized_input.messages,
-                tools: persisted.normalized_input.tools,
-            },
-        )?;
-        let definition = attempt.definition();
-        if definition.inference_id != execution.inference_id
-            || definition.invocation_id != execution.invocation_id
-            || definition.context_compilation_id != prepared.compilation().compilation_id
-            || definition.canonical_context_sha256
-                != prepared.compilation().canonical_context_sha256
-            || definition.transport_payload_sha256 != prepared.transport_payload_sha256()
-            || definition.provider != execution.provider
-            || definition.attempt_number != execution.attempt_number
-        {
-            return Err(ProviderInferenceServiceError::PersistedAttemptMismatch);
-        }
-        self.arm_dispatch(execution, attempt, prepared, execution_guard)
-    }
-
-    fn arm_dispatch(
-        &mut self,
-        execution: ProviderInferenceExecution,
-        mut attempt: ProviderAttemptAggregate,
-        prepared: PreparedProviderInference,
-        execution_guard: ProviderAttemptExecutionGuard,
-    ) -> Result<PreparedProviderAttempt, ProviderInferenceServiceError> {
-        let dispatch_id = Uuid::new_v4().to_string();
-        let sent_message_id = Uuid::new_v4().to_string();
-        let sent_key = format!("{}:sent", execution.attempt_id);
-        let sent_at = timestamp()?;
-        attempt.mark_sent(
-            self.journal,
-            current_run_sequence(self.journal, &execution.run_id)?,
-            &dispatch_id,
-            metadata(&sent_message_id, &sent_key, &sent_at),
-        )?;
-        #[cfg(feature = "runtime-test-failpoints")]
-        crate::runtime_test_failpoint::hit("provider_attempt.sent_before_http");
-
-        Ok(PreparedProviderAttempt::Dispatch(Box::new(
-            ProviderAttemptDispatch {
-                execution,
-                attempt,
-                prepared,
-                execution_guard,
-            },
-        )))
-    }
-
-    pub async fn dispatch_attempt(
-        gateway: &ProviderGateway,
-        provider: &BoundProvider,
-        dispatch: ProviderAttemptDispatch,
-    ) -> DispatchedProviderAttempt {
-        let ProviderAttemptDispatch {
-            execution,
-            attempt,
-            prepared,
-            execution_guard,
-        } = dispatch;
-        let result = gateway.infer_prepared(provider, prepared).await;
-        #[cfg(feature = "runtime-test-failpoints")]
-        crate::runtime_test_failpoint::hit("provider_attempt.response_before_terminal");
-        DispatchedProviderAttempt {
-            execution,
-            attempt,
-            result,
-            execution_guard,
-        }
-    }
-
-    pub async fn dispatch_attempt_cancellable(
-        gateway: &ProviderGateway,
-        provider: &BoundProvider,
-        dispatch: ProviderAttemptDispatch,
-        cancellation: &mut watch::Receiver<bool>,
-    ) -> DispatchedProviderAttempt {
-        let ProviderAttemptDispatch {
-            execution,
-            attempt,
-            prepared,
-            execution_guard,
-        } = dispatch;
-        let result = gateway
-            .infer_prepared_cancellable(provider, prepared, cancellation)
-            .await;
-        DispatchedProviderAttempt {
-            execution,
-            attempt,
-            result,
-            execution_guard,
-        }
-    }
-
-    pub fn finalize_attempt(
-        &mut self,
-        dispatched: DispatchedProviderAttempt,
-    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
-        Self::finalize_attempt_in(self.journal, dispatched)
-    }
-
-    pub fn finalize_attempt_in(
-        journal: &mut EventJournal,
-        dispatched: DispatchedProviderAttempt,
-    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
-        let DispatchedProviderAttempt {
-            execution,
-            attempt,
-            result,
-            execution_guard: _execution_guard,
-        } = dispatched;
-        finalize_attempt_parts(journal, execution, attempt, result)
     }
 }
 
@@ -950,6 +619,7 @@ fn finalize_attempt_parts(
     execution: ProviderInferenceExecution,
     mut attempt: ProviderAttemptAggregate,
     result: Result<ProviderInferenceOutcome, ProviderGatewayError>,
+    authority: &DispatchedProviderEffect,
 ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
     match result {
         Ok(outcome) => {
@@ -957,9 +627,11 @@ fn finalize_attempt_parts(
             let responded_message_id = Uuid::new_v4().to_string();
             let responded_key = format!("{}:responded", execution.attempt_id);
             let responded_at = timestamp()?;
+            let expected_run_sequence = current_run_sequence(journal, &execution.run_id)?;
+            authority.verify_database_authority(journal.database_path())?;
             attempt.respond_with_output(
                 journal,
-                current_run_sequence(journal, &execution.run_id)?,
+                expected_run_sequence,
                 response,
                 outcome.text.clone(),
                 outcome
@@ -981,9 +653,11 @@ fn finalize_attempt_parts(
             let failed_message_id = Uuid::new_v4().to_string();
             let failed_key = format!("{}:failed", execution.attempt_id);
             let failed_at = timestamp()?;
+            let expected_run_sequence = current_run_sequence(journal, &execution.run_id)?;
+            authority.verify_database_authority(journal.database_path())?;
             attempt.fail(
                 journal,
-                current_run_sequence(journal, &execution.run_id)?,
+                expected_run_sequence,
                 failure,
                 metadata(&failed_message_id, &failed_key, &failed_at),
             )?;
@@ -994,9 +668,11 @@ fn finalize_attempt_parts(
             let unknown_message_id = Uuid::new_v4().to_string();
             let unknown_key = format!("{}:outcome-unknown", execution.attempt_id);
             let unknown_at = timestamp()?;
+            let expected_run_sequence = current_run_sequence(journal, &execution.run_id)?;
+            authority.verify_database_authority(journal.database_path())?;
             attempt.mark_outcome_unknown(
                 journal,
-                current_run_sequence(journal, &execution.run_id)?,
+                expected_run_sequence,
                 Uuid::new_v4(),
                 metadata(&unknown_message_id, &unknown_key, &unknown_at),
             )?;
@@ -1004,6 +680,7 @@ fn finalize_attempt_parts(
             if run.state() != RunState::WaitingForReconciliation {
                 let reconciliation_message_id = Uuid::new_v4().to_string();
                 let reconciliation_key = format!("{}:run-reconciliation", execution.attempt_id);
+                authority.verify_database_authority(journal.database_path())?;
                 run.wait_for_reconciliation(
                     journal,
                     EventMetadata {
@@ -1071,6 +748,8 @@ pub enum ProviderInferenceServiceError {
     Time(#[from] time::error::Format),
     #[error(transparent)]
     ProviderEffect(#[from] ProviderEffectCapabilityError),
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
 }
 
 fn validate_execution(
@@ -1234,6 +913,16 @@ fn definitive_failure(error: &ProviderGatewayError) -> ProviderAttemptFailure {
         delivery_certainty: ProviderDeliveryCertainty::ResponseReceived,
         diagnostic_id: Uuid::new_v4(),
     }
+}
+
+#[cfg(test)]
+mod authorized_capability_tests {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/provider_inference_service.rs"
+    ));
+
+    provider_inference_service_authorized_tests!();
 }
 
 fn current_run_sequence(journal: &EventJournal, run_id: &str) -> Result<u64, EventJournalError> {

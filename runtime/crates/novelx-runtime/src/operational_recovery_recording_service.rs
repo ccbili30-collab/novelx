@@ -7,9 +7,10 @@ use crate::{
     operational_recovery_action::OperationalRecoveryAction,
     operational_recovery_aggregate::{
         OPERATIONAL_RECOVERY_POLICY_VERSION, OperationalRecoveryAggregateError,
-        OperationalRecoveryEventMetadata, OperationalRecoveryExecutionInterruption,
-        OperationalRecoveryInterruptionCause, OperationalRecoveryObservation,
-        OperationalRecoveryObservedGate, OperationalRecoveryRepository, OperationalRecoverySubject,
+        OperationalRecoveryDispositionAuthority, OperationalRecoveryEventMetadata,
+        OperationalRecoveryExecutionInterruption, OperationalRecoveryInterruptionCause,
+        OperationalRecoveryObservation, OperationalRecoveryObservedGate,
+        OperationalRecoveryRepository, OperationalRecoverySubject,
         OperationalRecoveryWaitingReason,
     },
     operational_recovery_scanner::{
@@ -21,7 +22,7 @@ use crate::{
     },
     runtime_cancellation_hub::CancellationCause,
     workspace_event_journal::WorkspaceEventJournal,
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,8 +63,10 @@ impl OperationalRecoveryRecordingService {
         workspace_id: &str,
         project_id: &str,
         report: &OperationalRecoveryReport,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         created_at: &str,
     ) -> Result<Vec<RecordedOperationalRecovery>, OperationalRecoveryRecordingError> {
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
         let mut recorded = Vec::with_capacity(report.runs.len());
         for run in &report.runs {
@@ -72,6 +75,7 @@ impl OperationalRecoveryRecordingService {
                 workspace_id,
                 project_id,
                 run,
+                exclusive_lease,
                 created_at,
             )?);
         }
@@ -82,11 +86,9 @@ impl OperationalRecoveryRecordingService {
     pub fn record_execution_interruption(
         &self,
         request: OperationalRecoveryInterruptionRequest,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<OperationalRecoveryExecutionInterruption, OperationalRecoveryRecordingError> {
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(OperationalRecoveryRecordingError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let clock = WorkspaceEventJournal::open(&self.database_path)?;
         let expected_global_sequence = clock.current_global_sequence()?;
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
@@ -143,7 +145,7 @@ impl OperationalRecoveryRecordingService {
             request.cancellation_intent_id,
             request.transport_boundary_crossed,
             request.resumable,
-            exclusive_lease.instance_id().to_owned(),
+            exclusive_lease.owner_id().to_owned(),
             exclusive_lease.lease_epoch().to_owned(),
             request.interrupted_at.clone(),
         )?;
@@ -188,6 +190,7 @@ fn record_run(
     workspace_id: &str,
     project_id: &str,
     run: &OperationalRecoveryRun,
+    exclusive_lease: &BoundWorkspaceRuntimeLease,
     created_at: &str,
 ) -> Result<RecordedOperationalRecovery, OperationalRecoveryRecordingError> {
     let subject = OperationalRecoverySubject {
@@ -207,43 +210,40 @@ fn record_run(
     let metadata = || OperationalRecoveryEventMetadata {
         created_at: created_at.to_owned(),
     };
-    let mut aggregate = repository.observe(subject, observation, metadata())?;
+    let disposition_authority =
+        OperationalRecoveryDispositionAuthority::new(workspace_id, &run.run_id, exclusive_lease);
+    let mut aggregate = repository.observe(subject, observation, exclusive_lease, metadata())?;
     aggregate = match run.gate {
         OperationalRecoveryGate::AwaitingProviderBinding => repository.wait(
-            workspace_id,
-            &run.run_id,
+            disposition_authority,
             &operation_id,
             OperationalRecoveryWaitingReason::ProviderBinding,
             run.source_fingerprint.clone(),
             metadata(),
         )?,
         OperationalRecoveryGate::WaitingForApproval => repository.wait(
-            workspace_id,
-            &run.run_id,
+            disposition_authority,
             &operation_id,
             OperationalRecoveryWaitingReason::HostApproval,
             run.source_fingerprint.clone(),
             metadata(),
         )?,
         OperationalRecoveryGate::WaitingForReconciliation => repository.wait(
-            workspace_id,
-            &run.run_id,
+            disposition_authority,
             &operation_id,
             OperationalRecoveryWaitingReason::Reconciliation,
             run.source_fingerprint.clone(),
             metadata(),
         )?,
         OperationalRecoveryGate::WaitingForExplicitExecution => repository.wait(
-            workspace_id,
-            &run.run_id,
+            disposition_authority,
             &operation_id,
             OperationalRecoveryWaitingReason::ExplicitExecution,
             run.source_fingerprint.clone(),
             metadata(),
         )?,
         OperationalRecoveryGate::Quarantined => repository.quarantine(
-            workspace_id,
-            &run.run_id,
+            disposition_authority,
             &operation_id,
             run.reasons.clone(),
             run.source_fingerprint.clone(),
@@ -288,8 +288,8 @@ fn map_gate(value: OperationalRecoveryGate) -> OperationalRecoveryObservedGate {
 
 #[derive(Debug, Error)]
 pub enum OperationalRecoveryRecordingError {
-    #[error("operational recovery interruption lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("operational recovery interruption evidence does not match the active execution")]
     InterruptionEvidenceMismatch,
     #[error(

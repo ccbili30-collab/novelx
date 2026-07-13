@@ -7,6 +7,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent, RuntimeEvent};
 use crate::run_state::{RunState, RunStateMachine, TransitionError};
+use crate::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError};
 
 const MAX_CANCELLATION_ID_BYTES: usize = 1_024;
 const MAX_CANCEL_IDEMPOTENCY_KEY_BYTES: usize = 1_024;
@@ -270,6 +271,7 @@ impl RunAggregate {
     pub fn record_cancellation_intent(
         &mut self,
         journal: &mut EventJournal,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         cancel_idempotency_key: &str,
         reason: &str,
         command_message_id: &str,
@@ -277,6 +279,7 @@ impl RunAggregate {
     ) -> Result<RunCancellationIntent, RunAggregateError> {
         self.record_cancellation_intent_inner(
             journal,
+            exclusive_lease,
             cancel_idempotency_key,
             reason,
             command_message_id,
@@ -295,6 +298,7 @@ impl RunAggregate {
     pub(crate) fn record_cancellation_intent_at_global_sequence(
         &mut self,
         journal: &mut EventJournal,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         cancel_idempotency_key: &str,
         reason: &str,
         command_message_id: &str,
@@ -303,6 +307,7 @@ impl RunAggregate {
     ) -> Result<RunCancellationIntentRecord, RunAggregateError> {
         self.record_cancellation_intent_inner(
             journal,
+            exclusive_lease,
             cancel_idempotency_key,
             reason,
             command_message_id,
@@ -316,6 +321,7 @@ impl RunAggregate {
     fn record_cancellation_intent_inner(
         &mut self,
         journal: &mut EventJournal,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         cancel_idempotency_key: &str,
         reason: &str,
         command_message_id: &str,
@@ -384,6 +390,7 @@ impl RunAggregate {
             previous_cancellation_state,
             cancellation_intent_event_idempotency_key(&self.run_id, &intent.intent_id),
         );
+        exclusive_lease.verify_database_authority(journal.database_path())?;
         let outcome = match expected_global_sequence {
             Some(expected_global_sequence) => journal.append_at_global_sequence(
                 event,
@@ -674,6 +681,7 @@ impl RunAggregate {
     pub fn request_cancellation_reconciliation(
         &mut self,
         journal: &mut EventJournal,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         attempt_ids: &[String],
         cancellation_reason: &str,
         metadata: EventMetadata<'_>,
@@ -712,6 +720,7 @@ impl RunAggregate {
         let previous = self.machine.state();
         let mut candidate = self.machine;
         transition_machine(&mut candidate, RunState::WaitingForReconciliation)?;
+        exclusive_lease.verify_database_authority(journal.database_path())?;
         let stored = journal.append(
             cancellation_requested_event(
                 &self.run_id,
@@ -928,6 +937,7 @@ impl RunAggregate {
     pub fn cancel(
         &mut self,
         journal: &mut EventJournal,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         metadata: EventMetadata<'_>,
     ) -> Result<(), RunAggregateError> {
         if self.cancellation_state != RunCancellationState::None {
@@ -955,6 +965,7 @@ impl RunAggregate {
                 .into());
             }
         }
+        exclusive_lease.verify_database_authority(journal.database_path())?;
         self.apply(journal, metadata, RunState::Cancelled)
     }
 
@@ -1116,6 +1127,8 @@ pub enum RunAggregateError {
     Transition(#[from] TransitionError),
     #[error(transparent)]
     Journal(#[from] EventJournalError),
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
 }
 
 fn replay(

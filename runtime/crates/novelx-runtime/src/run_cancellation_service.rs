@@ -267,6 +267,7 @@ impl RunCancellationService {
 
             let record = match run.record_cancellation_intent_at_global_sequence(
                 &mut journal,
+                self.bound_lease.as_ref(),
                 cancel_idempotency_key,
                 reason,
                 command_message_id,

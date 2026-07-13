@@ -49,7 +49,7 @@ use novelx_runtime::{
         ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
     },
     run_aggregate::{EventMetadata, RunAggregate},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
@@ -318,18 +318,22 @@ struct SeededRun {
 
 struct StartedDispatch {
     operation_id: String,
-    lease: WorkspaceRuntimeLease,
+    lease: BoundWorkspaceRuntimeLease,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("runtime.db");
+        EventJournal::open(&path).unwrap();
         Self { _temp: temp, path }
     }
 
-    fn lease(&self, owner: &str) -> WorkspaceRuntimeLease {
-        WorkspaceRuntimeLease::acquire(&self.path, owner).unwrap()
+    fn lease(&self, owner: &str) -> BoundWorkspaceRuntimeLease {
+        WorkspaceRuntimeLease::acquire(&self.path, owner)
+            .unwrap()
+            .bind_database(&self.path)
+            .unwrap()
     }
 
     fn seed_requested(
@@ -461,6 +465,7 @@ impl Fixture {
     }
 
     fn start_provider_dispatch(&self, seeded: &SeededRun, owner: &str) -> StartedDispatch {
+        let lease = self.lease(owner);
         let assignments = recover_agent_assignments(&self.path, WORKSPACE_ID, PROJECT_ID).unwrap();
         let report = {
             let mut journal = EventJournal::open(&self.path).unwrap();
@@ -479,13 +484,18 @@ impl Fixture {
             .unwrap();
         assert_eq!(run.gate, OperationalRecoveryGate::ProviderDispatchReady);
         let operation_id = OperationalRecoveryRecordingService::new(&self.path)
-            .record(WORKSPACE_ID, PROJECT_ID, &report, "2026-07-13T00:00:03Z")
+            .record(
+                WORKSPACE_ID,
+                PROJECT_ID,
+                &report,
+                &lease,
+                "2026-07-13T00:00:03Z",
+            )
             .unwrap()
             .into_iter()
             .find(|record| record.run_id == seeded.run_id)
             .unwrap()
             .operation_id;
-        let lease = self.lease(owner);
         let claims = OperationalRecoveryClaimService::new(&self.path);
         let claimed = claims
             .claim_provider_dispatch_ready(

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,7 +11,7 @@ use crate::provider_attempt::ProviderAttemptState;
 use crate::workspace_event_journal::{
     NewWorkspaceEvent, WorkspaceEvent, WorkspaceEventJournal, WorkspaceEventJournalError,
 };
-use crate::workspace_runtime_lease::WorkspaceRuntimeLease;
+use crate::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError};
 
 const STREAM_TYPE: &str = "operational_recovery";
 const EVENT_TYPE: &str = "operational_recovery.event";
@@ -875,12 +875,36 @@ struct HashMaterial<'a> {
 
 pub struct OperationalRecoveryRepository {
     journal: WorkspaceEventJournal,
+    database_path: PathBuf,
+}
+
+#[derive(Clone, Copy)]
+pub struct OperationalRecoveryDispositionAuthority<'a> {
+    pub workspace_id: &'a str,
+    pub run_id: &'a str,
+    pub exclusive_lease: &'a BoundWorkspaceRuntimeLease,
+}
+
+impl<'a> OperationalRecoveryDispositionAuthority<'a> {
+    pub const fn new(
+        workspace_id: &'a str,
+        run_id: &'a str,
+        exclusive_lease: &'a BoundWorkspaceRuntimeLease,
+    ) -> Self {
+        Self {
+            workspace_id,
+            run_id,
+            exclusive_lease,
+        }
+    }
 }
 
 impl OperationalRecoveryRepository {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OperationalRecoveryAggregateError> {
+        let database_path = path.as_ref().to_owned();
         Ok(Self {
-            journal: WorkspaceEventJournal::open(path)?,
+            journal: WorkspaceEventJournal::open(&database_path)?,
+            database_path,
         })
     }
 
@@ -899,6 +923,7 @@ impl OperationalRecoveryRepository {
         &mut self,
         subject: OperationalRecoverySubject,
         observation: OperationalRecoveryObservation,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
         validate_subject(&subject)?;
@@ -926,6 +951,7 @@ impl OperationalRecoveryRepository {
                     subject,
                     observation,
                 },
+                exclusive_lease,
                 metadata,
             );
         }
@@ -936,21 +962,21 @@ impl OperationalRecoveryRepository {
                 subject,
                 observation,
             },
+            exclusive_lease,
             metadata,
         )
     }
 
     pub fn wait(
         &mut self,
-        workspace_id: &str,
-        run_id: &str,
+        authority: OperationalRecoveryDispositionAuthority<'_>,
         operation_id: &str,
         reason: OperationalRecoveryWaitingReason,
         evidence_fingerprint: String,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
         require_sha256("evidence_fingerprint", &evidence_fingerprint)?;
-        let current = self.load(workspace_id, run_id)?;
+        let current = self.load(authority.workspace_id, authority.run_id)?;
         if let Some(operation) = current.operations.get(operation_id) {
             let candidate = OperationalRecoveryDisposition::Waiting {
                 reason,
@@ -972,14 +998,14 @@ impl OperationalRecoveryRepository {
                 reason,
                 evidence_fingerprint,
             },
+            authority.exclusive_lease,
             metadata,
         )
     }
 
     pub fn quarantine(
         &mut self,
-        workspace_id: &str,
-        run_id: &str,
+        authority: OperationalRecoveryDispositionAuthority<'_>,
         operation_id: &str,
         mut invariant_codes: Vec<String>,
         evidence_fingerprint: String,
@@ -994,7 +1020,7 @@ impl OperationalRecoveryRepository {
         for code in &invariant_codes {
             require_text("invariant_code", code)?;
         }
-        let current = self.load(workspace_id, run_id)?;
+        let current = self.load(authority.workspace_id, authority.run_id)?;
         if let Some(operation) = current.operations.get(operation_id) {
             let candidate = OperationalRecoveryDisposition::Quarantined {
                 invariant_codes: invariant_codes.clone(),
@@ -1016,6 +1042,7 @@ impl OperationalRecoveryRepository {
                 invariant_codes,
                 evidence_fingerprint,
             },
+            authority.exclusive_lease,
             metadata,
         )
     }
@@ -1025,7 +1052,7 @@ impl OperationalRecoveryRepository {
         workspace_id: &str,
         run_id: &str,
         claim: OperationalRecoveryClaim,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
@@ -1077,6 +1104,7 @@ impl OperationalRecoveryRepository {
             current,
             RecoveryEventData::Claimed { claim },
             expected_global_sequence,
+            exclusive_lease,
             metadata,
         )
     }
@@ -1089,7 +1117,7 @@ impl OperationalRecoveryRepository {
         operation_id: &str,
         previous_claim_id: &str,
         claim: OperationalRecoveryClaim,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
@@ -1134,10 +1162,11 @@ impl OperationalRecoveryRepository {
             RecoveryEventData::ClaimTransferred {
                 operation_id: operation_id.to_owned(),
                 previous_claim_id: previous_claim_id.to_owned(),
-                exclusive_owner_instance_id: exclusive_lease.instance_id().to_owned(),
+                exclusive_owner_instance_id: exclusive_lease.owner_id().to_owned(),
                 claim,
             },
             expected_global_sequence,
+            exclusive_lease,
             metadata,
         )
     }
@@ -1149,12 +1178,12 @@ impl OperationalRecoveryRepository {
         run_id: &str,
         operation_id: &str,
         stale: OperationalRecoveryStale,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
         validate_stale(&stale)?;
-        if stale.detector_instance_id != exclusive_lease.instance_id() {
+        if stale.detector_instance_id != exclusive_lease.owner_id() {
             return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
         }
         let current = self.load(workspace_id, run_id)?;
@@ -1196,6 +1225,7 @@ impl OperationalRecoveryRepository {
                 stale,
             },
             expected_global_sequence,
+            exclusive_lease,
             metadata,
         )
     }
@@ -1209,7 +1239,7 @@ impl OperationalRecoveryRepository {
         claim_id: &str,
         owner_instance_id: &str,
         fencing_token: u64,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         renewed_at: String,
         lease_expires_at: String,
         expected_global_sequence: u64,
@@ -1249,6 +1279,7 @@ impl OperationalRecoveryRepository {
                 lease_expires_at,
             },
             expected_global_sequence,
+            exclusive_lease,
             metadata,
         )
     }
@@ -1260,7 +1291,7 @@ impl OperationalRecoveryRepository {
         run_id: &str,
         operation_id: &str,
         execution: OperationalRecoveryExecution,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
@@ -1301,6 +1332,7 @@ impl OperationalRecoveryRepository {
                 execution,
             },
             expected_global_sequence,
+            exclusive_lease,
             metadata,
         )
     }
@@ -1312,7 +1344,7 @@ impl OperationalRecoveryRepository {
         run_id: &str,
         operation_id: &str,
         interruption: OperationalRecoveryExecutionInterruption,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
@@ -1321,7 +1353,7 @@ impl OperationalRecoveryRepository {
         if interruption.workspace_id != current.subject.workspace_id
             || interruption.run_id != current.subject.run_id
             || interruption.operation_id != operation_id
-            || interruption.recorder_instance_id != exclusive_lease.instance_id()
+            || interruption.recorder_instance_id != exclusive_lease.owner_id()
             || interruption.lease_epoch != exclusive_lease.lease_epoch()
         {
             return Err(OperationalRecoveryAggregateError::InterruptionIdentityConflict);
@@ -1352,6 +1384,7 @@ impl OperationalRecoveryRepository {
                 interruption,
             },
             expected_global_sequence,
+            exclusive_lease,
             metadata,
         )
     }
@@ -1363,7 +1396,7 @@ impl OperationalRecoveryRepository {
         run_id: &str,
         operation_id: &str,
         outcome: OperationalRecoveryOutcome,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
@@ -1396,6 +1429,7 @@ impl OperationalRecoveryRepository {
                 outcome,
             },
             expected_global_sequence,
+            exclusive_lease,
             metadata,
         )
     }
@@ -1407,7 +1441,7 @@ impl OperationalRecoveryRepository {
         run_id: &str,
         operation_id: &str,
         resume: OperationalRecoveryResume,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
@@ -1456,6 +1490,7 @@ impl OperationalRecoveryRepository {
                 resume,
             },
             expected_global_sequence,
+            exclusive_lease,
             metadata,
         )
     }
@@ -1467,7 +1502,7 @@ impl OperationalRecoveryRepository {
         run_id: &str,
         operation_id: &str,
         authorization: ProviderDispatchResumeAuthorization,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         expected_global_sequence: u64,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
@@ -1495,6 +1530,7 @@ impl OperationalRecoveryRepository {
                 authorization,
             },
             expected_global_sequence,
+            exclusive_lease,
             metadata,
         )
     }
@@ -1503,9 +1539,10 @@ impl OperationalRecoveryRepository {
         &mut self,
         current: OperationalRecoveryAggregate,
         data: RecoveryEventData,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
-        self.append_inner(current, data, None, metadata)
+        self.append_inner(current, data, None, exclusive_lease, metadata)
     }
 
     fn append_at_global_sequence(
@@ -1513,9 +1550,16 @@ impl OperationalRecoveryRepository {
         current: OperationalRecoveryAggregate,
         data: RecoveryEventData,
         expected_global_sequence: u64,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
-        self.append_inner(current, data, Some(expected_global_sequence), metadata)
+        self.append_inner(
+            current,
+            data,
+            Some(expected_global_sequence),
+            exclusive_lease,
+            metadata,
+        )
     }
 
     fn append_inner(
@@ -1523,6 +1567,7 @@ impl OperationalRecoveryRepository {
         current: OperationalRecoveryAggregate,
         data: RecoveryEventData,
         expected_global_sequence: Option<u64>,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         metadata: OperationalRecoveryEventMetadata,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
         require_text("created_at", &metadata.created_at)?;
@@ -1550,6 +1595,7 @@ impl OperationalRecoveryRepository {
             payload: serde_json::to_value(stored)?,
             created_at: metadata.created_at,
         };
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let workspace_sequence = self
             .journal
             .current_workspace_sequence(&current.subject.workspace_id)?;
@@ -2734,7 +2780,7 @@ fn validate_outcome_matches_execution(
 fn execution_finish_is_authorized(
     operation: &OperationalRecoveryOperation,
     execution: &OperationalRecoveryExecution,
-    exclusive_lease: &WorkspaceRuntimeLease,
+    exclusive_lease: &BoundWorkspaceRuntimeLease,
 ) -> bool {
     if exclusive_lease.proves_exclusive_owner(&execution.owner_instance_id) {
         return true;
@@ -3011,6 +3057,8 @@ pub enum OperationalRecoveryAggregateError {
     RevisionOverflow,
     #[error(transparent)]
     Journal(#[from] WorkspaceEventJournalError),
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]

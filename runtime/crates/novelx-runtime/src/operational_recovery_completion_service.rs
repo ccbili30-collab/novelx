@@ -13,7 +13,7 @@ use crate::{
         OperationalRecoveryProjectionError, PersistedProviderProjectionManifest,
     },
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,11 +39,9 @@ impl OperationalRecoveryCompletionService {
         &self,
         request: OperationalRecoveryCompletionRequest,
         manifest: &PersistedProviderProjectionManifest,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryCompletionError> {
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(OperationalRecoveryCompletionError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         manifest.verify()?;
         if manifest.run_id != request.run_id || manifest.execution_id != request.execution_id {
             return Err(OperationalRecoveryCompletionError::ManifestIdentityMismatch);
@@ -129,8 +127,8 @@ fn outcome_matches_manifest(
 
 #[derive(Debug, Error)]
 pub enum OperationalRecoveryCompletionError {
-    #[error("operational recovery workspace lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("operational recovery projection manifest identity does not match completion")]
     ManifestIdentityMismatch,
     #[error("operational recovery operation was not found")]

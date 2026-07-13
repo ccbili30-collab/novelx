@@ -22,6 +22,7 @@ use crate::{
         FinalizedToolResult, InferenceDispatchIdentity,
     },
     artifact_store::ArtifactStore,
+    assist_continuation_handshake_service::AssistContinuationAckProof,
     context_compile_service::{recover_compilation_receipt, recover_compiled_record},
     continuation_context_service::{ContinuationContextService, ContinuationContextServiceError},
     event_journal::{EventJournal, EventJournalError},
@@ -43,7 +44,7 @@ use crate::{
     run_aggregate::{RunAggregate, RunAggregateError},
     run_state::RunState,
     tool_coordination_service::ToolCoordinationStatus,
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 use crate::{
     artifact_store::ArtifactStore as LoopArtifactStore,
@@ -82,10 +83,31 @@ pub enum LiveAgentLoopOutcome {
     Cancelled,
 }
 
+pub struct PreparedAssistContinuation {
+    execution: ProviderInferenceExecution,
+    parent_inference_identity: novelx_protocol::ProviderInferenceIdentity,
+    continuation_inference_identity: novelx_protocol::ProviderInferenceIdentity,
+    tool_call_ids: Vec<Uuid>,
+}
+
+impl PreparedAssistContinuation {
+    pub fn parent_inference_identity(&self) -> &novelx_protocol::ProviderInferenceIdentity {
+        &self.parent_inference_identity
+    }
+
+    pub fn continuation_inference_identity(&self) -> &novelx_protocol::ProviderInferenceIdentity {
+        &self.continuation_inference_identity
+    }
+
+    pub fn tool_call_ids(&self) -> &[Uuid] {
+        &self.tool_call_ids
+    }
+}
+
 pub struct LiveAgentLoopRunner {
     database_path: PathBuf,
     workspace_id: String,
-    workspace_runtime_lease: Arc<WorkspaceRuntimeLease>,
+    workspace_runtime_lease: Arc<BoundWorkspaceRuntimeLease>,
     project_root: ProjectRoot,
     project_id: String,
     providers: ProviderRegistry,
@@ -179,7 +201,7 @@ impl LiveAgentLoopRunner {
     pub fn open(
         database_path: impl AsRef<Path>,
         workspace_id: String,
-        workspace_runtime_lease: Arc<WorkspaceRuntimeLease>,
+        workspace_runtime_lease: Arc<BoundWorkspaceRuntimeLease>,
         project_root: ProjectRoot,
         project_id: String,
         providers: ProviderRegistry,
@@ -190,9 +212,7 @@ impl LiveAgentLoopRunner {
             return Err(LiveAgentLoopError::IdentityInvalid);
         }
         let database_path = database_path.as_ref().to_path_buf();
-        if !workspace_runtime_lease.protects_database(&database_path) {
-            return Err(LiveAgentLoopError::WorkspaceLeaseInvalid);
-        }
+        workspace_runtime_lease.verify_database_authority(&database_path)?;
         EventJournal::open(&database_path)?;
         Ok(Self {
             database_path,
@@ -208,10 +228,6 @@ impl LiveAgentLoopRunner {
 
     pub fn workspace_id(&self) -> &str {
         &self.workspace_id
-    }
-
-    pub fn workspace_runtime_lease(&self) -> Arc<WorkspaceRuntimeLease> {
-        Arc::clone(&self.workspace_runtime_lease)
     }
 
     pub fn ensure_awaiting_provider(
@@ -279,6 +295,7 @@ impl LiveAgentLoopRunner {
                 let proposed = AgentLoopService::new(identity, self.policy, dispatch)?;
                 let message_id = Uuid::new_v4().to_string();
                 let created_at = timestamp()?;
+                self.verify_write_authority()?;
                 let record = repository.create(
                     &proposed,
                     &format!("agent-loop:{}:create", execution.invocation_id),
@@ -319,6 +336,44 @@ impl LiveAgentLoopRunner {
 
     pub async fn run<F, Fut>(
         &self,
+        execution: ProviderInferenceExecution,
+        initial_outcome: Option<ProviderInferenceOutcome>,
+        progress: F,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<LiveAgentLoopOutcome, LiveAgentLoopError>
+    where
+        F: FnMut(LiveAgentLoopProgress) -> Fut,
+        Fut: Future<Output = Result<(), LiveAgentLoopError>>,
+    {
+        {
+            let mut journal = EventJournal::open(&self.database_path)?;
+            if let Some(record) = AgentLoopJournalRepository::new(&mut journal)
+                .find_active_for_run(&execution.run_id)?
+            {
+                let is_second_or_later = record
+                    .service
+                    .pending_inference()
+                    .is_some_and(|identity| identity.request_number > 1);
+                let was_prepared_by_assist = journal
+                    .read_aggregate(
+                        &execution.run_id,
+                        "agent_loop",
+                        &record.service.identity().invocation_id,
+                        0,
+                    )?
+                    .iter()
+                    .any(|event| event.idempotency_key.contains(":assist-tool-results:"));
+                if is_second_or_later && was_prepared_by_assist {
+                    return Err(LiveAgentLoopError::AssistContinuationAckProofRequired);
+                }
+            }
+        }
+        self.run_inner(execution, initial_outcome, progress, cancellation)
+            .await
+    }
+
+    async fn run_inner<F, Fut>(
+        &self,
         mut execution: ProviderInferenceExecution,
         initial_outcome: Option<ProviderInferenceOutcome>,
         mut progress: F,
@@ -356,6 +411,7 @@ impl LiveAgentLoopRunner {
             let terminal_completion = completion.clone();
             let materialized = {
                 let mut artifacts = ArtifactStore::open(&self.database_path)?;
+                self.verify_write_authority()?;
                 ProviderToolMaterializer::new(&mut artifacts).materialize(
                     &execution.run_id,
                     &execution.invocation_id,
@@ -380,7 +436,9 @@ impl LiveAgentLoopRunner {
                         &self.database_path,
                         self.project_root.clone(),
                         self.project_id.clone(),
+                        Arc::clone(&self.workspace_runtime_lease),
                     )?;
+                    self.verify_write_authority()?;
                     let outcomes = tool_service
                         .execute_provider_calls(
                             &execution.run_id,
@@ -415,7 +473,9 @@ impl LiveAgentLoopRunner {
                         &self.database_path,
                         self.project_root.clone(),
                         self.project_id.clone(),
+                        Arc::clone(&self.workspace_runtime_lease),
                     )?;
+                    self.verify_write_authority()?;
                     let outcomes = tool_service
                         .execute_provider_calls(
                             &execution.run_id,
@@ -443,6 +503,7 @@ impl LiveAgentLoopRunner {
                     };
                     let receipt = {
                         let mut journal = EventJournal::open(&self.database_path)?;
+                        self.verify_write_authority()?;
                         ContinuationContextService::new(&mut journal, &self.providers).apply(
                             run_id,
                             Uuid::new_v4(),
@@ -475,17 +536,11 @@ impl LiveAgentLoopRunner {
         }
     }
 
-    pub async fn resume_after_assist<F, Fut>(
+    pub async fn prepare_assist_continuation(
         &self,
         run_id: Uuid,
         invocation_id: &str,
-        mut progress: F,
-        cancellation: &mut watch::Receiver<bool>,
-    ) -> Result<LiveAgentLoopOutcome, LiveAgentLoopError>
-    where
-        F: FnMut(LiveAgentLoopProgress) -> Fut,
-        Fut: Future<Output = Result<(), LiveAgentLoopError>>,
-    {
+    ) -> Result<PreparedAssistContinuation, LiveAgentLoopError> {
         let run_id_text = run_id.to_string();
         let mut loop_service = {
             let mut journal = EventJournal::open(&self.database_path)?;
@@ -524,19 +579,7 @@ impl LiveAgentLoopRunner {
                     | ToolCoordinationStatus::Denied
             )
         }) {
-            progress(LiveAgentLoopProgress::AwaitingApproval {
-                requests: requests.clone(),
-                outcomes,
-            })
-            .await?;
-            return Ok(LiveAgentLoopOutcome::AwaitingApproval {
-                invocation_id: invocation_id.to_owned(),
-                tool_call_ids: requests
-                    .iter()
-                    .map(|request| request.tool_call_id)
-                    .collect(),
-                completion,
-            });
+            return Err(LiveAgentLoopError::ResumeStateInvalid);
         }
         let decisions = outcomes
             .iter()
@@ -548,11 +591,6 @@ impl LiveAgentLoopRunner {
         let previous = loop_service.clone();
         let directive = loop_service.resolve_assist(decisions)?;
         self.append(&previous, &loop_service, &directive, "assist-resolved")?;
-        progress(LiveAgentLoopProgress::ToolsCompleted {
-            requests: requests.clone(),
-            outcomes: outcomes.clone(),
-        })
-        .await?;
         let results = finalized_results(&self.database_path, outcomes)?;
         let previous = loop_service.clone();
         let directive = loop_service.accept_tool_results(results)?;
@@ -563,6 +601,7 @@ impl LiveAgentLoopRunner {
         let run = RunAggregate::recover(&EventJournal::open(&self.database_path)?, &run_id_text)?;
         let receipt = {
             let mut journal = EventJournal::open(&self.database_path)?;
+            self.verify_write_authority()?;
             ContinuationContextService::new(&mut journal, &self.providers).apply(
                 run_id,
                 Uuid::new_v4(),
@@ -570,7 +609,6 @@ impl LiveAgentLoopRunner {
                 &intent,
             )?
         };
-        progress(LiveAgentLoopProgress::ContextCompiled(receipt.clone())).await?;
         let previous = loop_service.clone();
         let directive = loop_service.accept_context_compiled(receipt.compilation_id)?;
         self.append(
@@ -599,11 +637,50 @@ impl LiveAgentLoopRunner {
                 tools: vec![],
             },
         };
+        let dispatch = dispatch_identity(&execution)?;
+        let continuation_inference_identity = novelx_protocol::ProviderInferenceIdentity {
+            run_id,
+            inference_id: dispatch.inference_id,
+            attempt_id: dispatch.attempt_id,
+            context_compilation_id: dispatch.context_compilation_id,
+            request_number: dispatch.request_number,
+            attempt_number: u64::from(dispatch.attempt_number),
+        };
         let previous = loop_service.clone();
-        loop_service.acknowledge_inference_started(dispatch_identity(&execution)?)?;
+        loop_service.acknowledge_inference_started(dispatch)?;
         self.append_inference_started(&previous, &loop_service, next.request_number)?;
-        progress(LiveAgentLoopProgress::InferenceStarted(next)).await?;
-        self.run(execution, None, progress, cancellation).await
+        Ok(PreparedAssistContinuation {
+            execution,
+            parent_inference_identity: completion.identity,
+            continuation_inference_identity,
+            tool_call_ids: requests
+                .iter()
+                .map(|request| request.tool_call_id)
+                .collect(),
+        })
+    }
+
+    pub async fn run_acknowledged_assist<F, Fut>(
+        &self,
+        prepared: PreparedAssistContinuation,
+        proof: AssistContinuationAckProof,
+        progress: F,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<LiveAgentLoopOutcome, LiveAgentLoopError>
+    where
+        F: FnMut(LiveAgentLoopProgress) -> Fut,
+        Fut: Future<Output = Result<(), LiveAgentLoopError>>,
+    {
+        if proof.continuation_id() != prepared.continuation_inference_identity.inference_id
+            || proof.continuation_identity_sha256()
+                != novelx_protocol::provider_inference_identity_sha256(
+                    &prepared.continuation_inference_identity,
+                )?
+        {
+            return Err(LiveAgentLoopError::AssistContinuationAckProofInvalid);
+        }
+        self.run_inner(prepared.execution, None, progress, cancellation)
+            .await
     }
 
     async fn execute_provider_round(
@@ -614,7 +691,7 @@ impl LiveAgentLoopRunner {
         let ensured = {
             let mut journal = EventJournal::open(&self.database_path)?;
             ProviderInferenceService::new(&mut journal, &self.providers, &self.gateway)
-                .ensure_requested(execution.clone())?
+                .ensure_requested(execution.clone(), self.workspace_runtime_lease.as_ref())?
         };
         if let EnsuredProviderAttempt::Recovered(outcome) = ensured {
             return Ok(*outcome);
@@ -686,6 +763,7 @@ impl LiveAgentLoopRunner {
         let mut journal = EventJournal::open(&self.database_path)?;
         let message_id = Uuid::new_v4().to_string();
         let created_at = timestamp()?;
+        self.verify_write_authority()?;
         AgentLoopJournalRepository::new(&mut journal).append_transition(
             previous,
             current,
@@ -712,6 +790,7 @@ impl LiveAgentLoopRunner {
         let mut journal = EventJournal::open(&self.database_path)?;
         let message_id = Uuid::new_v4().to_string();
         let created_at = timestamp()?;
+        self.verify_write_authority()?;
         AgentLoopJournalRepository::new(&mut journal).append_inference_started(
             previous,
             current,
@@ -725,6 +804,12 @@ impl LiveAgentLoopRunner {
             },
         )?;
         Ok(())
+    }
+
+    fn verify_write_authority(&self) -> Result<(), LiveAgentLoopError> {
+        self.workspace_runtime_lease
+            .verify_database_authority(&self.database_path)
+            .map_err(Into::into)
     }
 }
 
@@ -853,8 +938,6 @@ fn checkpoint_sha256(service: &AgentLoopService) -> Result<String, LiveAgentLoop
 pub enum LiveAgentLoopError {
     #[error("live agent loop identity is invalid")]
     IdentityInvalid,
-    #[error("live agent loop workspace runtime lease does not protect its database")]
-    WorkspaceLeaseInvalid,
     #[error("live agent loop produced an unexpected directive")]
     DirectiveInvalid,
     #[error("project tool execution did not reach a terminal state")]
@@ -863,6 +946,10 @@ pub enum LiveAgentLoopError {
     ToolArtifactMissing,
     #[error("live agent loop cannot resume from its persisted phase")]
     ResumeStateInvalid,
+    #[error("Assist continuation requires a Host acknowledgement proof")]
+    AssistContinuationAckProofRequired,
+    #[error("Assist continuation acknowledgement proof does not match the prepared identity")]
+    AssistContinuationAckProofInvalid,
     #[error("live agent loop progress could not be emitted: {0}")]
     Progress(String),
     #[error("Provider authorization remained contended after bounded re-authorization")]
@@ -895,6 +982,8 @@ pub enum LiveAgentLoopError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Coordination(#[from] crate::tool_coordination_service::ToolCoordinationError),
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
 }
 
 fn is_authorization_contention(error: &ProviderInferenceServiceError) -> bool {

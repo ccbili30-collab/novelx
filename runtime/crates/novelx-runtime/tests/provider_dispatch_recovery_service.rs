@@ -21,6 +21,7 @@ use novelx_runtime::{
     },
     context_compile_service::ContextCompileService,
     event_journal::EventJournal,
+    live_agent_loop_runner::{LiveAgentLoopOutcome, LiveAgentLoopRunner},
     operational_recovery_aggregate::{OperationalRecoveryOutcome, OperationalRecoveryRepository},
     operational_recovery_claim_service::{
         OperationalRecoveryClaimRequest, OperationalRecoveryClaimService,
@@ -28,6 +29,7 @@ use novelx_runtime::{
     },
     operational_recovery_recording_service::OperationalRecoveryRecordingService,
     operational_recovery_scanner::{OperationalRecoveryGate, OperationalRecoveryScanner},
+    project_path::ProjectRoot,
     provider_attempt::{
         ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptFailure,
         ProviderAttemptMetadata, ProviderAttemptState, ProviderDeliveryCertainty,
@@ -54,9 +56,7 @@ use novelx_runtime::{
         ProviderInferenceMessage, ProviderInferenceRequest, ProviderInferenceRole,
         ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
     },
-    provider_inference_service::{
-        ProviderInferenceExecution, ProviderInferenceService, ProviderInferenceServiceError,
-    },
+    provider_inference_service::{ProviderInferenceExecution, ProviderInferenceServiceError},
     provider_retry_aggregate::{
         ExponentialFullJitterPolicy, ProviderRetryAggregate, ProviderRetryDefinition,
         ProviderRetryFailureObservation, ProviderRetryMetadata, ProviderRetryPolicyAlgorithm,
@@ -64,7 +64,7 @@ use novelx_runtime::{
     },
     run_aggregate::{EventMetadata, RunAggregate},
     runtime_cancellation_hub::{CancellationCause, RuntimeCancellationHub},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease},
 };
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
@@ -743,7 +743,7 @@ async fn wrong_database_lease_and_wrong_execution_fence_fail_before_network() {
         .unwrap_err();
     assert!(matches!(
         wrong_database,
-        ProviderDispatchRecoveryError::WorkspaceLeaseMismatch
+        ProviderDispatchRecoveryError::WorkspaceLease(_)
     ));
 
     let mut wrong_fence_request = seeded.request.clone();
@@ -841,11 +841,29 @@ async fn recovery_cannot_terminalize_an_attempt_owned_by_the_live_provider_path(
     let (providers, provider) = bound_registry(base_url, 2_000);
     let gateway = ProviderGateway::new().unwrap();
     let seeded = fixture.seed_requested(&providers, &provider, &gateway, "runtime-shared-guard");
-    let mut direct_journal = EventJournal::open(&fixture.path).unwrap();
-    let mut direct = ProviderInferenceService::new(&mut direct_journal, &providers, &gateway);
+    let direct = LiveAgentLoopRunner::open(
+        &fixture.path,
+        WORKSPACE_ID.to_owned(),
+        Arc::clone(&seeded.lease),
+        ProjectRoot::open(fixture._temp.path().to_str().unwrap()).unwrap(),
+        PROJECT_ID.to_owned(),
+        providers.clone(),
+        ProviderGateway::new().unwrap(),
+        AgentLoopPolicy {
+            maximum_tool_rounds: 4,
+            tool_schema_version: 1,
+        },
+    )
+    .unwrap();
     let recovery = ProviderDispatchRecoveryService::new(&fixture.path);
+    let (_cancel_tx, mut cancellation) = tokio::sync::watch::channel(false);
 
-    let direct_call = direct.execute(seeded.execution.clone());
+    let direct_call = direct.run(
+        seeded.execution.clone(),
+        None,
+        |_| async { Ok(()) },
+        &mut cancellation,
+    );
     let recovery_call = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
         recovery
@@ -861,10 +879,10 @@ async fn recovery_cannot_terminalize_an_attempt_owned_by_the_live_provider_path(
     let (direct_result, recovery_result) = tokio::join!(direct_call, recovery_call);
 
     server.await.unwrap();
-    assert_eq!(
-        direct_result.unwrap().text.as_deref(),
-        Some("直接路径唯一响应")
-    );
+    assert!(matches!(
+        direct_result.unwrap(),
+        LiveAgentLoopOutcome::Completed { ref output, .. } if output == "直接路径唯一响应"
+    ));
     assert!(matches!(
         recovery_result.unwrap_err(),
         ProviderDispatchRecoveryError::Provider(
@@ -1178,7 +1196,7 @@ struct SeededRecovery {
     provider: ProviderRunIdentity,
     execution: ProviderInferenceExecution,
     request: ProviderDispatchRecoveryRequest,
-    lease: Arc<WorkspaceRuntimeLease>,
+    lease: Arc<BoundWorkspaceRuntimeLease>,
     expected_retry: Option<ExpectedRetryGrant>,
 }
 
@@ -1223,6 +1241,7 @@ impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("runtime.db");
+        drop(EventJournal::open(&path).unwrap());
         Self {
             _temp: temp,
             path,
@@ -1230,8 +1249,13 @@ impl Fixture {
         }
     }
 
-    fn lease(&self, instance_id: &str) -> Arc<WorkspaceRuntimeLease> {
-        Arc::new(WorkspaceRuntimeLease::acquire(&self.path, instance_id).unwrap())
+    fn lease(&self, instance_id: &str) -> Arc<BoundWorkspaceRuntimeLease> {
+        Arc::new(
+            WorkspaceRuntimeLease::acquire(&self.path, instance_id)
+                .unwrap()
+                .bind_database(&self.path)
+                .unwrap(),
+        )
     }
 
     fn seed_requested(
@@ -1380,14 +1404,20 @@ impl Fixture {
         };
         let scanned = report.runs.iter().find(|run| run.run_id == run_id).unwrap();
         assert_eq!(scanned.gate, OperationalRecoveryGate::ProviderDispatchReady);
+        let lease = self.lease(owner_instance_id);
         let operation_id = OperationalRecoveryRecordingService::new(&self.path)
-            .record(WORKSPACE_ID, PROJECT_ID, &report, "2026-07-13T00:00:03Z")
+            .record(
+                WORKSPACE_ID,
+                PROJECT_ID,
+                &report,
+                &lease,
+                "2026-07-13T00:00:03Z",
+            )
             .unwrap()
             .into_iter()
             .find(|record| record.run_id == run_id)
             .unwrap()
             .operation_id;
-        let lease = self.lease(owner_instance_id);
         let claim_service = OperationalRecoveryClaimService::new(&self.path);
         let claimed = claim_service
             .claim_provider_dispatch_ready(
@@ -1978,14 +2008,20 @@ impl Fixture {
             OperationalRecoveryGate::ProviderDispatchReady,
             "unexpected retry recovery scan: {scanned:#?}"
         );
+        let lease = self.lease(owner_instance_id);
         let operation_id = OperationalRecoveryRecordingService::new(&self.path)
-            .record(WORKSPACE_ID, PROJECT_ID, &report, "2026-07-13T00:00:03Z")
+            .record(
+                WORKSPACE_ID,
+                PROJECT_ID,
+                &report,
+                &lease,
+                "2026-07-13T00:00:03Z",
+            )
             .unwrap()
             .into_iter()
             .find(|record| record.run_id == run_id)
             .unwrap()
             .operation_id;
-        let lease = self.lease(owner_instance_id);
         let claim_service = OperationalRecoveryClaimService::new(&self.path);
         let claimed = claim_service
             .claim_provider_dispatch_ready(

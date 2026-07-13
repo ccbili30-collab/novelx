@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use novelx_protocol::{
@@ -9,11 +9,13 @@ use novelx_protocol::{
     ContextCompilationReceipt, ContextCompile, Envelope, GoalComplete, GoalCompletionPropose,
     GoalCreate, GoalGet, GoalRevise, MessageType, PROTOCOL_VERSION, PlanCreate, PlanGet,
     PlanRevise, PlanStepComplete, PlanStepStart, ProviderInferenceCompleted,
-    ProviderInferenceStart, RunCancel, RunPrepare, RunReconcile, RunReconciliationReceipt,
-    RunSnapshot, RunStart, RuntimeBuild, RuntimeError, RuntimeErrorClass, RuntimeHello,
-    RuntimeIdentity, RuntimeInitialize, RuntimeReady, RuntimeStatus, RuntimeStopped,
-    ToolAuthorizationResolve, ToolAuthorizationResolved, ToolAuthorizationResolvedStatus,
-    ToolRequest,
+    ProviderInferenceContinuationAccepted, ProviderInferenceContinuationAcknowledge,
+    ProviderInferenceContinuationProposal, ProviderInferenceStart, RunCancel, RunPrepare,
+    RunReconcile, RunReconciliationReceipt, RunSnapshot, RunStart, RuntimeBuild, RuntimeError,
+    RuntimeErrorClass, RuntimeHello, RuntimeIdentity, RuntimeInitialize, RuntimeReady,
+    RuntimeStatus, RuntimeStopped, ToolAuthorizationEvidenceReference, ToolAuthorizationResolve,
+    ToolAuthorizationResolved, ToolAuthorizationResolvedStatus, ToolRequest,
+    provider_inference_identity_sha256,
 };
 use novelx_runtime::agent_assignment_command_service::{
     AgentAssignmentCommandFailure, AgentAssignmentCommandService,
@@ -22,13 +24,16 @@ use novelx_runtime::agent_assignment_recovery::{
     AgentAssignmentRecoveryError, AssignmentRecoveryReport, recover_agent_assignments,
 };
 use novelx_runtime::agent_loop_journal::AgentLoopJournalRepository;
+use novelx_runtime::assist_continuation_handshake_service::{
+    AssistContinuationAcknowledgement, AssistContinuationHandshakeService,
+};
 use novelx_runtime::context_compile_service::{
     ContextCompileService, ContextCompileServiceError, recover_compilation_receipt,
 };
 use novelx_runtime::event_journal::{EventJournal, EventJournalError};
 use novelx_runtime::goal_plan_command_service::{GoalPlanCommandFailure, GoalPlanCommandService};
 use novelx_runtime::live_agent_loop_runner::{
-    LiveAgentLoopOutcome, LiveAgentLoopProgress, LiveAgentLoopRunner,
+    LiveAgentLoopOutcome, LiveAgentLoopProgress, LiveAgentLoopRunner, PreparedAssistContinuation,
 };
 use novelx_runtime::operational_recovery_recording_service::{
     OperationalRecoveryRecordingError, OperationalRecoveryRecordingService,
@@ -66,7 +71,10 @@ use novelx_runtime::runtime_actor::{
 };
 use novelx_runtime::runtime_cancellation_hub::RuntimeCancellationHub;
 use novelx_runtime::tool_protocol_mapper::ToolProtocolMapper;
-use novelx_runtime::workspace_runtime_lease::{WorkspaceRuntimeLease, WorkspaceRuntimeLeaseError};
+use novelx_runtime::workspace_runtime_lease::{
+    BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError, WorkspaceRuntimeLease,
+    WorkspaceRuntimeLeaseError,
+};
 use novelx_runtime::{
     agent_loop_service::AgentLoopPolicy,
     live_agent_loop_runner::LiveAgentLoopError,
@@ -82,20 +90,28 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sent_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    let capabilities = vec![
+        "handshake".to_owned(),
+        "runtime_control".to_owned(),
+        "runs_v1".to_owned(),
+        "run_reconciliation_v1".to_owned(),
+        "contexts_v1".to_owned(),
+        "provider_inference_v1".to_owned(),
+        "goals_v1".to_owned(),
+        "plans_v1".to_owned(),
+        "agent_assignments_v1".to_owned(),
+    ];
+    #[cfg(feature = "runtime-test-failpoints")]
+    let capabilities = {
+        let mut capabilities = capabilities;
+        capabilities.push("runtime_test_failpoints_v1".to_owned());
+        capabilities.push(format!("runtime_binary:{}", env!("CARGO_BIN_NAME")));
+        capabilities
+    };
     let hello = RuntimeHello {
         runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
         protocol_versions: vec![PROTOCOL_VERSION],
-        capabilities: vec![
-            "handshake".to_owned(),
-            "runtime_control".to_owned(),
-            "runs_v1".to_owned(),
-            "run_reconciliation_v1".to_owned(),
-            "contexts_v1".to_owned(),
-            "provider_inference_v1".to_owned(),
-            "goals_v1".to_owned(),
-            "plans_v1".to_owned(),
-            "agent_assignments_v1".to_owned(),
-        ],
+        capabilities,
         build: RuntimeBuild {
             commit: option_env!("NOVELX_BUILD_COMMIT")
                 .unwrap_or("development")
@@ -593,6 +609,9 @@ async fn run_command_loop_inner(
     context: &mut RuntimeCommandContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_commands = VecDeque::new();
+    let mut pending_assist_continuations: BTreeMap<Uuid, PendingAssistContinuation> =
+        BTreeMap::new();
+    let mut assist_continuation_handshakes = AssistContinuationHandshakeService::default();
     loop {
         let input = if let Some(command) = pending_commands.pop_front() {
             command
@@ -715,10 +734,14 @@ async fn run_command_loop_inner(
                 let run_id = command.run_id.expect("validated run.cancel runId");
                 let active_tasks = output.active_run_tasks(run_id).await?;
                 if active_tasks.is_empty() {
-                    handle_run_cancel(&command, context.journal)?
+                    handle_run_cancel(&command, context.journal, context.workspace_runtime_lease)?
                 } else {
-                    let routed =
-                        handle_active_inference_cancel(&command, context.journal, &active_tasks)?;
+                    let routed = handle_active_inference_cancel(
+                        &command,
+                        context.journal,
+                        context.workspace_runtime_lease,
+                        &active_tasks,
+                    )?;
                     output.emit(routed.output).await?;
                     output.cancel_run(run_id).await?;
                     continue;
@@ -783,7 +806,7 @@ async fn run_command_loop_inner(
                 handle_context_compile(&command, context.journal, context.provider_registry)?
             }
             "tool.authorization.resolve" => {
-                handle_tool_authorization_resolve(output, &command, context).await?;
+                let resume = handle_tool_authorization_resolve(output, &command, context).await?;
                 let barrier = run_operational_recovery_barrier_with_host_control(
                     output,
                     context,
@@ -801,6 +824,28 @@ async fn run_command_loop_inner(
                 {
                     return Ok(());
                 }
+                if let Some(resume) = resume {
+                    propose_assist_continuation(
+                        output,
+                        resume,
+                        context
+                            .workspace_database_path
+                            .ok_or("Assist continuation requires Runtime storage")?,
+                        &mut pending_assist_continuations,
+                        &mut assist_continuation_handshakes,
+                    )
+                    .await?;
+                }
+                continue;
+            }
+            "provider.inference.continuation.acknowledge" => {
+                handle_assist_continuation_acknowledge(
+                    output,
+                    &command,
+                    &mut pending_assist_continuations,
+                    &mut assist_continuation_handshakes,
+                )
+                .await?;
                 continue;
             }
             "provider.inference.start" => {
@@ -867,6 +912,7 @@ fn operational_recovery_guard(
         "tool.authorization.resolve" => {
             recovery.gate == OperationalRecoveryGate::WaitingForApproval
         }
+        "provider.inference.continuation.acknowledge" => true,
         _ => false,
     };
     if allowed {
@@ -971,13 +1017,24 @@ struct RuntimeCommandContext<'a> {
     journal: &'a mut Option<EventJournal>,
     workspace_binding: Option<&'a WorkspaceBinding>,
     assignment_recovery_report: &'a AssignmentRecoveryReport,
-    workspace_runtime_lease: Option<&'a Arc<WorkspaceRuntimeLease>>,
+    workspace_runtime_lease: Option<&'a Arc<BoundWorkspaceRuntimeLease>>,
     operational_recovery_runs: &'a mut BTreeMap<String, OperationalRecoveryRun>,
     quarantined_assignment_ids: &'a BTreeSet<String>,
     provider_registry: &'a mut ProviderRegistry,
     provider_gateway: &'a Arc<ProviderGateway>,
     runtime_cancellation_hub: &'a RuntimeCancellationHub,
     project_root: Option<&'a ProjectRoot>,
+}
+
+struct AssistResumeIntent {
+    run_id: Uuid,
+    invocation_id: String,
+    runner: LiveAgentLoopRunner,
+}
+
+struct PendingAssistContinuation {
+    runner: Option<LiveAgentLoopRunner>,
+    prepared: Option<PreparedAssistContinuation>,
 }
 
 fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), String> {
@@ -1142,6 +1199,17 @@ fn validate_command(command: &Envelope, expected_sequence: u64) -> Result<(), St
             }
             serde_json::from_value::<ToolAuthorizationResolve>(command.payload.clone())
                 .map_err(|error| format!("invalid tool.authorization.resolve payload: {error}"))?;
+        }
+        "provider.inference.continuation.acknowledge" => {
+            if command.run_id.is_none() {
+                return Err("provider.inference.continuation.acknowledge requires runId".to_owned());
+            }
+            serde_json::from_value::<ProviderInferenceContinuationAcknowledge>(
+                command.payload.clone(),
+            )
+            .map_err(|error| {
+                format!("invalid provider.inference.continuation.acknowledge payload: {error}")
+            })?;
         }
         "provider.inference.start" => {
             if command.run_id.is_none() {
@@ -1763,7 +1831,7 @@ struct OperationalRecoveryPassSpec {
     providers: ProviderRegistry,
     gateway: ProviderGateway,
     cancellation_hub: RuntimeCancellationHub,
-    exclusive_lease: Arc<WorkspaceRuntimeLease>,
+    exclusive_lease: Arc<BoundWorkspaceRuntimeLease>,
 }
 
 fn prepare_operational_recovery_pass(
@@ -1838,6 +1906,7 @@ async fn run_operational_recovery_pass_inner(
         &spec.workspace_id,
         &spec.project_id,
         &report,
+        spec.exclusive_lease.as_ref(),
         &created_at,
     )?;
     Ok(report.runs)
@@ -2178,10 +2247,19 @@ fn handle_run_get(
 fn handle_run_cancel(
     command: &Envelope,
     journal: &mut Option<EventJournal>,
+    workspace_runtime_lease: Option<&Arc<BoundWorkspaceRuntimeLease>>,
 ) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated run.cancel runId");
     let cancel: RunCancel = serde_json::from_value(command.payload.clone())?;
-    match RunCommandService::new(journal, None).cancel(run_id, command.message_id, cancel) {
+    let Some(exclusive_lease) = workspace_runtime_lease else {
+        return run_cancel_workspace_lease_required(command, run_id);
+    };
+    match RunCommandService::new(journal, None).cancel(
+        run_id,
+        command.message_id,
+        cancel,
+        exclusive_lease.as_ref(),
+    ) {
         Ok(snapshot) => Ok(RoutedOutput::normal(run_snapshot_draft(command, snapshot)?)),
         Err(failure) => run_command_failure(command, run_id, failure),
     }
@@ -2190,12 +2268,16 @@ fn handle_run_cancel(
 fn handle_active_inference_cancel(
     command: &Envelope,
     journal: &mut Option<EventJournal>,
+    workspace_runtime_lease: Option<&Arc<BoundWorkspaceRuntimeLease>>,
     active_tasks: &[RuntimeTaskKey],
 ) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
     let run_id = command.run_id.expect("validated run.cancel runId");
     let cancel: RunCancel = serde_json::from_value(command.payload.clone())?;
+    let Some(exclusive_lease) = workspace_runtime_lease else {
+        return run_cancel_workspace_lease_required(command, run_id);
+    };
     let Some(storage) = journal.as_mut() else {
-        return handle_run_cancel(command, journal);
+        return handle_run_cancel(command, journal, Some(exclusive_lease));
     };
     let mut run = RunAggregate::recover(storage, &run_id.to_string())?;
     let attempt_ids = active_tasks
@@ -2206,6 +2288,7 @@ fn handle_active_inference_cancel(
     let message_id = command.message_id.to_string();
     run.request_cancellation_reconciliation(
         storage,
+        exclusive_lease.as_ref(),
         &attempt_ids,
         &cancel.reason,
         EventMetadata {
@@ -2219,6 +2302,26 @@ fn handle_active_inference_cancel(
         Ok(snapshot) => Ok(RoutedOutput::normal(run_snapshot_draft(command, snapshot)?)),
         Err(failure) => run_command_failure(command, run_id, failure),
     }
+}
+
+fn run_cancel_workspace_lease_required(
+    command: &Envelope,
+    run_id: Uuid,
+) -> Result<RoutedOutput, Box<dyn std::error::Error>> {
+    Ok(RoutedOutput::normal(run_rejected_draft(
+        command,
+        run_id,
+        RuntimeError {
+            code: "WORKSPACE_RUNTIME_LEASE_REQUIRED".to_owned(),
+            class: RuntimeErrorClass::Storage,
+            retryable: false,
+            public_message: "取消任务前必须取得当前项目数据库的独占运行权限，未写入任何结果。"
+                .to_owned(),
+            stage: "run.cancel.workspace_lease".to_owned(),
+            attempt: 0,
+            diagnostic_id: Uuid::new_v4(),
+        },
+    )?))
 }
 
 fn handle_run_prepare(
@@ -2351,7 +2454,7 @@ async fn handle_tool_authorization_resolve(
     output: &RuntimeActorHandle,
     command: &Envelope,
     context: &mut RuntimeCommandContext<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Option<AssistResumeIntent>, Box<dyn std::error::Error>> {
     let run_id = command
         .run_id
         .expect("validated tool.authorization.resolve runId");
@@ -2367,6 +2470,10 @@ async fn handle_tool_authorization_resolve(
         .workspace_binding
         .map(|binding| binding.project_id.clone())
         .ok_or("tool authorization requires a project binding")?;
+    let workspace_runtime_lease = context
+        .workspace_runtime_lease
+        .cloned()
+        .ok_or("tool authorization requires a bound workspace runtime lease")?;
     let pending = {
         let journal = context
             .journal
@@ -2376,7 +2483,12 @@ async fn handle_tool_authorization_resolve(
             .find_pending_request(&run_id.to_string(), resolution.tool_call_id)?
             .ok_or("pending ToolCall was not found")?
     };
-    let service = ProjectToolExecutionService::open(database_path, project_root, project_id)?;
+    let service = ProjectToolExecutionService::open(
+        database_path,
+        project_root,
+        project_id,
+        workspace_runtime_lease,
+    )?;
     let outcome = service
         .resolve_persisted_request_and_execute(
             &run_id.to_string(),
@@ -2441,31 +2553,136 @@ async fn handle_tool_authorization_resolve(
         },
     )?;
     if runner.assist_ready(run_id, &pending.invocation_id)? {
-        start_assist_resume_task(
-            output,
-            command.message_id,
+        return Ok(Some(AssistResumeIntent {
             run_id,
-            pending.invocation_id,
+            invocation_id: pending.invocation_id,
             runner,
-        )
-        .await?;
+        }));
     }
+    Ok(None)
+}
+
+async fn propose_assist_continuation(
+    output: &RuntimeActorHandle,
+    intent: AssistResumeIntent,
+    database_path: &str,
+    pending: &mut BTreeMap<Uuid, PendingAssistContinuation>,
+    handshakes: &mut AssistContinuationHandshakeService,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let prepared = intent
+        .runner
+        .prepare_assist_continuation(intent.run_id, &intent.invocation_id)
+        .await?;
+    let continuation_id = prepared.continuation_inference_identity().inference_id;
+    let continuation_identity_sha256 =
+        provider_inference_identity_sha256(prepared.continuation_inference_identity())?;
+    let journal = EventJournal::open(database_path)?;
+    let mut authorization_evidence = Vec::with_capacity(prepared.tool_call_ids().len());
+    for tool_call_id in prepared.tool_call_ids() {
+        let events = journal.read_aggregate(
+            &intent.run_id.to_string(),
+            "tool",
+            &tool_call_id.to_string(),
+            0,
+        )?;
+        let last = events
+            .last()
+            .ok_or("Assist authorization evidence is missing")?;
+        authorization_evidence.push(ToolAuthorizationEvidenceReference {
+            tool_call_id: *tool_call_id,
+            aggregate_sequence: last.aggregate_sequence,
+            idempotency_key: last.idempotency_key.clone(),
+        });
+    }
+    let proposal = ProviderInferenceContinuationProposal {
+        continuation_id,
+        run_id: intent.run_id,
+        invocation_id: intent.invocation_id,
+        parent_inference_identity: prepared.parent_inference_identity().clone(),
+        continuation_inference_identity: prepared.continuation_inference_identity().clone(),
+        continuation_identity_sha256,
+        triggering_tool_call_ids: prepared.tool_call_ids().to_vec(),
+        authorization_evidence,
+    };
+    let mut event = output_draft(
+        MessageType::Event,
+        "provider.inference.continuation.proposed",
+        proposal.clone(),
+    )?;
+    event.run_id = Some(intent.run_id);
+    handshakes.register(proposal.clone())?;
+    output.emit(event).await?;
+    pending.insert(
+        continuation_id,
+        PendingAssistContinuation {
+            runner: Some(intent.runner),
+            prepared: Some(prepared),
+        },
+    );
+    Ok(())
+}
+
+async fn handle_assist_continuation_acknowledge(
+    output: &RuntimeActorHandle,
+    command: &Envelope,
+    pending: &mut BTreeMap<Uuid, PendingAssistContinuation>,
+    handshakes: &mut AssistContinuationHandshakeService,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let acknowledgement: ProviderInferenceContinuationAcknowledge =
+        serde_json::from_value(command.payload.clone())?;
+    let run_id = command
+        .run_id
+        .ok_or("Continuation acknowledgement requires runId")?;
+    let acknowledged = handshakes.acknowledge(run_id, &acknowledgement)?;
+    let (receipt, proof) = match acknowledged {
+        AssistContinuationAcknowledgement::Duplicate { proposal } => (proposal, None),
+        AssistContinuationAcknowledgement::Accepted { proposal, proof } => (proposal, Some(proof)),
+    };
+    let receipt: ProviderInferenceContinuationAccepted = receipt;
+    let mut response =
+        response_draft(command, "provider.inference.continuation.accepted", receipt)?;
+    response.run_id = Some(run_id);
+    output.emit(response).await?;
+    let Some(proof) = proof else {
+        return Ok(());
+    };
+    let continuation = pending
+        .get_mut(&acknowledgement.continuation_id)
+        .ok_or("Continuation execution is not pending in this Runtime process")?;
+    let runner = continuation
+        .runner
+        .take()
+        .ok_or("Continuation runner is unavailable")?;
+    let prepared = continuation
+        .prepared
+        .take()
+        .ok_or("Prepared continuation is unavailable")?;
+    start_assist_resume_task(
+        output,
+        acknowledgement.continuation_id,
+        run_id,
+        runner,
+        prepared,
+        proof,
+    )
+    .await?;
     Ok(())
 }
 
 async fn start_assist_resume_task(
     output: &RuntimeActorHandle,
-    correlation_id: Uuid,
+    continuation_id: Uuid,
     run_id: Uuid,
-    invocation_id: String,
     runner: LiveAgentLoopRunner,
+    prepared: PreparedAssistContinuation,
+    proof: novelx_runtime::assist_continuation_handshake_service::AssistContinuationAckProof,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let task_key = RuntimeTaskKey {
         run_id,
         attempt_id: Uuid::new_v4(),
     };
     let failure = inference_runtime_error_draft(
-        correlation_id,
+        continuation_id,
         run_id,
         runtime_inference_error(
             "ASSIST_RESUME_FAILED",
@@ -2479,13 +2696,13 @@ async fn start_assist_resume_task(
             Box::pin(async move {
                 let progress_sender = progress.clone();
                 let outcome = runner
-                    .resume_after_assist(
-                        run_id,
-                        &invocation_id,
+                    .run_acknowledged_assist(
+                        prepared,
+                        proof,
                         move |event| {
                             let progress = progress_sender.clone();
                             async move {
-                                emit_live_loop_progress(correlation_id, run_id, event, progress)
+                                emit_live_loop_progress(continuation_id, run_id, event, progress)
                                     .await
                                     .map_err(LiveAgentLoopError::Progress)
                             }
@@ -2496,7 +2713,7 @@ async fn start_assist_resume_task(
                     .map_err(|error| error.to_string())?;
                 match outcome {
                     LiveAgentLoopOutcome::Completed { completion, .. } => {
-                        provider_completion_draft(correlation_id, completion)
+                        provider_completion_draft(continuation_id, completion)
                     }
                     LiveAgentLoopOutcome::AwaitingApproval { .. } => Err(
                         "Assist resume returned to approval after all decisions were persisted"
@@ -2573,7 +2790,7 @@ async fn handle_provider_inference_start(
     project_root: Option<&ProjectRoot>,
     workspace_id: Option<&str>,
     project_id: Option<&str>,
-    workspace_runtime_lease: Option<&Arc<WorkspaceRuntimeLease>>,
+    workspace_runtime_lease: Option<&Arc<BoundWorkspaceRuntimeLease>>,
     providers: &ProviderRegistry,
     gateway: &Arc<ProviderGateway>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3355,7 +3572,7 @@ async fn write_protocol_error(
 }
 
 struct InitializedRuntimeState {
-    workspace_runtime_lease: Arc<WorkspaceRuntimeLease>,
+    workspace_runtime_lease: Arc<BoundWorkspaceRuntimeLease>,
     journal: EventJournal,
     recovered_run_count: u64,
     assignment_report: AssignmentRecoveryReport,
@@ -3367,16 +3584,20 @@ fn initialize_runtime(
     path: &str,
     binding: &WorkspaceBinding,
 ) -> Result<InitializedRuntimeState, InitializationError> {
-    let workspace_runtime_lease = Arc::new(
+    let raw_workspace_runtime_lease =
         WorkspaceRuntimeLease::acquire(path, Uuid::new_v4().to_string())
-            .map_err(InitializationError::WorkspaceLease)?,
-    );
+            .map_err(InitializationError::WorkspaceLease)?;
+    let workspace_runtime_lease = Arc::new(bind_or_bootstrap_workspace_database(
+        Path::new(path),
+        raw_workspace_runtime_lease,
+    )?);
     let mut journal = EventJournal::open(path).map_err(InitializationError::Storage)?;
     journal
         .verify_deep_data_integrity()
         .map_err(InitializationError::Storage)?;
-    let report = RecoveryCoordinator::recover_and_reconcile(&mut journal)
-        .map_err(InitializationError::Recovery)?;
+    let report =
+        RecoveryCoordinator::recover_and_reconcile(&mut journal, workspace_runtime_lease.as_ref())
+            .map_err(InitializationError::Recovery)?;
     let assignment_report =
         recover_agent_assignments(path, &binding.workspace_id, &binding.project_id)
             .map_err(InitializationError::AssignmentRecovery)?;
@@ -3404,6 +3625,7 @@ fn initialize_runtime(
             &binding.workspace_id,
             &binding.project_id,
             &operational_report,
+            workspace_runtime_lease.as_ref(),
             &created_at,
         )
         .map_err(InitializationError::OperationalRecoveryRecording)?;
@@ -3423,6 +3645,42 @@ fn initialize_runtime(
     })
 }
 
+fn bind_or_bootstrap_workspace_database(
+    database_path: &Path,
+    raw_workspace_runtime_lease: WorkspaceRuntimeLease,
+) -> Result<BoundWorkspaceRuntimeLease, InitializationError> {
+    match std::fs::symlink_metadata(database_path) {
+        Ok(_) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            let database_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(database_path)
+                .map_err(|source| InitializationError::DatabaseBootstrapCreate {
+                    path: database_path.to_owned(),
+                    source,
+                })?;
+            database_file.sync_all().map_err(|source| {
+                InitializationError::DatabaseBootstrapSync {
+                    path: database_path.to_owned(),
+                    source,
+                }
+            })?;
+            drop(database_file);
+        }
+        Err(source) => {
+            return Err(InitializationError::DatabaseBootstrapInspect {
+                path: database_path.to_owned(),
+                source,
+            });
+        }
+    }
+    raw_workspace_runtime_lease
+        .bind_database(database_path)
+        .map_err(InitializationError::BoundWorkspaceLease)
+}
+
 async fn write_initialization_failed(
     output: &mut (impl AsyncWrite + Unpin),
     correlation_id: Uuid,
@@ -3434,6 +3692,26 @@ async fn write_initialization_failed(
             "WORKSPACE_RUNTIME_LEASE_UNAVAILABLE",
             RuntimeErrorClass::Storage,
             "runtime.initialize.workspace_lease",
+        ),
+        InitializationError::BoundWorkspaceLease(_) => (
+            "WORKSPACE_DATABASE_BINDING_FAILED",
+            RuntimeErrorClass::Storage,
+            "runtime.initialize.workspace_database_binding",
+        ),
+        InitializationError::DatabaseBootstrapInspect { .. } => (
+            "WORKSPACE_DATABASE_BOOTSTRAP_INSPECTION_FAILED",
+            RuntimeErrorClass::Storage,
+            "runtime.initialize.workspace_database_bootstrap.inspect",
+        ),
+        InitializationError::DatabaseBootstrapCreate { .. } => (
+            "WORKSPACE_DATABASE_BOOTSTRAP_CREATION_FAILED",
+            RuntimeErrorClass::Storage,
+            "runtime.initialize.workspace_database_bootstrap.create",
+        ),
+        InitializationError::DatabaseBootstrapSync { .. } => (
+            "WORKSPACE_DATABASE_BOOTSTRAP_SYNC_FAILED",
+            RuntimeErrorClass::Storage,
+            "runtime.initialize.workspace_database_bootstrap.sync",
         ),
         InitializationError::Storage(_) => (
             "RUNTIME_STORAGE_INITIALIZATION_FAILED",
@@ -3518,6 +3796,10 @@ impl RoutedOutput {
 #[derive(Debug)]
 enum InitializationError {
     WorkspaceLease(WorkspaceRuntimeLeaseError),
+    BoundWorkspaceLease(BoundWorkspaceRuntimeLeaseError),
+    DatabaseBootstrapInspect { path: PathBuf, source: io::Error },
+    DatabaseBootstrapCreate { path: PathBuf, source: io::Error },
+    DatabaseBootstrapSync { path: PathBuf, source: io::Error },
     Storage(EventJournalError),
     Recovery(RecoveryError),
     AssignmentRecovery(AgentAssignmentRecoveryError),
@@ -3531,6 +3813,24 @@ impl std::fmt::Display for InitializationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WorkspaceLease(error) => write!(formatter, "workspace runtime lease: {error}"),
+            Self::BoundWorkspaceLease(error) => {
+                write!(formatter, "bound workspace runtime lease: {error}")
+            }
+            Self::DatabaseBootstrapInspect { path, source } => write!(
+                formatter,
+                "inspect workspace database bootstrap path `{}`: {source}",
+                path.display()
+            ),
+            Self::DatabaseBootstrapCreate { path, source } => write!(
+                formatter,
+                "exclusively create empty workspace database `{}`: {source}",
+                path.display()
+            ),
+            Self::DatabaseBootstrapSync { path, source } => write!(
+                formatter,
+                "sync newly created workspace database `{}`: {source}",
+                path.display()
+            ),
             Self::Storage(error) => write!(formatter, "storage: {error}"),
             Self::Recovery(error) => write!(formatter, "recovery: {error}"),
             Self::AssignmentRecovery(error) => {

@@ -1,6 +1,6 @@
 mod support;
 
-use std::fs;
+use std::{fs, sync::Arc};
 
 use novelx_protocol::{
     ProviderInferenceToolCall, RunPermissionMode, ToolAuthorizationResolutionDecision,
@@ -14,6 +14,7 @@ use novelx_runtime::project_tool_execution_service::{
 };
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::tool_coordination_service::{ToolCoordinationService, ToolCoordinationStatus};
+use novelx_runtime::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -255,6 +256,7 @@ async fn predispatch_errors_have_stable_classes_and_codes() {
         fixture.database.clone(),
         ProjectRoot::open(fixture.project.to_str().unwrap()).unwrap(),
         "other-project".to_owned(),
+        Arc::clone(&fixture.lease),
     )
     .unwrap();
     let error = wrong_project
@@ -280,6 +282,7 @@ struct Fixture {
     project: std::path::PathBuf,
     database: std::path::PathBuf,
     run_id: String,
+    lease: Arc<BoundWorkspaceRuntimeLease>,
 }
 
 impl Fixture {
@@ -290,6 +293,12 @@ impl Fixture {
         let database = temp.path().join("runtime.db");
         let run_id = Uuid::new_v4().to_string();
         let mut journal = EventJournal::open(&database).unwrap();
+        let lease = Arc::new(
+            WorkspaceRuntimeLease::acquire(&database, "project-tool-execution-service")
+                .unwrap()
+                .bind_database(&database)
+                .unwrap(),
+        );
         let mut pinned = support::pinned_identity();
         pinned.mode = mode;
         let mut run =
@@ -301,6 +310,7 @@ impl Fixture {
             project,
             database,
             run_id,
+            lease,
         }
     }
 
@@ -309,6 +319,7 @@ impl Fixture {
             self.database.clone(),
             ProjectRoot::open(self.project.to_str().unwrap()).unwrap(),
             "project-1".to_owned(),
+            Arc::clone(&self.lease),
         )
         .unwrap()
     }

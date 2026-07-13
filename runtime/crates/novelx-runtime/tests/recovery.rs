@@ -6,6 +6,7 @@ use novelx_runtime::provider_attempt::{
 use novelx_runtime::recovery::{RecoveryClassification, RecoveryCoordinator, RecoveryError};
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::run_state::RunState;
+use novelx_runtime::workspace_runtime_lease::{BoundWorkspaceRuntimeLease, WorkspaceRuntimeLease};
 use serde_json::json;
 use support::pinned_identity;
 use tempfile::TempDir;
@@ -15,34 +16,59 @@ fn reopens_the_database_and_returns_stably_sorted_mixed_classifications() {
     let fixture = Fixture::new();
     {
         let mut journal = fixture.open();
-        create_run(&mut journal, "01-created", &[]);
-        create_run(&mut journal, "02-preparing", &[Step::Prepare]);
-        create_run(&mut journal, "03-running", &[Step::Prepare, Step::Start]);
+        create_run(&mut journal, &fixture.lease, "01-created", &[]);
         create_run(
             &mut journal,
+            &fixture.lease,
+            "02-preparing",
+            &[Step::Prepare],
+        );
+        create_run(
+            &mut journal,
+            &fixture.lease,
+            "03-running",
+            &[Step::Prepare, Step::Start],
+        );
+        create_run(
+            &mut journal,
+            &fixture.lease,
             "04-retrying",
             &[Step::Prepare, Step::Start, Step::Retry],
         );
         create_run(
             &mut journal,
+            &fixture.lease,
             "05-waiting",
             &[Step::Prepare, Step::Start, Step::Wait],
         );
         create_run(
             &mut journal,
+            &fixture.lease,
             "06-committing",
             &[Step::Prepare, Step::Start, Step::Commit],
         );
-        create_run(&mut journal, "07-blocked", &[Step::Prepare, Step::Block]);
-        create_run(&mut journal, "08-cancelled", &[Step::Cancel]);
-        create_run(&mut journal, "09-failed", &[Step::Fail]);
         create_run(
             &mut journal,
+            &fixture.lease,
+            "07-blocked",
+            &[Step::Prepare, Step::Block],
+        );
+        create_run(
+            &mut journal,
+            &fixture.lease,
+            "08-cancelled",
+            &[Step::Cancel],
+        );
+        create_run(&mut journal, &fixture.lease, "09-failed", &[Step::Fail]);
+        create_run(
+            &mut journal,
+            &fixture.lease,
             "10-completed",
             &[Step::Prepare, Step::Start, Step::Complete],
         );
         create_run(
             &mut journal,
+            &fixture.lease,
             "11-reconciliation",
             &[Step::Prepare, Step::Start, Step::Reconcile],
         );
@@ -114,8 +140,8 @@ fn reopens_the_database_and_returns_stably_sorted_mixed_classifications() {
 fn one_damaged_run_blocks_the_entire_report_without_writing() {
     let fixture = Fixture::new();
     let mut journal = fixture.open();
-    create_run(&mut journal, "healthy", &[Step::Prepare]);
-    create_run(&mut journal, "damaged", &[]);
+    create_run(&mut journal, &fixture.lease, "healthy", &[Step::Prepare]);
+    create_run(&mut journal, &fixture.lease, "damaged", &[]);
     journal
         .append(
             NewRuntimeEvent {
@@ -170,7 +196,7 @@ fn tool_only_aggregates_are_not_reported_as_runs() {
             0,
         )
         .unwrap();
-    create_run(&mut journal, "real-run", &[]);
+    create_run(&mut journal, &fixture.lease, "real-run", &[]);
 
     let report = RecoveryCoordinator::recover(&journal).unwrap();
     assert_eq!(report.runs.len(), 1);
@@ -182,7 +208,7 @@ fn tool_only_aggregates_are_not_reported_as_runs() {
 fn sent_provider_attempt_is_reported_as_outcome_unknown_without_writing() {
     let fixture = Fixture::new();
     let mut journal = fixture.open();
-    create_run(&mut journal, "provider-run", &[]);
+    create_run(&mut journal, &fixture.lease, "provider-run", &[]);
     let mut attempt = ProviderAttemptAggregate::create(
         &mut journal,
         "provider-run",
@@ -242,7 +268,12 @@ fn sent_provider_attempt_is_reported_as_outcome_unknown_without_writing() {
 fn terminal_run_with_unknown_provider_outcome_rejects_recovery() {
     let fixture = Fixture::new();
     let mut journal = fixture.open();
-    create_run(&mut journal, "terminal-provider-run", &[Step::Cancel]);
+    create_run(
+        &mut journal,
+        &fixture.lease,
+        "terminal-provider-run",
+        &[Step::Cancel],
+    );
     let mut attempt = ProviderAttemptAggregate::create(
         &mut journal,
         "terminal-provider-run",
@@ -309,7 +340,12 @@ enum Step {
     Reconcile,
 }
 
-fn create_run(journal: &mut EventJournal, run_id: &str, steps: &[Step]) {
+fn create_run(
+    journal: &mut EventJournal,
+    lease: &BoundWorkspaceRuntimeLease,
+    run_id: &str,
+    steps: &[Step],
+) {
     let created_message = format!("{run_id}-message-0");
     let mut run = RunAggregate::create(
         journal,
@@ -338,7 +374,7 @@ fn create_run(journal: &mut EventJournal, run_id: &str, steps: &[Step]) {
             Step::Commit => run.begin_commit(journal, metadata),
             Step::Retry => run.retry(journal, metadata),
             Step::Block => run.block(journal, metadata),
-            Step::Cancel => run.cancel(journal, metadata),
+            Step::Cancel => run.cancel(journal, lease, metadata),
             Step::Fail => run.fail(journal, metadata),
             Step::Complete => run.complete(journal, metadata),
             Step::Reconcile => run.wait_for_reconciliation(journal, metadata),
@@ -350,15 +386,22 @@ fn create_run(journal: &mut EventJournal, run_id: &str, steps: &[Step]) {
 struct Fixture {
     _temp: TempDir,
     database_path: std::path::PathBuf,
+    lease: BoundWorkspaceRuntimeLease,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("runtime.db");
+        EventJournal::open(&database_path).unwrap();
+        let lease = WorkspaceRuntimeLease::acquire(&database_path, "recovery-tests")
+            .unwrap()
+            .bind_database(&database_path)
+            .unwrap();
         Self {
             _temp: temp,
             database_path,
+            lease,
         }
     }
 

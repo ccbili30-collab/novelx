@@ -34,7 +34,7 @@ use crate::{
         OperationalRecoveryGate, OperationalRecoveryScanError, OperationalRecoveryScanner,
     },
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
-    workspace_runtime_lease::WorkspaceRuntimeLease,
+    workspace_runtime_lease::{BoundWorkspaceRuntimeLease, BoundWorkspaceRuntimeLeaseError},
 };
 
 const DEFAULT_CLAIM_LEASE_SECONDS: u64 = 60;
@@ -76,19 +76,18 @@ impl OperationalRecoverySupervisor {
         workspace_id: &str,
         project_id: &str,
         bound_providers: &[ProviderRunIdentity],
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<OperationalRecoverySupervisorReport, OperationalRecoverySupervisorError> {
         require_text("workspace_id", workspace_id)?;
         require_text("project_id", project_id)?;
-        if !exclusive_lease.protects_database(&self.database_path) {
-            return Err(OperationalRecoverySupervisorError::WorkspaceLeaseMismatch);
-        }
+        exclusive_lease.verify_database_authority(&self.database_path)?;
         let report = self.scan_consistently(workspace_id, project_id, bound_providers)?;
         let created_at = timestamp()?;
         let recorded = OperationalRecoveryRecordingService::new(&self.database_path).record(
             workspace_id,
             project_id,
             &report,
+            exclusive_lease,
             &created_at,
         )?;
         let operation_by_run = recorded
@@ -123,7 +122,7 @@ impl OperationalRecoverySupervisor {
         workspace_id: &str,
         project_id: &str,
         bound_providers: &[ProviderRunIdentity],
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         run_id: &str,
         current_operation_id: &str,
         current_gate: OperationalRecoveryGate,
@@ -257,7 +256,7 @@ impl OperationalRecoverySupervisor {
         run_id: &str,
         operation_id: &str,
         bound_providers: &[ProviderRunIdentity],
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<OperationalRecoverySupervisorRun, OperationalRecoverySupervisorError> {
         let aggregate =
             OperationalRecoveryRepository::open(&self.database_path)?.load(workspace_id, run_id)?;
@@ -310,7 +309,7 @@ impl OperationalRecoverySupervisor {
         run_id: &str,
         operation_id: &str,
         current_gate: OperationalRecoveryGate,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
     ) -> Result<OperationalRecoverySupervisorRun, OperationalRecoverySupervisorError> {
         let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
         let aggregate = repository.load(workspace_id, run_id)?;
@@ -355,7 +354,7 @@ impl OperationalRecoverySupervisor {
                 let resumed_at = timestamp()?;
                 let resume = OperationalRecoveryResume::derive(
                     execution,
-                    exclusive_lease.instance_id().to_owned(),
+                    exclusive_lease.owner_id().to_owned(),
                     resumed_at.clone(),
                 )?;
                 let clock =
@@ -389,7 +388,7 @@ impl OperationalRecoverySupervisor {
         run_id: &str,
         operation_id: &str,
         execution_id: String,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &BoundWorkspaceRuntimeLease,
         resuming: bool,
     ) -> Result<OperationalRecoverySupervisorRun, OperationalRecoverySupervisorError> {
         let request = PersistedProviderProjectionRequest {
@@ -478,8 +477,8 @@ fn require_text(
 pub enum OperationalRecoverySupervisorError {
     #[error("operational recovery supervisor field `{0}` must not be empty")]
     EmptyField(&'static str),
-    #[error("operational recovery workspace lease does not protect this database")]
-    WorkspaceLeaseMismatch,
+    #[error(transparent)]
+    WorkspaceLease(#[from] BoundWorkspaceRuntimeLeaseError),
     #[error("operational recovery source changed during scan: {before} -> {after}")]
     SourceChangedDuringScan { before: u64, after: u64 },
     #[error("operational recovery supervisor state invariant failed: {0}")]

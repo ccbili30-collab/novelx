@@ -10,10 +10,12 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::provider_attempt::ProviderAttemptRecovery;
+use crate::provider_effect_capability::ProviderEffectCapabilityError;
 use crate::provider_gateway::{ProviderGatewayError, ProviderInferenceOutcome};
 use crate::provider_inference_service::{
     ProviderInferenceExecution, ProviderInferenceServiceError,
 };
+use crate::run_aggregate::RunAggregateError;
 use crate::runtime_actor::RuntimeOutputDraft;
 
 pub struct ProviderInferenceProtocolMapper {
@@ -300,6 +302,16 @@ fn classify_error(
             RuntimeErrorClass::Validation,
             false,
             "The Provider attempt already has a terminal result.",
+        ),
+        ProviderInferenceServiceError::WorkspaceLease(error)
+        | ProviderInferenceServiceError::ProviderEffect(
+            ProviderEffectCapabilityError::WorkspaceLease(error),
+        )
+        | ProviderInferenceServiceError::Run(RunAggregateError::WorkspaceLease(error)) => (
+            error.protocol_code(),
+            RuntimeErrorClass::Storage,
+            false,
+            "Workspace Runtime write authority could not be verified.",
         ),
         ProviderInferenceServiceError::Attempt(_)
         | ProviderInferenceServiceError::Journal(_)
