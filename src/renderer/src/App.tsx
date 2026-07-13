@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, Boxes, Download, FileInput, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings } from "lucide-react";
 import type { AgentArtifact, CollaborationListResult, CreativeWorkspaceMutation, HandoffSummary, ProjectAddResult, ProjectSummary, SessionSummary, WorkspaceSnapshot } from "../../shared/ipcContract";
 import type { DesktopUpdateState } from "../../shared/desktopUpdateContract";
@@ -59,6 +59,7 @@ export function App() {
   const [selectedDomain, setSelectedDomain] = useState<WorkspaceSnapshot["resources"][number]["type"] | null>(null);
   const [selectedChangeSetId, setSelectedChangeSetId] = useState<string | null>(null);
   const [changeSetRefreshKey, setChangeSetRefreshKey] = useState(0);
+  const [committedWorkspaceRefreshKey, setCommittedWorkspaceRefreshKey] = useState(0);
   const [sessionMessageRefreshKey, setSessionMessageRefreshKey] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -355,10 +356,23 @@ export function App() {
     }
   }
 
-  async function refreshCreativeWorkspace() {
+  const refreshCreativeWorkspace = useCallback(async () => {
     const next = await window.novaxDesktop.workspace.getCurrent();
     if (next) setWorkspace(next);
-  }
+  }, []);
+
+  const handleCommittedChangeSet = useCallback(async () => {
+    setChangeSetRefreshKey((value) => value + 1);
+    setCommittedWorkspaceRefreshKey((value) => value + 1);
+    try {
+      await refreshCreativeWorkspace();
+      setCreativeError(null);
+    } catch (error) {
+      setCreativeError(error instanceof Error && error.message.trim()
+        ? error.message
+        : "正式内容已提交，但工作台刷新失败，请重新打开项目。");
+    }
+  }, [refreshCreativeWorkspace]);
 
   async function createCreativeObject(input: Extract<CreativeWorkspaceMutation, { action: "create_resource" }>) {
     const existing = new Set(workspace?.resources.map((resource) => resource.id) ?? []);
@@ -500,6 +514,7 @@ export function App() {
         messageRefreshKey={sessionMessageRefreshKey}
         selectedChangeSetId={selectedChangeSetId}
         onOpenChangeSet={openChangeSet}
+        onCommittedChangeSet={handleCommittedChangeSet}
         onOpenDocumentReference={openDocumentReference}
         onActivityChange={setActivity}
       />
@@ -576,7 +591,7 @@ export function App() {
           />
           {agentPanel}
           {selectedChangeSetId ? (
-            <section className="agent-artifact-panel"><ChangeSetWorkbench changeSetId={selectedChangeSetId} onChanged={() => setChangeSetRefreshKey((value) => value + 1)} /></section>
+            <section className="agent-artifact-panel"><ChangeSetWorkbench changeSetId={selectedChangeSetId} onChanged={() => setChangeSetRefreshKey((value) => value + 1)} onCommitted={handleCommittedChangeSet} /></section>
           ) : (
             <ProjectActivityPanel
               projectId={activeProjectId}
@@ -611,9 +626,9 @@ export function App() {
           />
           <section className="canvas" aria-label="创作内容">
             {selectedChangeSetId ? (
-              <ChangeSetWorkbench changeSetId={selectedChangeSetId} onChanged={() => setChangeSetRefreshKey((value) => value + 1)} />
+              <ChangeSetWorkbench changeSetId={selectedChangeSetId} onChanged={() => setChangeSetRefreshKey((value) => value + 1)} onCommitted={handleCommittedChangeSet} />
             ) : selectedDomain === "graph" || selectedResource?.type === "graph" ? (
-              <Suspense fallback={<div className="graph-loading"><LoaderCircle size={18} aria-hidden="true" />正在载入图谱</div>}><SemanticGraphView /></Suspense>
+              <Suspense fallback={<div className="graph-loading"><LoaderCircle size={18} aria-hidden="true" />正在载入图谱</div>}><SemanticGraphView refreshKey={committedWorkspaceRefreshKey} /></Suspense>
             ) : selectedDomain === "asset" || selectedResource?.type === "asset" ? (
               <div className="empty-state"><Image size={28} strokeWidth={1.4} aria-hidden="true" /><h1>资产尚未加入</h1></div>
             ) : selectedResource ? (
@@ -628,7 +643,7 @@ export function App() {
                     onDelete={deleteDocument}
                   />
                   {selectedDocument
-                    ? <CreativeDocumentEditorHost ref={editorRef} document={selectedDocument} locator={documentLocator} onCreateDocument={() => setCreateDocumentResource(selectedResource)} />
+                    ? <CreativeDocumentEditorHost ref={editorRef} document={selectedDocument} refreshKey={committedWorkspaceRefreshKey} locator={documentLocator} onCreateDocument={() => setCreateDocumentResource(selectedResource)} />
                     : <EditorHost ref={editorRef} resource={selectedResource} />}
                 </div>
               </div>

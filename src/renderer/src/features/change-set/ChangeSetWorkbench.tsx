@@ -5,6 +5,7 @@ import type { SafeChangeSetDetail } from "../../../../shared/ipcContract";
 export function ChangeSetWorkbench(props: {
   changeSetId: string;
   onChanged(): void;
+  onCommitted(): Promise<void>;
 }) {
   const [detail, setDetail] = useState<SafeChangeSetDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +59,8 @@ export function ChangeSetWorkbench(props: {
       });
       if (result.ok) {
         setDetail(result.changeSet);
-        props.onChanged();
+        if (result.changeSet.status === "committed") await props.onCommitted();
+        else props.onChanged();
       } else {
         setError(result.error.message);
       }

@@ -28,7 +28,7 @@ const NODE_WIDTH = 184;
 const NODE_HEIGHT = 68;
 const nodeTypes = { semantic: SemanticNodeCard };
 
-export function SemanticGraphView() {
+export function SemanticGraphView({ refreshKey }: { refreshKey: number }) {
   const [snapshot, setSnapshot] = useState<SemanticGraphSnapshot | null>(null);
   const [inspector, setInspector] = useState<SemanticGraphInspector | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -42,6 +42,9 @@ export function SemanticGraphView() {
 
   useEffect(() => {
     let active = true;
+    setError(null);
+    setInspector(null);
+    setSelectedId(null);
     void window.novaxDesktop.graph.getSnapshot().then((result) => {
       if (!active) return;
       if (result.ok) setSnapshot(result.graph);
@@ -50,7 +53,7 @@ export function SemanticGraphView() {
       if (active) setError(readErrorMessage(cause));
     });
     return () => { active = false; };
-  }, []);
+  }, [refreshKey]);
 
   const visibleGraph = useMemo(() => {
     if (!snapshot) return { nodes: [] as FlowNode[], edges: [] as Edge[] };

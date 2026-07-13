@@ -23,6 +23,7 @@ interface StewardRuntimePanelProps {
   messageRefreshKey: number;
   selectedChangeSetId: string | null;
   onOpenChangeSet(changeSetId: string): Promise<void>;
+  onCommittedChangeSet(): Promise<void>;
   onOpenDocumentReference?(reference: Extract<AgentArtifact, { kind: "document_reference" }>): Promise<void> | void;
   onActivityChange(activity: { label: string; domains: string[] } | null): void;
 }
@@ -44,6 +45,7 @@ export function StewardRuntimePanel({
   messageRefreshKey,
   selectedChangeSetId,
   onOpenChangeSet,
+  onCommittedChangeSet,
   onOpenDocumentReference,
   onActivityChange,
 }: StewardRuntimePanelProps) {
@@ -86,11 +88,14 @@ export function StewardRuntimePanel({
       onActivityChange(null);
       if (event.type === "run.completed") {
         appendEntry({ kind: "assistant", text: event.message, outcome: event.outcome, artifacts: event.artifacts });
+        if (event.changeSetState === "committed" && event.artifacts.some((artifact) => (
+          artifact.kind === "change_set" && artifact.state === "committed"
+        ))) void onCommittedChangeSet();
       } else {
         appendEntry({ kind: "error", text: event.message, artifacts: event.artifacts });
       }
     });
-  }, [session?.id, onActivityChange]);
+  }, [session?.id, onActivityChange, onCommittedChangeSet]);
 
   useEffect(() => {
     let cancelled = false;

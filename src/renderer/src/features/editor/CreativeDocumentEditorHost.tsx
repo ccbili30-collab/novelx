@@ -11,9 +11,10 @@ export interface CreativeDocumentEditorHandle {
 
 export const CreativeDocumentEditorHost = forwardRef<CreativeDocumentEditorHandle, {
   document: WorkspaceDocument;
+  refreshKey: number;
   locator?: Extract<AgentArtifact, { kind: "document_reference" }>["locator"] | null;
   onCreateDocument(): void;
-}>(function CreativeDocumentEditorHost({ document: documentSummary, locator, onCreateDocument }, ref) {
+}>(function CreativeDocumentEditorHost({ document: documentSummary, refreshKey, locator, onCreateDocument }, ref) {
   const [document, setDocument] = useState<CreativeEditorDocumentSnapshot | null>(null);
   const [content, setContent] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("loading");
@@ -41,7 +42,7 @@ export const CreativeDocumentEditorHost = forwardRef<CreativeDocumentEditorHandl
       setErrorMessage(readErrorMessage(error));
       setSaveState("error");
     });
-  }, [documentSummary.id]);
+  }, [documentSummary.id, refreshKey]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
