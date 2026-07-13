@@ -44,6 +44,9 @@ use crate::{
     workspace_runtime_lease::WorkspaceRuntimeLease,
 };
 
+#[path = "provider_recovery_effect_authorization_service.rs"]
+pub mod recovery;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderLiveEffectAuthorizationRequest {
     pub run_id: Uuid,
@@ -70,6 +73,29 @@ pub struct ProviderLiveEffectAuthorization {
 
 #[allow(dead_code)]
 impl ProviderLiveEffectAuthorization {
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        execution: ProviderInferenceExecution,
+        attempt: ProviderAttemptAggregate,
+        prepared: PreparedProviderInference,
+        provider: Arc<BoundProvider>,
+        execution_guard: ProviderAttemptExecutionGuard,
+        capability: ProviderEffectCapability,
+        expected_run_sequence: u64,
+        expected_global_sequence: u64,
+    ) -> Self {
+        Self {
+            execution,
+            attempt,
+            prepared,
+            provider,
+            execution_guard,
+            capability,
+            expected_run_sequence,
+            expected_global_sequence,
+        }
+    }
+
     pub const fn expected_run_sequence(&self) -> u64 {
         self.expected_run_sequence
     }
