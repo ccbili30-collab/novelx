@@ -1,10 +1,20 @@
 use novelx_protocol::{RunPinnedIdentity, RunReconciliationDecision, RuntimeError};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::event_journal::{EventJournal, EventJournalError, NewRuntimeEvent, RuntimeEvent};
 use crate::run_state::{RunState, RunStateMachine, TransitionError};
+
+const MAX_CANCELLATION_ID_BYTES: usize = 1_024;
+const MAX_CANCEL_IDEMPOTENCY_KEY_BYTES: usize = 1_024;
+const MAX_CANCELLATION_REASON_BYTES: usize = 16 * 1_024;
+const MAX_CANCELLATION_REQUESTED_AT_BYTES: usize = 128;
+/// Per-Run safety ceiling. A Run is one execution, not a project; 4,096 cancellation cycles
+/// preserves pathological long-running sessions while preventing unbounded replay memory.
+pub const MAX_RUN_CANCELLATION_CYCLES: usize = 4_096;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunAggregate {
@@ -16,6 +26,96 @@ pub struct RunAggregate {
     created_at: String,
     updated_at: String,
     terminal_error: Option<RuntimeError>,
+    cancellation_state: RunCancellationState,
+    cancellation_intent: Option<RunCancellationIntent>,
+    cancellation_intent_history: Vec<RunCancellationIntent>,
+    cancellation_settlement_history: Vec<RunCancellationSettlementRecord>,
+    reconciliation_history: Vec<RunReconciliationRecord>,
+    cancellation_cycle_count: usize,
+    cancellation_evidence_sha256: Option<String>,
+    legacy_cancellation_requested: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RunCancellationState {
+    #[default]
+    None,
+    IntentRecorded,
+    CancelledSafe,
+    ReconciliationRequired,
+    AbandonedAfterUnknown,
+    WithdrawnForRetry,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunCancellationIntent {
+    intent_id: String,
+    run_id: String,
+    workspace_id: String,
+    cancel_idempotency_key: String,
+    reason: String,
+    reason_sha256: String,
+    requested_at: String,
+    command_message_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RunCancellationSettlementRecord {
+    intent_id: String,
+    state: RunCancellationState,
+    evidence_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RunReconciliationRecord {
+    event_version: u32,
+    reconciliation_idempotency_key: String,
+    attempt_id: String,
+    decision: RunReconciliationDecision,
+    duplicate_execution_acknowledged: bool,
+    intent_id: Option<String>,
+    unknown_effects_sha256: Option<String>,
+    cancellation_disposition: Option<RunCancellationDisposition>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunCancellationDisposition {
+    AbandonedAfterUnknown,
+    WithdrawnForRetry,
+}
+
+impl RunCancellationIntent {
+    pub fn intent_id(&self) -> &str {
+        &self.intent_id
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
+    pub fn cancel_idempotency_key(&self) -> &str {
+        &self.cancel_idempotency_key
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub fn reason_sha256(&self) -> &str {
+        &self.reason_sha256
+    }
+
+    pub fn requested_at(&self) -> &str {
+        &self.requested_at
+    }
+
+    pub fn command_message_id(&self) -> &str {
+        &self.command_message_id
+    }
 }
 
 pub struct EventMetadata<'a> {
@@ -79,6 +179,349 @@ impl RunAggregate {
         self.terminal_error.as_ref()
     }
 
+    pub const fn cancellation_state(&self) -> RunCancellationState {
+        self.cancellation_state
+    }
+
+    pub const fn cancellation_intent(&self) -> Option<&RunCancellationIntent> {
+        self.cancellation_intent.as_ref()
+    }
+
+    pub fn cancellation_intent_history(&self) -> &[RunCancellationIntent] {
+        &self.cancellation_intent_history
+    }
+
+    pub fn active_cancellation_intent(&self) -> Option<&RunCancellationIntent> {
+        if self.has_unsettled_cancellation_intent() {
+            self.cancellation_intent.as_ref()
+        } else {
+            None
+        }
+    }
+
+    pub fn cancellation_evidence_sha256(&self) -> Option<&str> {
+        self.cancellation_evidence_sha256.as_deref()
+    }
+
+    pub const fn permits_new_side_effects(&self) -> bool {
+        !self.legacy_cancellation_requested
+            && matches!(
+                self.cancellation_state,
+                RunCancellationState::None | RunCancellationState::WithdrawnForRetry
+            )
+    }
+
+    const fn has_unsettled_cancellation_intent(&self) -> bool {
+        matches!(
+            self.cancellation_state,
+            RunCancellationState::IntentRecorded | RunCancellationState::ReconciliationRequired
+        )
+    }
+
+    const fn has_pending_cancellation_barrier(&self) -> bool {
+        self.legacy_cancellation_requested || self.has_unsettled_cancellation_intent()
+    }
+
+    pub fn record_cancellation_intent(
+        &mut self,
+        journal: &mut EventJournal,
+        cancel_idempotency_key: &str,
+        reason: &str,
+        command_message_id: &str,
+        requested_at: &str,
+    ) -> Result<RunCancellationIntent, RunAggregateError> {
+        let intent = build_cancellation_intent(
+            self.pinned_identity.workspace_id.as_str(),
+            &self.run_id,
+            cancel_idempotency_key,
+            reason,
+            command_message_id,
+            requested_at,
+        )?;
+        if let Some(existing) = self
+            .cancellation_intent_history
+            .iter()
+            .find(|existing| existing.cancel_idempotency_key == intent.cancel_idempotency_key)
+        {
+            if cancellation_intents_match(existing, &intent) {
+                return Ok(existing.clone());
+            }
+            return Err(RunAggregateError::CancellationIntentConflict {
+                existing_intent_id: existing.intent_id.clone(),
+                requested_intent_id: intent.intent_id,
+            });
+        }
+        if let Some(existing) = self
+            .cancellation_intent_history
+            .iter()
+            .find(|existing| existing.intent_id == intent.intent_id)
+        {
+            return Err(RunAggregateError::CancellationIntentConflict {
+                existing_intent_id: existing.intent_id.clone(),
+                requested_intent_id: intent.intent_id,
+            });
+        }
+        if self.legacy_cancellation_requested {
+            return Err(RunAggregateError::CancellationSettlementRequired);
+        }
+        if let Some(existing) = self.cancellation_intent.as_ref()
+            && self.cancellation_state != RunCancellationState::WithdrawnForRetry
+        {
+            return Err(RunAggregateError::CancellationIntentConflict {
+                existing_intent_id: existing.intent_id.clone(),
+                requested_intent_id: intent.intent_id,
+            });
+        }
+        if !matches!(
+            self.cancellation_state,
+            RunCancellationState::None | RunCancellationState::WithdrawnForRetry
+        ) {
+            return Err(RunAggregateError::CancellationStateMismatch);
+        }
+        require_cancellation_intent_run_state(self.machine.state())?;
+        if self.cancellation_cycle_count >= MAX_RUN_CANCELLATION_CYCLES {
+            return Err(RunAggregateError::CancellationCycleLimitReached(
+                MAX_RUN_CANCELLATION_CYCLES,
+            ));
+        }
+        let previous_cancellation_state = self.cancellation_state;
+        let event = cancellation_intent_recorded_event(
+            &intent,
+            self.machine.state(),
+            previous_cancellation_state,
+            cancellation_intent_event_idempotency_key(&self.run_id, &intent.intent_id),
+        );
+        let stored =
+            match journal.append(event, self.last_run_sequence, self.last_aggregate_sequence) {
+                Ok(stored) => stored,
+                Err(error) if is_event_concurrency_conflict(&error) => {
+                    return self
+                        .resolve_cancellation_intent_append_conflict(journal, &intent, error);
+                }
+                Err(error) => return Err(error.into()),
+            };
+        self.cancellation_state = RunCancellationState::IntentRecorded;
+        self.cancellation_intent = Some(intent.clone());
+        self.cancellation_intent_history.push(intent.clone());
+        self.cancellation_cycle_count += 1;
+        self.cancellation_evidence_sha256 = None;
+        self.last_run_sequence = stored.run_sequence;
+        self.last_aggregate_sequence = stored.aggregate_sequence;
+        self.updated_at = stored.created_at;
+        Ok(intent)
+    }
+
+    fn resolve_cancellation_intent_append_conflict(
+        &mut self,
+        journal: &EventJournal,
+        requested: &RunCancellationIntent,
+        original_error: EventJournalError,
+    ) -> Result<RunCancellationIntent, RunAggregateError> {
+        let recovered = Self::recover(journal, &self.run_id)?;
+        let resolution = if let Some(existing) = recovered
+            .cancellation_intent_history
+            .iter()
+            .find(|existing| existing.cancel_idempotency_key == requested.cancel_idempotency_key)
+        {
+            if cancellation_intents_match(existing, requested) {
+                Ok(existing.clone())
+            } else {
+                Err(RunAggregateError::CancellationIntentConflict {
+                    existing_intent_id: existing.intent_id.clone(),
+                    requested_intent_id: requested.intent_id.clone(),
+                })
+            }
+        } else if let Some(existing) = recovered.active_cancellation_intent() {
+            Err(RunAggregateError::CancellationIntentConflict {
+                existing_intent_id: existing.intent_id.clone(),
+                requested_intent_id: requested.intent_id.clone(),
+            })
+        } else {
+            Err(original_error.into())
+        };
+        *self = recovered;
+        resolution
+    }
+
+    pub fn mark_cancellation_safe(
+        &mut self,
+        journal: &mut EventJournal,
+        intent_id: &str,
+        evidence_manifest_sha256: &str,
+        metadata: EventMetadata<'_>,
+    ) -> Result<(), RunAggregateError> {
+        require_sha256(evidence_manifest_sha256)?;
+        if let Some(result) = self.historical_settlement_result(
+            intent_id,
+            evidence_manifest_sha256,
+            CancellationSettlementKind::CancelledSafe,
+        ) {
+            return result;
+        }
+        self.require_cancellation_intent(intent_id)?;
+        if self.cancellation_state != RunCancellationState::IntentRecorded {
+            return Err(RunAggregateError::CancellationTransitionInvalid {
+                from: self.cancellation_state,
+                to: RunCancellationState::CancelledSafe,
+            });
+        }
+        let previous = self.machine.state();
+        let mut candidate = self.machine;
+        transition_machine(&mut candidate, RunState::Cancelled)?;
+        let event = cancellation_settlement_event(
+            &self.run_id,
+            intent_id,
+            evidence_manifest_sha256,
+            metadata,
+            previous,
+            RunState::Cancelled,
+            RunCancellationState::IntentRecorded,
+            RunCancellationState::CancelledSafe,
+            CancellationSettlementKind::CancelledSafe,
+        );
+        let stored =
+            match journal.append(event, self.last_run_sequence, self.last_aggregate_sequence) {
+                Ok(stored) => stored,
+                Err(error) if is_event_concurrency_conflict(&error) => {
+                    return self.resolve_cancellation_settlement_append_conflict(
+                        journal,
+                        intent_id,
+                        evidence_manifest_sha256,
+                        CancellationSettlementKind::CancelledSafe,
+                        error,
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            };
+        self.machine = candidate;
+        self.cancellation_state = RunCancellationState::CancelledSafe;
+        self.cancellation_settlement_history
+            .push(RunCancellationSettlementRecord {
+                intent_id: intent_id.to_owned(),
+                state: RunCancellationState::CancelledSafe,
+                evidence_sha256: evidence_manifest_sha256.to_owned(),
+            });
+        self.cancellation_evidence_sha256 = Some(evidence_manifest_sha256.to_owned());
+        self.last_run_sequence = stored.run_sequence;
+        self.last_aggregate_sequence = stored.aggregate_sequence;
+        self.updated_at = stored.created_at;
+        Ok(())
+    }
+
+    pub fn mark_cancellation_reconciliation_required(
+        &mut self,
+        journal: &mut EventJournal,
+        intent_id: &str,
+        unknown_effects_sha256: &str,
+        metadata: EventMetadata<'_>,
+    ) -> Result<(), RunAggregateError> {
+        require_sha256(unknown_effects_sha256)?;
+        if let Some(result) = self.historical_settlement_result(
+            intent_id,
+            unknown_effects_sha256,
+            CancellationSettlementKind::ReconciliationRequired,
+        ) {
+            return result;
+        }
+        self.require_cancellation_intent(intent_id)?;
+        if self.cancellation_state != RunCancellationState::IntentRecorded {
+            return Err(RunAggregateError::CancellationTransitionInvalid {
+                from: self.cancellation_state,
+                to: RunCancellationState::ReconciliationRequired,
+            });
+        }
+        let previous = self.machine.state();
+        let mut candidate = self.machine;
+        if previous != RunState::WaitingForReconciliation {
+            transition_machine(&mut candidate, RunState::WaitingForReconciliation)?;
+        }
+        let event = cancellation_settlement_event(
+            &self.run_id,
+            intent_id,
+            unknown_effects_sha256,
+            metadata,
+            previous,
+            RunState::WaitingForReconciliation,
+            RunCancellationState::IntentRecorded,
+            RunCancellationState::ReconciliationRequired,
+            CancellationSettlementKind::ReconciliationRequired,
+        );
+        let stored =
+            match journal.append(event, self.last_run_sequence, self.last_aggregate_sequence) {
+                Ok(stored) => stored,
+                Err(error) if is_event_concurrency_conflict(&error) => {
+                    return self.resolve_cancellation_settlement_append_conflict(
+                        journal,
+                        intent_id,
+                        unknown_effects_sha256,
+                        CancellationSettlementKind::ReconciliationRequired,
+                        error,
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            };
+        self.machine = candidate;
+        self.cancellation_state = RunCancellationState::ReconciliationRequired;
+        self.cancellation_settlement_history
+            .push(RunCancellationSettlementRecord {
+                intent_id: intent_id.to_owned(),
+                state: RunCancellationState::ReconciliationRequired,
+                evidence_sha256: unknown_effects_sha256.to_owned(),
+            });
+        self.cancellation_evidence_sha256 = Some(unknown_effects_sha256.to_owned());
+        self.last_run_sequence = stored.run_sequence;
+        self.last_aggregate_sequence = stored.aggregate_sequence;
+        self.updated_at = stored.created_at;
+        Ok(())
+    }
+
+    fn require_cancellation_intent(&self, intent_id: &str) -> Result<(), RunAggregateError> {
+        require_sha256(intent_id)?;
+        match self.cancellation_intent.as_ref() {
+            Some(intent) if intent.intent_id == intent_id => Ok(()),
+            Some(intent) => Err(RunAggregateError::CancellationIntentConflict {
+                existing_intent_id: intent.intent_id.clone(),
+                requested_intent_id: intent_id.to_owned(),
+            }),
+            None => Err(RunAggregateError::CancellationIntentRequired),
+        }
+    }
+
+    fn historical_settlement_result(
+        &self,
+        intent_id: &str,
+        evidence_sha256: &str,
+        kind: CancellationSettlementKind,
+    ) -> Option<Result<(), RunAggregateError>> {
+        let existing = self
+            .cancellation_settlement_history
+            .iter()
+            .find(|settlement| settlement.intent_id == intent_id)?;
+        if existing.state == kind.target_cancellation_state()
+            && existing.evidence_sha256 == evidence_sha256
+        {
+            Some(Ok(()))
+        } else {
+            Some(Err(RunAggregateError::CancellationSettlementConflict))
+        }
+    }
+
+    fn resolve_cancellation_settlement_append_conflict(
+        &mut self,
+        journal: &EventJournal,
+        intent_id: &str,
+        evidence_sha256: &str,
+        kind: CancellationSettlementKind,
+        original_error: EventJournalError,
+    ) -> Result<(), RunAggregateError> {
+        let recovered = Self::recover(journal, &self.run_id)?;
+        let resolution = recovered
+            .historical_settlement_result(intent_id, evidence_sha256, kind)
+            .unwrap_or_else(|| Err(original_error.into()));
+        *self = recovered;
+        resolution
+    }
+
     pub fn prepare(
         &mut self,
         journal: &mut EventJournal,
@@ -128,6 +571,9 @@ impl RunAggregate {
         cancellation_reason: &str,
         metadata: EventMetadata<'_>,
     ) -> Result<(), RunAggregateError> {
+        if self.cancellation_state != RunCancellationState::None {
+            return Err(RunAggregateError::CancellationSettlementRequired);
+        }
         if attempt_ids.is_empty() || cancellation_reason.trim().is_empty() {
             return Err(RunAggregateError::InvalidPayload);
         }
@@ -148,6 +594,14 @@ impl RunAggregate {
             }
             .into());
         }
+        if self.legacy_cancellation_requested {
+            return Err(RunAggregateError::CancellationSettlementRequired);
+        }
+        if self.cancellation_cycle_count >= MAX_RUN_CANCELLATION_CYCLES {
+            return Err(RunAggregateError::CancellationCycleLimitReached(
+                MAX_RUN_CANCELLATION_CYCLES,
+            ));
+        }
         let previous = self.machine.state();
         let mut candidate = self.machine;
         transition_machine(&mut candidate, RunState::WaitingForReconciliation)?;
@@ -163,6 +617,8 @@ impl RunAggregate {
             self.last_aggregate_sequence,
         )?;
         self.machine = candidate;
+        self.legacy_cancellation_requested = true;
+        self.cancellation_cycle_count += 1;
         self.last_run_sequence = stored.run_sequence;
         self.last_aggregate_sequence = stored.aggregate_sequence;
         self.updated_at = stored.created_at;
@@ -193,66 +649,165 @@ impl RunAggregate {
         duplicate_execution_acknowledged: bool,
         metadata: EventMetadata<'_>,
     ) -> Result<(), RunAggregateError> {
-        if attempt_id.trim().is_empty() {
-            return Err(RunAggregateError::InvalidPayload);
+        require_bounded_text(attempt_id, MAX_CANCELLATION_ID_BYTES)?;
+        require_bounded_text(metadata.idempotency_key, MAX_CANCEL_IDEMPOTENCY_KEY_BYTES)?;
+        let target = reconciliation_target(decision, duplicate_execution_acknowledged)?;
+        if let Some(result) = self.historical_reconciliation_result(
+            metadata.idempotency_key,
+            attempt_id,
+            decision,
+            duplicate_execution_acknowledged,
+        ) {
+            return result;
         }
-        let target = match decision {
-            RunReconciliationDecision::CancelRun => RunState::Cancelled,
-            RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate => {
-                RunState::Retrying
-            }
-        };
-        let existing = journal
-            .read_aggregate(&self.run_id, "run", &self.run_id, 0)?
-            .into_iter()
-            .find(|event| event.idempotency_key == metadata.idempotency_key);
-        if let Some(existing) = existing {
-            let payload = parse_reconciliation_payload(&existing.payload)?;
-            if existing.event_type == "run.reconciled"
-                && existing.event_version == 1
-                && payload.transition.current == target
-                && payload.attempt_id == attempt_id
-                && payload.decision == decision
-                && payload.duplicate_execution_acknowledged == duplicate_execution_acknowledged
-            {
-                return Ok(());
-            }
-            return Err(EventJournalError::IdempotencyConflict {
-                idempotency_key: metadata.idempotency_key.to_owned(),
-            }
-            .into());
+        if self.cancellation_state == RunCancellationState::IntentRecorded {
+            return Err(RunAggregateError::CancellationSettlementRequired);
         }
         if self.machine.state() != RunState::WaitingForReconciliation {
             return Err(RunAggregateError::ReconciliationStateRequired);
         }
-        let required_ack = matches!(
-            decision,
-            RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate
-        );
-        if duplicate_execution_acknowledged != required_ack {
-            return Err(RunAggregateError::InvalidPayload);
-        }
         let previous = self.machine.state();
         let mut candidate = self.machine;
         transition_machine(&mut candidate, target)?;
-        let stored = journal.append(
-            reconciliation_event(
-                &self.run_id,
-                attempt_id,
-                decision,
-                duplicate_execution_acknowledged,
-                metadata,
-                previous,
-                target,
-            ),
-            self.last_run_sequence,
-            self.last_aggregate_sequence,
-        )?;
+        let reconciliation_idempotency_key = metadata.idempotency_key.to_owned();
+        let (event, record) = if self.cancellation_state
+            == RunCancellationState::ReconciliationRequired
+            && !self.legacy_cancellation_requested
+        {
+            let intent_id = self
+                .cancellation_intent
+                .as_ref()
+                .ok_or(RunAggregateError::CancellationIntentRequired)?
+                .intent_id
+                .clone();
+            let unknown_effects_sha256 = self
+                .cancellation_evidence_sha256
+                .clone()
+                .ok_or(RunAggregateError::CancellationStateMismatch)?;
+            let disposition = cancellation_disposition(decision);
+            (
+                cancellation_reconciliation_event_v2(
+                    &self.run_id,
+                    attempt_id,
+                    decision,
+                    duplicate_execution_acknowledged,
+                    &intent_id,
+                    &unknown_effects_sha256,
+                    disposition,
+                    metadata,
+                    previous,
+                    target,
+                ),
+                RunReconciliationRecord {
+                    event_version: 2,
+                    reconciliation_idempotency_key: reconciliation_idempotency_key.clone(),
+                    attempt_id: attempt_id.to_owned(),
+                    decision,
+                    duplicate_execution_acknowledged,
+                    intent_id: Some(intent_id),
+                    unknown_effects_sha256: Some(unknown_effects_sha256),
+                    cancellation_disposition: Some(disposition),
+                },
+            )
+        } else if self.cancellation_state == RunCancellationState::None {
+            (
+                reconciliation_event(
+                    &self.run_id,
+                    attempt_id,
+                    decision,
+                    duplicate_execution_acknowledged,
+                    metadata,
+                    previous,
+                    target,
+                ),
+                RunReconciliationRecord {
+                    event_version: 1,
+                    reconciliation_idempotency_key: reconciliation_idempotency_key.clone(),
+                    attempt_id: attempt_id.to_owned(),
+                    decision,
+                    duplicate_execution_acknowledged,
+                    intent_id: None,
+                    unknown_effects_sha256: None,
+                    cancellation_disposition: None,
+                },
+            )
+        } else {
+            return Err(RunAggregateError::ReconciliationStateRequired);
+        };
+        let stored =
+            match journal.append(event, self.last_run_sequence, self.last_aggregate_sequence) {
+                Ok(stored) => stored,
+                Err(error) if is_event_concurrency_conflict(&error) => {
+                    return self.resolve_reconciliation_append_conflict(
+                        journal,
+                        &reconciliation_idempotency_key,
+                        attempt_id,
+                        decision,
+                        duplicate_execution_acknowledged,
+                        error,
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            };
         self.machine = candidate;
+        if record.event_version == 2 {
+            self.cancellation_state = cancellation_state_after_reconciliation(decision);
+        }
+        self.legacy_cancellation_requested = false;
+        self.reconciliation_history.push(record);
         self.last_run_sequence = stored.run_sequence;
         self.last_aggregate_sequence = stored.aggregate_sequence;
         self.updated_at = stored.created_at;
         Ok(())
+    }
+
+    fn historical_reconciliation_result(
+        &self,
+        reconciliation_idempotency_key: &str,
+        attempt_id: &str,
+        decision: RunReconciliationDecision,
+        duplicate_execution_acknowledged: bool,
+    ) -> Option<Result<(), RunAggregateError>> {
+        let existing = self.reconciliation_history.iter().find(|record| {
+            record.reconciliation_idempotency_key == reconciliation_idempotency_key
+                || record.attempt_id == attempt_id
+        })?;
+        if !reconciliation_record_is_well_formed(existing) {
+            return Some(Err(RunAggregateError::CancellationStateMismatch));
+        }
+        if existing.attempt_id == attempt_id
+            && existing.decision == decision
+            && existing.duplicate_execution_acknowledged == duplicate_execution_acknowledged
+        {
+            Some(Ok(()))
+        } else {
+            Some(Err(EventJournalError::IdempotencyConflict {
+                idempotency_key: reconciliation_idempotency_key.to_owned(),
+            }
+            .into()))
+        }
+    }
+
+    fn resolve_reconciliation_append_conflict(
+        &mut self,
+        journal: &EventJournal,
+        reconciliation_idempotency_key: &str,
+        attempt_id: &str,
+        decision: RunReconciliationDecision,
+        duplicate_execution_acknowledged: bool,
+        original_error: EventJournalError,
+    ) -> Result<(), RunAggregateError> {
+        let recovered = Self::recover(journal, &self.run_id)?;
+        let resolution = recovered
+            .historical_reconciliation_result(
+                reconciliation_idempotency_key,
+                attempt_id,
+                decision,
+                duplicate_execution_acknowledged,
+            )
+            .unwrap_or_else(|| Err(original_error.into()));
+        *self = recovered;
+        resolution
     }
 
     pub fn block(
@@ -268,6 +823,9 @@ impl RunAggregate {
         journal: &mut EventJournal,
         metadata: EventMetadata<'_>,
     ) -> Result<(), RunAggregateError> {
+        if self.cancellation_state != RunCancellationState::None {
+            return Err(RunAggregateError::CancellationSettlementRequired);
+        }
         if self.machine.state() == RunState::Cancelled {
             let events = journal.read_aggregate(&self.run_id, "run", &self.run_id, 0)?;
             if let Some(existing) = events
@@ -307,6 +865,9 @@ impl RunAggregate {
         metadata: EventMetadata<'_>,
         terminal_error: RuntimeError,
     ) -> Result<(), RunAggregateError> {
+        if self.has_pending_cancellation_barrier() {
+            return Err(RunAggregateError::CancellationSettlementRequired);
+        }
         let previous = self.machine.state();
         let mut candidate = self.machine;
         transition_machine(&mut candidate, RunState::Failed)?;
@@ -337,6 +898,12 @@ impl RunAggregate {
         metadata: EventMetadata<'_>,
         target: RunState,
     ) -> Result<(), RunAggregateError> {
+        if self.has_pending_cancellation_barrier() {
+            if self.is_idempotent_transition(journal, &metadata, event_type(target), target)? {
+                return Ok(());
+            }
+            return Err(RunAggregateError::CancellationSettlementRequired);
+        }
         let previous = self.machine.state();
         let mut candidate = self.machine;
         transition_machine(&mut candidate, target)?;
@@ -412,6 +979,32 @@ pub enum RunAggregateError {
     StateMismatch,
     #[error("run reconciliation requires waiting_for_reconciliation")]
     ReconciliationStateRequired,
+    #[error(
+        "run cancellation intent conflicts: existing {existing_intent_id}, requested {requested_intent_id}"
+    )]
+    CancellationIntentConflict {
+        existing_intent_id: String,
+        requested_intent_id: String,
+    },
+    #[error("run cancellation settlement requires a recorded intent")]
+    CancellationIntentRequired,
+    #[error("run cancellation state is inconsistent with its persisted intent")]
+    CancellationStateMismatch,
+    #[error("run cancellation transition is invalid: {from:?} -> {to:?}")]
+    CancellationTransitionInvalid {
+        from: RunCancellationState,
+        to: RunCancellationState,
+    },
+    #[error("run cancellation evidence conflicts with the persisted settlement")]
+    CancellationSettlementConflict,
+    #[error("run cancellation requires settlement before another lifecycle operation")]
+    CancellationSettlementRequired,
+    #[error("run state {0:?} cannot record a cancellation intent")]
+    CancellationRunStateInvalid(RunState),
+    #[error("run reached the maximum of {0} persisted cancellation cycles")]
+    CancellationCycleLimitReached(usize),
+    #[error("terminal run state {0:?} cannot accept a new cancellation intent")]
+    CancellationRunTerminal(RunState),
     #[error(transparent)]
     Transition(#[from] TransitionError),
     #[error(transparent)]
@@ -452,6 +1045,14 @@ fn replay(
         created_at: first.created_at.clone(),
         updated_at: first.created_at.clone(),
         terminal_error: None,
+        cancellation_state: RunCancellationState::None,
+        cancellation_intent: None,
+        cancellation_intent_history: Vec::new(),
+        cancellation_settlement_history: Vec::new(),
+        reconciliation_history: Vec::new(),
+        cancellation_cycle_count: 0,
+        cancellation_evidence_sha256: None,
+        legacy_cancellation_requested: false,
     };
     for event in &events[1..] {
         let expected = aggregate.last_aggregate_sequence + 1;
@@ -463,6 +1064,34 @@ fn replay(
         }
         if event.event_type == "run.created" {
             return Err(RunAggregateError::DuplicateCreated);
+        }
+        if event.event_type == "run.cancellation_intent_recorded" {
+            replay_cancellation_intent_recorded(&mut aggregate, event)?;
+            continue;
+        }
+        if event.event_type == "run.cancelled_safe" {
+            replay_cancellation_settlement(
+                &mut aggregate,
+                event,
+                CancellationSettlementKind::CancelledSafe,
+            )?;
+            continue;
+        }
+        if event.event_type == "run.cancellation_reconciliation_required" {
+            replay_cancellation_settlement(
+                &mut aggregate,
+                event,
+                CancellationSettlementKind::ReconciliationRequired,
+            )?;
+            continue;
+        }
+        if aggregate.has_pending_cancellation_barrier()
+            && !(event.event_type == "run.reconciled"
+                && (aggregate.legacy_cancellation_requested
+                    || aggregate.cancellation_state
+                        == RunCancellationState::ReconciliationRequired))
+        {
+            return Err(RunAggregateError::CancellationSettlementRequired);
         }
         if event.event_type == "run.failed" && event.event_version == 2 {
             let failure = parse_failure_payload(&event.payload)?;
@@ -477,26 +1106,37 @@ fn replay(
             aggregate.updated_at = event.created_at.clone();
             continue;
         }
-        if event.event_type == "run.reconciled" && event.event_version == 1 {
-            let payload = parse_reconciliation_payload(&event.payload)?;
-            if payload.transition.previous != Some(aggregate.machine.state())
-                || aggregate.machine.state() != RunState::WaitingForReconciliation
-            {
-                return Err(RunAggregateError::StateMismatch);
+        if event.event_type == "run.reconciled" {
+            match event.event_version {
+                1 => replay_legacy_reconciliation(&mut aggregate, event)?,
+                2 => replay_cancellation_reconciliation(&mut aggregate, event)?,
+                version => {
+                    return Err(RunAggregateError::UnknownEventVersion {
+                        event_type: event.event_type.clone(),
+                        version,
+                    });
+                }
             }
-            transition_machine(&mut aggregate.machine, payload.transition.current)?;
-            aggregate.last_aggregate_sequence = event.aggregate_sequence;
-            aggregate.updated_at = event.created_at.clone();
             continue;
         }
         if event.event_type == "run.cancellation_requested" && event.event_version == 1 {
+            if aggregate.cancellation_state != RunCancellationState::None {
+                return Err(RunAggregateError::CancellationSettlementRequired);
+            }
             let payload = parse_cancellation_requested_payload(&event.payload)?;
+            if aggregate.cancellation_cycle_count >= MAX_RUN_CANCELLATION_CYCLES {
+                return Err(RunAggregateError::CancellationCycleLimitReached(
+                    MAX_RUN_CANCELLATION_CYCLES,
+                ));
+            }
             if payload.transition.previous != Some(aggregate.machine.state())
                 || payload.transition.current != RunState::WaitingForReconciliation
             {
                 return Err(RunAggregateError::StateMismatch);
             }
             transition_machine(&mut aggregate.machine, RunState::WaitingForReconciliation)?;
+            aggregate.legacy_cancellation_requested = true;
+            aggregate.cancellation_cycle_count += 1;
             aggregate.last_aggregate_sequence = event.aggregate_sequence;
             aggregate.updated_at = event.created_at.clone();
             continue;
@@ -508,6 +1148,11 @@ fn replay(
             });
         }
         let target = state_for_event(&event.event_type)?;
+        if target == RunState::Cancelled
+            && aggregate.cancellation_state != RunCancellationState::None
+        {
+            return Err(RunAggregateError::CancellationSettlementRequired);
+        }
         let payload = parse_payload(&event.payload)?;
         if payload.previous != Some(aggregate.machine.state()) || payload.current != target {
             return Err(RunAggregateError::StateMismatch);
@@ -541,8 +1186,659 @@ struct ReconciliationPayload {
     duplicate_execution_acknowledged: bool,
 }
 
+struct CancellationReconciliationPayload {
+    transition: TransitionPayload,
+    reconciliation_idempotency_key: String,
+    attempt_id: String,
+    decision: RunReconciliationDecision,
+    duplicate_execution_acknowledged: bool,
+    intent_id: String,
+    unknown_effects_sha256: String,
+    cancellation_disposition: RunCancellationDisposition,
+}
+
 struct CancellationRequestedPayload {
     transition: TransitionPayload,
+}
+
+struct CancellationIntentPayload {
+    previous_cancellation_state: RunCancellationState,
+    current_cancellation_state: RunCancellationState,
+    run_state: RunState,
+    intent: RunCancellationIntent,
+}
+
+#[derive(Clone, Copy)]
+enum CancellationSettlementKind {
+    CancelledSafe,
+    ReconciliationRequired,
+}
+
+impl CancellationSettlementKind {
+    const fn event_type(self) -> &'static str {
+        match self {
+            Self::CancelledSafe => "run.cancelled_safe",
+            Self::ReconciliationRequired => "run.cancellation_reconciliation_required",
+        }
+    }
+
+    const fn target_cancellation_state(self) -> RunCancellationState {
+        match self {
+            Self::CancelledSafe => RunCancellationState::CancelledSafe,
+            Self::ReconciliationRequired => RunCancellationState::ReconciliationRequired,
+        }
+    }
+
+    const fn target_run_state(self) -> RunState {
+        match self {
+            Self::CancelledSafe => RunState::Cancelled,
+            Self::ReconciliationRequired => RunState::WaitingForReconciliation,
+        }
+    }
+
+    const fn evidence_field(self) -> &'static str {
+        match self {
+            Self::CancelledSafe => "evidenceManifestSha256",
+            Self::ReconciliationRequired => "unknownEffectsSha256",
+        }
+    }
+}
+
+struct CancellationSettlementPayload {
+    previous_cancellation_state: RunCancellationState,
+    current_cancellation_state: RunCancellationState,
+    transition: TransitionPayload,
+    intent_id: String,
+    evidence_sha256: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunCancellationIntentHashMaterial<'a> {
+    scheme: &'static str,
+    workspace_id: &'a str,
+    run_id: &'a str,
+    cancel_idempotency_key: &'a str,
+    reason_sha256: &'a str,
+}
+
+pub fn derive_run_cancellation_intent_id(
+    workspace_id: &str,
+    run_id: &str,
+    cancel_idempotency_key: &str,
+    reason: &str,
+) -> Result<String, RunAggregateError> {
+    require_bounded_text(workspace_id, MAX_CANCELLATION_ID_BYTES)?;
+    require_bounded_text(run_id, MAX_CANCELLATION_ID_BYTES)?;
+    require_bounded_text(cancel_idempotency_key, MAX_CANCEL_IDEMPOTENCY_KEY_BYTES)?;
+    require_bounded_text(reason, MAX_CANCELLATION_REASON_BYTES)?;
+    let reason_sha256 = hash_text(reason);
+    let material = RunCancellationIntentHashMaterial {
+        scheme: "run-cancel-intent/v1",
+        workspace_id,
+        run_id,
+        cancel_idempotency_key,
+        reason_sha256: &reason_sha256,
+    };
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&material).map_err(|_| RunAggregateError::InvalidPayload)?
+        )
+    ))
+}
+
+fn build_cancellation_intent(
+    workspace_id: &str,
+    run_id: &str,
+    cancel_idempotency_key: &str,
+    reason: &str,
+    command_message_id: &str,
+    requested_at: &str,
+) -> Result<RunCancellationIntent, RunAggregateError> {
+    require_bounded_text(command_message_id, MAX_CANCELLATION_ID_BYTES)?;
+    require_bounded_text(requested_at, MAX_CANCELLATION_REQUESTED_AT_BYTES)?;
+    validate_rfc3339(requested_at)?;
+    let reason_sha256 = hash_text(reason);
+    Ok(RunCancellationIntent {
+        intent_id: derive_run_cancellation_intent_id(
+            workspace_id,
+            run_id,
+            cancel_idempotency_key,
+            reason,
+        )?,
+        run_id: run_id.to_owned(),
+        workspace_id: workspace_id.to_owned(),
+        cancel_idempotency_key: cancel_idempotency_key.to_owned(),
+        reason: reason.to_owned(),
+        reason_sha256,
+        requested_at: requested_at.to_owned(),
+        command_message_id: command_message_id.to_owned(),
+    })
+}
+
+fn require_text(value: &str) -> Result<(), RunAggregateError> {
+    if value.trim().is_empty() {
+        Err(RunAggregateError::InvalidPayload)
+    } else {
+        Ok(())
+    }
+}
+
+fn require_bounded_text(value: &str, max_bytes: usize) -> Result<(), RunAggregateError> {
+    require_text(value)?;
+    if value.len() > max_bytes {
+        Err(RunAggregateError::InvalidPayload)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_cancellation_intent_fields(
+    intent: &RunCancellationIntent,
+) -> Result<(), RunAggregateError> {
+    require_bounded_text(&intent.workspace_id, MAX_CANCELLATION_ID_BYTES)?;
+    require_bounded_text(&intent.run_id, MAX_CANCELLATION_ID_BYTES)?;
+    require_bounded_text(
+        &intent.cancel_idempotency_key,
+        MAX_CANCEL_IDEMPOTENCY_KEY_BYTES,
+    )?;
+    require_bounded_text(&intent.reason, MAX_CANCELLATION_REASON_BYTES)?;
+    require_bounded_text(&intent.command_message_id, MAX_CANCELLATION_ID_BYTES)?;
+    require_bounded_text(&intent.requested_at, MAX_CANCELLATION_REQUESTED_AT_BYTES)?;
+    validate_rfc3339(&intent.requested_at)?;
+    require_sha256(&intent.intent_id)?;
+    require_sha256(&intent.reason_sha256)
+}
+
+fn validate_rfc3339(value: &str) -> Result<(), RunAggregateError> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map(|_| ())
+        .map_err(|_| RunAggregateError::InvalidPayload)
+}
+
+fn cancellation_intents_match(
+    existing: &RunCancellationIntent,
+    requested: &RunCancellationIntent,
+) -> bool {
+    existing.intent_id == requested.intent_id
+        && existing.run_id == requested.run_id
+        && existing.workspace_id == requested.workspace_id
+        && existing.cancel_idempotency_key == requested.cancel_idempotency_key
+        && existing.reason == requested.reason
+        && existing.reason_sha256 == requested.reason_sha256
+}
+
+fn require_cancellation_intent_run_state(state: RunState) -> Result<(), RunAggregateError> {
+    if matches!(state, RunState::Running | RunState::Retrying) {
+        Ok(())
+    } else {
+        Err(RunAggregateError::CancellationRunStateInvalid(state))
+    }
+}
+
+fn is_event_concurrency_conflict(error: &EventJournalError) -> bool {
+    matches!(
+        error,
+        EventJournalError::MessageIdConflict { .. }
+            | EventJournalError::IdempotencyConflict { .. }
+            | EventJournalError::RunSequenceConflict { .. }
+            | EventJournalError::AggregateSequenceConflict { .. }
+    )
+}
+
+fn reconciliation_record_is_well_formed(record: &RunReconciliationRecord) -> bool {
+    match record.event_version {
+        1 => {
+            record.intent_id.is_none()
+                && record.unknown_effects_sha256.is_none()
+                && record.cancellation_disposition.is_none()
+        }
+        2 => {
+            record.intent_id.as_deref().is_some_and(is_lowercase_sha256)
+                && record
+                    .unknown_effects_sha256
+                    .as_deref()
+                    .is_some_and(is_lowercase_sha256)
+                && record.cancellation_disposition
+                    == Some(cancellation_disposition(record.decision))
+        }
+        _ => false,
+    }
+}
+
+fn hash_text(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn require_sha256(value: &str) -> Result<(), RunAggregateError> {
+    if is_lowercase_sha256(value) {
+        Ok(())
+    } else {
+        Err(RunAggregateError::InvalidPayload)
+    }
+}
+
+fn required_text_field(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<String, RunAggregateError> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or(RunAggregateError::InvalidPayload)?;
+    require_text(value)?;
+    Ok(value.to_owned())
+}
+
+fn required_sha256_field(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<String, RunAggregateError> {
+    let value = required_text_field(object, field)?;
+    require_sha256(&value)?;
+    Ok(value)
+}
+
+fn cancellation_state_name(state: RunCancellationState) -> &'static str {
+    match state {
+        RunCancellationState::None => "none",
+        RunCancellationState::IntentRecorded => "intent_recorded",
+        RunCancellationState::CancelledSafe => "cancelled_safe",
+        RunCancellationState::ReconciliationRequired => "reconciliation_required",
+        RunCancellationState::AbandonedAfterUnknown => "abandoned_after_unknown",
+        RunCancellationState::WithdrawnForRetry => "withdrawn_for_retry",
+    }
+}
+
+fn parse_cancellation_state(value: &str) -> Result<RunCancellationState, RunAggregateError> {
+    match value {
+        "none" => Ok(RunCancellationState::None),
+        "intent_recorded" => Ok(RunCancellationState::IntentRecorded),
+        "cancelled_safe" => Ok(RunCancellationState::CancelledSafe),
+        "reconciliation_required" => Ok(RunCancellationState::ReconciliationRequired),
+        "abandoned_after_unknown" => Ok(RunCancellationState::AbandonedAfterUnknown),
+        "withdrawn_for_retry" => Ok(RunCancellationState::WithdrawnForRetry),
+        _ => Err(RunAggregateError::InvalidPayload),
+    }
+}
+
+fn parse_cancellation_state_field(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<RunCancellationState, RunAggregateError> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or(RunAggregateError::InvalidPayload)
+        .and_then(parse_cancellation_state)
+}
+
+const fn cancellation_state_after_reconciliation(
+    decision: RunReconciliationDecision,
+) -> RunCancellationState {
+    match decision {
+        RunReconciliationDecision::CancelRun => RunCancellationState::AbandonedAfterUnknown,
+        RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate => {
+            RunCancellationState::WithdrawnForRetry
+        }
+    }
+}
+
+fn reconciliation_target(
+    decision: RunReconciliationDecision,
+    duplicate_execution_acknowledged: bool,
+) -> Result<RunState, RunAggregateError> {
+    match decision {
+        RunReconciliationDecision::CancelRun if !duplicate_execution_acknowledged => {
+            Ok(RunState::Cancelled)
+        }
+        RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate
+            if duplicate_execution_acknowledged =>
+        {
+            Ok(RunState::Retrying)
+        }
+        _ => Err(RunAggregateError::InvalidPayload),
+    }
+}
+
+const fn cancellation_disposition(
+    decision: RunReconciliationDecision,
+) -> RunCancellationDisposition {
+    match decision {
+        RunReconciliationDecision::CancelRun => RunCancellationDisposition::AbandonedAfterUnknown,
+        RunReconciliationDecision::RetryAsNewAttemptAcknowledgingDuplicate => {
+            RunCancellationDisposition::WithdrawnForRetry
+        }
+    }
+}
+
+const fn cancellation_disposition_name(disposition: RunCancellationDisposition) -> &'static str {
+    match disposition {
+        RunCancellationDisposition::AbandonedAfterUnknown => "abandoned_after_unknown",
+        RunCancellationDisposition::WithdrawnForRetry => "withdrawn_for_retry",
+    }
+}
+
+fn parse_cancellation_disposition(
+    value: &str,
+) -> Result<RunCancellationDisposition, RunAggregateError> {
+    match value {
+        "abandoned_after_unknown" => Ok(RunCancellationDisposition::AbandonedAfterUnknown),
+        "withdrawn_for_retry" => Ok(RunCancellationDisposition::WithdrawnForRetry),
+        _ => Err(RunAggregateError::InvalidPayload),
+    }
+}
+
+fn cancellation_intent_event_idempotency_key(run_id: &str, intent_id: &str) -> String {
+    format!("run:{run_id}:cancel-intent:{intent_id}")
+}
+
+fn cancellation_settlement_event_idempotency_key(
+    run_id: &str,
+    intent_id: &str,
+    evidence_sha256: &str,
+    kind: CancellationSettlementKind,
+) -> String {
+    match kind {
+        CancellationSettlementKind::CancelledSafe => {
+            format!("run:{run_id}:cancel-safe:{intent_id}:{evidence_sha256}")
+        }
+        CancellationSettlementKind::ReconciliationRequired => {
+            format!("run:{run_id}:cancel-reconciliation:{intent_id}:{evidence_sha256}")
+        }
+    }
+}
+
+fn cancellation_reconciliation_event_idempotency_key(
+    run_id: &str,
+    intent_id: &str,
+    attempt_id: &str,
+    unknown_effects_sha256: &str,
+    disposition: RunCancellationDisposition,
+) -> String {
+    format!(
+        "run:{run_id}:cancel-reconciled:{intent_id}:{attempt_id}:{}:{unknown_effects_sha256}",
+        cancellation_disposition_name(disposition)
+    )
+}
+
+fn replay_cancellation_intent_recorded(
+    aggregate: &mut RunAggregate,
+    event: &RuntimeEvent,
+) -> Result<(), RunAggregateError> {
+    if event.event_version != 1 {
+        return Err(RunAggregateError::UnknownEventVersion {
+            event_type: event.event_type.clone(),
+            version: event.event_version,
+        });
+    }
+    let payload = parse_cancellation_intent_payload(&event.payload)?;
+    if aggregate.legacy_cancellation_requested {
+        return Err(RunAggregateError::CancellationSettlementRequired);
+    }
+    require_cancellation_intent_run_state(payload.run_state)?;
+    if aggregate.cancellation_cycle_count >= MAX_RUN_CANCELLATION_CYCLES {
+        return Err(RunAggregateError::CancellationCycleLimitReached(
+            MAX_RUN_CANCELLATION_CYCLES,
+        ));
+    }
+    let may_start_cycle = matches!(
+        aggregate.cancellation_state,
+        RunCancellationState::None | RunCancellationState::WithdrawnForRetry
+    );
+    if payload.previous_cancellation_state != aggregate.cancellation_state
+        || payload.current_cancellation_state != RunCancellationState::IntentRecorded
+        || !may_start_cycle
+        || (aggregate.cancellation_state == RunCancellationState::None
+            && aggregate.cancellation_intent.is_some())
+        || (aggregate.cancellation_state == RunCancellationState::WithdrawnForRetry
+            && aggregate.cancellation_intent.is_none())
+        || aggregate.machine.state().is_terminal()
+        || payload.run_state != aggregate.machine.state()
+        || payload.intent.run_id != aggregate.run_id
+        || payload.intent.workspace_id != aggregate.pinned_identity.workspace_id
+        || event.message_id != payload.intent.command_message_id
+        || event.created_at != payload.intent.requested_at
+        || event.idempotency_key
+            != cancellation_intent_event_idempotency_key(
+                &aggregate.run_id,
+                &payload.intent.intent_id,
+            )
+    {
+        return Err(RunAggregateError::CancellationStateMismatch);
+    }
+    let derived = derive_run_cancellation_intent_id(
+        &payload.intent.workspace_id,
+        &payload.intent.run_id,
+        &payload.intent.cancel_idempotency_key,
+        &payload.intent.reason,
+    )?;
+    if derived != payload.intent.intent_id
+        || hash_text(&payload.intent.reason) != payload.intent.reason_sha256
+        || aggregate.cancellation_intent_history.iter().any(|intent| {
+            intent.intent_id == payload.intent.intent_id
+                || intent.cancel_idempotency_key == payload.intent.cancel_idempotency_key
+        })
+    {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    aggregate.cancellation_state = RunCancellationState::IntentRecorded;
+    aggregate.cancellation_intent = Some(payload.intent.clone());
+    aggregate.cancellation_intent_history.push(payload.intent);
+    aggregate.cancellation_cycle_count += 1;
+    aggregate.cancellation_evidence_sha256 = None;
+    aggregate.last_aggregate_sequence = event.aggregate_sequence;
+    aggregate.updated_at = event.created_at.clone();
+    Ok(())
+}
+
+fn replay_cancellation_settlement(
+    aggregate: &mut RunAggregate,
+    event: &RuntimeEvent,
+    kind: CancellationSettlementKind,
+) -> Result<(), RunAggregateError> {
+    if event.event_type != kind.event_type() || event.event_version != 1 {
+        return Err(RunAggregateError::UnknownEventVersion {
+            event_type: event.event_type.clone(),
+            version: event.event_version,
+        });
+    }
+    let payload = parse_cancellation_settlement_payload(&event.payload, kind)?;
+    let intent = aggregate
+        .cancellation_intent
+        .as_ref()
+        .ok_or(RunAggregateError::CancellationIntentRequired)?;
+    if aggregate.cancellation_state != RunCancellationState::IntentRecorded
+        || payload.previous_cancellation_state != RunCancellationState::IntentRecorded
+        || payload.current_cancellation_state != kind.target_cancellation_state()
+        || payload.intent_id != intent.intent_id
+        || payload.transition.previous != Some(aggregate.machine.state())
+        || payload.transition.current != kind.target_run_state()
+        || event.idempotency_key
+            != cancellation_settlement_event_idempotency_key(
+                &aggregate.run_id,
+                &payload.intent_id,
+                &payload.evidence_sha256,
+                kind,
+            )
+    {
+        return Err(RunAggregateError::CancellationStateMismatch);
+    }
+    if kind.target_run_state() != aggregate.machine.state() {
+        transition_machine(&mut aggregate.machine, kind.target_run_state())?;
+    } else if matches!(kind, CancellationSettlementKind::CancelledSafe) {
+        return Err(RunAggregateError::StateMismatch);
+    }
+    aggregate.cancellation_state = kind.target_cancellation_state();
+    aggregate
+        .cancellation_settlement_history
+        .push(RunCancellationSettlementRecord {
+            intent_id: payload.intent_id,
+            state: kind.target_cancellation_state(),
+            evidence_sha256: payload.evidence_sha256.clone(),
+        });
+    aggregate.cancellation_evidence_sha256 = Some(payload.evidence_sha256);
+    aggregate.last_aggregate_sequence = event.aggregate_sequence;
+    aggregate.updated_at = event.created_at.clone();
+    Ok(())
+}
+
+fn replay_legacy_reconciliation(
+    aggregate: &mut RunAggregate,
+    event: &RuntimeEvent,
+) -> Result<(), RunAggregateError> {
+    if aggregate.cancellation_state != RunCancellationState::None
+        || aggregate.machine.state() != RunState::WaitingForReconciliation
+    {
+        return Err(RunAggregateError::CancellationStateMismatch);
+    }
+    let payload = parse_reconciliation_payload(&event.payload)?;
+    if payload.transition.previous != Some(aggregate.machine.state())
+        || aggregate.reconciliation_history.iter().any(|record| {
+            record.reconciliation_idempotency_key == event.idempotency_key
+                || record.attempt_id == payload.attempt_id
+        })
+    {
+        return Err(RunAggregateError::StateMismatch);
+    }
+    transition_machine(&mut aggregate.machine, payload.transition.current)?;
+    aggregate
+        .reconciliation_history
+        .push(RunReconciliationRecord {
+            event_version: 1,
+            reconciliation_idempotency_key: event.idempotency_key.clone(),
+            attempt_id: payload.attempt_id,
+            decision: payload.decision,
+            duplicate_execution_acknowledged: payload.duplicate_execution_acknowledged,
+            intent_id: None,
+            unknown_effects_sha256: None,
+            cancellation_disposition: None,
+        });
+    aggregate.legacy_cancellation_requested = false;
+    aggregate.last_aggregate_sequence = event.aggregate_sequence;
+    aggregate.updated_at = event.created_at.clone();
+    Ok(())
+}
+
+fn replay_cancellation_reconciliation(
+    aggregate: &mut RunAggregate,
+    event: &RuntimeEvent,
+) -> Result<(), RunAggregateError> {
+    if aggregate.legacy_cancellation_requested
+        || aggregate.cancellation_state != RunCancellationState::ReconciliationRequired
+        || aggregate.machine.state() != RunState::WaitingForReconciliation
+    {
+        return Err(RunAggregateError::CancellationStateMismatch);
+    }
+    let payload = parse_cancellation_reconciliation_payload(&event.payload)?;
+    let intent = aggregate
+        .cancellation_intent
+        .as_ref()
+        .ok_or(RunAggregateError::CancellationIntentRequired)?;
+    let settlement = aggregate
+        .cancellation_settlement_history
+        .iter()
+        .find(|settlement| settlement.intent_id == intent.intent_id)
+        .ok_or(RunAggregateError::CancellationStateMismatch)?;
+    if payload.transition.previous != Some(aggregate.machine.state())
+        || payload.intent_id != intent.intent_id
+        || settlement.state != RunCancellationState::ReconciliationRequired
+        || payload.unknown_effects_sha256 != settlement.evidence_sha256
+        || aggregate.cancellation_evidence_sha256.as_deref()
+            != Some(payload.unknown_effects_sha256.as_str())
+        || payload.cancellation_disposition != cancellation_disposition(payload.decision)
+        || event.idempotency_key
+            != cancellation_reconciliation_event_idempotency_key(
+                &aggregate.run_id,
+                &payload.intent_id,
+                &payload.attempt_id,
+                &payload.unknown_effects_sha256,
+                payload.cancellation_disposition,
+            )
+        || aggregate.reconciliation_history.iter().any(|record| {
+            record.reconciliation_idempotency_key == payload.reconciliation_idempotency_key
+                || record.attempt_id == payload.attempt_id
+        })
+    {
+        return Err(RunAggregateError::CancellationStateMismatch);
+    }
+    transition_machine(&mut aggregate.machine, payload.transition.current)?;
+    aggregate.cancellation_state = cancellation_state_after_reconciliation(payload.decision);
+    aggregate
+        .reconciliation_history
+        .push(RunReconciliationRecord {
+            event_version: 2,
+            reconciliation_idempotency_key: payload.reconciliation_idempotency_key,
+            attempt_id: payload.attempt_id,
+            decision: payload.decision,
+            duplicate_execution_acknowledged: payload.duplicate_execution_acknowledged,
+            intent_id: Some(payload.intent_id),
+            unknown_effects_sha256: Some(payload.unknown_effects_sha256),
+            cancellation_disposition: Some(payload.cancellation_disposition),
+        });
+    aggregate.last_aggregate_sequence = event.aggregate_sequence;
+    aggregate.updated_at = event.created_at.clone();
+    Ok(())
+}
+
+fn parse_cancellation_intent_payload(
+    value: &Value,
+) -> Result<CancellationIntentPayload, RunAggregateError> {
+    let object = value.as_object().ok_or(RunAggregateError::InvalidPayload)?;
+    if object.len() != 11 {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    let previous_cancellation_state =
+        parse_cancellation_state_field(object, "previousCancellationState")?;
+    let current_cancellation_state =
+        parse_cancellation_state_field(object, "currentCancellationState")?;
+    let run_state = object
+        .get("runState")
+        .and_then(Value::as_str)
+        .ok_or(RunAggregateError::InvalidPayload)
+        .and_then(parse_state)?;
+    let intent = RunCancellationIntent {
+        intent_id: required_text_field(object, "intentId")?,
+        run_id: required_text_field(object, "runId")?,
+        workspace_id: required_text_field(object, "workspaceId")?,
+        cancel_idempotency_key: required_text_field(object, "cancelIdempotencyKey")?,
+        reason: required_text_field(object, "reason")?,
+        reason_sha256: required_sha256_field(object, "reasonSha256")?,
+        requested_at: required_text_field(object, "requestedAt")?,
+        command_message_id: required_text_field(object, "commandMessageId")?,
+    };
+    validate_cancellation_intent_fields(&intent)?;
+    Ok(CancellationIntentPayload {
+        previous_cancellation_state,
+        current_cancellation_state,
+        run_state,
+        intent,
+    })
+}
+
+fn parse_cancellation_settlement_payload(
+    value: &Value,
+    kind: CancellationSettlementKind,
+) -> Result<CancellationSettlementPayload, RunAggregateError> {
+    let object = value.as_object().ok_or(RunAggregateError::InvalidPayload)?;
+    if object.len() != 7 {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    let previous_cancellation_state =
+        parse_cancellation_state_field(object, "previousCancellationState")?;
+    let current_cancellation_state =
+        parse_cancellation_state_field(object, "currentCancellationState")?;
+    let transition = parse_transition_fields(object)?;
+    let intent_id = required_sha256_field(object, "intentId")?;
+    let evidence_sha256 = required_sha256_field(object, kind.evidence_field())?;
+    Ok(CancellationSettlementPayload {
+        previous_cancellation_state,
+        current_cancellation_state,
+        transition,
+        intent_id,
+        evidence_sha256,
+    })
 }
 
 fn parse_cancellation_requested_payload(
@@ -617,6 +1913,56 @@ fn parse_reconciliation_payload(value: &Value) -> Result<ReconciliationPayload, 
         attempt_id,
         decision,
         duplicate_execution_acknowledged,
+    })
+}
+
+fn parse_cancellation_reconciliation_payload(
+    value: &Value,
+) -> Result<CancellationReconciliationPayload, RunAggregateError> {
+    let object = value.as_object().ok_or(RunAggregateError::InvalidPayload)?;
+    if object.len() != 10 {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    let transition = parse_transition_fields(object)?;
+    let reconciliation_idempotency_key =
+        required_text_field(object, "reconciliationIdempotencyKey")?;
+    let attempt_id = required_text_field(object, "attemptId")?;
+    require_bounded_text(
+        &reconciliation_idempotency_key,
+        MAX_CANCEL_IDEMPOTENCY_KEY_BYTES,
+    )?;
+    require_bounded_text(&attempt_id, MAX_CANCELLATION_ID_BYTES)?;
+    let decision = serde_json::from_value(
+        object
+            .get("decision")
+            .cloned()
+            .ok_or(RunAggregateError::InvalidPayload)?,
+    )
+    .map_err(|_| RunAggregateError::InvalidPayload)?;
+    let duplicate_execution_acknowledged = object
+        .get("duplicateExecutionAcknowledged")
+        .and_then(Value::as_bool)
+        .ok_or(RunAggregateError::InvalidPayload)?;
+    let expected = reconciliation_target(decision, duplicate_execution_acknowledged)?;
+    if transition.current != expected {
+        return Err(RunAggregateError::InvalidPayload);
+    }
+    let intent_id = required_sha256_field(object, "intentId")?;
+    let unknown_effects_sha256 = required_sha256_field(object, "unknownEffectsSha256")?;
+    let cancellation_disposition = object
+        .get("cancellationDisposition")
+        .and_then(Value::as_str)
+        .ok_or(RunAggregateError::InvalidPayload)
+        .and_then(parse_cancellation_disposition)?;
+    Ok(CancellationReconciliationPayload {
+        transition,
+        reconciliation_idempotency_key,
+        attempt_id,
+        decision,
+        duplicate_execution_acknowledged,
+        intent_id,
+        unknown_effects_sha256,
+        cancellation_disposition,
     })
 }
 
@@ -733,6 +2079,95 @@ fn transition_event(
     }
 }
 
+fn cancellation_intent_recorded_event(
+    intent: &RunCancellationIntent,
+    run_state: RunState,
+    previous_cancellation_state: RunCancellationState,
+    idempotency_key: String,
+) -> NewRuntimeEvent {
+    NewRuntimeEvent {
+        run_id: intent.run_id.clone(),
+        aggregate_type: "run".to_owned(),
+        aggregate_id: intent.run_id.clone(),
+        message_id: intent.command_message_id.clone(),
+        idempotency_key,
+        event_type: "run.cancellation_intent_recorded".to_owned(),
+        event_version: 1,
+        payload: json!({
+            "previousCancellationState": cancellation_state_name(previous_cancellation_state),
+            "currentCancellationState": "intent_recorded",
+            "runState": state_name(run_state),
+            "intentId": intent.intent_id,
+            "runId": intent.run_id,
+            "workspaceId": intent.workspace_id,
+            "cancelIdempotencyKey": intent.cancel_idempotency_key,
+            "reason": intent.reason,
+            "reasonSha256": intent.reason_sha256,
+            "requestedAt": intent.requested_at,
+            "commandMessageId": intent.command_message_id,
+        }),
+        created_at: intent.requested_at.clone(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cancellation_settlement_event(
+    run_id: &str,
+    intent_id: &str,
+    evidence_sha256: &str,
+    metadata: EventMetadata<'_>,
+    previous_run_state: RunState,
+    current_run_state: RunState,
+    previous_cancellation_state: RunCancellationState,
+    current_cancellation_state: RunCancellationState,
+    kind: CancellationSettlementKind,
+) -> NewRuntimeEvent {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "previousCancellationState".to_owned(),
+        Value::String(cancellation_state_name(previous_cancellation_state).to_owned()),
+    );
+    payload.insert(
+        "currentCancellationState".to_owned(),
+        Value::String(cancellation_state_name(current_cancellation_state).to_owned()),
+    );
+    payload.insert(
+        "previousState".to_owned(),
+        Value::String(state_name(previous_run_state).to_owned()),
+    );
+    payload.insert(
+        "currentState".to_owned(),
+        Value::String(state_name(current_run_state).to_owned()),
+    );
+    payload.insert(
+        "reason".to_owned(),
+        metadata
+            .reason
+            .map_or(Value::Null, |value| Value::String(value.to_owned())),
+    );
+    payload.insert("intentId".to_owned(), Value::String(intent_id.to_owned()));
+    payload.insert(
+        kind.evidence_field().to_owned(),
+        Value::String(evidence_sha256.to_owned()),
+    );
+    NewRuntimeEvent {
+        run_id: run_id.to_owned(),
+        aggregate_type: "run".to_owned(),
+        aggregate_id: run_id.to_owned(),
+        message_id: metadata.message_id.to_owned(),
+        idempotency_key: cancellation_settlement_event_idempotency_key(
+            run_id,
+            intent_id,
+            evidence_sha256,
+            kind,
+        ),
+        event_type: kind.event_type().to_owned(),
+        event_version: 1,
+        payload: Value::Object(payload),
+        created_at: metadata.created_at.to_owned(),
+    }
+}
+
 fn cancellation_requested_event(
     run_id: &str,
     attempt_ids: &[String],
@@ -778,6 +2213,49 @@ fn reconciliation_event(
         event_version: 1,
         payload: json!({ "previousState": state_name(previous), "currentState": state_name(current), "reason": metadata.reason,
             "attemptId": attempt_id, "decision": decision, "duplicateExecutionAcknowledged": duplicate_execution_acknowledged }),
+        created_at: metadata.created_at.to_owned(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cancellation_reconciliation_event_v2(
+    run_id: &str,
+    attempt_id: &str,
+    decision: RunReconciliationDecision,
+    duplicate_execution_acknowledged: bool,
+    intent_id: &str,
+    unknown_effects_sha256: &str,
+    disposition: RunCancellationDisposition,
+    metadata: EventMetadata<'_>,
+    previous: RunState,
+    current: RunState,
+) -> NewRuntimeEvent {
+    NewRuntimeEvent {
+        run_id: run_id.to_owned(),
+        aggregate_type: "run".to_owned(),
+        aggregate_id: run_id.to_owned(),
+        message_id: metadata.message_id.to_owned(),
+        idempotency_key: cancellation_reconciliation_event_idempotency_key(
+            run_id,
+            intent_id,
+            attempt_id,
+            unknown_effects_sha256,
+            disposition,
+        ),
+        event_type: "run.reconciled".to_owned(),
+        event_version: 2,
+        payload: json!({
+            "previousState": state_name(previous),
+            "currentState": state_name(current),
+            "reason": metadata.reason,
+            "reconciliationIdempotencyKey": metadata.idempotency_key,
+            "attemptId": attempt_id,
+            "decision": decision,
+            "duplicateExecutionAcknowledged": duplicate_execution_acknowledged,
+            "intentId": intent_id,
+            "unknownEffectsSha256": unknown_effects_sha256,
+            "cancellationDisposition": cancellation_disposition_name(disposition),
+        }),
         created_at: metadata.created_at.to_owned(),
     }
 }
