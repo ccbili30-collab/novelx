@@ -112,10 +112,125 @@ pub struct OperationalRecoveryOperation {
     pub disposition: Option<OperationalRecoveryDisposition>,
     pub claim: Option<OperationalRecoveryClaim>,
     pub execution: Option<OperationalRecoveryExecution>,
+    pub interruptions: Vec<OperationalRecoveryExecutionInterruption>,
     pub resumes: Vec<OperationalRecoveryResume>,
     pub provider_dispatch_resumes: Vec<ProviderDispatchResumeAuthorization>,
     pub outcome: Option<OperationalRecoveryOutcome>,
     pub stale: Option<OperationalRecoveryStale>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationalRecoveryInterruptionCause {
+    RuntimeShutdown,
+    HostDisconnected,
+    RunCancel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationalRecoveryExecutionInterruption {
+    pub interruption_id: String,
+    pub workspace_id: String,
+    pub run_id: String,
+    pub operation_id: String,
+    pub execution_id: String,
+    pub claim_id: String,
+    pub owner_instance_id: String,
+    pub fencing_token: u64,
+    pub source_fingerprint: String,
+    pub action_spec_sha256: String,
+    pub attempt_id: String,
+    pub attempt_aggregate_sequence: u64,
+    pub attempt_definition_sha256: String,
+    pub attempt_evidence_sha256: String,
+    pub cause: OperationalRecoveryInterruptionCause,
+    pub transport_boundary_crossed: bool,
+    pub resumable: bool,
+    pub recorder_instance_id: String,
+    pub lease_epoch: String,
+    pub interrupted_at: String,
+}
+
+impl OperationalRecoveryExecutionInterruption {
+    #[allow(clippy::too_many_arguments)]
+    pub fn derive(
+        workspace_id: String,
+        run_id: String,
+        operation_id: String,
+        execution: &OperationalRecoveryExecution,
+        attempt_id: String,
+        attempt_aggregate_sequence: u64,
+        attempt_definition_sha256: String,
+        attempt_evidence_sha256: String,
+        cause: OperationalRecoveryInterruptionCause,
+        transport_boundary_crossed: bool,
+        resumable: bool,
+        recorder_instance_id: String,
+        lease_epoch: String,
+        interrupted_at: String,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        validate_execution(execution)?;
+        require_text("workspace_id", &workspace_id)?;
+        require_text("run_id", &run_id)?;
+        require_sha256("operation_id", &operation_id)?;
+        require_text("attempt_id", &attempt_id)?;
+        if attempt_aggregate_sequence == 0 {
+            return Err(OperationalRecoveryAggregateError::InterruptionEvidenceInvalid);
+        }
+        require_sha256("attempt_definition_sha256", &attempt_definition_sha256)?;
+        require_sha256("attempt_evidence_sha256", &attempt_evidence_sha256)?;
+        require_text("recorder_instance_id", &recorder_instance_id)?;
+        require_text("lease_epoch", &lease_epoch)?;
+        parse_time("interrupted_at", &interrupted_at)?;
+        if transport_boundary_crossed
+            || resumable != !matches!(cause, OperationalRecoveryInterruptionCause::RunCancel)
+        {
+            return Err(OperationalRecoveryAggregateError::InterruptionSemanticsInvalid);
+        }
+        let interruption_id = canonical_sha256(&serde_json::json!({
+            "workspaceId": workspace_id,
+            "runId": run_id,
+            "operationId": operation_id,
+            "executionId": execution.execution_id,
+            "claimId": execution.claim_id,
+            "ownerInstanceId": execution.owner_instance_id,
+            "fencingToken": execution.fencing_token,
+            "sourceFingerprint": execution.source_fingerprint,
+            "actionSpecSha256": execution.action_spec_sha256,
+            "attemptId": attempt_id,
+            "attemptAggregateSequence": attempt_aggregate_sequence,
+            "attemptDefinitionSha256": attempt_definition_sha256,
+            "attemptEvidenceSha256": attempt_evidence_sha256,
+            "cause": cause,
+            "transportBoundaryCrossed": transport_boundary_crossed,
+            "resumable": resumable,
+            "recorderInstanceId": recorder_instance_id,
+            "leaseEpoch": lease_epoch,
+        }))?;
+        Ok(Self {
+            interruption_id,
+            workspace_id,
+            run_id,
+            operation_id,
+            execution_id: execution.execution_id.clone(),
+            claim_id: execution.claim_id.clone(),
+            owner_instance_id: execution.owner_instance_id.clone(),
+            fencing_token: execution.fencing_token,
+            source_fingerprint: execution.source_fingerprint.clone(),
+            action_spec_sha256: execution.action_spec_sha256.clone(),
+            attempt_id,
+            attempt_aggregate_sequence,
+            attempt_definition_sha256,
+            attempt_evidence_sha256,
+            cause,
+            transport_boundary_crossed,
+            resumable,
+            recorder_instance_id,
+            lease_epoch,
+            interrupted_at,
+        })
+    }
 }
 
 impl OperationalRecoveryOperation {
@@ -624,6 +739,10 @@ enum RecoveryEventData {
         operation_id: String,
         execution: OperationalRecoveryExecution,
     },
+    ExecutionInterrupted {
+        operation_id: String,
+        interruption: OperationalRecoveryExecutionInterruption,
+    },
     ExecutionResumeAuthorized {
         operation_id: String,
         resume: OperationalRecoveryResume,
@@ -1090,6 +1209,57 @@ impl OperationalRecoveryRepository {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn record_execution_interruption(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        operation_id: &str,
+        interruption: OperationalRecoveryExecutionInterruption,
+        exclusive_lease: &WorkspaceRuntimeLease,
+        expected_global_sequence: u64,
+        metadata: OperationalRecoveryEventMetadata,
+    ) -> Result<OperationalRecoveryAggregate, OperationalRecoveryAggregateError> {
+        validate_interruption(&interruption)?;
+        let current = self.load(workspace_id, run_id)?;
+        if interruption.workspace_id != current.subject.workspace_id
+            || interruption.run_id != current.subject.run_id
+            || interruption.operation_id != operation_id
+            || interruption.recorder_instance_id != exclusive_lease.instance_id()
+            || interruption.lease_epoch != exclusive_lease.lease_epoch()
+        {
+            return Err(OperationalRecoveryAggregateError::InterruptionIdentityConflict);
+        }
+        let operation = current
+            .operations
+            .get(operation_id)
+            .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+        validate_interruption_for_operation(operation, &interruption)?;
+        let execution = operation
+            .execution
+            .as_ref()
+            .ok_or(OperationalRecoveryAggregateError::ExecutionRequired)?;
+        if !execution_finish_is_authorized(operation, execution, exclusive_lease) {
+            return Err(OperationalRecoveryAggregateError::ExclusiveOwnerRequired);
+        }
+        if operation
+            .interruptions
+            .iter()
+            .any(|existing| existing.interruption_id == interruption.interruption_id)
+        {
+            return Ok(current);
+        }
+        self.append_at_global_sequence(
+            current,
+            RecoveryEventData::ExecutionInterrupted {
+                operation_id: operation_id.to_owned(),
+                interruption,
+            },
+            expected_global_sequence,
+            metadata,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn finish_execution(
         &mut self,
         workspace_id: &str,
@@ -1351,6 +1521,7 @@ fn apply_event(
                     disposition: None,
                     claim: None,
                     execution: None,
+                    interruptions: vec![],
                     resumes: vec![],
                     provider_dispatch_resumes: vec![],
                     outcome: None,
@@ -1628,6 +1799,36 @@ fn apply_event(
             aggregate.revision = event.aggregate_revision;
             aggregate.last_event_hash = event.event_hash;
         }
+        RecoveryEventData::ExecutionInterrupted {
+            operation_id,
+            interruption,
+        } => {
+            validate_interruption(&interruption)?;
+            let aggregate = value
+                .as_mut()
+                .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
+            if interruption.workspace_id != aggregate.subject.workspace_id
+                || interruption.run_id != aggregate.subject.run_id
+                || interruption.operation_id != operation_id
+            {
+                return Err(OperationalRecoveryAggregateError::InterruptionIdentityConflict);
+            }
+            let operation = aggregate
+                .operations
+                .get_mut(&operation_id)
+                .ok_or(OperationalRecoveryAggregateError::OperationNotFound)?;
+            validate_interruption_for_operation(operation, &interruption)?;
+            if operation
+                .interruptions
+                .iter()
+                .any(|existing| existing.interruption_id == interruption.interruption_id)
+            {
+                return Err(OperationalRecoveryAggregateError::InterruptionConflict);
+            }
+            operation.interruptions.push(interruption);
+            aggregate.revision = event.aggregate_revision;
+            aggregate.last_event_hash = event.event_hash;
+        }
         RecoveryEventData::ExecutionFinished {
             operation_id,
             outcome,
@@ -1787,6 +1988,89 @@ fn validate_execution(
     } else {
         Err(OperationalRecoveryAggregateError::ExecutionConflict)
     }
+}
+
+fn validate_interruption(
+    interruption: &OperationalRecoveryExecutionInterruption,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    let execution = OperationalRecoveryExecution {
+        execution_id: interruption.execution_id.clone(),
+        claim_id: interruption.claim_id.clone(),
+        owner_instance_id: interruption.owner_instance_id.clone(),
+        fencing_token: interruption.fencing_token,
+        source_fingerprint: interruption.source_fingerprint.clone(),
+        action_spec_sha256: interruption.action_spec_sha256.clone(),
+        effect_class: OperationalRecoveryEffectClass::ProviderDispatch,
+        started_at: interruption.interrupted_at.clone(),
+    };
+    let derived = OperationalRecoveryExecutionInterruption::derive(
+        interruption.workspace_id.clone(),
+        interruption.run_id.clone(),
+        interruption.operation_id.clone(),
+        &execution,
+        interruption.attempt_id.clone(),
+        interruption.attempt_aggregate_sequence,
+        interruption.attempt_definition_sha256.clone(),
+        interruption.attempt_evidence_sha256.clone(),
+        interruption.cause,
+        interruption.transport_boundary_crossed,
+        interruption.resumable,
+        interruption.recorder_instance_id.clone(),
+        interruption.lease_epoch.clone(),
+        interruption.interrupted_at.clone(),
+    )?;
+    if derived == *interruption {
+        Ok(())
+    } else {
+        Err(OperationalRecoveryAggregateError::InterruptionConflict)
+    }
+}
+
+fn validate_interruption_for_operation(
+    operation: &OperationalRecoveryOperation,
+    interruption: &OperationalRecoveryExecutionInterruption,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    if operation.outcome.is_some() || operation.stale.is_some() || operation.disposition.is_some() {
+        return Err(OperationalRecoveryAggregateError::OperationTerminal);
+    }
+    let claim = operation
+        .claim
+        .as_ref()
+        .ok_or(OperationalRecoveryAggregateError::ClaimRequired)?;
+    let execution = operation
+        .execution
+        .as_ref()
+        .ok_or(OperationalRecoveryAggregateError::ExecutionRequired)?;
+    let action = claim
+        .action_spec
+        .as_ref()
+        .ok_or(OperationalRecoveryAggregateError::InterruptionEvidenceInvalid)?;
+    let OperationalRecoveryAction::PersistedProviderAttemptDispatch {
+        attempt_id,
+        expected_attempt_sequence,
+        ..
+    } = action
+    else {
+        return Err(OperationalRecoveryAggregateError::InterruptionEvidenceInvalid);
+    };
+    if execution.effect_class != OperationalRecoveryEffectClass::ProviderDispatch
+        || interruption.execution_id != execution.execution_id
+        || interruption.claim_id != execution.claim_id
+        || interruption.owner_instance_id != execution.owner_instance_id
+        || interruption.fencing_token != execution.fencing_token
+        || interruption.source_fingerprint != execution.source_fingerprint
+        || interruption.action_spec_sha256 != execution.action_spec_sha256
+        || interruption.claim_id != claim.claim_id
+        || interruption.owner_instance_id != claim.owner_instance_id
+        || interruption.fencing_token != claim.fencing_token
+        || interruption.source_fingerprint != claim.source_fingerprint
+        || interruption.action_spec_sha256 != claim.action_spec_sha256
+        || &interruption.attempt_id != attempt_id
+        || interruption.attempt_aggregate_sequence != *expected_attempt_sequence
+    {
+        return Err(OperationalRecoveryAggregateError::InterruptionEvidenceInvalid);
+    }
+    Ok(())
 }
 
 fn validate_resume(
@@ -2290,6 +2574,7 @@ fn event_operation_id(data: &RecoveryEventData) -> &str {
         RecoveryEventData::ClaimTransferred { operation_id, .. }
         | RecoveryEventData::LeaseRenewed { operation_id, .. }
         | RecoveryEventData::ExecutionStarted { operation_id, .. }
+        | RecoveryEventData::ExecutionInterrupted { operation_id, .. }
         | RecoveryEventData::ExecutionResumeAuthorized { operation_id, .. }
         | RecoveryEventData::ProviderDispatchResumeAuthorized { operation_id, .. }
         | RecoveryEventData::ExecutionFinished { operation_id, .. }
@@ -2323,6 +2608,9 @@ fn event_suffix(data: &RecoveryEventData) -> Result<String, OperationalRecoveryA
         ),
         RecoveryEventData::ExecutionStarted { execution, .. } => {
             format!("execution-started:{}", execution.execution_id)
+        }
+        RecoveryEventData::ExecutionInterrupted { interruption, .. } => {
+            format!("execution-interrupted:{}", interruption.interruption_id)
         }
         RecoveryEventData::ExecutionResumeAuthorized { resume, .. } => {
             format!("execution-resumed:{}", resume.resume_id)
@@ -2414,6 +2702,14 @@ pub enum OperationalRecoveryAggregateError {
     ExecutionConflict,
     #[error("operational recovery execution must start first")]
     ExecutionRequired,
+    #[error("operational recovery interruption identity conflicts with persisted state")]
+    InterruptionIdentityConflict,
+    #[error("operational recovery interruption evidence is invalid")]
+    InterruptionEvidenceInvalid,
+    #[error("operational recovery interruption semantics are invalid")]
+    InterruptionSemanticsInvalid,
+    #[error("operational recovery interruption conflicts with persisted history")]
+    InterruptionConflict,
     #[error("operational recovery local execution resume is not allowed")]
     ResumeNotAllowed,
     #[error("operational recovery local execution resume conflicts with persisted history")]

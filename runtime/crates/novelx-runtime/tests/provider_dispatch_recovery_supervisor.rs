@@ -17,7 +17,10 @@ use novelx_runtime::{
     },
     context_compile_service::{ContextCompileService, recover_compilation_receipt},
     event_journal::EventJournal,
-    operational_recovery_aggregate::{OperationalRecoveryOutcome, OperationalRecoveryRepository},
+    operational_recovery_aggregate::{
+        OperationalRecoveryInterruptionCause, OperationalRecoveryOutcome,
+        OperationalRecoveryRepository,
+    },
     operational_recovery_claim_service::{
         OperationalRecoveryClaimRequest, OperationalRecoveryClaimService,
         OperationalRecoveryStartRequest,
@@ -26,7 +29,8 @@ use novelx_runtime::{
     operational_recovery_scanner::{OperationalRecoveryGate, OperationalRecoveryScanner},
     provider_attempt::{
         ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptMetadata,
-        ProviderAttemptState, ProviderResponseReceipt,
+        ProviderAttemptState, ProviderResponseReceipt, provider_attempt_definition_sha256,
+        provider_attempt_evidence_sha256,
     },
     provider_dispatch_recovery_service::ProviderDispatchRecoveryTerminal,
     provider_dispatch_recovery_supervisor::{
@@ -140,12 +144,41 @@ async fn sticky_shutdown_interrupts_a_late_requested_registration_before_sent_an
         ProviderAttemptState::Requested
     );
     assert_eq!(fixture.attempt_event_types(&seeded), ["provider.requested"]);
-    assert!(
-        fixture
-            .operation(&seeded.run_id, &run.operation_id)
-            .outcome
-            .is_none()
+    let operation = fixture.operation(&seeded.run_id, &run.operation_id);
+    assert!(operation.outcome.is_none());
+    assert_eq!(operation.interruptions.len(), 1);
+    let recorded = &operation.interruptions[0];
+    let attempt = ProviderAttemptAggregate::recover(
+        &EventJournal::open(&fixture.path).unwrap(),
+        &seeded.run_id,
+        &seeded.attempt_id,
+    )
+    .unwrap();
+    assert_eq!(recorded.workspace_id, WORKSPACE_ID);
+    assert_eq!(recorded.run_id, seeded.run_id);
+    assert_eq!(recorded.operation_id, run.operation_id);
+    assert_eq!(recorded.execution_id, interrupted.execution_id);
+    assert_eq!(recorded.attempt_id, seeded.attempt_id);
+    assert_eq!(
+        recorded.cause,
+        OperationalRecoveryInterruptionCause::RuntimeShutdown
     );
+    assert!(!recorded.transport_boundary_crossed);
+    assert!(recorded.resumable);
+    assert_eq!(
+        recorded.attempt_aggregate_sequence,
+        attempt.aggregate_sequence()
+    );
+    assert_eq!(
+        recorded.attempt_definition_sha256,
+        provider_attempt_definition_sha256(&attempt).unwrap()
+    );
+    assert_eq!(
+        recorded.attempt_evidence_sha256,
+        provider_attempt_evidence_sha256(&attempt).unwrap()
+    );
+    assert_eq!(recorded.recorder_instance_id, lease.instance_id());
+    assert_eq!(recorded.lease_epoch, lease.lease_epoch());
     assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
     server.abort();
 }
@@ -189,6 +222,61 @@ async fn old_owner_requested_execution_is_authorized_and_dispatched_by_new_runti
         operation.outcome,
         Some(OperationalRecoveryOutcome::Succeeded { .. })
     ));
+}
+
+#[tokio::test]
+async fn old_owner_requested_execution_records_interruption_under_authorized_new_lease() {
+    let fixture = Fixture::new();
+    let (base_url, requests, server) = spawn_server("must not be requested").await;
+    let (providers, provider) = bound_registry(base_url);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway);
+    let started = fixture.start_provider_dispatch(&seeded, "runtime-owner-a");
+    let original_owner = started.lease.instance_id().to_owned();
+    drop(started.lease);
+    let new_lease = fixture.lease("runtime-owner-b");
+    fixture
+        .cancellation_hub
+        .signal_global(CancellationCause::RuntimeShutdown)
+        .unwrap();
+
+    let report = ProviderDispatchRecoverySupervisor::new(&fixture.path)
+        .run_provider_dispatch_pass(
+            WORKSPACE_ID,
+            PROJECT_ID,
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &new_lease,
+        )
+        .await
+        .unwrap();
+
+    let run = only_run(&report.runs);
+    let ProviderDispatchRecoverySupervisorOutcome::InterruptedBeforeSent(interrupted) =
+        &run.outcome
+    else {
+        panic!(
+            "expected authorized pre-Sent interruption, got {:?}",
+            run.outcome
+        );
+    };
+    assert_eq!(interrupted.cause, CancellationCause::RuntimeShutdown);
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.attempt_state(&seeded),
+        ProviderAttemptState::Requested
+    );
+    let operation = fixture.operation(&seeded.run_id, &started.operation_id);
+    assert_eq!(operation.provider_dispatch_resumes.len(), 1);
+    assert!(operation.outcome.is_none());
+    assert_eq!(operation.interruptions.len(), 1);
+    let recorded = &operation.interruptions[0];
+    assert_eq!(recorded.owner_instance_id, original_owner);
+    assert_eq!(recorded.recorder_instance_id, new_lease.instance_id());
+    assert_eq!(recorded.lease_epoch, new_lease.lease_epoch());
+    assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
+    server.abort();
 }
 
 #[tokio::test]

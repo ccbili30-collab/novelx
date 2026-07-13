@@ -3,11 +3,12 @@ use novelx_runtime::operational_recovery_action::OperationalRecoveryAction;
 use novelx_runtime::operational_recovery_aggregate::{
     OPERATIONAL_RECOVERY_POLICY_VERSION, OperationalRecoveryAggregateError,
     OperationalRecoveryClaim, OperationalRecoveryDisposition, OperationalRecoveryEffectClass,
-    OperationalRecoveryEventMetadata, OperationalRecoveryExecution, OperationalRecoveryObservation,
-    OperationalRecoveryObservedGate, OperationalRecoveryOutcome, OperationalRecoveryRepository,
-    OperationalRecoveryResume, OperationalRecoveryStale, OperationalRecoverySubject,
-    OperationalRecoveryWaitingReason, ProviderDispatchResumeAuthorization,
-    ProviderDispatchResumeCapability,
+    OperationalRecoveryEventMetadata, OperationalRecoveryExecution,
+    OperationalRecoveryExecutionInterruption, OperationalRecoveryInterruptionCause,
+    OperationalRecoveryObservation, OperationalRecoveryObservedGate, OperationalRecoveryOutcome,
+    OperationalRecoveryRepository, OperationalRecoveryResume, OperationalRecoveryStale,
+    OperationalRecoverySubject, OperationalRecoveryWaitingReason,
+    ProviderDispatchResumeAuthorization, ProviderDispatchResumeCapability,
 };
 use novelx_runtime::provider_attempt::ProviderAttemptState;
 use novelx_runtime::workspace_runtime_lease::WorkspaceRuntimeLease;
@@ -1896,6 +1897,177 @@ fn same_label_provider_resumer_must_refresh_authorization_before_finishing() {
     assert_eq!(
         finished.operations[&observation.operation_id].outcome,
         Some(outcome)
+    );
+}
+
+#[test]
+fn pre_sent_interruption_is_fenced_idempotent_non_terminal_and_tamper_evident() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "b",
+        OperationalRecoveryObservedGate::ProviderDispatchReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let lease = fixture.lease("runtime-owner");
+    let claim = provider_dispatch_claim(&observation, lease.instance_id(), 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim.clone(),
+            &lease,
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let execution = OperationalRecoveryExecution::derive(
+        &claim,
+        OperationalRecoveryEffectClass::ProviderDispatch,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            execution.clone(),
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:01:00Z"),
+        )
+        .unwrap();
+    let interruption = OperationalRecoveryExecutionInterruption::derive(
+        subject.workspace_id.clone(),
+        subject.run_id.clone(),
+        observation.operation_id.clone(),
+        &execution,
+        "attempt-1".to_owned(),
+        1,
+        "d".repeat(64),
+        "e".repeat(64),
+        OperationalRecoveryInterruptionCause::RuntimeShutdown,
+        false,
+        true,
+        lease.instance_id().to_owned(),
+        lease.lease_epoch().to_owned(),
+        "2026-07-13T00:02:00Z".to_owned(),
+    )
+    .unwrap();
+    let recorded = repository
+        .record_execution_interruption(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            interruption.clone(),
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:02:00Z"),
+        )
+        .unwrap();
+    let operation = &recorded.operations[&observation.operation_id];
+    assert_eq!(operation.interruptions, std::slice::from_ref(&interruption));
+    assert!(operation.outcome.is_none());
+    assert!(operation.stale.is_none());
+
+    let retried_persistence = OperationalRecoveryExecutionInterruption::derive(
+        subject.workspace_id.clone(),
+        subject.run_id.clone(),
+        observation.operation_id.clone(),
+        &execution,
+        "attempt-1".to_owned(),
+        1,
+        "d".repeat(64),
+        "e".repeat(64),
+        OperationalRecoveryInterruptionCause::RuntimeShutdown,
+        false,
+        true,
+        lease.instance_id().to_owned(),
+        lease.lease_epoch().to_owned(),
+        "2026-07-13T00:02:30Z".to_owned(),
+    )
+    .unwrap();
+    assert_eq!(
+        retried_persistence.interruption_id,
+        interruption.interruption_id
+    );
+    let replayed = repository
+        .record_execution_interruption(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            retried_persistence,
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:02:30Z"),
+        )
+        .unwrap();
+    assert_eq!(replayed.revision, recorded.revision);
+
+    let later_interruption = OperationalRecoveryExecutionInterruption::derive(
+        subject.workspace_id.clone(),
+        subject.run_id.clone(),
+        observation.operation_id.clone(),
+        &execution,
+        "attempt-1".to_owned(),
+        1,
+        "d".repeat(64),
+        "e".repeat(64),
+        OperationalRecoveryInterruptionCause::HostDisconnected,
+        false,
+        true,
+        lease.instance_id().to_owned(),
+        lease.lease_epoch().to_owned(),
+        "2026-07-13T00:03:00Z".to_owned(),
+    )
+    .unwrap();
+    let later = repository
+        .record_execution_interruption(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            later_interruption,
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:03:00Z"),
+        )
+        .unwrap();
+    assert_eq!(later.revision, recorded.revision + 1);
+    assert_eq!(
+        later.operations[&observation.operation_id]
+            .interruptions
+            .len(),
+        2
+    );
+    assert!(
+        later.operations[&observation.operation_id]
+            .outcome
+            .is_none()
+    );
+
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER workspace_events_no_update;")
+        .unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE workspace_events SET payload_json = json_set(payload_json, '$.data.data.interruption.attemptEvidenceSha256', ?) WHERE stream_type = 'operational_recovery' AND json_extract(payload_json, '$.data.kind') = 'execution_interrupted' AND json_extract(payload_json, '$.data.data.interruption.interruptedAt') = ?",
+            rusqlite::params!["f".repeat(64), "2026-07-13T00:02:00Z"],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let error = repository
+        .load(&subject.workspace_id, &subject.run_id)
+        .unwrap_err();
+    assert!(
+        matches!(error, OperationalRecoveryAggregateError::HashChainInvalid),
+        "unexpected interruption replay error: {error:?}"
     );
 }
 

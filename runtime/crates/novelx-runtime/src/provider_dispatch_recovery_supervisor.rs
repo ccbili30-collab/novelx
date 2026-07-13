@@ -21,7 +21,8 @@ use crate::{
         OperationalRecoveryTransferRequest,
     },
     operational_recovery_recording_service::{
-        OperationalRecoveryRecordingError, OperationalRecoveryRecordingService,
+        OperationalRecoveryInterruptionRequest, OperationalRecoveryRecordingError,
+        OperationalRecoveryRecordingService,
     },
     operational_recovery_scanner::{
         OperationalRecoveryGate, OperationalRecoveryScanError, OperationalRecoveryScanner,
@@ -475,7 +476,15 @@ impl ProviderDispatchRecoverySupervisor {
             }
             Err(error) => return Err(error.into()),
         };
-        Ok(result(run_id, operation_id, supervisor_outcome(receipt)))
+        let outcome = persist_interruption_before_return(
+            &self.database_path,
+            workspace_id,
+            run_id,
+            operation_id,
+            receipt,
+            exclusive_lease,
+        )?;
+        Ok(result(run_id, operation_id, outcome))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -516,7 +525,15 @@ impl ProviderDispatchRecoverySupervisor {
             }
             Err(error) => return Err(error.into()),
         };
-        Ok(result(run_id, operation_id, supervisor_outcome(receipt)))
+        let outcome = persist_interruption_before_return(
+            &self.database_path,
+            workspace_id,
+            run_id,
+            operation_id,
+            receipt,
+            exclusive_lease,
+        )?;
+        Ok(result(run_id, operation_id, outcome))
     }
 
     fn scan_consistently(
@@ -571,15 +588,35 @@ fn result(
     }
 }
 
-fn supervisor_outcome(
+fn persist_interruption_before_return(
+    database_path: &Path,
+    workspace_id: &str,
+    run_id: &str,
+    operation_id: &str,
     recovery: ProviderDispatchRecoveryResult,
-) -> ProviderDispatchRecoverySupervisorOutcome {
+    exclusive_lease: &WorkspaceRuntimeLease,
+) -> Result<ProviderDispatchRecoverySupervisorOutcome, ProviderDispatchRecoverySupervisorError> {
     match recovery {
-        ProviderDispatchRecoveryResult::Completed(receipt) => {
-            ProviderDispatchRecoverySupervisorOutcome::Completed(receipt.terminal)
-        }
+        ProviderDispatchRecoveryResult::Completed(receipt) => Ok(
+            ProviderDispatchRecoverySupervisorOutcome::Completed(receipt.terminal),
+        ),
         ProviderDispatchRecoveryResult::InterruptedBeforeSent(interrupted) => {
-            ProviderDispatchRecoverySupervisorOutcome::InterruptedBeforeSent(interrupted)
+            let recorded_at = timestamp()?;
+            OperationalRecoveryRecordingService::new(database_path).record_execution_interruption(
+                OperationalRecoveryInterruptionRequest {
+                    workspace_id: workspace_id.to_owned(),
+                    run_id: run_id.to_owned(),
+                    operation_id: operation_id.to_owned(),
+                    execution_id: interrupted.execution_id.clone(),
+                    attempt_id: interrupted.attempt_id.clone(),
+                    cause: interrupted.cause,
+                    transport_boundary_crossed: interrupted.transport_boundary_crossed,
+                    resumable: interrupted.resumable,
+                    interrupted_at: recorded_at,
+                },
+                exclusive_lease,
+            )?;
+            Ok(ProviderDispatchRecoverySupervisorOutcome::InterruptedBeforeSent(interrupted))
         }
     }
 }

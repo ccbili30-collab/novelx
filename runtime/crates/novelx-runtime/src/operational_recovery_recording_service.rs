@@ -3,15 +3,25 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::{
+    event_journal::{EventJournal, EventJournalError},
+    operational_recovery_action::OperationalRecoveryAction,
     operational_recovery_aggregate::{
         OPERATIONAL_RECOVERY_POLICY_VERSION, OperationalRecoveryAggregateError,
-        OperationalRecoveryEventMetadata, OperationalRecoveryObservation,
+        OperationalRecoveryEventMetadata, OperationalRecoveryExecutionInterruption,
+        OperationalRecoveryInterruptionCause, OperationalRecoveryObservation,
         OperationalRecoveryObservedGate, OperationalRecoveryRepository, OperationalRecoverySubject,
         OperationalRecoveryWaitingReason,
     },
     operational_recovery_scanner::{
         OperationalRecoveryGate, OperationalRecoveryReport, OperationalRecoveryRun,
     },
+    provider_attempt::{
+        ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState,
+        provider_attempt_definition_sha256, provider_attempt_evidence_sha256,
+    },
+    runtime_cancellation_hub::CancellationCause,
+    workspace_event_journal::WorkspaceEventJournal,
+    workspace_runtime_lease::WorkspaceRuntimeLease,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,6 +30,19 @@ pub struct RecordedOperationalRecovery {
     pub operation_id: String,
     pub gate: OperationalRecoveryGate,
     pub aggregate_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationalRecoveryInterruptionRequest {
+    pub workspace_id: String,
+    pub run_id: String,
+    pub operation_id: String,
+    pub execution_id: String,
+    pub attempt_id: String,
+    pub cause: CancellationCause,
+    pub transport_boundary_crossed: bool,
+    pub resumable: bool,
+    pub interrupted_at: String,
 }
 
 pub struct OperationalRecoveryRecordingService {
@@ -53,6 +76,108 @@ impl OperationalRecoveryRecordingService {
         }
         recorded.sort_by(|left, right| left.run_id.cmp(&right.run_id));
         Ok(recorded)
+    }
+
+    pub fn record_execution_interruption(
+        &self,
+        request: OperationalRecoveryInterruptionRequest,
+        exclusive_lease: &WorkspaceRuntimeLease,
+    ) -> Result<OperationalRecoveryExecutionInterruption, OperationalRecoveryRecordingError> {
+        if !exclusive_lease.protects_database(&self.database_path) {
+            return Err(OperationalRecoveryRecordingError::WorkspaceLeaseMismatch);
+        }
+        let clock = WorkspaceEventJournal::open(&self.database_path)?;
+        let expected_global_sequence = clock.current_global_sequence()?;
+        let mut repository = OperationalRecoveryRepository::open(&self.database_path)?;
+        let aggregate = repository.load(&request.workspace_id, &request.run_id)?;
+        let operation = aggregate
+            .operations
+            .get(&request.operation_id)
+            .ok_or(OperationalRecoveryRecordingError::InterruptionEvidenceMismatch)?;
+        let claim = operation
+            .claim
+            .as_ref()
+            .ok_or(OperationalRecoveryRecordingError::InterruptionEvidenceMismatch)?;
+        let execution = operation
+            .execution
+            .as_ref()
+            .ok_or(OperationalRecoveryRecordingError::InterruptionEvidenceMismatch)?;
+        let action = claim
+            .action_spec
+            .as_ref()
+            .ok_or(OperationalRecoveryRecordingError::InterruptionEvidenceMismatch)?;
+        let OperationalRecoveryAction::PersistedProviderAttemptDispatch {
+            attempt_id,
+            expected_attempt_sequence,
+            ..
+        } = action
+        else {
+            return Err(OperationalRecoveryRecordingError::InterruptionEvidenceMismatch);
+        };
+        if aggregate.subject.workspace_id != request.workspace_id
+            || aggregate.subject.run_id != request.run_id
+            || execution.execution_id != request.execution_id
+            || attempt_id != &request.attempt_id
+        {
+            return Err(OperationalRecoveryRecordingError::InterruptionEvidenceMismatch);
+        }
+        let journal = EventJournal::open(&self.database_path)?;
+        let attempt =
+            ProviderAttemptAggregate::recover(&journal, &request.run_id, &request.attempt_id)?;
+        if attempt.state() != ProviderAttemptState::Requested
+            || attempt.aggregate_sequence() != *expected_attempt_sequence
+        {
+            return Err(OperationalRecoveryRecordingError::AttemptCrossedTransportBoundary);
+        }
+        let interruption = OperationalRecoveryExecutionInterruption::derive(
+            request.workspace_id.clone(),
+            request.run_id.clone(),
+            request.operation_id.clone(),
+            execution,
+            request.attempt_id,
+            attempt.aggregate_sequence(),
+            provider_attempt_definition_sha256(&attempt)?,
+            provider_attempt_evidence_sha256(&attempt)?,
+            map_interruption_cause(request.cause),
+            request.transport_boundary_crossed,
+            request.resumable,
+            exclusive_lease.instance_id().to_owned(),
+            exclusive_lease.lease_epoch().to_owned(),
+            request.interrupted_at.clone(),
+        )?;
+        let persisted = repository.record_execution_interruption(
+            &request.workspace_id,
+            &request.run_id,
+            &request.operation_id,
+            interruption.clone(),
+            exclusive_lease,
+            expected_global_sequence,
+            OperationalRecoveryEventMetadata {
+                created_at: request.interrupted_at,
+            },
+        )?;
+        let recorded = persisted.operations[&request.operation_id]
+            .interruptions
+            .iter()
+            .find(|candidate| candidate.interruption_id == interruption.interruption_id)
+            .ok_or(OperationalRecoveryRecordingError::InterruptionPersistenceMissing)?;
+        if persisted.operations[&request.operation_id]
+            .outcome
+            .is_some()
+        {
+            return Err(OperationalRecoveryRecordingError::InterruptionPersistenceConflict);
+        }
+        Ok(recorded.clone())
+    }
+}
+
+fn map_interruption_cause(value: CancellationCause) -> OperationalRecoveryInterruptionCause {
+    match value {
+        CancellationCause::RuntimeShutdown => OperationalRecoveryInterruptionCause::RuntimeShutdown,
+        CancellationCause::HostDisconnected => {
+            OperationalRecoveryInterruptionCause::HostDisconnected
+        }
+        CancellationCause::RunCancel => OperationalRecoveryInterruptionCause::RunCancel,
     }
 }
 
@@ -161,6 +286,26 @@ fn map_gate(value: OperationalRecoveryGate) -> OperationalRecoveryObservedGate {
 
 #[derive(Debug, Error)]
 pub enum OperationalRecoveryRecordingError {
+    #[error("operational recovery interruption lease does not protect this database")]
+    WorkspaceLeaseMismatch,
+    #[error("operational recovery interruption evidence does not match the active execution")]
+    InterruptionEvidenceMismatch,
+    #[error(
+        "operational recovery interruption cannot be recorded after the Provider transport boundary"
+    )]
+    AttemptCrossedTransportBoundary,
+    #[error("operational recovery interruption event was not persisted")]
+    InterruptionPersistenceMissing,
+    #[error("operational recovery interruption persistence conflicts with active operation state")]
+    InterruptionPersistenceConflict,
     #[error(transparent)]
     Aggregate(#[from] OperationalRecoveryAggregateError),
+    #[error(transparent)]
+    Attempt(#[from] ProviderAttemptError),
+    #[error(transparent)]
+    Journal(#[from] EventJournalError),
+    #[error(transparent)]
+    WorkspaceJournal(#[from] crate::workspace_event_journal::WorkspaceEventJournalError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }
