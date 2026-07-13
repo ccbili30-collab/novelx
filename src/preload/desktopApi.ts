@@ -35,6 +35,9 @@ import {
   graphSnapshotResultSchema,
   nullableWorkspaceSnapshotSchema,
   nullableContextBudgetAuditSchema,
+  workspaceImageAssetListResultSchema,
+  showcaseGetRequestSchema,
+  showcaseGetResultSchema,
   projectDoctorResultSchema,
   storyProfileCreateRequestSchema,
   storyProfileCreateResultSchema,
@@ -269,6 +272,11 @@ export function exposeDesktopApi(): void {
       },
       async inspectProject() {
         return projectDoctorResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.workspaceDoctor));
+      },
+      async listImageAssets() {
+        return workspaceImageAssetListResultSchema.parse(
+          await ipcRenderer.invoke(desktopIpcChannels.workspaceImageAssets),
+        );
       },
       async restore(request) {
         const safeRequest = workspaceRestoreRequestSchema.parse(request);
@@ -508,6 +516,14 @@ export function exposeDesktopApi(): void {
         const safeRequest = graphInspectNodeRequestSchema.parse(request);
         return graphInspectorResultSchema.parse(
           await ipcRenderer.invoke(desktopIpcChannels.graphInspectNode, safeRequest),
+        );
+      },
+    },
+    showcase: {
+      async get(request) {
+        const safeRequest = showcaseGetRequestSchema.parse(request);
+        return showcaseGetResultSchema.parse(
+          await ipcRenderer.invoke(desktopIpcChannels.showcaseGet, safeRequest),
         );
       },
     },

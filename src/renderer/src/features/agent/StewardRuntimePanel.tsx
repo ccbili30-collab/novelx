@@ -25,6 +25,7 @@ interface StewardRuntimePanelProps {
   onOpenChangeSet(changeSetId: string): Promise<void>;
   onCommittedChangeSet(): Promise<void>;
   onOpenDocumentReference?(reference: Extract<AgentArtifact, { kind: "document_reference" }>): Promise<void> | void;
+  onReadyImage?(image: Extract<AgentArtifact, { kind: "image" }>): Promise<void> | void;
   onActivityChange(activity: { label: string; domains: string[] } | null): void;
 }
 
@@ -47,6 +48,7 @@ export function StewardRuntimePanel({
   onOpenChangeSet,
   onCommittedChangeSet,
   onOpenDocumentReference,
+  onReadyImage,
   onActivityChange,
 }: StewardRuntimePanelProps) {
   const [mode, setMode] = useState<"assist" | "free">("assist");
@@ -88,6 +90,9 @@ export function StewardRuntimePanel({
       onActivityChange(null);
       if (event.type === "run.completed") {
         appendEntry({ kind: "assistant", text: event.message, outcome: event.outcome, artifacts: event.artifacts });
+        for (const artifact of event.artifacts) {
+          if (artifact.kind === "image" && artifact.status === "ready") void onReadyImage?.(artifact);
+        }
         if (event.changeSetState === "committed" && event.artifacts.some((artifact) => (
           artifact.kind === "change_set" && artifact.state === "committed"
         ))) void onCommittedChangeSet();
@@ -95,7 +100,7 @@ export function StewardRuntimePanel({
         appendEntry({ kind: "error", text: event.message, artifacts: event.artifacts });
       }
     });
-  }, [session?.id, onActivityChange, onCommittedChangeSet]);
+  }, [session?.id, onActivityChange, onCommittedChangeSet, onReadyImage]);
 
   useEffect(() => {
     let cancelled = false;

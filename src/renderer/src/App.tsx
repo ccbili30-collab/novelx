@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BookOpen, Boxes, Download, FileInput, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings } from "lucide-react";
+import { BookOpen, Boxes, Download, FileInput, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings, Sparkles } from "lucide-react";
 import type { AgentArtifact, CollaborationListResult, CreativeWorkspaceMutation, HandoffSummary, ProjectAddResult, ProjectSummary, SessionSummary, WorkspaceSnapshot } from "../../shared/ipcContract";
 import type { DesktopUpdateState } from "../../shared/desktopUpdateContract";
 import { StewardRuntimePanel } from "./features/agent/StewardRuntimePanel";
@@ -28,6 +28,7 @@ import {
 } from "../../shared/backgroundPreference";
 import { PlayerWorkbench } from "./features/player/PlayerWorkbench";
 import { ImportWorkbench } from "./features/import/ImportWorkbench";
+import { CreativeShowcase } from "./features/showcase/CreativeShowcase";
 import snowBackgroundUrl from "./assets/snow.svg?url";
 
 const SemanticGraphView = lazy(async () => {
@@ -40,7 +41,7 @@ const ProviderSettingsDialog = lazy(async () => {
   return { default: module.ProviderSettingsDialog };
 });
 
-type WorkbenchMode = "player" | "agent" | "ide" | "import";
+type WorkbenchMode = "player" | "agent" | "ide" | "showcase" | "import";
 type OnboardingState = Pick<ProjectAddResult, "project" | "detection">;
 
 export function App() {
@@ -58,6 +59,7 @@ export function App() {
   const [documentLocator, setDocumentLocator] = useState<Extract<AgentArtifact, { kind: "document_reference" }>["locator"] | null>(null);
   const [selectedDomain, setSelectedDomain] = useState<WorkspaceSnapshot["resources"][number]["type"] | null>(null);
   const [selectedChangeSetId, setSelectedChangeSetId] = useState<string | null>(null);
+  const [showcaseStoryId, setShowcaseStoryId] = useState<string | null>(null);
   const [changeSetRefreshKey, setChangeSetRefreshKey] = useState(0);
   const [committedWorkspaceRefreshKey, setCommittedWorkspaceRefreshKey] = useState(0);
   const [sessionMessageRefreshKey, setSessionMessageRefreshKey] = useState(0);
@@ -318,6 +320,33 @@ export function App() {
     setMode("ide");
   }
 
+  async function openShowcaseDocument(documentId: string, resourceId: string) {
+    await selectDocument(documentId, resourceId);
+    setMode("ide");
+  }
+
+  const openReadyImageShowcase = useCallback(async (artifact: Extract<AgentArtifact, { kind: "image" }>) => {
+    const currentWorkspace = await window.novaxDesktop.workspace.getCurrent() ?? workspace;
+    if (!currentWorkspace) return;
+    const result = await window.novaxDesktop.workspace.listImageAssets();
+    if (!result.ok) return;
+    const asset = result.assets.find((candidate) => candidate.assetId === artifact.assetId);
+    if (!asset) return;
+    const stories = currentWorkspace.resources.filter((resource) => resource.type === "story" && resource.objectKind === "story");
+    const candidates = stories.filter((story) => {
+      const relevantIds = collectShowcaseNavigationIds(story.id, currentWorkspace);
+      return asset.sourceResourceIds.some((resourceId) => relevantIds.has(resourceId));
+    });
+    const target = candidates.length === 1
+      ? candidates[0]
+      : candidates.length === 0 && stories.length === 1 ? stories[0] : null;
+    if (!target) return;
+    setWorkspace(currentWorkspace);
+    setShowcaseStoryId(target.id);
+    setCommittedWorkspaceRefreshKey((value) => value + 1);
+    setMode("showcase");
+  }, [workspace]);
+
   async function openChangeSet(changeSetId: string) {
     await flushEditor();
     setSelectedChangeSetId(changeSetId);
@@ -516,6 +545,7 @@ export function App() {
         onOpenChangeSet={openChangeSet}
         onCommittedChangeSet={handleCommittedChangeSet}
         onOpenDocumentReference={openDocumentReference}
+        onReadyImage={openReadyImageShowcase}
         onActivityChange={setActivity}
       />
     </section>
@@ -552,6 +582,9 @@ export function App() {
           <button type="button" role="radio" aria-checked={mode === "ide"} onClick={() => setMode("ide")}>
             <PanelLeft size={14} aria-hidden="true" />IDE 模式
           </button>
+          <button type="button" role="radio" aria-checked={mode === "showcase"} onClick={() => setMode("showcase")}>
+            <Sparkles size={14} aria-hidden="true" />作品预览
+          </button>
           <button type="button" role="radio" aria-checked={mode === "import"} onClick={() => setMode("import")}>
             <FileInput size={14} aria-hidden="true" />导入
           </button>
@@ -565,7 +598,16 @@ export function App() {
         </button> : null}
       </header>
 
-      {mode === "player" ? <PlayerWorkbench workspace={workspace} /> : mode === "import" ? <ImportWorkbench workspace={workspace} /> : mode === "agent" ? (
+      {mode === "player" ? <PlayerWorkbench workspace={workspace} /> : mode === "import" ? <ImportWorkbench workspace={workspace} /> : mode === "showcase" ? (
+        workspace ? <CreativeShowcase
+          workspace={workspace}
+          refreshKey={committedWorkspaceRefreshKey}
+          storyResourceId={showcaseStoryId}
+          onStoryChange={setShowcaseStoryId}
+          onOpenResource={openActivityResource}
+          onOpenDocument={openShowcaseDocument}
+        /> : <div className="empty-state"><Sparkles size={28} strokeWidth={1.4} aria-hidden="true" /><h1>项目尚未初始化</h1></div>
+      ) : mode === "agent" ? (
         <div className="workbench-grid workbench-grid--agent">
           <ProjectSessionRail
             projects={projects}
@@ -630,7 +672,7 @@ export function App() {
             ) : selectedDomain === "graph" || selectedResource?.type === "graph" ? (
               <Suspense fallback={<div className="graph-loading"><LoaderCircle size={18} aria-hidden="true" />正在载入图谱</div>}><SemanticGraphView refreshKey={committedWorkspaceRefreshKey} /></Suspense>
             ) : selectedDomain === "asset" || selectedResource?.type === "asset" ? (
-              <div className="empty-state"><Image size={28} strokeWidth={1.4} aria-hidden="true" /><h1>资产尚未加入</h1></div>
+              <div className="empty-state"><Image size={28} strokeWidth={1.4} aria-hidden="true" /><h1>视觉资产</h1><button type="button" onClick={() => setMode("showcase")}>打开作品预览</button></div>
             ) : selectedResource ? (
               <div className="creative-canvas-stack">
                 {workspace ? <ObjectMetadataPanel workspace={workspace} resource={selectedResource} busy={creativeBusy} onMutate={mutateCreativeWorkspace} onWorkspaceRefresh={refreshCreativeWorkspace} /> : null}
@@ -657,7 +699,7 @@ export function App() {
 
       <footer className="statusbar">
         <span>{activeProject ? projectStateLabel(activeProject.state) : "本地"}</span>
-        <span>{mode === "player" ? "玩家模式" : mode === "import" ? "来源导入" : activeSession ? `Agent：${activeSession.title}` : "尚未选择 Agent 会话"}</span>
+        <span>{mode === "player" ? "玩家模式" : mode === "showcase" ? "作品预览" : mode === "import" ? "来源导入" : activeSession ? `Agent：${activeSession.title}` : "尚未选择 Agent 会话"}</span>
       </footer>
 
       {creativeError ? <div className="creative-operation-error" role="alert"><span>{creativeError}</span><button type="button" onClick={() => setCreativeError(null)}>关闭</button></div> : null}
@@ -711,4 +753,24 @@ function projectStateLabel(state: ProjectSummary["state"]): string {
   if (state === "materials_detected") return "现有素材等待接管";
   if (state === "missing") return "项目目录失联";
   return "项目等待初始化";
+}
+
+function collectShowcaseNavigationIds(storyId: string, workspace: WorkspaceSnapshot): Set<string> {
+  const ids = new Set([storyId]);
+  for (const relation of workspace.relations) {
+    if (relation.sourceResourceId === storyId && (relation.kind === "uses_world" || relation.kind === "uses_oc")) {
+      ids.add(relation.targetResourceId);
+    }
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const resource of workspace.resources) {
+      if (resource.parentId && ids.has(resource.parentId) && !ids.has(resource.id)) {
+        ids.add(resource.id);
+        changed = true;
+      }
+    }
+  }
+  return ids;
 }

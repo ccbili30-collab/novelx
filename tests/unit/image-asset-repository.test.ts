@@ -52,6 +52,28 @@ describe("ImageAssetRepository", () => {
     expect(repository.complete(job.id, assetInput())).toEqual(asset);
   });
 
+  it("lists only committed assets with source attribution and without provider prompts", () => {
+    const repository = openRepository();
+    const job = repository.createOrGetJob(jobInput("published"));
+    repository.claim(job.id);
+    repository.markRequestSent(job.id);
+    const asset = repository.complete(job.id, assetInput());
+    repository.createOrGetJob(jobInput("still-queued"));
+
+    const listed = repository.listPublishedAssets();
+    expect(listed).toEqual([{
+      asset,
+      title: job.title,
+      purpose: job.purpose,
+      sourceResourceIds: job.sourceResourceIds,
+      sourceVersionIds: job.sourceVersionIds,
+    }]);
+    expect(JSON.stringify(listed)).not.toContain(job.prompt);
+    expect(() => repository.listPublishedAssets(0)).toThrowError(
+      expect.objectContaining({ code: "IMAGE_ASSET_LIST_LIMIT_INVALID" }),
+    );
+  });
+
   it("upgrades an existing v20 workspace to the image schema", () => {
     const repository = openRepository();
     expect(repository.createOrGetJob(jobInput()).status).toBe("queued");

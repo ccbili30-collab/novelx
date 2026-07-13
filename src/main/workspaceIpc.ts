@@ -31,6 +31,9 @@ import {
   semanticGraphInspectorSchema,
   semanticGraphSnapshotSchema,
   workspaceSnapshotSchema,
+  workspaceImageAssetListResultSchema,
+  showcaseGetRequestSchema,
+  showcaseGetResultSchema,
   workspaceHistoryResultSchema,
   nullableContextBudgetAuditSchema,
   projectDoctorResultSchema,
@@ -87,6 +90,10 @@ import {
   type SemanticGraphInspector,
   type SemanticGraphSnapshot,
   type WorkspaceSnapshot,
+  type WorkspaceImageAsset,
+  type WorkspaceImageAssetListResult,
+  type CreativeShowcaseSnapshot,
+  type ShowcaseGetResult,
   type CheckpointHistoryEntry,
   type WorkspaceHistoryResult,
   type WorkspaceRestoreResult,
@@ -119,6 +126,7 @@ import { CreativeWorkspaceService } from "../domain/workspace/creativeWorkspaceS
 import { ChangeSetService, type ChangeSetPolicyEvaluator } from "../domain/changeSet/changeSetService";
 import { WorkspaceChangeSetPolicy } from "../domain/changeSet/workspaceChangeSetPolicy";
 import { SemanticGraphService } from "../domain/graph/semanticGraphService";
+import { CreativeShowcaseService } from "../domain/showcase/creativeShowcaseService";
 import type { AgentToolGateway } from "./agentProcessSupervisor";
 import { createWorkspaceAgentToolGateway } from "./workspaceAgentToolGateway";
 import { AgentAuditRepository } from "../domain/audit/agentAuditRepository";
@@ -320,6 +328,27 @@ export class WorkspaceSession {
     return { bytes, mimeType: asset.mimeType, sha256: asset.sha256 };
   }
 
+  listImageAssets(): WorkspaceImageAsset[] {
+    return new ImageAssetRepository(this.requireWorkspace()).listPublishedAssets().map((record) => ({
+      assetId: record.asset.id,
+      jobId: record.asset.jobId,
+      title: record.title,
+      purpose: record.purpose,
+      status: record.asset.status,
+      thumbnailUrl: `novax-asset://image/${encodeURIComponent(record.asset.id)}`,
+      mimeType: record.asset.mimeType,
+      width: record.asset.width,
+      height: record.asset.height,
+      sourceResourceIds: record.sourceResourceIds,
+      sourceVersionIds: record.sourceVersionIds,
+      createdAt: record.asset.createdAt,
+    }));
+  }
+
+  getShowcase(storyResourceId: string): CreativeShowcaseSnapshot {
+    return new CreativeShowcaseService(this.requireWorkspace()).get(storyResourceId);
+  }
+
   getDocument(resourceId: string): EditorDocumentSnapshot {
     return editorDocumentSnapshotSchema.parse(new DocumentEditorService(this.requireWorkspace()).getForEditor(resourceId));
   }
@@ -425,8 +454,10 @@ export class WorkspaceSession {
     return semanticGraphSnapshotSchema.parse(new SemanticGraphService(this.requireWorkspace()).getSnapshot());
   }
 
-  inspectGraphNode(nodeId: string): SemanticGraphInspector {
-    return semanticGraphInspectorSchema.parse(new SemanticGraphService(this.requireWorkspace()).inspectNode(nodeId));
+  inspectGraphNode(nodeId: string, scopeResourceIds?: string[]): SemanticGraphInspector {
+    return semanticGraphInspectorSchema.parse(
+      new SemanticGraphService(this.requireWorkspace()).inspectNode(nodeId, scopeResourceIds),
+    );
   }
 
   close(): void {
@@ -527,6 +558,11 @@ export function registerWorkspaceIpc(options: {
     nullableContextBudgetAuditSchema.parse(session.getCurrent() ? session.getLatestContextBudget() : null)
   ));
   ipcMain.handle(desktopIpcChannels.workspaceDoctor, () => projectDoctorResult(() => session.inspectProject()));
+  ipcMain.handle(desktopIpcChannels.workspaceImageAssets, () => workspaceImageAssetListResult(() => session.listImageAssets()));
+  ipcMain.handle(desktopIpcChannels.showcaseGet, (_event, payload: unknown) => showcaseResult(() => {
+    const request = showcaseGetRequestSchema.parse(payload);
+    return session.getShowcase(request.storyResourceId);
+  }));
   ipcMain.handle(desktopIpcChannels.projectFileList, (_event, payload: unknown) => {
     const request = projectFileListRequestSchema.parse(payload ?? {});
     try {
@@ -698,7 +734,7 @@ export function registerWorkspaceIpc(options: {
   ipcMain.handle(desktopIpcChannels.graphSnapshot, () => graphSnapshotResult(() => session.getGraphSnapshot()));
   ipcMain.handle(desktopIpcChannels.graphInspectNode, (_event, payload: unknown) => graphInspectorResult(() => {
     const request = graphInspectNodeRequestSchema.parse(payload);
-    return session.inspectGraphNode(request.nodeId);
+    return session.inspectGraphNode(request.nodeId, request.scopeResourceIds);
   }));
 
   const e2eWorkspace = !app.isPackaged ? process.env.NOVAX_DESKTOP_E2E_WORKSPACE : undefined;
@@ -1033,6 +1069,38 @@ function graphSnapshotResult(operation: () => SemanticGraphSnapshot): GraphSnaps
     return graphSnapshotResultSchema.parse({ ok: true, graph: operation() });
   } catch (error) {
     return graphSnapshotResultSchema.parse({ ok: false, error: publicGraphError(error) });
+  }
+}
+
+function workspaceImageAssetListResult(operation: () => WorkspaceImageAsset[]): WorkspaceImageAssetListResult {
+  try {
+    return workspaceImageAssetListResultSchema.parse({ ok: true, assets: operation() });
+  } catch (error) {
+    const code = readPublicCode(error, "IMAGE_ASSET_LIST_FAILED") === "WORKSPACE_NOT_OPEN"
+      ? "WORKSPACE_NOT_OPEN"
+      : "IMAGE_ASSET_LIST_FAILED";
+    const message = code === "WORKSPACE_NOT_OPEN"
+      ? "尚未打开工作区。"
+      : "图片资产暂时无法载入，请重试。";
+    return workspaceImageAssetListResultSchema.parse({ ok: false, error: { code, message } });
+  }
+}
+
+function showcaseResult(operation: () => CreativeShowcaseSnapshot): ShowcaseGetResult {
+  try {
+    return showcaseGetResultSchema.parse({ ok: true, showcase: operation() });
+  } catch (error) {
+    const publicCode = readPublicCode(error, "SHOWCASE_LOAD_FAILED");
+    const code = ([
+      "WORKSPACE_NOT_OPEN", "SHOWCASE_STORY_NOT_FOUND", "SHOWCASE_STORY_INVALID",
+    ] as const).find((candidate) => candidate === publicCode) ?? "SHOWCASE_LOAD_FAILED";
+    const message = {
+      WORKSPACE_NOT_OPEN: "尚未打开工作区。",
+      SHOWCASE_STORY_NOT_FOUND: "当前版本中找不到这个故事。",
+      SHOWCASE_STORY_INVALID: "所选对象不是可预览的故事。",
+      SHOWCASE_LOAD_FAILED: "作品预览暂时无法载入，请重试。",
+    }[code];
+    return showcaseGetResultSchema.parse({ ok: false, error: { code, message } });
   }
 }
 

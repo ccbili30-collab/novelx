@@ -28,7 +28,17 @@ const NODE_WIDTH = 184;
 const NODE_HEIGHT = 68;
 const nodeTypes = { semantic: SemanticNodeCard };
 
-export function SemanticGraphView({ refreshKey }: { refreshKey: number }) {
+export function SemanticGraphView({
+  refreshKey,
+  snapshot: suppliedSnapshot,
+  scopeResourceIds,
+  embedded = false,
+}: {
+  refreshKey: number;
+  snapshot?: SemanticGraphSnapshot;
+  scopeResourceIds?: string[];
+  embedded?: boolean;
+}) {
   const [snapshot, setSnapshot] = useState<SemanticGraphSnapshot | null>(null);
   const [inspector, setInspector] = useState<SemanticGraphInspector | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -45,6 +55,11 @@ export function SemanticGraphView({ refreshKey }: { refreshKey: number }) {
     setError(null);
     setInspector(null);
     setSelectedId(null);
+    if (suppliedSnapshot) {
+      setSnapshot(suppliedSnapshot);
+      return () => { active = false; };
+    }
+    setSnapshot(null);
     void window.novaxDesktop.graph.getSnapshot().then((result) => {
       if (!active) return;
       if (result.ok) setSnapshot(result.graph);
@@ -53,7 +68,7 @@ export function SemanticGraphView({ refreshKey }: { refreshKey: number }) {
       if (active) setError(readErrorMessage(cause));
     });
     return () => { active = false; };
-  }, [refreshKey]);
+  }, [refreshKey, suppliedSnapshot]);
 
   const visibleGraph = useMemo(() => {
     if (!snapshot) return { nodes: [] as FlowNode[], edges: [] as Edge[] };
@@ -86,7 +101,7 @@ export function SemanticGraphView({ refreshKey }: { refreshKey: number }) {
     setInspectorLoading(true);
     setError(null);
     try {
-      const result = await window.novaxDesktop.graph.inspectNode({ nodeId });
+      const result = await window.novaxDesktop.graph.inspectNode({ nodeId, scopeResourceIds });
       if (result.ok) setInspector(result.inspector);
       else setError(result.error.message);
     } catch (cause) {
@@ -104,7 +119,7 @@ export function SemanticGraphView({ refreshKey }: { refreshKey: number }) {
   }
 
   return (
-    <article className="semantic-graph" aria-label="语义图谱">
+    <article className="semantic-graph" data-embedded={embedded} aria-label="语义图谱">
       <header className="graph-toolbar">
         <label className="graph-search">
           <Search size={14} aria-hidden="true" />

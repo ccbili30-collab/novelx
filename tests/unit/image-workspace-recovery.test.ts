@@ -41,6 +41,42 @@ describe("Image job workspace recovery", () => {
     workspace.close();
     expect(fs.existsSync(path.join(temporaryPath, "interrupted.tmp"))).toBe(false);
   });
+
+  it("projects committed image assets through the workspace boundary without private provider fields", () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-image-workspace-projection-"));
+    const workspace = openWorkspace(root);
+    const repository = new ImageAssetRepository(workspace);
+    const source = workspace.db.prepare(`
+      SELECT resource_id, id FROM resource_revisions ORDER BY created_at, id LIMIT 1
+    `).get() as { resource_id: string; id: string };
+    const created = repository.createOrGetJob(job("projection", source));
+    repository.claim(created.id);
+    repository.markRequestSent(created.id);
+    const asset = repository.complete(created.id, {
+      mimeType: "image/png",
+      width: 1024,
+      height: 1024,
+      byteLength: 128,
+      sha256: "a".repeat(64),
+      relativePath: `.novax/assets/images/${"a".repeat(64)}.png`,
+    });
+    workspace.close();
+
+    const session = new WorkspaceSession();
+    session.openPath(root);
+    const result = session.listImageAssets();
+    session.close();
+
+    expect(result).toEqual([expect.objectContaining({
+      assetId: asset.id,
+      jobId: created.id,
+      title: created.title,
+      sourceResourceIds: [source.resource_id],
+      sourceVersionIds: [source.id],
+      thumbnailUrl: `novax-asset://image/${asset.id}`,
+    })]);
+    expect(JSON.stringify(result)).not.toMatch(/prompt|providerId|modelId|relativePath|sha256/i);
+  });
 });
 
 function job(suffix: string, source: { resource_id: string; id: string }) {

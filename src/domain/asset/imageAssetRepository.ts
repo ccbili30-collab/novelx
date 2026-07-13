@@ -47,6 +47,26 @@ export interface ImageAssetRecord {
   updatedAt: string;
 }
 
+export interface PublishedImageAssetRecord {
+  asset: ImageAssetRecord;
+  title: string;
+  purpose: ImageGenerationPurpose;
+  sourceResourceIds: string[];
+  sourceVersionIds: string[];
+}
+
+export interface ShowcaseImageJobRecord {
+  jobId: string;
+  title: string;
+  purpose: ImageGenerationPurpose;
+  status: ImageGenerationJobStatus;
+  sourceResourceIds: string[];
+  sourceVersionIds: string[];
+  asset: ImageAssetRecord | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export class ImageAssetRepository {
   constructor(readonly workspace: WorkspaceDatabase) {}
 
@@ -168,6 +188,93 @@ export class ImageAssetRepository {
     const row = this.workspace.db.prepare("SELECT * FROM image_assets WHERE id = ?").get(assetId);
     if (!row) throw repositoryError("IMAGE_ASSET_NOT_FOUND");
     return mapAsset(row);
+  }
+
+  listPublishedAssets(limit = 500): PublishedImageAssetRecord[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) {
+      throw repositoryError("IMAGE_ASSET_LIST_LIMIT_INVALID");
+    }
+    const rows = this.workspace.db.prepare(`
+      SELECT
+        assets.*,
+        jobs.title AS job_title,
+        jobs.purpose AS job_purpose,
+        jobs.source_resource_ids_json AS job_source_resource_ids_json,
+        jobs.source_version_ids_json AS job_source_version_ids_json
+      FROM image_assets assets
+      INNER JOIN image_generation_jobs jobs ON jobs.id = assets.job_id
+      WHERE jobs.status = 'succeeded'
+      ORDER BY assets.created_at DESC, assets.id DESC
+      LIMIT ?
+    `).all(limit);
+    return rows.map((row) => {
+      const value = row as Record<string, unknown>;
+      return {
+        asset: mapAsset(row),
+        title: String(value.job_title),
+        purpose: String(value.job_purpose) as ImageGenerationPurpose,
+        sourceResourceIds: readStringArray(value.job_source_resource_ids_json),
+        sourceVersionIds: readStringArray(value.job_source_version_ids_json),
+      };
+    });
+  }
+
+  listShowcaseJobs(limit = 1_000): ShowcaseImageJobRecord[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) {
+      throw repositoryError("IMAGE_JOB_LIST_LIMIT_INVALID");
+    }
+    const rows = this.workspace.db.prepare(`
+      SELECT
+        jobs.id AS job_id,
+        jobs.title AS job_title,
+        jobs.purpose AS job_purpose,
+        jobs.status AS job_status,
+        jobs.source_resource_ids_json AS job_source_resource_ids_json,
+        jobs.source_version_ids_json AS job_source_version_ids_json,
+        jobs.created_at AS job_created_at,
+        jobs.updated_at AS job_updated_at,
+        assets.id AS asset_id,
+        assets.mime_type AS asset_mime_type,
+        assets.width AS asset_width,
+        assets.height AS asset_height,
+        assets.byte_length AS asset_byte_length,
+        assets.sha256 AS asset_sha256,
+        assets.relative_path AS asset_relative_path,
+        assets.status AS asset_status,
+        assets.created_at AS asset_created_at,
+        assets.updated_at AS asset_updated_at
+      FROM image_generation_jobs jobs
+      LEFT JOIN image_assets assets ON assets.job_id = jobs.id
+      ORDER BY jobs.created_at DESC, jobs.id DESC
+      LIMIT ?
+    `).all(limit);
+    return rows.map((row) => {
+      const value = row as Record<string, unknown>;
+      const jobId = String(value.job_id);
+      return {
+        jobId,
+        title: String(value.job_title),
+        purpose: String(value.job_purpose) as ImageGenerationPurpose,
+        status: String(value.job_status) as ImageGenerationJobStatus,
+        sourceResourceIds: readStringArray(value.job_source_resource_ids_json),
+        sourceVersionIds: readStringArray(value.job_source_version_ids_json),
+        asset: value.asset_id === null || value.asset_id === undefined ? null : {
+          id: String(value.asset_id),
+          jobId,
+          mimeType: String(value.asset_mime_type) as ImageAssetRecord["mimeType"],
+          width: Number(value.asset_width),
+          height: Number(value.asset_height),
+          byteLength: Number(value.asset_byte_length),
+          sha256: String(value.asset_sha256),
+          relativePath: String(value.asset_relative_path),
+          status: String(value.asset_status) as ImageAssetStatus,
+          createdAt: String(value.asset_created_at),
+          updatedAt: String(value.asset_updated_at),
+        },
+        createdAt: String(value.job_created_at),
+        updatedAt: String(value.job_updated_at),
+      };
+    });
   }
 
   recoverInterruptedJobs(): { requeued: number; reconciliationRequired: number } {

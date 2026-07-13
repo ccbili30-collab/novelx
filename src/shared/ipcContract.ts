@@ -48,6 +48,8 @@ export const desktopIpcChannels = {
   workspaceHistory: "novax:workspace-history",
   workspaceContextBudget: "novax:workspace-context-budget",
   workspaceDoctor: "novax:workspace-doctor",
+  workspaceImageAssets: "novax:workspace-image-assets",
+  showcaseGet: "novax:showcase-get",
   storyProfileCreate: "novax:story-profile-create",
   storyProfileList: "novax:story-profile-list",
   startProfileCreate: "novax:start-profile-create",
@@ -444,6 +446,112 @@ export const workspaceSnapshotSchema = z.object({
   relations: z.array(workspaceCreativeRelationSchema).max(100_000),
   constraintProfiles: z.array(workspaceConstraintProfileSchema).max(10_000),
 }).strict();
+
+export const workspaceImageAssetSchema = z.object({
+  assetId: opaqueIdSchema,
+  jobId: opaqueIdSchema,
+  title: z.string().trim().min(1).max(240),
+  purpose: z.enum(["character_portrait", "scene"]),
+  status: z.enum(["ready", "stale"]),
+  thumbnailUrl: z.string().max(4_000).refine(
+    (value) => value.startsWith("novax-asset://image/"),
+    "Workspace image assets must use the managed Novax protocol.",
+  ),
+  mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+  width: z.number().int().positive().max(16_384),
+  height: z.number().int().positive().max(16_384),
+  sourceResourceIds: z.array(opaqueIdSchema).min(1).max(100),
+  sourceVersionIds: z.array(opaqueIdSchema).min(1).max(100),
+  createdAt: z.iso.datetime(),
+}).strict();
+
+export const workspaceImageAssetListResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), assets: z.array(workspaceImageAssetSchema).max(1_000) }).strict(),
+  z.object({
+    ok: z.literal(false),
+    error: z.object({
+      code: z.enum(["WORKSPACE_NOT_OPEN", "IMAGE_ASSET_LIST_FAILED"]),
+      message: z.string().min(1).max(240),
+    }).strict(),
+  }).strict(),
+]);
+
+export const showcaseGetRequestSchema = z.object({
+  storyResourceId: opaqueIdSchema,
+}).strict();
+
+const showcaseStableDocumentSchema = z.object({
+  documentId: z.string().min(1).max(160),
+  resourceId: opaqueIdSchema,
+  kind: workspaceCreativeDocumentSchema.shape.kind,
+  title: z.string().min(1).max(240),
+  sortOrder: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  stableVersionId: opaqueIdSchema,
+  content: z.string().max(8_000_000),
+}).strict();
+
+const showcaseResourceSchema = z.object({
+  id: opaqueIdSchema,
+  type: workspaceResourceSchema.shape.type,
+  objectKind: workspaceResourceSchema.shape.objectKind,
+  title: z.string().min(1).max(240),
+  documents: z.array(showcaseStableDocumentSchema).max(10_000),
+}).strict();
+
+const showcaseImageSchema = z.object({
+  jobId: opaqueIdSchema,
+  assetId: opaqueIdSchema.nullable(),
+  title: z.string().min(1).max(240),
+  purpose: z.enum(["character_portrait", "scene"]),
+  status: z.enum(["queued", "generating", "ready", "stale", "failed", "reconciliation_required"]),
+  statusMessage: z.string().min(1).max(240),
+  thumbnailUrl: z.string().max(4_000).refine(
+    (value) => value.startsWith("novax-asset://image/"),
+    "Showcase images must use the managed Novax protocol.",
+  ).nullable(),
+  mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]).nullable(),
+  width: z.number().int().positive().max(16_384).nullable(),
+  height: z.number().int().positive().max(16_384).nullable(),
+  sourceResourceIds: z.array(opaqueIdSchema).min(1).max(100),
+  sourceVersionIds: z.array(opaqueIdSchema).min(1).max(100),
+  sourceResources: z.array(z.object({
+    id: opaqueIdSchema,
+    type: workspaceResourceSchema.shape.type,
+    objectKind: workspaceResourceSchema.shape.objectKind,
+    title: z.string().min(1).max(240),
+  }).strict()).max(100),
+  createdAt: z.iso.datetime(),
+}).strict().superRefine((image, context) => {
+  const renderable = image.status === "ready" || image.status === "stale";
+  const hasPayload = image.assetId !== null && image.thumbnailUrl !== null && image.mimeType !== null
+    && image.width !== null && image.height !== null;
+  if (renderable !== hasPayload) {
+    context.addIssue({ code: "custom", message: "Only ready or stale showcase images may expose a managed image payload." });
+  }
+});
+
+export const creativeShowcaseSnapshotSchema = z.object({
+  story: showcaseResourceSchema,
+  proseDocuments: z.array(showcaseStableDocumentSchema).max(10_000),
+  worlds: z.array(showcaseResourceSchema).max(1_000),
+  characters: z.array(showcaseResourceSchema).max(10_000),
+  images: z.array(showcaseImageSchema).max(1_000),
+  graphScopeResourceIds: z.array(opaqueIdSchema).min(1).max(100),
+  graph: z.lazy(() => semanticGraphSnapshotSchema),
+}).strict();
+
+export const showcaseGetResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), showcase: creativeShowcaseSnapshotSchema }).strict(),
+  z.object({
+    ok: z.literal(false),
+    error: z.object({
+      code: z.enum([
+        "WORKSPACE_NOT_OPEN", "SHOWCASE_STORY_NOT_FOUND", "SHOWCASE_STORY_INVALID", "SHOWCASE_LOAD_FAILED",
+      ]),
+      message: z.string().min(1).max(240),
+    }).strict(),
+  }).strict(),
+]);
 
 export const nullableWorkspaceSnapshotSchema = workspaceSnapshotSchema.nullable();
 
@@ -1055,6 +1163,7 @@ export const semanticGraphSnapshotSchema = z.object({
 
 export const graphInspectNodeRequestSchema = z.object({
   nodeId: z.string().min(1).max(120),
+  scopeResourceIds: z.array(opaqueIdSchema).max(100).optional(),
 }).strict();
 
 const graphSourceSummarySchema = z.object({
@@ -1243,6 +1352,11 @@ export type SharedMemoryPublishRequest = z.infer<typeof sharedMemoryPublishReque
 export type HandoffCreateRequest = z.infer<typeof handoffCreateRequestSchema>;
 export type HandoffUpdateRequest = z.infer<typeof handoffUpdateRequestSchema>;
 export type WorkspaceSnapshot = z.infer<typeof workspaceSnapshotSchema>;
+export type WorkspaceImageAsset = z.infer<typeof workspaceImageAssetSchema>;
+export type WorkspaceImageAssetListResult = z.infer<typeof workspaceImageAssetListResultSchema>;
+export type ShowcaseGetRequest = z.infer<typeof showcaseGetRequestSchema>;
+export type CreativeShowcaseSnapshot = z.infer<typeof creativeShowcaseSnapshotSchema>;
+export type ShowcaseGetResult = z.infer<typeof showcaseGetResultSchema>;
 export type CreativeWorkspaceMutation = z.infer<typeof creativeWorkspaceMutationSchema>;
 export type CreativeMutationResult = z.infer<typeof creativeMutationResultSchema>;
 export type CheckpointHistoryEntry = z.infer<typeof checkpointHistoryEntrySchema>;
@@ -1369,6 +1483,7 @@ export interface DesktopApi {
     listHistory(): Promise<WorkspaceHistoryResult>;
     getLatestContextBudget(): Promise<ContextBudgetAudit | null>;
     inspectProject(): Promise<ProjectDoctorResult>;
+    listImageAssets(): Promise<WorkspaceImageAssetListResult>;
     restore(request: WorkspaceRestoreRequest): Promise<WorkspaceRestoreResult>;
     subscribeFlushRequest(listener: (request: WorkspaceFlushRequest) => void): () => void;
     completeFlush(request: WorkspaceFlushComplete): void;
@@ -1428,6 +1543,9 @@ export interface DesktopApi {
   graph: {
     getSnapshot(): Promise<GraphSnapshotResult>;
     inspectNode(request: GraphInspectNodeRequest): Promise<GraphInspectorResult>;
+  };
+  showcase: {
+    get(request: ShowcaseGetRequest): Promise<ShowcaseGetResult>;
   };
   provider: {
     getStatus(): Promise<ProviderStatusResult>;

@@ -123,6 +123,8 @@ describe("desktop IPC contract", () => {
       workspaceCurrent: "novax:workspace-current",
       workspaceHistory: "novax:workspace-history",
       workspaceDoctor: "novax:workspace-doctor",
+      workspaceImageAssets: "novax:workspace-image-assets",
+      showcaseGet: "novax:showcase-get",
       storyProfileCreate: "novax:story-profile-create",
       storyProfileList: "novax:story-profile-list",
       startProfileCreate: "novax:start-profile-create",

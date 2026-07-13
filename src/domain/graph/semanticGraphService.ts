@@ -114,13 +114,20 @@ export class SemanticGraphService {
     return this.#build().snapshot;
   }
 
-  inspectNode(nodeId: string): SemanticGraphInspector {
+  getSnapshotForScopes(scopeResourceIds: readonly string[]): SemanticGraphSnapshot {
+    return filterSnapshotByScopes(this.#build().snapshot, normalizeScopeIds(scopeResourceIds));
+  }
+
+  inspectNode(nodeId: string, scopeResourceIds?: readonly string[]): SemanticGraphInspector {
     const graph = this.#build();
-    const node = graph.snapshot.nodes.find((candidate) => candidate.id === nodeId);
+    const snapshot = scopeResourceIds
+      ? filterSnapshotByScopes(graph.snapshot, normalizeScopeIds(scopeResourceIds))
+      : graph.snapshot;
+    const node = snapshot.nodes.find((candidate) => candidate.id === nodeId);
     const detail = graph.details.get(nodeId);
     if (!node || !detail) throw graphError("GRAPH_NODE_NOT_FOUND", "Graph node was not found on the current branch.");
-    const nodes = new Map(graph.snapshot.nodes.map((candidate) => [candidate.id, candidate]));
-    const relations = graph.snapshot.edges.flatMap((edge) => {
+    const nodes = new Map(snapshot.nodes.map((candidate) => [candidate.id, candidate]));
+    const relations = snapshot.edges.flatMap((edge) => {
       const direction = edge.sourceNodeId === nodeId
         ? "outgoing" as const
         : edge.targetNodeId === nodeId
@@ -325,6 +332,34 @@ export class SemanticGraphService {
     }
     return { type: "recorded", label: "已记录来源" };
   }
+}
+
+function normalizeScopeIds(scopeResourceIds: readonly string[]): Set<string> {
+  if (scopeResourceIds.length > 100) throw graphError("GRAPH_SCOPE_INVALID", "Graph scope is too large.");
+  const normalized = new Set<string>();
+  for (const value of scopeResourceIds) {
+    const id = value.trim();
+    if (!id || id.length > 120) throw graphError("GRAPH_SCOPE_INVALID", "Graph scope contains an invalid resource id.");
+    normalized.add(safeId("scope", id));
+  }
+  return normalized;
+}
+
+function filterSnapshotByScopes(snapshot: SemanticGraphSnapshot, scopeIds: ReadonlySet<string>): SemanticGraphSnapshot {
+  const nodes = snapshot.nodes.filter((node) => scopeIds.has(node.scope.id));
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const edges = snapshot.edges.filter((edge) => nodeIds.has(edge.sourceNodeId) && nodeIds.has(edge.targetNodeId));
+  return {
+    lens: snapshot.lens,
+    nodes,
+    edges,
+    filterOptions: {
+      nodeKinds: uniqueSorted(nodes.map((node) => node.kind)),
+      semanticTypes: uniqueSorted(nodes.map((node) => node.semanticType)),
+      scopeTypes: uniqueSorted(nodes.map((node) => node.scope.type)),
+      statuses: uniqueSorted(nodes.map((node) => node.status)),
+    },
+  };
 }
 
 function projectScope(assertion: SourcedAssertionRecord, resource: ResourceRecord | undefined): SemanticGraphScope {
