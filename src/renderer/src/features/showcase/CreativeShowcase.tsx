@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { BookOpenText, CircleUserRound, Image, LoaderCircle, Network, Sparkles } from "lucide-react";
+import { BookOpenText, CircleUserRound, Image, LoaderCircle, Network, Play, Sparkles } from "lucide-react";
 import type { CreativeShowcaseSnapshot, WorkspaceSnapshot } from "../../../../shared/ipcContract";
 import { AgentMessageContent } from "../agent/AgentMessageContent";
 import { ImageAssetCard } from "../assets/ImageAssetCard";
@@ -10,6 +10,12 @@ export function CreativeShowcase(props: {
   refreshKey: number;
   storyResourceId?: string | null;
   onStoryChange?(storyResourceId: string): void;
+  onEnterPlayer(input: {
+    storyResourceId: string;
+    worldResourceId: string;
+    storyTitle: string;
+    ocResourceIds: string[];
+  }): Promise<void>;
   onOpenResource(resourceId: string): Promise<void> | void;
   onOpenDocument(documentId: string, resourceId: string): Promise<void> | void;
 }) {
@@ -23,6 +29,9 @@ export function CreativeShowcase(props: {
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedWorldId, setSelectedWorldId] = useState("");
+  const [launchingPlayer, setLaunchingPlayer] = useState(false);
+  const [launchError, setLaunchError] = useState<string | null>(null);
 
   const selectedStory = stories.find((story) => story.id === storyId) ?? null;
   const selectedDocument = showcase?.proseDocuments.find((document) => document.documentId === selectedDocumentId)
@@ -30,6 +39,20 @@ export function CreativeShowcase(props: {
   const selectedImage = showcase?.images.find((image) => image.assetId === selectedImageId)
     ?? showcase?.images.find((image) => image.status === "ready" || image.status === "stale")
     ?? showcase?.images[0] ?? null;
+  const linkedWorlds = useMemo(() => {
+    if (!storyId) return [];
+    const ids = new Set(props.workspace.relations
+      .filter((relation) => relation.kind === "uses_world" && relation.sourceResourceId === storyId)
+      .map((relation) => relation.targetResourceId));
+    return props.workspace.resources.filter((resource) => ids.has(resource.id) && resource.objectKind === "world");
+  }, [props.workspace.relations, props.workspace.resources, storyId]);
+  const linkedOcs = useMemo(() => {
+    if (!storyId) return [];
+    const ids = new Set(props.workspace.relations
+      .filter((relation) => relation.kind === "uses_oc" && relation.sourceResourceId === storyId)
+      .map((relation) => relation.targetResourceId));
+    return props.workspace.resources.filter((resource) => ids.has(resource.id) && resource.objectKind === "oc");
+  }, [props.workspace.relations, props.workspace.resources, storyId]);
 
   useEffect(() => {
     if (props.storyResourceId && stories.some((story) => story.id === props.storyResourceId)
@@ -40,6 +63,14 @@ export function CreativeShowcase(props: {
     if (storyId && stories.some((story) => story.id === storyId)) return;
     setStoryId(stories[0]?.id ?? null);
   }, [props.storyResourceId, stories, storyId]);
+
+  useEffect(() => {
+    setSelectedWorldId((current) => {
+      if (linkedWorlds.length === 1) return linkedWorlds[0].id;
+      return linkedWorlds.some((world) => world.id === current) ? current : "";
+    });
+    setLaunchError(null);
+  }, [linkedWorlds, storyId]);
 
   useEffect(() => {
     let active = true;
@@ -70,6 +101,24 @@ export function CreativeShowcase(props: {
     props.onStoryChange?.(nextStoryId);
   }
 
+  async function enterPlayerMode() {
+    if (!selectedStory || !selectedWorldId || launchingPlayer) return;
+    setLaunchingPlayer(true);
+    setLaunchError(null);
+    try {
+      await props.onEnterPlayer({
+        storyResourceId: selectedStory.id,
+        worldResourceId: selectedWorldId,
+        storyTitle: selectedStory.title,
+        ocResourceIds: linkedOcs.map((oc) => oc.id),
+      });
+    } catch (cause) {
+      setLaunchError(readErrorMessage(cause));
+    } finally {
+      setLaunchingPlayer(false);
+    }
+  }
+
   return (
     <article className="creative-showcase" aria-label="创作联合展台">
       <header className="showcase-toolbar">
@@ -85,11 +134,37 @@ export function CreativeShowcase(props: {
               </select>
             </label>
           ) : selectedStory ? <span>{selectedStory.title}</span> : null}
+          {linkedWorlds.length > 1 ? (
+            <label>游玩世界
+              <select aria-label="游玩世界" value={selectedWorldId} onChange={(event) => setSelectedWorldId(event.target.value)}>
+                <option value="">请选择</option>
+                {linkedWorlds.map((world) => <option value={world.id} key={world.id}>{world.title}</option>)}
+              </select>
+            </label>
+          ) : null}
+          <button
+            className="showcase-enter-player"
+            type="button"
+            onClick={() => void enterPlayerMode()}
+            disabled={!selectedStory || !selectedWorldId || launchingPlayer}
+          >
+            {launchingPlayer ? <LoaderCircle className="spin" size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
+            {launchingPlayer ? "正在进入" : "进入玩家模式"}
+          </button>
           <span>{showcase?.images.length ?? 0} 张图 · {showcase?.characters.length ?? 0} 个角色 · {showcase?.graph.nodes.length ?? 0} 个图谱节点</span>
         </div>
       </header>
 
-      {error ? <div className="showcase-error" role="alert">{error}</div> : null}
+      <div className="showcase-notices">
+        {error ? <div className="showcase-error" role="alert">{error}</div> : null}
+        {!selectedStory ? <div className="showcase-launch-note">当前项目没有可游玩的故事。</div>
+          : linkedWorlds.length === 0 ? <div className="showcase-launch-note" role="status">这个故事尚未绑定世界，补充世界关系后才能进入玩家模式。</div>
+            : <div className="showcase-launch-note" role="status">
+                <span>游玩世界：{linkedWorlds.find((world) => world.id === selectedWorldId)?.title ?? "等待选择"}</span>
+                <span>绑定 OC：{linkedOcs.length ? linkedOcs.map((oc) => oc.title).join("、") : "无"}</span>
+              </div>}
+        {launchError ? <div className="showcase-error" role="alert">进入玩家模式失败：{launchError}</div> : null}
+      </div>
       <div className="showcase-scroll">
         <div className="showcase-lead">
           <section className="showcase-visual" aria-label="视觉资产">

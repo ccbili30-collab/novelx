@@ -1,8 +1,16 @@
 import { BookOpen, GitFork, LoaderCircle, Plus, RotateCcw, Send } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Playthrough, PublicPlayTurn, StartProfile, StoryProfile, WorkspaceSnapshot } from "../../../../shared/ipcContract";
+import type { Playthrough, PublicPlayTurn, StartProfile, StoryProfile, WorkspaceImageAsset, WorkspaceSnapshot } from "../../../../shared/ipcContract";
 
-export function PlayerWorkbench({ workspace }: { workspace: WorkspaceSnapshot | null }) {
+export interface PlayerLaunchTarget {
+  storyProfileId: string;
+  playthroughId: string;
+}
+
+export function PlayerWorkbench({ workspace, launchTarget = null }: {
+  workspace: WorkspaceSnapshot | null;
+  launchTarget?: PlayerLaunchTarget | null;
+}) {
   const [profiles, setProfiles] = useState<StoryProfile[]>([]);
   const [profileId, setProfileId] = useState("");
   const [playthroughs, setPlaythroughs] = useState<Playthrough[]>([]);
@@ -17,10 +25,12 @@ export function PlayerWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
   const [newStoryId, setNewStoryId] = useState("");
   const [newWorldId, setNewWorldId] = useState("");
   const [busy, setBusy] = useState(false);
+  const [sceneImage, setSceneImage] = useState<WorkspaceImageAsset | null>(null);
   const activeRunId = useRef<string | null>(null);
   const pendingActionRef = useRef("");
   const terminalRuns = useRef(new Set<string>());
   const streamRef = useRef<HTMLDivElement | null>(null);
+  const pendingLaunchRef = useRef<PlayerLaunchTarget | null>(launchTarget);
 
   const stories = workspace?.resources.filter((item) => item.objectKind === "story") ?? [];
   const worlds = workspace?.resources.filter((item) => item.objectKind === "world") ?? [];
@@ -29,18 +39,37 @@ export function PlayerWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
 
   useEffect(() => {
     if (!workspace) { setProfiles([]); setProfileId(""); return; }
-    void loadProfiles();
-  }, [workspace?.workspaceId]);
+    pendingLaunchRef.current = launchTarget;
+    void loadProfiles(launchTarget?.storyProfileId ?? null);
+  }, [workspace?.workspaceId, launchTarget?.storyProfileId, launchTarget?.playthroughId]);
 
   useEffect(() => {
     if (!profileId) { setPlaythroughs([]); setStarts([]); setPlaythroughId(""); return; }
-    void Promise.all([loadPlaythroughs(profileId), loadStarts(profileId)]);
+    const pending = pendingLaunchRef.current?.storyProfileId === profileId ? pendingLaunchRef.current : null;
+    void Promise.all([loadPlaythroughs(profileId, pending?.playthroughId ?? null), loadStarts(profileId)]).finally(() => {
+      if (pendingLaunchRef.current === pending) pendingLaunchRef.current = null;
+    });
   }, [profileId]);
 
   useEffect(() => {
     if (!playthroughId) { setTurns([]); return; }
     void loadTurns(playthroughId);
   }, [playthroughId]);
+
+  useEffect(() => {
+    let active = true;
+    const profile = profiles.find((item) => item.id === profileId);
+    setSceneImage(null);
+    if (!profile) return () => { active = false; };
+    void window.novaxDesktop.workspace.listImageAssets().then((result) => {
+      if (!active) return;
+      if (!result.ok) { setError(result.error.message); return; }
+      setSceneImage(selectStrictSceneImage(result.assets, profile.storyResourceId));
+    }).catch((cause: unknown) => {
+      if (active) setError(readErrorMessage(cause));
+    });
+    return () => { active = false; };
+  }, [profileId, profiles]);
 
   useEffect(() => window.novaxDesktop.play.subscribeTurns((event) => {
     if (activeRunId.current && event.runId !== activeRunId.current) return;
@@ -53,17 +82,29 @@ export function PlayerWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
     queueMicrotask(() => streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" }));
   }), []);
 
-  async function loadProfiles() {
+  async function loadProfiles(preferredProfileId: string | null = null) {
     const result = await window.novaxDesktop.play.listStoryProfiles();
     if (!result.ok) { setError(result.error.message); return; }
     setProfiles(result.profiles);
-    setProfileId((current) => result.profiles.some((item) => item.id === current) ? current : result.profiles.find((item) => item.status === "active")?.id ?? "");
+    if (preferredProfileId && !result.profiles.some((item) => item.id === preferredProfileId)) {
+      setProfileId("");
+      setError("指定的故事配置已不存在，无法进入该玩家存档。");
+      return;
+    }
+    setProfileId((current) => preferredProfileId
+      ?? (result.profiles.some((item) => item.id === current) ? current : result.profiles.find((item) => item.status === "active")?.id ?? ""));
   }
-  async function loadPlaythroughs(nextProfileId: string) {
+  async function loadPlaythroughs(nextProfileId: string, preferredPlaythroughId: string | null = null) {
     const result = await window.novaxDesktop.play.listPlaythroughs({ storyProfileId: nextProfileId });
     if (!result.ok) { setError(result.error.message); return; }
     setPlaythroughs(result.playthroughs);
-    setPlaythroughId((current) => result.playthroughs.some((item) => item.id === current) ? current : result.playthroughs.find((item) => item.status === "active")?.id ?? "");
+    if (preferredPlaythroughId && !result.playthroughs.some((item) => item.id === preferredPlaythroughId)) {
+      setPlaythroughId("");
+      setError("指定的玩家存档已不存在，无法继续游玩。");
+      return;
+    }
+    setPlaythroughId((current) => preferredPlaythroughId
+      ?? (result.playthroughs.some((item) => item.id === current) ? current : result.playthroughs.find((item) => item.status === "active")?.id ?? ""));
   }
   async function loadStarts(nextProfileId: string) {
     const result = await window.novaxDesktop.play.listStartProfiles({ storyProfileId: nextProfileId });
@@ -80,7 +121,8 @@ export function PlayerWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
     setBusy(true); setError(null);
     try {
       const story = stories.find((item) => item.id === newStoryId)!;
-      const result = await window.novaxDesktop.play.createStoryProfile({ storyResourceId: newStoryId, worldResourceId: newWorldId, title: story.title, ocBindings: [] });
+      const ocBindings = collectStoryOcIds(workspace, newStoryId).map((ocResourceId) => ({ ocResourceId, variantResourceId: null }));
+      const result = await window.novaxDesktop.play.createStoryProfile({ storyResourceId: newStoryId, worldResourceId: newWorldId, title: story.title, ocBindings });
       if (!result.ok) { setError(result.error.message); return; }
       await loadProfiles(); setProfileId(result.profile.id);
     } finally { setBusy(false); }
@@ -133,7 +175,10 @@ export function PlayerWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
 
     <div className="player-reader">
       <div className="player-turn-stream" ref={streamRef} aria-live="polite">
-        {turns.length ? turns.map((turn) => <article className="player-turn-card" key={turn.id}><p className="player-action-line">你选择：{turn.playerAction}</p><div className="player-prose">{turn.writerText.split("\n").map((line, index) => <p key={index}>{line || "\u00a0"}</p>)}</div></article>) : <div className="player-empty"><BookOpen size={28} strokeWidth={1.3} /><h1>{playthroughId ? "故事尚未开始" : "选择或建立一个存档"}</h1></div>}
+        {turns.length ? turns.map((turn) => <article className="player-turn-card" key={turn.id}>
+          {sceneImage ? <figure className="player-scene-image"><img src={sceneImage.thumbnailUrl} alt={`场景：${sceneImage.title}`} /><figcaption>来源绑定场景 · {sceneImage.title}</figcaption></figure> : null}
+          <p className="player-action-line">你选择：{turn.playerAction}</p><div className="player-prose">{turn.writerText.split("\n").map((line, index) => <p key={index}>{line || "\u00a0"}</p>)}</div>
+        </article>) : <div className="player-empty"><BookOpen size={28} strokeWidth={1.3} /><h1>{playthroughId ? "故事尚未开始" : "选择或建立一个存档"}</h1></div>}
       </div>
       <div className="player-composer">
         {error ? <div className="player-blocked" role="alert">{error}<button type="button" title="关闭" onClick={() => setError(null)}>×</button></div> : null}
@@ -146,6 +191,28 @@ export function PlayerWorkbench({ workspace }: { workspace: WorkspaceSnapshot | 
 
     {pendingConflict ? <div className="player-conflict-backdrop" role="presentation"><div className="player-conflict-dialog" role="dialog" aria-modal="true" aria-labelledby="player-conflict-title"><GitFork size={22} /><h2 id="player-conflict-title">当前正史已经变化</h2><p>旧存档不会被自动改写。请选择本次行动要沿用哪条时间线。</p><div><button type="button" onClick={() => resolveConflict("continue_pinned")}><RotateCcw size={16} />继续旧存档</button><button type="button" className="primary" onClick={() => resolveConflict("fork_from_current")}><GitFork size={16} />从当前正史新建分支</button></div></div></div> : null}
   </section>;
+}
+
+export function selectStrictSceneImage(assets: WorkspaceImageAsset[], storyResourceId: string): WorkspaceImageAsset | null {
+  return assets
+    .filter((asset) => asset.status === "ready"
+      && asset.purpose === "scene"
+      && asset.sourceResourceIds.includes(storyResourceId))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+}
+
+function collectStoryOcIds(workspace: WorkspaceSnapshot | null, storyResourceId: string): string[] {
+  if (!workspace) return [];
+  const validOcIds = new Set(workspace.resources.filter((resource) => resource.objectKind === "oc").map((resource) => resource.id));
+  return [...new Set(workspace.relations
+    .filter((relation) => relation.kind === "uses_oc"
+      && relation.sourceResourceId === storyResourceId
+      && validOcIds.has(relation.targetResourceId))
+    .map((relation) => relation.targetResourceId))];
+}
+
+function readErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message.trim() ? error.message : "玩家内容载入失败，请重试。";
 }
 
 function visibleState(state: Record<string, unknown> | null) {

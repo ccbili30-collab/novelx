@@ -26,7 +26,7 @@ import {
   readBackgroundPreference,
   type NovaxBackgroundPreference,
 } from "../../shared/backgroundPreference";
-import { PlayerWorkbench } from "./features/player/PlayerWorkbench";
+import { PlayerWorkbench, type PlayerLaunchTarget } from "./features/player/PlayerWorkbench";
 import { ImportWorkbench } from "./features/import/ImportWorkbench";
 import { CreativeShowcase } from "./features/showcase/CreativeShowcase";
 import snowBackgroundUrl from "./assets/snow.svg?url";
@@ -60,6 +60,7 @@ export function App() {
   const [selectedDomain, setSelectedDomain] = useState<WorkspaceSnapshot["resources"][number]["type"] | null>(null);
   const [selectedChangeSetId, setSelectedChangeSetId] = useState<string | null>(null);
   const [showcaseStoryId, setShowcaseStoryId] = useState<string | null>(null);
+  const [playerLaunchTarget, setPlayerLaunchTarget] = useState<PlayerLaunchTarget | null>(null);
   const [changeSetRefreshKey, setChangeSetRefreshKey] = useState(0);
   const [committedWorkspaceRefreshKey, setCommittedWorkspaceRefreshKey] = useState(0);
   const [sessionMessageRefreshKey, setSessionMessageRefreshKey] = useState(0);
@@ -323,6 +324,39 @@ export function App() {
   async function openShowcaseDocument(documentId: string, resourceId: string) {
     await selectDocument(documentId, resourceId);
     setMode("ide");
+  }
+
+  async function enterPlayerFromShowcase(input: {
+    storyResourceId: string;
+    worldResourceId: string;
+    storyTitle: string;
+    ocResourceIds: string[];
+  }): Promise<void> {
+    const profileList = await window.novaxDesktop.play.listStoryProfiles();
+    if (!profileList.ok) throw new Error(profileList.error.message);
+    let profile = profileList.profiles.find((candidate) => candidate.status === "active"
+      && candidate.storyResourceId === input.storyResourceId
+      && candidate.worldResourceId === input.worldResourceId) ?? null;
+    if (!profile) {
+      const created = await window.novaxDesktop.play.createStoryProfile({
+        storyResourceId: input.storyResourceId,
+        worldResourceId: input.worldResourceId,
+        title: input.storyTitle,
+        ocBindings: input.ocResourceIds.map((ocResourceId) => ({ ocResourceId, variantResourceId: null })),
+      });
+      if (!created.ok) throw new Error(created.error.message);
+      profile = created.profile;
+    }
+    const playthroughList = await window.novaxDesktop.play.listPlaythroughs({ storyProfileId: profile.id });
+    if (!playthroughList.ok) throw new Error(playthroughList.error.message);
+    let playthrough = playthroughList.playthroughs.find((candidate) => candidate.status === "active") ?? null;
+    if (!playthrough) {
+      const created = await window.novaxDesktop.play.createPlaythrough({ storyProfileId: profile.id, startProfileId: null });
+      if (!created.ok) throw new Error(created.error.message);
+      playthrough = created.playthrough;
+    }
+    setPlayerLaunchTarget({ storyProfileId: profile.id, playthroughId: playthrough.id });
+    setMode("player");
   }
 
   const openReadyImageShowcase = useCallback(async (artifact: Extract<AgentArtifact, { kind: "image" }>) => {
@@ -598,12 +632,13 @@ export function App() {
         </button> : null}
       </header>
 
-      {mode === "player" ? <PlayerWorkbench workspace={workspace} /> : mode === "import" ? <ImportWorkbench workspace={workspace} /> : mode === "showcase" ? (
+      {mode === "player" ? <PlayerWorkbench workspace={workspace} launchTarget={playerLaunchTarget} /> : mode === "import" ? <ImportWorkbench workspace={workspace} /> : mode === "showcase" ? (
         workspace ? <CreativeShowcase
           workspace={workspace}
           refreshKey={committedWorkspaceRefreshKey}
           storyResourceId={showcaseStoryId}
           onStoryChange={setShowcaseStoryId}
+          onEnterPlayer={enterPlayerFromShowcase}
           onOpenResource={openActivityResource}
           onOpenDocument={openShowcaseDocument}
         /> : <div className="empty-state"><Sparkles size={28} strokeWidth={1.4} aria-hidden="true" /><h1>项目尚未初始化</h1></div>

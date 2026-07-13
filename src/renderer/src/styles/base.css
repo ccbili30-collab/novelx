@@ -303,6 +303,9 @@ button { letter-spacing: 0; }
 .player-reader { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; background: var(--novax-color-conversation); }
 .player-turn-stream { min-height: 0; overflow: auto; padding: 28px clamp(20px, 5vw, 72px) 22px; scroll-behavior: smooth; }
 .player-turn-card { width: min(760px, 100%); margin: 0 auto 18px; padding: 18px 20px 20px; border: 1px solid var(--novax-color-line); border-radius: 7px; background: var(--novax-color-paper-raised); box-shadow: 0 1px 2px var(--novax-color-shadow); }
+.player-scene-image { position: relative; margin: -18px -20px 16px; overflow: hidden; border-radius: 7px 7px 0 0; background: var(--novax-color-surface-subtle); }
+.player-scene-image img { display: block; width: 100%; max-height: 340px; aspect-ratio: 16 / 9; object-fit: cover; }
+.player-scene-image figcaption { position: absolute; right: 0; bottom: 0; left: 0; padding: 22px 13px 9px; background: linear-gradient(transparent, color-mix(in srgb, var(--novax-color-text-strong) 84%, transparent)); color: white; font-size: 10px; letter-spacing: .03em; }
 .player-action-line { margin: 0 0 13px; padding-bottom: 10px; border-bottom: 1px solid var(--novax-color-line); color: var(--novax-color-text-subtle); font-size: 12px; }
 .player-prose { color: var(--novax-color-text-strong); font-family: "Noto Serif SC", "Songti SC", SimSun, serif; font-size: 16px; line-height: 1.9; }
 .player-prose p { margin: 0 0 0.85em; }
@@ -987,6 +990,9 @@ button { letter-spacing: 0; }
 .showcase-toolbar__controls > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .showcase-toolbar__controls label { display: flex; align-items: center; gap: 6px; }
 .showcase-toolbar__controls select, .showcase-story header select { height: 27px; max-width: 170px; border: 1px solid var(--novax-color-border-control); border-radius: 4px; outline: 0; background: var(--novax-color-surface-control); color: var(--novax-color-text); font-size: 10px; }
+.showcase-enter-player { min-height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid var(--accent); border-radius: 5px; background: var(--accent); color: var(--novax-color-on-accent); font-size: 10px; font-weight: 680; white-space: nowrap; cursor: pointer; }
+.showcase-enter-player:disabled { border-color: var(--novax-color-border-control); background: var(--novax-color-disabled-surface); color: var(--novax-color-disabled); cursor: not-allowed; }
+.showcase-launch-note { display: flex; align-items: center; justify-content: flex-end; gap: 14px; min-height: 30px; padding: 5px 16px; border-bottom: 1px solid var(--line); background: var(--novax-color-surface-subtle); color: var(--novax-color-text-subtle); font-size: 10px; }
 .showcase-error { padding: 7px 16px; border-bottom: 1px solid var(--novax-color-danger-border); background: var(--novax-color-danger-surface); color: var(--novax-color-danger-strong); font-size: 10px; }
 .showcase-scroll { min-height: 0; overflow: auto; padding: 14px; }
 .showcase-lead { display: grid; grid-template-columns: minmax(280px, 1.1fr) minmax(250px, .9fr); gap: 12px; height: min(48vh, 420px); min-height: 330px; }

@@ -33,7 +33,9 @@ test("shows story, source-bound image, characters and event graph in one real wo
 
     const showcase = page.getByRole("article", { name: "创作联合展台" });
     await expect(showcase).toBeVisible();
-    await expect(showcase.locator(".showcase-toolbar__controls > span").first()).toHaveText("雾潮纪事");
+    const storySelect = showcase.getByRole("combobox", { name: "故事", exact: true });
+    await storySelect.selectOption({ label: "雾潮纪事" });
+    await expect(storySelect.locator("option:checked")).toHaveText("雾潮纪事");
     await expect(showcase.getByText("洛弥在退潮后的银滩上醒来。", { exact: false })).toBeVisible();
     await expect(showcase.getByRole("button", { name: /洛弥.*OC/ })).toBeVisible();
     await expect(showcase.getByText("雾潮列车 · 抵达", { exact: true })).toBeVisible();
@@ -51,11 +53,69 @@ test("shows story, source-bound image, characters and event graph in one real wo
 
     await page.screenshot({ path: "test-results/novax-creative-showcase-1440x900.png", fullPage: true });
     await expect(page.getByRole("article", { name: "语义图谱" })).toBeVisible();
+
+    await expect(showcase.getByRole("button", { name: "进入玩家模式" })).toBeDisabled();
+    await expect(showcase.getByText("游玩世界：等待选择", { exact: true })).toBeVisible();
+    await showcase.getByLabel("游玩世界").selectOption({ label: "雾潮世界" });
+    await showcase.getByRole("button", { name: "进入玩家模式" }).click();
+    await expect(page.getByRole("region", { name: "玩家模式" })).toBeVisible();
+    const firstLaunch = await inspectPlayerLaunch(page);
+    expect(firstLaunch).toMatchObject({
+      profiles: [{
+        title: "雾潮纪事",
+        storyTitle: "雾潮纪事",
+        worldTitle: "雾潮世界",
+        status: "active",
+        ocTitles: ["洛弥", "雾鸢"],
+      }],
+      playthroughCounts: [1],
+    });
+
+    await page.getByRole("radio", { name: "作品预览" }).click();
+    const reopenedShowcase = page.getByRole("article", { name: "创作联合展台" });
+    await reopenedShowcase.getByLabel("游玩世界").selectOption({ label: "雾潮世界" });
+    await reopenedShowcase.getByRole("button", { name: "进入玩家模式" }).click();
+    await expect(page.getByRole("region", { name: "玩家模式" })).toBeVisible();
+    const secondLaunch = await inspectPlayerLaunch(page);
+    expect(secondLaunch).toEqual(firstLaunch);
+
+    await page.getByRole("radio", { name: "作品预览" }).click();
+    const noWorldShowcase = page.getByRole("article", { name: "创作联合展台" });
+    await noWorldShowcase.getByRole("combobox", { name: "故事", exact: true }).selectOption({ label: "无界故事" });
+    await expect(noWorldShowcase.getByText("这个故事尚未绑定世界，补充世界关系后才能进入玩家模式。")).toBeVisible();
+    await expect(noWorldShowcase.getByRole("button", { name: "进入玩家模式" })).toBeDisabled();
   } finally {
     if (app) await app.close();
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   }
 });
+
+async function inspectPlayerLaunch(page: import("@playwright/test").Page) {
+  return page.evaluate(async () => {
+    const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
+    const workspace = await desktop.workspace.getCurrent();
+    const result = await desktop.play.listStoryProfiles();
+    if (!workspace || !result.ok) throw new Error("Fixture player launch projection was unavailable.");
+    const byId = new Map(workspace.resources.map((resource) => [resource.id, resource.title]));
+    const playthroughCounts: number[] = [];
+    for (const profile of result.profiles) {
+      const playthroughs = await desktop.play.listPlaythroughs({ storyProfileId: profile.id });
+      if (!playthroughs.ok) throw new Error(playthroughs.error.message);
+      playthroughCounts.push(playthroughs.playthroughs.length);
+    }
+    return {
+      profiles: result.profiles.map((profile) => ({
+        id: profile.id,
+        title: profile.title,
+        storyTitle: byId.get(profile.storyResourceId),
+        worldTitle: byId.get(profile.worldResourceId),
+        status: profile.status,
+        ocTitles: profile.ocBindings.map((binding) => byId.get(binding.ocResourceId)).sort(),
+      })),
+      playthroughCounts,
+    };
+  });
+}
 
 test("fails closed when image assets are requested without an open workspace", async () => {
   const env = Object.fromEntries(
@@ -83,15 +143,22 @@ function seedShowcaseWorkspace(root: string): void {
   try {
     const creative = new CreativeWorkspaceService(workspace);
     creative.mutate({ action: "create_resource", domain: "world", objectKind: "world", title: "雾潮世界", parentId: null });
+    creative.mutate({ action: "create_resource", domain: "world", objectKind: "world", title: "镜潮世界", parentId: null });
     creative.mutate({ action: "create_resource", domain: "oc", objectKind: "oc", title: "洛弥", parentId: null });
+    creative.mutate({ action: "create_resource", domain: "oc", objectKind: "oc", title: "雾鸢", parentId: null });
     creative.mutate({ action: "create_resource", domain: "story", objectKind: "story", title: "雾潮纪事", parentId: null });
+    creative.mutate({ action: "create_resource", domain: "story", objectKind: "story", title: "无界故事", parentId: null });
 
     const resources = new ResourceRepository(workspace);
     const world = resources.listCurrent().find((resource) => resource.title === "雾潮世界")!;
+    const secondWorld = resources.listCurrent().find((resource) => resource.title === "镜潮世界")!;
     const character = resources.listCurrent().find((resource) => resource.title === "洛弥")!;
+    const secondCharacter = resources.listCurrent().find((resource) => resource.title === "雾鸢")!;
     const story = resources.listCurrent().find((resource) => resource.title === "雾潮纪事")!;
     creative.mutate({ action: "create_relation", kind: "uses_world", sourceResourceId: story.id, targetResourceId: world.id });
+    creative.mutate({ action: "create_relation", kind: "uses_world", sourceResourceId: story.id, targetResourceId: secondWorld.id });
     creative.mutate({ action: "create_relation", kind: "uses_oc", sourceResourceId: story.id, targetResourceId: character.id });
+    creative.mutate({ action: "create_relation", kind: "uses_oc", sourceResourceId: story.id, targetResourceId: secondCharacter.id });
 
     const prose = new CreativeDocumentRepository(workspace).listCurrent()
       .find((document) => document.resourceId === story.id && document.kind === "prose")!;
