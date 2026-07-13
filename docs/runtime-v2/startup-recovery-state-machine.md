@@ -19,6 +19,14 @@
 
 ## 2. 当前事实与缺口
 
+### Assist continuation proposal/ack（协助续跑提议/确认）
+
+Assist 工具决定全部持久化后，Runtime 不再与 Operational Recovery（运行恢复）并发启动续跑。顺序固定为：授权决定落盘且 AgentLoop 仍为 `AwaitingApproval` → 完成 recovery barrier → 持久化 ToolResult、续接 Context 和 `inference-started` → 发布 `provider.inference.continuation.proposed` → Host 校验并先登记 continuation identity → Host 发送 `provider.inference.continuation.acknowledge` → Runtime 精确核对 identity hash、父推理身份和授权证据 → 写出 `provider.inference.continuation.accepted` → 才允许 Provider 请求。
+
+`continuationId` 等于已持久化的 continuation `inferenceId`。终态事件以该 ID 作为 `correlationId`，Host 继续执行完整 inference identity 校验。Approve 和 Deny 都进入第二轮；Deny 以严格配对的 `TOOL_DENIED` ToolResult 继续，不能直接结束并破坏工具协议。
+
+当前 acknowledgement 幂等状态只保存在进程内。程序重启后尚不能从 Journal 重建未确认 proposal，也不会自动重新发布 proposal；因此这只是 live Assist 双向握手闭环，不是 durable continuation recovery（持久续跑恢复）闭环。
+
 启动入口先取得工作区独占锁，运行 `RecoveryCoordinator`、Assignment structural recovery、local-only Operational Recovery Supervisor，并在 `runtime.ready` 前记录完整扫描结果。没有 Provider 绑定时不会调用模型。Host 后续完成 `provider.bind` 后，Runtime 依次运行 local projection Supervisor、Provider Dispatch Supervisor、再次运行 local projection Supervisor，再发布刷新后的恢复状态。
 
 当前启动链已经能处理一个已持久化并已启动的 `ProviderDispatch`：新 Runtime 通过专用 ResumeAuthorization 续接 `Requested`，或零网络收口 `Sent/OutcomeUnknown/Responded/Failed`。它仍没有统一驱动全部 active AgentLoop phase，也没有 Tool Dispatch Supervisor，因此这里只是 Provider 子链闭环，不是完整启动恢复闭环。
