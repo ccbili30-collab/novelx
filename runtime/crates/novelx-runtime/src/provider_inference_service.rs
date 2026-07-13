@@ -18,9 +18,14 @@ use crate::provider_attempt::{
     ProviderAttemptFailure, ProviderAttemptMetadata, ProviderAttemptRecovery, ProviderAttemptState,
     ProviderDeliveryCertainty, ProviderResponseReceipt,
 };
+use crate::provider_effect_authorization_service::ProviderLiveEffectAuthorization;
+use crate::provider_effect_capability::{
+    ArmedProviderEffect, DispatchedProviderEffect, ProviderEffectCapabilityError,
+};
 use crate::provider_gateway::{
-    BoundProvider, PreparedProviderInference, ProviderGateway, ProviderGatewayError,
-    ProviderInferenceOutcome, ProviderInferenceReceipt, ProviderInferenceRequest, ProviderRegistry,
+    BoundProvider, PreparedProviderHttpDispatch, PreparedProviderInference, ProviderGateway,
+    ProviderGatewayError, ProviderInferenceOutcome, ProviderInferenceReceipt,
+    ProviderInferenceRequest, ProviderRegistry,
 };
 use crate::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
 use crate::run_state::RunState;
@@ -68,6 +73,22 @@ pub struct DispatchedProviderAttempt {
     execution: ProviderInferenceExecution,
     attempt: ProviderAttemptAggregate,
     result: Result<ProviderInferenceOutcome, ProviderGatewayError>,
+    execution_guard: ProviderAttemptExecutionGuard,
+}
+
+pub(crate) struct AuthorizedProviderAttemptDispatch {
+    execution: ProviderInferenceExecution,
+    attempt: ProviderAttemptAggregate,
+    http_dispatch: PreparedProviderHttpDispatch,
+    armed_effect: ArmedProviderEffect,
+    execution_guard: ProviderAttemptExecutionGuard,
+}
+
+pub(crate) struct AuthorizedDispatchedProviderAttempt {
+    execution: ProviderInferenceExecution,
+    attempt: ProviderAttemptAggregate,
+    result: Result<ProviderInferenceOutcome, ProviderGatewayError>,
+    dispatched_effect: DispatchedProviderEffect,
     execution_guard: ProviderAttemptExecutionGuard,
 }
 
@@ -183,6 +204,102 @@ impl<'a> ProviderInferenceService<'a> {
         let provider = self.providers.resolve(&dispatch.execution.provider)?;
         let dispatched = Self::dispatch_attempt(self.gateway, provider, dispatch).await;
         self.finalize_attempt(dispatched)
+    }
+
+    /// Crosses the durable authorized send boundary without performing network I/O.
+    ///
+    /// Every local construction and cancellation check happens before capability consumption and
+    /// the atomic `provider.sent` append. The returned move-only dispatch is the only value that
+    /// may enter the authorized Gateway kernel.
+    pub(crate) fn arm_authorized_dispatch(
+        &mut self,
+        authorization: ProviderLiveEffectAuthorization,
+        lease_database_path: impl AsRef<std::path::Path>,
+        cancelled_before_sent: bool,
+    ) -> Result<AuthorizedProviderAttemptDispatch, ProviderInferenceServiceError> {
+        let (
+            execution,
+            mut attempt,
+            prepared,
+            provider,
+            execution_guard,
+            capability,
+            expected_run_sequence,
+            expected_global_sequence,
+        ) = authorization.into_parts();
+        if !execution_guard.protects(self.journal, &execution.run_id, &execution.attempt_id) {
+            return Err(ProviderInferenceServiceError::AttemptGuardMismatch);
+        }
+        let http_dispatch = self.gateway.prepare_authorized_http_dispatch(
+            &provider,
+            prepared,
+            capability.receipt(),
+        )?;
+        if cancelled_before_sent {
+            return Err(ProviderInferenceServiceError::CancelledBeforeDispatch);
+        }
+        let material = capability.receipt().material().clone();
+        let consumed = capability.consume(&material, lease_database_path)?;
+        let sent_message_id = Uuid::new_v4().to_string();
+        let sent_key = format!("{}:sent-authorized", execution.attempt_id);
+        let sent_at = timestamp()?;
+        let armed_effect = attempt.mark_sent_authorized(
+            self.journal,
+            consumed,
+            expected_run_sequence,
+            expected_global_sequence,
+            metadata(&sent_message_id, &sent_key, &sent_at),
+        )?;
+        #[cfg(feature = "runtime-test-failpoints")]
+        crate::runtime_test_failpoint::hit("provider_attempt.authorized_sent_before_http");
+        Ok(AuthorizedProviderAttemptDispatch {
+            execution,
+            attempt,
+            http_dispatch,
+            armed_effect,
+            execution_guard,
+        })
+    }
+
+    pub(crate) async fn dispatch_authorized_attempt(
+        gateway: &ProviderGateway,
+        dispatch: AuthorizedProviderAttemptDispatch,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> AuthorizedDispatchedProviderAttempt {
+        let AuthorizedProviderAttemptDispatch {
+            execution,
+            attempt,
+            http_dispatch,
+            armed_effect,
+            execution_guard,
+        } = dispatch;
+        let result = gateway
+            .execute_authorized_http_dispatch(http_dispatch, armed_effect, cancellation)
+            .await;
+        let (result, dispatched_effect) = result.into_parts();
+        #[cfg(feature = "runtime-test-failpoints")]
+        crate::runtime_test_failpoint::hit("provider_attempt.authorized_response_before_terminal");
+        AuthorizedDispatchedProviderAttempt {
+            execution,
+            attempt,
+            result,
+            dispatched_effect,
+            execution_guard,
+        }
+    }
+
+    pub(crate) fn finalize_authorized_attempt_in(
+        journal: &mut EventJournal,
+        dispatched: AuthorizedDispatchedProviderAttempt,
+    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
+        let AuthorizedDispatchedProviderAttempt {
+            execution,
+            attempt,
+            result,
+            dispatched_effect: _dispatched_effect,
+            execution_guard: _execution_guard,
+        } = dispatched;
+        finalize_attempt_parts(journal, execution, attempt, result)
     }
 
     /// Ensures that the authoritative Provider Attempt exists in `Requested`, or projects an
@@ -624,80 +741,89 @@ impl<'a> ProviderInferenceService<'a> {
     ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
         let DispatchedProviderAttempt {
             execution,
-            mut attempt,
+            attempt,
             result,
             execution_guard: _execution_guard,
         } = dispatched;
-        match result {
-            Ok(outcome) => {
-                let response = response_receipt(&execution.provider, &outcome.receipt);
-                let responded_message_id = Uuid::new_v4().to_string();
-                let responded_key = format!("{}:responded", execution.attempt_id);
-                let responded_at = timestamp()?;
-                attempt.respond_with_output(
+        finalize_attempt_parts(journal, execution, attempt, result)
+    }
+}
+
+fn finalize_attempt_parts(
+    journal: &mut EventJournal,
+    execution: ProviderInferenceExecution,
+    mut attempt: ProviderAttemptAggregate,
+    result: Result<ProviderInferenceOutcome, ProviderGatewayError>,
+) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
+    match result {
+        Ok(outcome) => {
+            let response = response_receipt(&execution.provider, &outcome.receipt);
+            let responded_message_id = Uuid::new_v4().to_string();
+            let responded_key = format!("{}:responded", execution.attempt_id);
+            let responded_at = timestamp()?;
+            attempt.respond_with_output(
+                journal,
+                current_run_sequence(journal, &execution.run_id)?,
+                response,
+                outcome.text.clone(),
+                outcome
+                    .tool_calls
+                    .iter()
+                    .map(|call| novelx_protocol::ProviderInferenceToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                        arguments_sha256: call.arguments_sha256.clone(),
+                    })
+                    .collect(),
+                metadata(&responded_message_id, &responded_key, &responded_at),
+            )?;
+            Ok(outcome)
+        }
+        Err(error) if response_was_received(&error) => {
+            let failure = definitive_failure(&error);
+            let failed_message_id = Uuid::new_v4().to_string();
+            let failed_key = format!("{}:failed", execution.attempt_id);
+            let failed_at = timestamp()?;
+            attempt.fail(
+                journal,
+                current_run_sequence(journal, &execution.run_id)?,
+                failure,
+                metadata(&failed_message_id, &failed_key, &failed_at),
+            )?;
+            Err(error.into())
+        }
+        Err(error) => {
+            let cancelled = matches!(error, ProviderGatewayError::Cancelled);
+            let unknown_message_id = Uuid::new_v4().to_string();
+            let unknown_key = format!("{}:outcome-unknown", execution.attempt_id);
+            let unknown_at = timestamp()?;
+            attempt.mark_outcome_unknown(
+                journal,
+                current_run_sequence(journal, &execution.run_id)?,
+                Uuid::new_v4(),
+                metadata(&unknown_message_id, &unknown_key, &unknown_at),
+            )?;
+            let mut run = RunAggregate::recover(journal, &execution.run_id)?;
+            if run.state() != RunState::WaitingForReconciliation {
+                let reconciliation_message_id = Uuid::new_v4().to_string();
+                let reconciliation_key = format!("{}:run-reconciliation", execution.attempt_id);
+                run.wait_for_reconciliation(
                     journal,
-                    current_run_sequence(journal, &execution.run_id)?,
-                    response,
-                    outcome.text.clone(),
-                    outcome
-                        .tool_calls
-                        .iter()
-                        .map(|call| novelx_protocol::ProviderInferenceToolCall {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            arguments: call.arguments.clone(),
-                            arguments_sha256: call.arguments_sha256.clone(),
-                        })
-                        .collect(),
-                    metadata(&responded_message_id, &responded_key, &responded_at),
+                    EventMetadata {
+                        message_id: &reconciliation_message_id,
+                        idempotency_key: &reconciliation_key,
+                        created_at: &unknown_at,
+                        reason: Some("provider_outcome_unknown"),
+                    },
                 )?;
-                Ok(outcome)
             }
-            Err(error) if response_was_received(&error) => {
-                let failure = definitive_failure(&error);
-                let failed_message_id = Uuid::new_v4().to_string();
-                let failed_key = format!("{}:failed", execution.attempt_id);
-                let failed_at = timestamp()?;
-                attempt.fail(
-                    journal,
-                    current_run_sequence(journal, &execution.run_id)?,
-                    failure,
-                    metadata(&failed_message_id, &failed_key, &failed_at),
-                )?;
-                Err(error.into())
-            }
-            Err(error) => {
-                let cancelled = matches!(error, ProviderGatewayError::Cancelled);
-                let unknown_message_id = Uuid::new_v4().to_string();
-                let unknown_key = format!("{}:outcome-unknown", execution.attempt_id);
-                let unknown_at = timestamp()?;
-                attempt.mark_outcome_unknown(
-                    journal,
-                    current_run_sequence(journal, &execution.run_id)?,
-                    Uuid::new_v4(),
-                    metadata(&unknown_message_id, &unknown_key, &unknown_at),
-                )?;
-                let mut run = RunAggregate::recover(journal, &execution.run_id)?;
-                if run.state() != RunState::WaitingForReconciliation {
-                    let reconciliation_message_id = Uuid::new_v4().to_string();
-                    let reconciliation_key = format!("{}:run-reconciliation", execution.attempt_id);
-                    run.wait_for_reconciliation(
-                        journal,
-                        EventMetadata {
-                            message_id: &reconciliation_message_id,
-                            idempotency_key: &reconciliation_key,
-                            created_at: &unknown_at,
-                            reason: Some("provider_outcome_unknown"),
-                        },
-                    )?;
-                }
-                if cancelled {
-                    Err(ProviderInferenceServiceError::CancelledAfterDispatch)
-                } else {
-                    Err(ProviderInferenceServiceError::DeliveryUnknown(Box::new(
-                        error,
-                    )))
-                }
+            if cancelled {
+                Err(ProviderInferenceServiceError::CancelledAfterDispatch)
+            } else {
+                Err(ProviderInferenceServiceError::DeliveryUnknown(Box::new(
+                    error,
+                )))
             }
         }
     }
@@ -731,6 +857,8 @@ pub enum ProviderInferenceServiceError {
     FinalizationOutcomeUnknown,
     #[error("Provider inference was cancelled after dispatch")]
     CancelledAfterDispatch,
+    #[error("Provider inference was cancelled before the durable dispatch boundary")]
+    CancelledBeforeDispatch,
     #[error("Provider attempt already ended with {0:?}")]
     ExistingTerminal(ProviderAttemptRecovery),
     #[error("Provider delivery became uncertain: {0}")]
@@ -745,6 +873,8 @@ pub enum ProviderInferenceServiceError {
     Run(#[from] RunAggregateError),
     #[error(transparent)]
     Time(#[from] time::error::Format),
+    #[error(transparent)]
+    ProviderEffect(#[from] ProviderEffectCapabilityError),
 }
 
 fn validate_execution(

@@ -7,11 +7,12 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
 use novelx_protocol::{
-    ContextBudgetAllocation, ContextBudgetCategory, ContextCompilationReceipt, ContextDisclosure,
-    ContextRepresentation, Envelope, MessageType, PROTOCOL_VERSION, ProviderInferenceAccepted,
-    ProviderInferenceCompleted, ProviderInferenceStart, RunCancel, RunLifecycleState, RunReconcile,
-    RunReconciliationDecision, RunReconciliationReceipt, RunSnapshot, RuntimeApplicationIdentity,
-    RuntimeError, RuntimeInitialize, RuntimeStatus, TokenizerIdentity, TokenizerKind,
+    ContextBudgetAllocation, ContextBudgetCategory, ContextCompilationReceipt, ContextCompile,
+    ContextDisclosure, ContextRepresentation, Envelope, MessageType, PROTOCOL_VERSION,
+    ProviderInferenceAccepted, ProviderInferenceCompleted, ProviderInferenceStart, RunCancel,
+    RunLifecycleState, RunReconcile, RunReconciliationDecision, RunReconciliationReceipt,
+    RunSnapshot, RuntimeApplicationIdentity, RuntimeError, RuntimeInitialize, RuntimeStatus,
+    TokenizerIdentity, TokenizerKind,
 };
 use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
 use novelx_runtime::provider_gateway::{
@@ -20,6 +21,9 @@ use novelx_runtime::provider_gateway::{
 };
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate};
 use novelx_runtime::run_state::RunState;
+use novelx_runtime::{
+    agent_loop_journal::AgentLoopJournalRepository, agent_loop_service::LoopPhase,
+};
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
@@ -134,6 +138,16 @@ fn real_provider_inference_accepts_before_completion_and_does_not_block_status()
             .collect::<Vec<_>>(),
         vec!["provider.requested", "provider.sent", "provider.responded"]
     );
+    assert_eq!(attempt_events[1].event_version, 2);
+    assert_eq!(
+        attempt_events[1].payload["grant"]["material"]["authority"]["kind"],
+        "initial_agent_loop"
+    );
+    let mut loop_journal = EventJournal::open(&fixture.path).unwrap();
+    let persisted_loop = AgentLoopJournalRepository::new(&mut loop_journal)
+        .recover(&run_id.to_string(), &start_payload.invocation_id)
+        .unwrap();
+    assert_eq!(persisted_loop.service.phase(), LoopPhase::Completed);
     assert!(!format!("{:?}", journal.read_run(&run_id.to_string(), 0).unwrap()).contains(SECRET));
 }
 
@@ -526,6 +540,18 @@ impl Fixture {
         let run_id = Uuid::new_v4();
         let mut identity = pinned_identity();
         identity.provider.config_sha256 = config_hash.to_owned();
+        let source_command = ContextCompile {
+            compile_idempotency_key: "context-key-1".to_owned(),
+            invocation_id: format!("{run_id}:steward"),
+            request_number: 1,
+            provider: identity.provider.clone(),
+            context_policy: identity.context_policy.clone(),
+            compiler_version: "1.0.0".to_owned(),
+            context_window: config.context_window,
+            configured_max_output_tokens: config.max_tokens,
+            safety_reserve_tokens: 6_400,
+            items: vec![],
+        };
         let mut journal = EventJournal::open(&self.path).unwrap();
         let mut run = RunAggregate::create(
             &mut journal,
@@ -573,6 +599,7 @@ impl Fixture {
                     payload: serde_json::json!({
                         "requestSha256": "9".repeat(64),
                         "receipt": receipt,
+                        "sourceCommand": source_command,
                         "normalizedInput": normalized,
                         "normalizedInputSha256": normalized_hash,
                     }),

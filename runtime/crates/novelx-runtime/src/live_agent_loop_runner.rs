@@ -12,6 +12,7 @@ use novelx_protocol::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
@@ -28,9 +29,15 @@ use crate::{
     project_tool_execution_service::{
         ProjectToolExecutionError, ProjectToolExecutionOutcome, ProjectToolExecutionService,
     },
+    provider_attempt::ProviderAttemptError,
+    provider_effect_authorization_service::{
+        ProviderEffectAuthorizationError, ProviderEffectAuthorizationService,
+        ProviderLiveEffectAuthorizationRequest,
+    },
     provider_gateway::{ProviderGateway, ProviderInferenceOutcome, ProviderRegistry},
     provider_inference_service::{
-        ProviderInferenceExecution, ProviderInferenceService, ProviderInferenceServiceError,
+        EnsuredProviderAttempt, ProviderInferenceExecution, ProviderInferenceService,
+        ProviderInferenceServiceError,
     },
     provider_tool_materializer::{ProviderToolMaterializer, ProviderToolMaterializerError},
     run_aggregate::{RunAggregate, RunAggregateError},
@@ -87,17 +94,16 @@ pub struct LiveAgentLoopRunner {
 }
 
 impl LiveAgentLoopRunner {
-    pub async fn resume_awaiting_provider<F, Fut, C>(
+    pub async fn resume_awaiting_provider<F, Fut>(
         &self,
         run_id: Uuid,
         invocation_id: &str,
         progress: F,
-        cancelled: C,
+        cancellation: &mut watch::Receiver<bool>,
     ) -> Result<LiveAgentLoopOutcome, LiveAgentLoopError>
     where
         F: FnMut(LiveAgentLoopProgress) -> Fut,
         Fut: Future<Output = Result<(), LiveAgentLoopError>>,
-        C: FnMut() -> bool,
     {
         let run_id_text = run_id.to_string();
         let loop_service = {
@@ -132,7 +138,7 @@ impl LiveAgentLoopRunner {
                 tools: vec![],
             },
         };
-        self.run(execution, None, progress, cancelled).await
+        self.run(execution, None, progress, cancellation).await
     }
 
     pub fn assist_ready(
@@ -311,17 +317,16 @@ impl LiveAgentLoopRunner {
         Ok(loop_service)
     }
 
-    pub async fn run<F, Fut, C>(
+    pub async fn run<F, Fut>(
         &self,
         mut execution: ProviderInferenceExecution,
         initial_outcome: Option<ProviderInferenceOutcome>,
         mut progress: F,
-        mut cancelled: C,
+        cancellation: &mut watch::Receiver<bool>,
     ) -> Result<LiveAgentLoopOutcome, LiveAgentLoopError>
     where
         F: FnMut(LiveAgentLoopProgress) -> Fut,
         Fut: Future<Output = Result<(), LiveAgentLoopError>>,
-        C: FnMut() -> bool,
     {
         let run_id =
             Uuid::parse_str(&execution.run_id).map_err(|_| LiveAgentLoopError::IdentityInvalid)?;
@@ -329,7 +334,7 @@ impl LiveAgentLoopRunner {
         let mut next_outcome = initial_outcome;
         let mut rounds = 0_u32;
         loop {
-            if cancelled() {
+            if *cancellation.borrow() {
                 let previous = loop_service.clone();
                 let directive = loop_service.cancel("cancelled by host")?;
                 self.append(&previous, &loop_service, &directive, "cancel")?;
@@ -342,9 +347,7 @@ impl LiveAgentLoopRunner {
             let outcome = match next_outcome.take() {
                 Some(outcome) => outcome,
                 None => {
-                    let mut journal = EventJournal::open(&self.database_path)?;
-                    ProviderInferenceService::new(&mut journal, &self.providers, &self.gateway)
-                        .execute(execution.clone())
+                    self.execute_provider_round(execution.clone(), cancellation)
                         .await?
                 }
             };
@@ -472,17 +475,16 @@ impl LiveAgentLoopRunner {
         }
     }
 
-    pub async fn resume_after_assist<F, Fut, C>(
+    pub async fn resume_after_assist<F, Fut>(
         &self,
         run_id: Uuid,
         invocation_id: &str,
         mut progress: F,
-        cancelled: C,
+        cancellation: &mut watch::Receiver<bool>,
     ) -> Result<LiveAgentLoopOutcome, LiveAgentLoopError>
     where
         F: FnMut(LiveAgentLoopProgress) -> Fut,
         Fut: Future<Output = Result<(), LiveAgentLoopError>>,
-        C: FnMut() -> bool,
     {
         let run_id_text = run_id.to_string();
         let mut loop_service = {
@@ -601,7 +603,77 @@ impl LiveAgentLoopRunner {
         loop_service.acknowledge_inference_started(dispatch_identity(&execution)?)?;
         self.append_inference_started(&previous, &loop_service, next.request_number)?;
         progress(LiveAgentLoopProgress::InferenceStarted(next)).await?;
-        self.run(execution, None, progress, cancelled).await
+        self.run(execution, None, progress, cancellation).await
+    }
+
+    async fn execute_provider_round(
+        &self,
+        execution: ProviderInferenceExecution,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<ProviderInferenceOutcome, LiveAgentLoopError> {
+        let ensured = {
+            let mut journal = EventJournal::open(&self.database_path)?;
+            ProviderInferenceService::new(&mut journal, &self.providers, &self.gateway)
+                .ensure_requested(execution.clone())?
+        };
+        if let EnsuredProviderAttempt::Recovered(outcome) = ensured {
+            return Ok(*outcome);
+        }
+        let request = ProviderLiveEffectAuthorizationRequest {
+            run_id: Uuid::parse_str(&execution.run_id)
+                .map_err(|_| LiveAgentLoopError::IdentityInvalid)?,
+            invocation_id: execution.invocation_id.clone(),
+            attempt_id: Uuid::parse_str(&execution.attempt_id)
+                .map_err(|_| LiveAgentLoopError::IdentityInvalid)?,
+        };
+        let authorizer = ProviderEffectAuthorizationService::new(
+            &self.database_path,
+            self.workspace_id.clone(),
+            self.project_id.clone(),
+        )?;
+        let mut dispatch = None;
+        for retry in 0..3 {
+            let authorization = authorizer.authorize_live(
+                request.clone(),
+                &self.providers,
+                &self.gateway,
+                Arc::clone(&self.workspace_runtime_lease),
+            )?;
+            let result = {
+                let mut journal = EventJournal::open(&self.database_path)?;
+                ProviderInferenceService::new(&mut journal, &self.providers, &self.gateway)
+                    .arm_authorized_dispatch(
+                        authorization,
+                        &self.database_path,
+                        *cancellation.borrow(),
+                    )
+            };
+            match result {
+                Ok(authorized) => {
+                    dispatch = Some(authorized);
+                    break;
+                }
+                Err(error) if retry < 2 && is_authorization_contention(&error) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let dispatch = dispatch.ok_or(LiveAgentLoopError::ProviderAuthorizationContended)?;
+        let dispatched = ProviderInferenceService::dispatch_authorized_attempt(
+            &self.gateway,
+            dispatch,
+            cancellation,
+        )
+        .await;
+        let outcome = {
+            let mut journal = EventJournal::open(&self.database_path)?;
+            ProviderInferenceService::finalize_authorized_attempt_in(&mut journal, dispatched)?
+        };
+        let run =
+            RunAggregate::recover(&EventJournal::open(&self.database_path)?, &execution.run_id)?;
+        if run.state() != RunState::Running {
+            return Err(ProviderInferenceServiceError::RunNotRunning(run.state()).into());
+        }
+        Ok(outcome)
     }
 
     fn append(
@@ -793,6 +865,8 @@ pub enum LiveAgentLoopError {
     ResumeStateInvalid,
     #[error("live agent loop progress could not be emitted: {0}")]
     Progress(String),
+    #[error("Provider authorization remained contended after bounded re-authorization")]
+    ProviderAuthorizationContended,
     #[error(transparent)]
     Loop(#[from] crate::agent_loop_service::AgentLoopError),
     #[error(transparent)]
@@ -812,6 +886,8 @@ pub enum LiveAgentLoopError {
     #[error(transparent)]
     Provider(#[from] ProviderInferenceServiceError),
     #[error(transparent)]
+    ProviderAuthorization(#[from] ProviderEffectAuthorizationError),
+    #[error(transparent)]
     Run(#[from] RunAggregateError),
     #[error(transparent)]
     Time(#[from] time::error::Format),
@@ -819,4 +895,14 @@ pub enum LiveAgentLoopError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Coordination(#[from] crate::tool_coordination_service::ToolCoordinationError),
+}
+
+fn is_authorization_contention(error: &ProviderInferenceServiceError) -> bool {
+    matches!(
+        error,
+        ProviderInferenceServiceError::Attempt(ProviderAttemptError::Journal(
+            EventJournalError::GlobalSequenceConflict { .. }
+                | EventJournalError::RunSequenceConflict { .. }
+        ))
+    )
 }

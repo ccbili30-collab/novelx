@@ -315,6 +315,12 @@ fn classify_error(
             false,
             "Provider inference runtime processing failed.",
         ),
+        ProviderInferenceServiceError::ProviderEffect(_) => (
+            "PROVIDER_EFFECT_AUTHORIZATION_INVALID",
+            RuntimeErrorClass::Validation,
+            false,
+            "Provider inference authorization is invalid or expired.",
+        ),
         ProviderInferenceServiceError::OutcomeUnknown
         | ProviderInferenceServiceError::FinalizationOutcomeUnknown
         | ProviderInferenceServiceError::DeliveryUnknown(_) => (
@@ -328,6 +334,12 @@ fn classify_error(
             RuntimeErrorClass::Cancelled,
             false,
             "Provider inference was cancelled after dispatch.",
+        ),
+        ProviderInferenceServiceError::CancelledBeforeDispatch => (
+            "RUN_CANCELLED",
+            RuntimeErrorClass::Cancelled,
+            false,
+            "Provider inference was cancelled before dispatch; no request was sent.",
         ),
     }
 }

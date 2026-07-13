@@ -45,13 +45,12 @@ use novelx_runtime::project_tool_execution_service::{
 };
 use novelx_runtime::provider_dispatch_recovery_supervisor::ProviderDispatchRecoverySupervisor;
 use novelx_runtime::provider_gateway::{
-    ProviderBindSensitiveEnvelope, ProviderGateway, ProviderGatewayError, ProviderInferenceOutcome,
-    ProviderInferenceRequest, ProviderRegistry,
+    ProviderBindSensitiveEnvelope, ProviderGateway, ProviderGatewayError, ProviderInferenceRequest,
+    ProviderRegistry,
 };
 use novelx_runtime::provider_inference_protocol::ProviderInferenceProtocolMapper;
 use novelx_runtime::provider_inference_service::{
-    PreparedProviderAttempt, ProviderInferenceExecution, ProviderInferenceService,
-    ProviderInferenceServiceError,
+    ProviderInferenceExecution, ProviderInferenceServiceError,
 };
 use novelx_runtime::recovery::{RecoveryCoordinator, RecoveryError};
 use novelx_runtime::run_aggregate::{EventMetadata, RunAggregate, RunAggregateError};
@@ -430,7 +429,11 @@ async fn run_command_loop(
                     context.project_root,
                     context
                         .workspace_binding
+                        .map(|binding| binding.workspace_id.as_str()),
+                    context
+                        .workspace_binding
                         .map(|binding| binding.project_id.as_str()),
+                    context.workspace_runtime_lease,
                     context.provider_registry,
                     context.provider_gateway,
                 )
@@ -832,15 +835,24 @@ async fn refresh_operational_recovery(
         &providers,
         exclusive_lease.as_ref(),
     )?;
-    ProviderDispatchRecoverySupervisor::new(database_path)
-        .run_provider_dispatch_pass(
-            &binding.workspace_id,
-            &binding.project_id,
-            context.provider_registry,
-            context.provider_gateway.as_ref(),
-            exclusive_lease.as_ref(),
-        )
-        .await?;
+    let dispatch_database_path = database_path.to_owned();
+    let dispatch_workspace_id = binding.workspace_id.clone();
+    let dispatch_project_id = binding.project_id.clone();
+    let dispatch_providers = context.provider_registry.clone();
+    let dispatch_gateway = context.provider_gateway.as_ref().clone();
+    let dispatch_lease = Arc::clone(exclusive_lease);
+    tokio::spawn(async move {
+        ProviderDispatchRecoverySupervisor::new(dispatch_database_path)
+            .run_provider_dispatch_pass(
+                &dispatch_workspace_id,
+                &dispatch_project_id,
+                &dispatch_providers,
+                &dispatch_gateway,
+                dispatch_lease.as_ref(),
+            )
+            .await
+    })
+    .await??;
     OperationalRecoverySupervisor::new(database_path).run_local_recovery_pass(
         &binding.workspace_id,
         &binding.project_id,
@@ -1442,6 +1454,15 @@ async fn handle_tool_authorization_resolve(
     let runner = LiveAgentLoopRunner::open(
         database_path,
         context
+            .workspace_binding
+            .map(|binding| binding.workspace_id.clone())
+            .ok_or("tool authorization requires a workspace binding")?,
+        Arc::clone(
+            context
+                .workspace_runtime_lease
+                .ok_or("tool authorization requires an exclusive workspace lease")?,
+        ),
+        context
             .project_root
             .cloned()
             .ok_or("tool authorization requires a verified project root")?,
@@ -1491,7 +1512,7 @@ async fn start_assist_resume_task(
         ),
     )?;
     output
-        .start_silent_streaming_task(task_key, failure, move |cancellation, progress| {
+        .start_silent_streaming_task(task_key, failure, move |mut cancellation, progress| {
             Box::pin(async move {
                 let progress_sender = progress.clone();
                 let outcome = runner
@@ -1506,7 +1527,7 @@ async fn start_assist_resume_task(
                                     .map_err(LiveAgentLoopError::Progress)
                             }
                         },
-                        || *cancellation.borrow(),
+                        &mut cancellation,
                     )
                     .await
                     .map_err(|error| error.to_string())?;
@@ -1587,7 +1608,9 @@ async fn handle_provider_inference_start(
     journal: &mut Option<EventJournal>,
     workspace_database_path: Option<&str>,
     project_root: Option<&ProjectRoot>,
+    workspace_id: Option<&str>,
     project_id: Option<&str>,
+    workspace_runtime_lease: Option<&Arc<WorkspaceRuntimeLease>>,
     providers: &ProviderRegistry,
     gateway: &Arc<ProviderGateway>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1697,44 +1720,97 @@ async fn handle_provider_inference_start(
             tools: Vec::new(),
         },
     };
-    let prepared = match ProviderInferenceService::new(journal, providers, gateway)
-        .prepare_attempt(execution.clone())
-    {
-        Ok(prepared) => prepared,
+    if let Err(error) = providers.resolve(&execution.provider) {
+        let service_error = ProviderInferenceServiceError::Gateway(error);
+        let mapper = ProviderInferenceProtocolMapper::new(command.message_id, current_timestamp()?);
+        output
+            .emit(mapper.rejected(&execution, &service_error)?)
+            .await?;
+        return Ok(());
+    }
+    let Some(project_root) = project_root.cloned() else {
+        output
+            .emit(inference_runtime_error_draft(
+                command.message_id,
+                run_id,
+                runtime_inference_error(
+                    "RUNTIME_PROJECT_BINDING_REQUIRED",
+                    RuntimeErrorClass::Validation,
+                    "A verified project root is required for Agent execution.",
+                    start.attempt_number,
+                ),
+            )?)
+            .await?;
+        return Ok(());
+    };
+    let (Some(workspace_id), Some(project_id), Some(workspace_runtime_lease)) = (
+        workspace_id.map(str::to_owned),
+        project_id.map(str::to_owned),
+        workspace_runtime_lease.cloned(),
+    ) else {
+        output
+            .emit(inference_runtime_error_draft(
+                command.message_id,
+                run_id,
+                runtime_inference_error(
+                    "RUNTIME_WORKSPACE_BINDING_REQUIRED",
+                    RuntimeErrorClass::Validation,
+                    "Workspace identity and its exclusive Runtime lease are required.",
+                    start.attempt_number,
+                ),
+            )?)
+            .await?;
+        return Ok(());
+    };
+    let runner = match LiveAgentLoopRunner::open(
+        database_path,
+        workspace_id,
+        workspace_runtime_lease,
+        project_root,
+        project_id,
+        providers.clone(),
+        gateway.as_ref().clone(),
+        AgentLoopPolicy {
+            maximum_tool_rounds: 8,
+            tool_schema_version: 1,
+        },
+    ) {
+        Ok(runner) => runner,
         Err(error) => {
-            let mapper =
-                ProviderInferenceProtocolMapper::new(command.message_id, current_timestamp()?);
-            output.emit(mapper.rejected(&execution, &error)?).await?;
+            eprintln!("live Agent Loop binding rejected: {error}");
+            output
+                .emit(inference_runtime_error_draft(
+                    command.message_id,
+                    run_id,
+                    runtime_inference_error(
+                        "AGENT_LOOP_BINDING_REJECTED",
+                        RuntimeErrorClass::Validation,
+                        "The Agent loop could not bind to this workspace.",
+                        start.attempt_number,
+                    ),
+                )?)
+                .await?;
             return Ok(());
         }
     };
-    let provider = match &prepared {
-        PreparedProviderAttempt::Recovered(_) => None,
-        PreparedProviderAttempt::Dispatch(_) => {
-            match providers.resolve_owned(&execution.provider) {
-                Ok(provider) => Some(provider),
-                Err(error) => {
-                    let service_error = ProviderInferenceServiceError::Gateway(error);
-                    let mapper = ProviderInferenceProtocolMapper::new(
-                        command.message_id,
-                        current_timestamp()?,
-                    );
-                    output
-                        .emit(mapper.rejected(&execution, &service_error)?)
-                        .await?;
-                    return Ok(());
-                }
-            }
-        }
-    };
+    if let Err(error) = runner.ensure_awaiting_provider(&execution) {
+        eprintln!("live Agent Loop pre-send gate rejected: {error}");
+        output
+            .emit(inference_runtime_error_draft(
+                command.message_id,
+                run_id,
+                runtime_inference_error(
+                    "AGENT_LOOP_AUTHORITY_REJECTED",
+                    RuntimeErrorClass::Validation,
+                    "The Agent loop authority does not match this inference.",
+                    start.attempt_number,
+                ),
+            )?)
+            .await?;
+        return Ok(());
+    }
     let accepted = ProviderInferenceProtocolMapper::new(command.message_id, current_timestamp()?)
         .accepted(&execution)?;
-    let database_path = database_path.to_owned();
-    let gateway = Arc::clone(gateway);
-    let loop_gateway = gateway.as_ref().clone();
-    let loop_providers = providers.clone();
-    let project_root = project_root.cloned();
-    let project_id = project_id.map(str::to_owned);
     let correlation_id = command.message_id;
     let task_key = RuntimeTaskKey {
         run_id,
@@ -1755,146 +1831,54 @@ async fn handle_provider_inference_start(
             task_key,
             accepted,
             task_failure,
-            move |mut cancellation, progress| Box::pin(async move {
-                let result = match prepared {
-                    PreparedProviderAttempt::Recovered(outcome) => Ok(*outcome),
-                    PreparedProviderAttempt::Dispatch(dispatch) => {
-                        let provider = provider.ok_or_else(|| {
-                            "Provider dispatch prepared without a bound Provider".to_owned()
-                        })?;
-                        let dispatched = ProviderInferenceService::dispatch_attempt_cancellable(
-                            &gateway,
-                            &provider,
-                            *dispatch,
+            move |mut cancellation, progress| {
+                Box::pin(async move {
+                    let progress_sender = progress.clone();
+                    let result = runner
+                        .run(
+                            execution.clone(),
+                            None,
+                            move |event| {
+                                let progress = progress_sender.clone();
+                                async move {
+                                    emit_live_loop_progress(correlation_id, run_id, event, progress)
+                                        .await
+                                        .map_err(LiveAgentLoopError::Progress)
+                                }
+                            },
                             &mut cancellation,
                         )
                         .await;
-                        match EventJournal::open(&database_path) {
-                            Ok(mut journal) => {
-                                let finalized = ProviderInferenceService::finalize_attempt_in(
-                                    &mut journal,
-                                    dispatched,
-                                );
-                                match finalized {
-                                    Ok(outcome) => match RunAggregate::recover(
-                                        &journal,
-                                        &execution.run_id,
-                                    ) {
-                                        Ok(run)
-                                            if run.state()
-                                                == RunState::WaitingForReconciliation =>
-                                        {
-                                            Err(ProviderInferenceServiceError::CancelledAfterDispatch)
-                                        }
-                                        Ok(run) if run.state() != RunState::Running => Err(
-                                            ProviderInferenceServiceError::RunNotRunning(run.state()),
-                                        ),
-                                        Ok(_) => Ok(outcome),
-                                        Err(_) => Err(
-                                            ProviderInferenceServiceError::FinalizationOutcomeUnknown,
-                                        ),
-                                    },
-                                    Err(error @ ProviderInferenceServiceError::Gateway(_))
-                                    | Err(error @ ProviderInferenceServiceError::DeliveryUnknown(_))
-                                    | Err(error @ ProviderInferenceServiceError::CancelledAfterDispatch) => {
-                                        Err(error)
-                                    }
-                                    Err(_) => Err(
-                                        ProviderInferenceServiceError::FinalizationOutcomeUnknown,
-                                    ),
-                                }
-                            }
-                            Err(_) => Err(
-                                ProviderInferenceServiceError::FinalizationOutcomeUnknown,
-                            ),
+                    match result {
+                        Ok(LiveAgentLoopOutcome::Completed { completion, .. })
+                        | Ok(LiveAgentLoopOutcome::AwaitingApproval { completion, .. }) => {
+                            provider_completion_draft(correlation_id, completion)
                         }
+                        Ok(LiveAgentLoopOutcome::Cancelled) => {
+                            Err("live Agent loop was cancelled".to_owned())
+                        }
+                        Err(LiveAgentLoopError::Provider(error)) => {
+                            let mapper = ProviderInferenceProtocolMapper::new(
+                                correlation_id,
+                                current_timestamp().map_err(|error| error.to_string())?,
+                            );
+                            if inference_outcome_unknown(&error) {
+                                mapper
+                                    .reconciliation_required(&execution, &error)
+                                    .map_err(|error| error.to_string())
+                            } else {
+                                mapper
+                                    .failed(&execution, &error)
+                                    .map_err(|error| error.to_string())
+                            }
+                        }
+                        Err(error) => Err(error.to_string()),
                     }
-                };
-                let mapper = ProviderInferenceProtocolMapper::new(
-                    correlation_id,
-                    current_timestamp().map_err(|error| error.to_string())?,
-                );
-                match result {
-                    Ok(outcome) if outcome.tool_calls.is_empty() => {
-                        mapper.completed(&execution, &outcome).map_err(|error| error.to_string())
-                    }
-                    Ok(outcome) => run_live_tool_loop(
-                        correlation_id,
-                        execution.clone(),
-                        outcome,
-                        &database_path,
-                        project_root,
-                        project_id,
-                        loop_providers,
-                        loop_gateway,
-                        progress,
-                        &cancellation,
-                    )
-                    .await,
-                    Err(error) if inference_outcome_unknown(&error) => {
-                        mapper.reconciliation_required(&execution, &error).map_err(|error| error.to_string())
-                    }
-                    Err(error) => mapper.failed(&execution, &error).map_err(|error| error.to_string()),
-                }
-            }),
+                })
+            },
         )
         .await?;
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_live_tool_loop(
-    correlation_id: Uuid,
-    execution: ProviderInferenceExecution,
-    initial_outcome: ProviderInferenceOutcome,
-    database_path: &str,
-    project_root: Option<ProjectRoot>,
-    project_id: Option<String>,
-    providers: ProviderRegistry,
-    gateway: ProviderGateway,
-    progress: RuntimeTaskProgressSender,
-    cancellation: &tokio::sync::watch::Receiver<bool>,
-) -> Result<RuntimeOutputDraft, String> {
-    let project_root =
-        project_root.ok_or_else(|| "verified project root is required".to_owned())?;
-    let project_id = project_id.ok_or_else(|| "project identity is required".to_owned())?;
-    let run_id = Uuid::parse_str(&execution.run_id).map_err(|error| error.to_string())?;
-    let runner = LiveAgentLoopRunner::open(
-        database_path,
-        project_root,
-        project_id,
-        providers,
-        gateway,
-        AgentLoopPolicy {
-            maximum_tool_rounds: 8,
-            tool_schema_version: 1,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    let progress_sender = progress.clone();
-    let outcome = runner
-        .run(
-            execution,
-            Some(initial_outcome),
-            move |event| {
-                let progress = progress_sender.clone();
-                async move {
-                    emit_live_loop_progress(correlation_id, run_id, event, progress)
-                        .await
-                        .map_err(LiveAgentLoopError::Progress)
-                }
-            },
-            || *cancellation.borrow(),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    match outcome {
-        LiveAgentLoopOutcome::Completed { completion, .. }
-        | LiveAgentLoopOutcome::AwaitingApproval { completion, .. } => {
-            provider_completion_draft(correlation_id, completion)
-        }
-        LiveAgentLoopOutcome::Cancelled => Err("live agent loop was cancelled".to_owned()),
-    }
 }
 
 async fn emit_live_loop_progress(

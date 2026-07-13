@@ -1,6 +1,6 @@
 # ADR-0015: Provider Effect Capability and Authorized Sent Boundary（模型副作用能力与授权发送边界）
 
-Status: accepted foundation; live and recovery dispatch integration incomplete
+Status: accepted live path; recovery dispatch integration incomplete
 Date: 2026-07-13
 
 ## Context
@@ -28,7 +28,10 @@ The proof must also survive restarts and concurrent workspace activity. In-memor
 10. The Live Issuer（实时签发器）reconstructs Context, Provider and transport payload from durable records and returns exact workspace-global, Run and Attempt CAS inputs. Initial, continuation and retry authority must respectively originate from `Created`, `InferenceStarted` and `InferenceRetried`.
 11. The issuer revalidates Agent Loop project, source scope and permission against the Run pin. Current and initial Context records must contain a source command matching invocation, request number, Provider and Context policy.
 12. Retry authority requires the real terminal parent `ProviderAttempt`: Failed state, retryable failure, Attempt identity, definition/evidence hashes, sequence and failure receipt must match the retry observation, schedule and Agent Loop binding.
-13. Gateway Prebuild（网关预构建）uses the authoritative persisted Context and bound Provider to construct the exact POST URL, Authorization header, body and timeouts before the durable Sent boundary. The prebuilt request is move-only and does not expose credentials. The final prebuild-to-send sealed path is not yet complete.
+13. Gateway Prebuild（网关预构建）uses the authoritative persisted Context and bound Provider to construct the exact POST URL, Authorization header, body and timeouts before the durable Sent boundary. The prebuilt request is move-only and does not expose credentials. Its effective deadline is the minimum of the persisted Attempt deadline, inference deadline and Provider configuration deadline.
+14. Every live first request, plain-text result, tool continuation and Assist resume is driven by `LiveAgentLoopRunner`. The Runner establishes `Requested`, obtains live authorization, builds the exact HTTP request, checks cancellation, persists authorized Sent v2, consumes `ArmedProviderEffect`, holds the workspace lease through terminal persistence and then advances the Agent Loop.
+15. Conservative workspace-global CAS contention is handled only by bounded re-authorization while the Attempt remains `Requested`. It never retries an Attempt after Sent.
+16. Provider dispatch recovery is spawned as an isolated Runtime task before awaiting it. This keeps the deeply nested recovery/HTTP future off the command-loop polling stack while preserving the same exclusive lease and typed result.
 
 ## Consequences
 
@@ -40,8 +43,8 @@ The proof must also survive restarts and concurrent workspace activity. In-memor
 
 ## Explicitly Unfinished
 
-- Service / Gateway sealing（服务与网关封口）so every Provider network path consumes an authorized capability and no legacy send path remains.
-- `main.rs` and Runtime command wiring（主流程接线）before every first Provider request.
+- Recovery Service / Gateway sealing（恢复服务与网关封口）so operational recovery also consumes an authorized capability and no legacy send path remains.
+- Removal of the compatibility-only `ProviderInferenceService::execute*` and `ProviderGateway::infer*` entries after recovery migration.
 - Recovery Issuer（恢复签发器）for restarted Requested attempts and exact recovery authority variants.
 - Host multi-round identity（宿主多轮身份）so continuation Run/invocation/Context/dispatch identity is carried without reconstruction gaps.
 - Real third-party network tests and process kill tests（真实网络与进程终止测试）for authorize -> Sent v2 -> HTTP -> terminal persistence.

@@ -222,13 +222,14 @@ async fn precreated_loop_accepts_a_text_outcome_and_persists_completed() {
     let execution = execution(run_id, provider, receipt, "precreated-text");
     let runner = open_runner(&fixture, providers, "project-1");
     runner.ensure_awaiting_provider(&execution).unwrap();
+    let (_cancel_tx, mut cancellation) = tokio::sync::watch::channel(false);
 
     let outcome = runner
         .run(
             execution.clone(),
             Some(text_outcome(&execution, "正文完成")),
             |_| async { Ok(()) },
-            || false,
+            &mut cancellation,
         )
         .await
         .unwrap();
@@ -287,6 +288,7 @@ async fn free_live_loop_executes_read_and_stat_then_sends_results_to_second_infe
 
     let progress = Arc::new(Mutex::new(Vec::new()));
     let captured_progress = Arc::clone(&progress);
+    let (_cancel_tx, mut cancellation) = tokio::sync::watch::channel(false);
     let outcome = runner
         .run(
             execution,
@@ -298,7 +300,7 @@ async fn free_live_loop_executes_read_and_stat_then_sends_results_to_second_infe
                     Ok(())
                 }
             },
-            || false,
+            &mut cancellation,
         )
         .await
         .unwrap();
@@ -391,6 +393,7 @@ async fn awaiting_provider_resume_reuses_the_persisted_dispatch_identity() {
         },
     )
     .unwrap();
+    let (_cancel_tx, mut cancellation) = tokio::sync::watch::channel(false);
 
     let interrupted = runner
         .run(
@@ -404,13 +407,18 @@ async fn awaiting_provider_resume_reuses_the_persisted_dispatch_identity() {
                 }
                 Ok(())
             },
-            || false,
+            &mut cancellation,
         )
         .await;
     assert!(matches!(interrupted, Err(LiveAgentLoopError::Progress(_))));
 
     let resumed = runner
-        .resume_awaiting_provider(run_id, invocation_id, |_| async { Ok(()) }, || false)
+        .resume_awaiting_provider(
+            run_id,
+            invocation_id,
+            |_| async { Ok(()) },
+            &mut cancellation,
+        )
         .await
         .unwrap();
     assert!(
@@ -457,8 +465,9 @@ async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_ro
         },
     )
     .unwrap();
+    let (_cancel_tx, mut cancellation) = tokio::sync::watch::channel(false);
     let waiting = runner
-        .run(execution, None, |_| async { Ok(()) }, || false)
+        .run(execution, None, |_| async { Ok(()) }, &mut cancellation)
         .await
         .unwrap();
     let LiveAgentLoopOutcome::AwaitingApproval {
@@ -489,7 +498,12 @@ async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_ro
         .unwrap();
 
     let still_waiting = runner
-        .resume_after_assist(run_id, invocation_id, |_| async { Ok(()) }, || false)
+        .resume_after_assist(
+            run_id,
+            invocation_id,
+            |_| async { Ok(()) },
+            &mut cancellation,
+        )
         .await
         .unwrap();
     assert!(matches!(
@@ -513,7 +527,12 @@ async fn assist_resume_waits_for_all_decisions_then_completes_second_provider_ro
         .await
         .unwrap();
     let completed = runner
-        .resume_after_assist(run_id, invocation_id, |_| async { Ok(()) }, || false)
+        .resume_after_assist(
+            run_id,
+            invocation_id,
+            |_| async { Ok(()) },
+            &mut cancellation,
+        )
         .await
         .unwrap();
     assert!(

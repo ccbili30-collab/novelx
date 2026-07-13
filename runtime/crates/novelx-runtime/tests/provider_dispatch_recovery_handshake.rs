@@ -538,7 +538,21 @@ fn bind_provider(
             }
         }),
     );
-    let response = read_envelope(output);
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    if line.trim().is_empty() {
+        drop(child.stdin.take());
+        let mut stderr = String::new();
+        child
+            .stderr
+            .as_mut()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        let status = child.wait().unwrap();
+        panic!("Runtime exited during provider.bind: status={status}; stderr={stderr}");
+    }
+    let response: Envelope = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(response.name, "provider.bound");
 }
 
