@@ -29,6 +29,8 @@
 - Recovery 完成与 shutdown / EOF 同时发生时，Dispatcher（调度器）在发布 Completed 前再次扫描已接受的 control 和 command FIFO，防止生命周期命令被普通命令穿透。
 - RuntimeActor 拒绝重复活动 `RuntimeTaskKey`，不会再用新 cancellation sender（取消发送器）覆盖旧任务；任务终结后同一 Key 才能复用。
 - TypeScript Protocol Schema（协议结构）可严格解析 disconnected stopped（断连停止）帧，但当前 Supervisor 没有“本端已关闭 stdin 后仍继续消费 stdout”的合法路径，因此任何未关联的 `host_disconnected` 帧都失败关闭。只有 Host 主动发送 shutdown 后收到严格关联的 `reason=requested`，且随后 `code=0`、无 signal，才算正常停止。
+- Supervisor 收到 `runtime.stopped(requested)` 后仍会等待真实子进程退出；非零退出、signal 退出或停止超时都会报告 `RUNTIME_V2_EXITED_AFTER_READY`，超时后强制清理子进程树，不能用一个提前到达的 stopped 响应掩盖异常退出。
+- 强制终止前会复核 ChildProcess exit 状态、让出一个事件循环周期并检查 PID 是否仍存活，避免对刚退出的旧 PID 直接执行 `taskkill`；完整消除 PID 复用竞态仍需要后续引入 Windows Job Object（Windows 作业对象）。
 
 ## 真实验收证据
 
@@ -63,7 +65,7 @@
 - Internal Recovery Fatal 黑盒证明：0 HTTP、无 `provider.bound`、无 `runtime.stopped`，并输出结构化 `RUNTIME_OPERATIONAL_RECOVERY_FAILED`。
 - `provider_inference_handshake`：5/5 通过；held real Provider（真实保持连接的模型请求）与 routed Fatal 并存时，先输出 `run.rejected`，随后中止活动请求并非零退出，无 `runtime.stopped`。
 - Rust workspace（Rust 工作区）全量测试、带 `runtime-test-failpoints` 的 Clippy `-D warnings` 与格式检查全部通过。
-- TypeScript / Electron 全量 Vitest：411 passed、10 skipped；TypeScript 类型检查和生产构建通过。
+- TypeScript / Electron 全量 Vitest：414 passed、10 skipped；TypeScript 类型检查和生产构建通过。
 
 ## 明确未完成
 

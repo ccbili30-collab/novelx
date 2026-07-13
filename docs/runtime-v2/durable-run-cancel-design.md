@@ -1,7 +1,9 @@
 # Durable Run Cancel（持久化任务取消）设计基线
 
-日期：2026-07-13  
-状态：Accepted for implementation（已接受，待实现）  
+日期：2026-07-13
+
+状态：Accepted for implementation（已接受，待实现）
+
 依赖：ADR-0016、Provider Sent v2（模型发送边界第二版）、Operational Recovery（运行恢复）
 
 ## 1. 问题

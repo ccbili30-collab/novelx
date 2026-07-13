@@ -462,6 +462,29 @@ export class RuntimeV2ProcessSupervisor {
         // Cleanup must continue even when the runtime cannot complete protocol shutdown.
       }
     }
+    if (this.#ready && this.#validatedStopReason === "requested") {
+      const exit = await waitForExitWithin(child, this.#options.stopTimeoutMs);
+      if (exit === null) {
+        this.#failRuntime(new RuntimeV2SupervisorError(
+          "RUNTIME_V2_EXITED_AFTER_READY",
+          `Runtime V2 acknowledged shutdown but did not exit within ${this.#options.stopTimeoutMs}ms.${stderrSuffix(this.#stderr)}`,
+          { stderr: this.#stderr },
+        ), false);
+        await this.#terminateChild(child, true);
+        return;
+      }
+      if (exit.code !== 0 || exit.signal !== null) {
+        this.#failRuntime(new RuntimeV2SupervisorError(
+          "RUNTIME_V2_EXITED_AFTER_READY",
+          `Runtime V2 acknowledged shutdown but did not exit cleanly (code=${String(exit.code)}, signal=${String(exit.signal)}).${stderrSuffix(this.#stderr)}`,
+          { stderr: this.#stderr },
+        ), false);
+        await this.#terminateChild(child);
+        return;
+      }
+      this.#completeCleanRuntimeExit(child);
+      return;
+    }
     await this.#terminateChild(child);
   }
 
@@ -571,6 +594,7 @@ export class RuntimeV2ProcessSupervisor {
     )));
     child.once("exit", (code, signal) => {
       if (!this.#ready) return;
+      if (this.#stopping && this.#validatedStopReason === "requested") return;
       if (this.#validatedStopReason !== null && code === 0 && signal === null) {
         this.#completeCleanRuntimeExit(child);
         return;
@@ -904,7 +928,7 @@ export class RuntimeV2ProcessSupervisor {
     });
   }
 
-  #failRuntime(error: RuntimeV2SupervisorError): void {
+  #failRuntime(error: RuntimeV2SupervisorError, terminateChild = true): void {
     if (!this.#ready) return;
     const child = this.#child;
     this.#ready = false;
@@ -915,7 +939,7 @@ export class RuntimeV2ProcessSupervisor {
     this.#pending.clear();
     this.#activeInferences.clear();
     this.#options.onRuntimeFailure?.(error);
-    if (child) void this.#terminateChild(child);
+    if (child && terminateChild) void this.#terminateChild(child);
   }
 
   #completeCleanRuntimeExit(child: ChildProcessWithoutNullStreams): void {
@@ -928,7 +952,7 @@ export class RuntimeV2ProcessSupervisor {
     this.#lines = null;
   }
 
-  async #terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  async #terminateChild(child: ChildProcessWithoutNullStreams, force = false): Promise<void> {
     if (this.#child === child) this.#child = null;
     this.#ready = false;
     this.#stopping = false;
@@ -939,9 +963,19 @@ export class RuntimeV2ProcessSupervisor {
     const pid = child.pid;
     const exited = waitForExit(child);
     if (!child.stdin.destroyed) child.stdin.end();
-    if (await resolvesWithin(exited, this.#options.stopTimeoutMs)) return;
-    if (pid) terminateOwnedProcessTree(pid);
-    if (!child.killed) child.kill();
+    if (!force && await resolvesWithin(exited, this.#options.stopTimeoutMs)) return;
+    if (hasChildExited(child)) return;
+    if (force) {
+      await yieldToEventLoop();
+      if (hasChildExited(child)) return;
+    }
+    if (pid && !isProcessAlive(pid)) return;
+    if (hasChildExited(child)) return;
+    if (pid) {
+      terminateOwnedProcessTree(pid);
+    } else if (!child.killed) {
+      child.kill();
+    }
     await resolvesWithin(exited, this.#options.stopTimeoutMs);
   }
 }
@@ -1053,9 +1087,53 @@ function readMessageName(value: unknown): unknown {
   return value.name;
 }
 
+interface ChildExitResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+function waitForExitWithin(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number,
+): Promise<ChildExitResult | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: ChildExitResult | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve(result);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => finish({ code, signal });
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    child.once("exit", onExit);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      finish({ code: child.exitCode, signal: child.signalCode });
+    }
+  });
+}
+
 function waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve) => child.once("exit", () => resolve()));
+}
+
+function hasChildExited(child: ChildProcessWithoutNullStreams): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 async function resolvesWithin(operation: Promise<void>, timeoutMs: number): Promise<boolean> {

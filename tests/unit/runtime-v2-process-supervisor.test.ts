@@ -175,6 +175,59 @@ describe("RuntimeV2ProcessSupervisor", () => {
     expect(failures).toEqual([]);
   });
 
+  it("reports a non-zero exit after the runtime acknowledged requested shutdown", async () => {
+    const failures: RuntimeV2SupervisorError[] = [];
+    const supervisor = createSupervisor(createFixture("requested-stopped-nonzero-exit"), {
+      onRuntimeFailure: (error) => failures.push(error),
+    });
+    await supervisor.start();
+    const pid = supervisor.pid!;
+
+    await supervisor.stop();
+
+    expect(supervisor.pid).toBeNull();
+    expect(isAlive(pid)).toBe(false);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ code: "RUNTIME_V2_EXITED_AFTER_READY" });
+    expect(failures[0]?.message).toContain("code=9");
+  });
+
+  it("reports a stop timeout and force-terminates a runtime that hangs after acknowledging shutdown", async () => {
+    const failures: RuntimeV2SupervisorError[] = [];
+    const supervisor = createSupervisor(createFixture("requested-stopped-hang"), {
+      stopTimeoutMs: 100,
+      onRuntimeFailure: (error) => failures.push(error),
+    });
+    await supervisor.start();
+    const pid = supervisor.pid!;
+
+    await supervisor.stop();
+
+    expect(supervisor.pid).toBeNull();
+    expect(isAlive(pid)).toBe(false);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ code: "RUNTIME_V2_EXITED_AFTER_READY" });
+    expect(failures[0]?.message).toContain("did not exit within 100ms");
+  });
+
+  it("does not force-kill a runtime that exits on stdin EOF at the force-termination boundary", async () => {
+    const fixture = createFixture("requested-stopped-exit-on-eof");
+    const eofExitMarker = `${fixture.capturePath}.eof-exit`;
+    const failures: RuntimeV2SupervisorError[] = [];
+    const supervisor = createSupervisor(fixture, {
+      stopTimeoutMs: 100,
+      onRuntimeFailure: (error) => failures.push(error),
+    });
+    await supervisor.start();
+
+    await supervisor.stop();
+
+    expect(fs.readFileSync(eofExitMarker, "utf8")).toBe("clean-eof-exit");
+    expect(supervisor.pid).toBeNull();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.message).toContain("did not exit within 100ms");
+  });
+
   it("routes Agent Assignment commands and preserves typed rejections", async () => {
     const accepted = createSupervisor(createFixture("assignment-success"));
     await accepted.start();
@@ -561,6 +614,12 @@ process.stdout.write(JSON.stringify(envelope(version, "runtime.hello", {
   build: { commit: "fixture", target: "win32-x64" },
 })) + "\n");
 const input = readline.createInterface({ input: process.stdin });
+if (scenario === "requested-stopped-exit-on-eof") {
+  input.once("close", () => {
+    fs.writeFileSync(capturePath + ".eof-exit", "clean-eof-exit", "utf8");
+    process.exit(0);
+  });
+}
 let initialized = false;
 let runtimeSequence = 2;
 input.on("line", (line) => {
@@ -757,9 +816,14 @@ input.on("line", (line) => {
       return;
     }
     if (command.name === "runtime.shutdown") {
-      process.stdout.write(JSON.stringify(envelope(
+      const stopped = JSON.stringify(envelope(
         1, "runtime.stopped", { reason: "requested" }, command.messageId, runtimeSequence, "response",
-      )) + "\n", () => process.exit(0));
+      )) + "\n";
+      if (scenario === "requested-stopped-hang" || scenario === "requested-stopped-exit-on-eof") {
+        process.stdout.write(stopped);
+      } else {
+        process.stdout.write(stopped, () => process.exit(scenario === "requested-stopped-nonzero-exit" ? 9 : 0));
+      }
     }
     return;
   }
