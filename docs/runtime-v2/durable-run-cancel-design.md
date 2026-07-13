@@ -53,6 +53,7 @@ run.cancellation_reconciliation_required v1
 RunCancellationIntent {
     intent_id,
     run_id,
+    workspace_id,
     cancel_idempotency_key,
     reason,
     requested_at,
@@ -60,17 +61,21 @@ RunCancellationIntent {
 }
 ```
 
-`intent_id` 使用 Canonical SHA-256（规范化 SHA-256）：
+`intent_id` 使用 Canonical SHA-256（规范化 SHA-256）。哈希输入不是字段字符串拼接，而是固定字段顺序、camelCase（小驼峰命名）、无多余空白的结构化 Canonical JSON（规范 JSON）UTF-8 字节：
 
-```text
-SHA-256(
-  "run-cancel-intent/v1"
-  + workspaceId
-  + runId
-  + cancelIdempotencyKey
-  + SHA-256(reason)
-)
+```json
+{
+  "scheme": "run-cancel-intent/v1",
+  "workspaceId": "<workspace-id>",
+  "runId": "<run-id>",
+  "cancelIdempotencyKey": "<cancel-idempotency-key>",
+  "reasonSha256": "<lowercase-sha256-of-reason-utf8>"
+}
 ```
+
+等价定义为 `SHA-256(UTF8(canonicalJson(material)))`。Rust 实现使用有固定声明顺序和 `#[serde(rename_all = "camelCase")]` 的结构体生成上述字节；其他语言实现必须复现同一字段名、顺序和编码，不能退化为分隔符不明确的字符串拼接。
+
+A1（第一批基础）把每个 Run（运行任务）的新式取消周期上限固定为 4,096，避免新式取消历史的事件重放和内存状态无限增长；Legacy（旧版）取消沿用原有单次待对账语义，不计入这个新式周期上限。A1 只允许在 `Running`（运行中）和 `Retrying`（重试中）记录新式取消意图；`Created`（已创建）、`Preparing`（准备中）、`WaitingForApproval`（等待批准）、`WaitingForReconciliation`（等待对账）和 `Committing`（提交中）等其他 Run 状态是否允许取消，必须由 A2（第二批接线）结合 Host（宿主）命令语义逐一决定，不能未经设计直接放宽。
 
 权威顺序固定为：
 
@@ -94,7 +99,7 @@ Requested -> CancelledBeforeSent
 事件：
 
 ```text
-provider.cancelled_before_sent v1
+provider.cancelled_before_sent v3
 ```
 
 写入必须同时验证：
