@@ -861,6 +861,7 @@ fn run_state_name(value: RunState) -> &'static str {
 fn provider_attempt_state_name(value: ProviderAttemptState) -> &'static str {
     match value {
         ProviderAttemptState::Requested => "requested",
+        ProviderAttemptState::CancelledBeforeSent => "cancelled_before_sent",
         ProviderAttemptState::Sent => "sent",
         ProviderAttemptState::Responded => "responded",
         ProviderAttemptState::Failed => "failed",
@@ -871,6 +872,7 @@ fn provider_attempt_state_name(value: ProviderAttemptState) -> &'static str {
 fn provider_attempt_recovery_name(value: ProviderAttemptRecovery) -> &'static str {
     match value {
         ProviderAttemptRecovery::SafeToSend => "safe_to_send",
+        ProviderAttemptRecovery::CancelledSafe => "cancelled_safe",
         ProviderAttemptRecovery::OutcomeUnknown => "outcome_unknown",
         ProviderAttemptRecovery::Completed => "completed",
         ProviderAttemptRecovery::RetryEligible => "retry_eligible",

@@ -25,12 +25,14 @@ use novelx_runtime::{
         OperationalRecoveryClaimRequest, OperationalRecoveryClaimService,
         OperationalRecoveryStartRequest,
     },
-    operational_recovery_recording_service::OperationalRecoveryRecordingService,
+    operational_recovery_recording_service::{
+        OperationalRecoveryInterruptionRequest, OperationalRecoveryRecordingService,
+    },
     operational_recovery_scanner::{OperationalRecoveryGate, OperationalRecoveryScanner},
     provider_attempt::{
-        ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptMetadata,
-        ProviderAttemptState, ProviderResponseReceipt, provider_attempt_definition_sha256,
-        provider_attempt_evidence_sha256,
+        ProviderAttemptAggregate, ProviderAttemptCancelledBeforeSent, ProviderAttemptDefinition,
+        ProviderAttemptMetadata, ProviderAttemptState, ProviderResponseReceipt,
+        provider_attempt_definition_sha256, provider_attempt_evidence_sha256,
     },
     provider_dispatch_recovery_service::ProviderDispatchRecoveryTerminal,
     provider_dispatch_recovery_supervisor::{
@@ -46,6 +48,7 @@ use novelx_runtime::{
     },
     run_aggregate::{EventMetadata, RunAggregate},
     runtime_cancellation_hub::{CancellationCause, RuntimeCancellationHub},
+    workspace_event_journal::WorkspaceEventJournal,
     workspace_runtime_lease::WorkspaceRuntimeLease,
 };
 use sha2::{Digest, Sha256};
@@ -180,6 +183,197 @@ async fn sticky_shutdown_interrupts_a_late_requested_registration_before_sent_an
     assert_eq!(recorded.recorder_instance_id, lease.instance_id());
     assert_eq!(recorded.lease_epoch, lease.lease_epoch());
     assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn restart_finalizes_persisted_run_cancel_without_http_or_redispatch() {
+    let fixture = Fixture::new();
+    let (base_url, requests, server) = spawn_server("must not be requested").await;
+    let (providers, provider) = bound_registry(base_url);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway);
+    let started = fixture.start_provider_dispatch(&seeded, "runtime-owner-before-crash");
+    let original_operation_id = started.operation_id.clone();
+    let operation = fixture.operation(&seeded.run_id, &original_operation_id);
+    let execution_id = operation.execution.as_ref().unwrap().execution_id.clone();
+    let cancellation_intent_id = "9".repeat(64);
+
+    let interruption = OperationalRecoveryRecordingService::new(&fixture.path)
+        .record_execution_interruption(
+            OperationalRecoveryInterruptionRequest {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                run_id: seeded.run_id.clone(),
+                operation_id: original_operation_id.clone(),
+                execution_id,
+                attempt_id: seeded.attempt_id.clone(),
+                cause: CancellationCause::RunCancel,
+                cancellation_intent_id: Some(cancellation_intent_id.clone()),
+                transport_boundary_crossed: false,
+                resumable: false,
+                interrupted_at: "2026-07-13T00:04:00Z".to_owned(),
+            },
+            &started.lease,
+        )
+        .unwrap();
+
+    let cancellation = {
+        let mut journal = EventJournal::open(&fixture.path).unwrap();
+        let mut attempt =
+            ProviderAttemptAggregate::recover(&journal, &seeded.run_id, &seeded.attempt_id)
+                .unwrap();
+        let expected_run_sequence = current_run_sequence(&journal, &seeded.run_id);
+        let cancellation = ProviderAttemptCancelledBeforeSent::derive(
+            &attempt,
+            cancellation_intent_id.clone(),
+            expected_run_sequence,
+        )
+        .unwrap();
+        let idempotency_key = format!(
+            "provider:{}:cancel-before-sent:{}:{}",
+            seeded.attempt_id,
+            cancellation.cancellation_intent_id,
+            cancellation.requested_evidence_sha256
+        );
+        let expected_global_sequence = WorkspaceEventJournal::open(&fixture.path)
+            .unwrap()
+            .current_global_sequence()
+            .unwrap();
+        attempt
+            .cancel_before_sent(
+                &mut journal,
+                expected_run_sequence,
+                expected_global_sequence,
+                cancellation.clone(),
+                provider_metadata("provider-cancelled-before-sent", &idempotency_key),
+            )
+            .unwrap();
+        cancellation
+    };
+
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        ["provider.requested", "provider.cancelled_before_sent"]
+    );
+    assert!(
+        fixture
+            .operation(&seeded.run_id, &original_operation_id)
+            .outcome
+            .is_none()
+    );
+
+    // The generic Scanner deliberately still quarantines the now-terminal attempt: an orphan
+    // cancelled attempt is not enough authority to declare a Run safely closed. The Supervisor
+    // may only finalize because the older active operation retains the exact action, execution,
+    // RunCancel interruption, and cancellation receipt.
+    let assignments = recover_agent_assignments(&fixture.path, WORKSPACE_ID, PROJECT_ID).unwrap();
+    let scan = {
+        let mut journal = EventJournal::open(&fixture.path).unwrap();
+        OperationalRecoveryScanner::new(
+            &mut journal,
+            &assignments,
+            std::slice::from_ref(&seeded.provider),
+        )
+        .scan(WORKSPACE_ID, PROJECT_ID)
+        .unwrap()
+    };
+    let scanned = scan
+        .runs
+        .iter()
+        .find(|run| run.run_id == seeded.run_id)
+        .unwrap();
+    assert_eq!(scanned.gate, OperationalRecoveryGate::Quarantined);
+    assert!(
+        scanned
+            .reasons
+            .iter()
+            .any(|reason| reason == "persisted_provider_evidence_conflict")
+    );
+
+    drop(started.lease);
+    let restarted_hub = RuntimeCancellationHub::new();
+    let restarted_lease = fixture.lease("runtime-owner-after-crash");
+    let report = ProviderDispatchRecoverySupervisor::new(&fixture.path)
+        .run_provider_dispatch_pass(
+            WORKSPACE_ID,
+            PROJECT_ID,
+            &providers,
+            &gateway,
+            &restarted_hub,
+            &restarted_lease,
+        )
+        .await
+        .unwrap();
+    let run = only_run(&report.runs);
+    assert_eq!(run.operation_id, original_operation_id);
+    assert_eq!(
+        run.outcome,
+        ProviderDispatchRecoverySupervisorOutcome::Completed(
+            ProviderDispatchRecoveryTerminal::CancelledSafe
+        )
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+    let recovered = OperationalRecoveryRepository::open(&fixture.path)
+        .unwrap()
+        .load(WORKSPACE_ID, &seeded.run_id)
+        .unwrap();
+    let original = &recovered.operations[&original_operation_id];
+    assert_eq!(
+        original.interruptions.as_slice(),
+        std::slice::from_ref(&interruption)
+    );
+    let Some(OperationalRecoveryOutcome::CancelledSafe {
+        cancellation_intent_id: outcome_intent,
+        interruption_id,
+        attempt_id,
+        attempt_aggregate_sequence,
+        attempt_definition_sha256,
+        ..
+    }) = original.outcome.as_ref()
+    else {
+        panic!("the original active operation was not finalized as CancelledSafe");
+    };
+    assert_eq!(outcome_intent, &cancellation_intent_id);
+    assert_eq!(interruption_id, &interruption.interruption_id);
+    assert_eq!(attempt_id, &seeded.attempt_id);
+    assert_eq!(*attempt_aggregate_sequence, 2);
+    assert_eq!(
+        attempt_definition_sha256,
+        &cancellation.requested_definition_sha256
+    );
+    let revision_after_finalize = recovered.revision;
+    let outcome_after_finalize = original.outcome.clone();
+
+    let second_report = ProviderDispatchRecoverySupervisor::new(&fixture.path)
+        .run_provider_dispatch_pass(
+            WORKSPACE_ID,
+            PROJECT_ID,
+            &providers,
+            &gateway,
+            &restarted_hub,
+            &restarted_lease,
+        )
+        .await
+        .unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        ["provider.requested", "provider.cancelled_before_sent"]
+    );
+    let after_retry = OperationalRecoveryRepository::open(&fixture.path)
+        .unwrap()
+        .load(WORKSPACE_ID, &seeded.run_id)
+        .unwrap();
+    assert_eq!(after_retry.revision, revision_after_finalize);
+    assert_eq!(
+        after_retry.operations[&original_operation_id].outcome,
+        outcome_after_finalize
+    );
+    assert_eq!(
+        only_run(&second_report.runs).outcome,
+        ProviderDispatchRecoverySupervisorOutcome::Waiting(OperationalRecoveryGate::Quarantined)
+    );
     server.abort();
 }
 

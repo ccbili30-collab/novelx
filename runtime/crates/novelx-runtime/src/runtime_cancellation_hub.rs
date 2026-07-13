@@ -80,6 +80,7 @@ impl RecoveryTaskIdentity {
 
 #[derive(Clone)]
 pub struct RuntimeCancellationHub {
+    hub_instance_id: Uuid,
     inner: Arc<Mutex<HubState>>,
 }
 
@@ -89,7 +90,7 @@ struct HubState {
     attempt_owners: HashMap<AttemptOwnerKey, RecoveryTaskIdentity>,
     execution_owners: HashMap<ExecutionOwnerKey, RecoveryTaskIdentity>,
     global_cancellation: Option<StickyCancellation>,
-    run_cancellations: HashMap<RunKey, StickyCancellation>,
+    run_cancellations: HashMap<RunKey, StickyRunCancellation>,
     next_signal_sequence: u64,
 }
 
@@ -103,6 +104,12 @@ struct RegistrationEntry {
 struct StickyCancellation {
     cause: CancellationCause,
     sequence: u64,
+}
+
+#[derive(Clone)]
+struct StickyRunCancellation {
+    intent_id: String,
+    signal: StickyCancellation,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -129,6 +136,7 @@ struct RunKey {
 impl RuntimeCancellationHub {
     pub fn new() -> Self {
         Self {
+            hub_instance_id: Uuid::new_v4(),
             inner: Arc::new(Mutex::new(HubState::default())),
         }
     }
@@ -152,7 +160,10 @@ impl RuntimeCancellationHub {
         let run_key = RunKey::from(&identity);
         let initial_cancellation = earliest_cancellation(
             state.global_cancellation,
-            state.run_cancellations.get(&run_key).copied(),
+            state
+                .run_cancellations
+                .get(&run_key)
+                .map(|cancellation| cancellation.signal),
         )
         .map(|signal| signal.cause);
         let gate = initial_cancellation.map_or_else(
@@ -235,6 +246,7 @@ impl RuntimeCancellationHub {
             return Ok(AbandonBeforeSentReceipt {
                 was_registered: false,
                 cancellation_cause: None,
+                cancellation_intent_id: None,
             });
         };
         if entry.registration_id != registration.registration_id {
@@ -250,12 +262,27 @@ impl RuntimeCancellationHub {
         }
         verify_owner(&state.attempt_owners, &attempt_key, identity)?;
         verify_owner(&state.execution_owners, &execution_key, identity)?;
+        let cancellation_intent_id = match snapshot.cancellation_cause() {
+            Some(CancellationCause::RunCancel) => {
+                let run_key = RunKey::from(identity);
+                let cancellation = state
+                    .run_cancellations
+                    .get(&run_key)
+                    .filter(|cancellation| {
+                        cancellation.signal.cause == CancellationCause::RunCancel
+                    })
+                    .ok_or(RuntimeCancellationHubError::StateInvariant)?;
+                Some(cancellation.intent_id.clone())
+            }
+            _ => None,
+        };
         state.registrations.remove(identity);
         state.attempt_owners.remove(&attempt_key);
         state.execution_owners.remove(&execution_key);
         Ok(AbandonBeforeSentReceipt {
             was_registered: true,
             cancellation_cause: snapshot.cancellation_cause(),
+            cancellation_intent_id,
         })
     }
 
@@ -289,9 +316,128 @@ impl RuntimeCancellationHub {
         &self,
         workspace_id: &str,
         run_id: &str,
+        intent_id: &str,
+    ) -> Result<CancellationSignalReceipt, RuntimeCancellationHubError> {
+        self.apply_run_cancel(workspace_id, run_id, intent_id)
+    }
+
+    pub fn hydrate_run_cancel(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+        intent_id: &str,
+    ) -> Result<CancellationSignalReceipt, RuntimeCancellationHubError> {
+        self.apply_run_cancel(workspace_id, run_id, intent_id)
+    }
+
+    pub fn active_run_cancellation(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+    ) -> Result<Option<ActiveRunCancellation>, RuntimeCancellationHubError> {
+        require_identity_text("workspace_id", workspace_id)?;
+        require_identity_text("run_id", run_id)?;
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| RuntimeCancellationHubError::StatePoisoned)?;
+        let run_key = RunKey {
+            workspace_id: workspace_id.to_owned(),
+            run_id: run_id.to_owned(),
+        };
+        Ok(state
+            .run_cancellations
+            .get(&run_key)
+            .map(|cancellation| ActiveRunCancellation {
+                intent_id: cancellation.intent_id.clone(),
+                signal_sequence: cancellation.signal.sequence,
+            }))
+    }
+
+    /// Test-only authority hook for exercising move-only settlement semantics.
+    /// Production code intentionally has no raw-string capability constructor;
+    /// the durable coordinator must later accept sealed Journal settlement proof.
+    #[cfg(test)]
+    pub(crate) fn authorize_run_cancellation_settled(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+        intent_id: &str,
+    ) -> Result<RunCancellationSettledCapability, RuntimeCancellationHubError> {
+        require_identity_text("workspace_id", workspace_id)?;
+        require_identity_text("run_id", run_id)?;
+        require_canonical_sha256("intent_id", intent_id)?;
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| RuntimeCancellationHubError::StatePoisoned)?;
+        let run_key = RunKey {
+            workspace_id: workspace_id.to_owned(),
+            run_id: run_id.to_owned(),
+        };
+        let cancellation = state
+            .run_cancellations
+            .get(&run_key)
+            .ok_or(RuntimeCancellationHubError::RunCancelNotActive)?;
+        require_matching_run_cancel_intent(&cancellation.intent_id, intent_id)?;
+        Ok(RunCancellationSettledCapability {
+            hub_instance_id: self.hub_instance_id,
+            run_key,
+            intent_id: intent_id.to_owned(),
+            signal_sequence: cancellation.signal.sequence,
+        })
+    }
+
+    pub fn clear_run_cancel(
+        &self,
+        settled: RunCancellationSettledCapability,
+    ) -> Result<RunCancellationClearReceipt, RuntimeCancellationHubError> {
+        if settled.hub_instance_id != self.hub_instance_id {
+            return Err(RuntimeCancellationHubError::RunCancelCapabilityHubMismatch);
+        }
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| RuntimeCancellationHubError::StatePoisoned)?;
+        let active_registrations = state
+            .registrations
+            .keys()
+            .filter(|identity| {
+                identity.workspace_id == settled.run_key.workspace_id
+                    && identity.run_id == settled.run_key.run_id
+            })
+            .count();
+        if active_registrations != 0 {
+            return Err(RuntimeCancellationHubError::RunCancelRegistrationsActive {
+                active_registrations,
+            });
+        }
+        let cancellation = state
+            .run_cancellations
+            .get(&settled.run_key)
+            .ok_or(RuntimeCancellationHubError::RunCancelNotActive)?;
+        require_matching_run_cancel_intent(&cancellation.intent_id, &settled.intent_id)?;
+        if cancellation.signal.sequence != settled.signal_sequence {
+            return Err(RuntimeCancellationHubError::RunCancelCapabilityStale);
+        }
+        state.run_cancellations.remove(&settled.run_key);
+        Ok(RunCancellationClearReceipt {
+            workspace_id: settled.run_key.workspace_id,
+            run_id: settled.run_key.run_id,
+            intent_id: settled.intent_id,
+            signal_sequence: settled.signal_sequence,
+        })
+    }
+
+    fn apply_run_cancel(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+        intent_id: &str,
     ) -> Result<CancellationSignalReceipt, RuntimeCancellationHubError> {
         require_identity_text("workspace_id", workspace_id)?;
         require_identity_text("run_id", run_id)?;
+        require_canonical_sha256("intent_id", intent_id)?;
         let mut state = self
             .inner
             .lock()
@@ -300,11 +446,20 @@ impl RuntimeCancellationHub {
             workspace_id: workspace_id.to_owned(),
             run_id: run_id.to_owned(),
         };
-        let effective = match state.run_cancellations.get(&run_key).copied() {
-            Some(signal) => signal,
+        let effective = match state.run_cancellations.get(&run_key) {
+            Some(cancellation) => {
+                require_matching_run_cancel_intent(&cancellation.intent_id, intent_id)?;
+                cancellation.signal
+            }
             None => {
                 let signal = next_sticky_signal(&mut state, CancellationCause::RunCancel)?;
-                state.run_cancellations.insert(run_key, signal);
+                state.run_cancellations.insert(
+                    run_key,
+                    StickyRunCancellation {
+                        intent_id: intent_id.to_owned(),
+                        signal,
+                    },
+                );
                 signal
             }
         };
@@ -359,25 +514,93 @@ pub struct UnregisterReceipt {
     was_registered: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AbandonBeforeSentReceipt {
     was_registered: bool,
     cancellation_cause: Option<CancellationCause>,
+    cancellation_intent_id: Option<String>,
 }
 
 impl AbandonBeforeSentReceipt {
-    pub(crate) const fn was_registered(self) -> bool {
+    pub(crate) const fn was_registered(&self) -> bool {
         self.was_registered
     }
 
-    pub(crate) const fn cancellation_cause(self) -> Option<CancellationCause> {
+    pub(crate) const fn cancellation_cause(&self) -> Option<CancellationCause> {
         self.cancellation_cause
+    }
+
+    pub(crate) fn cancellation_intent_id(&self) -> Option<&str> {
+        self.cancellation_intent_id.as_deref()
     }
 }
 
 impl UnregisterReceipt {
     pub const fn was_registered(self) -> bool {
         self.was_registered
+    }
+}
+
+/// Process-local view of the sticky cancellation currently installed for one Run.
+///
+/// `signal_sequence` orders signals only within this Hub instance. Hydration after a
+/// process restart assigns a new sequence, so durable identity and audit must use
+/// `intent_id`, never `signal_sequence`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveRunCancellation {
+    intent_id: String,
+    signal_sequence: u64,
+}
+
+impl ActiveRunCancellation {
+    pub fn intent_id(&self) -> &str {
+        &self.intent_id
+    }
+
+    /// Returns the Hub-local signal ordering evidence.
+    ///
+    /// This value is not stable across Runtime restarts and must not be persisted as
+    /// the cancellation identity. Use [`Self::intent_id`] for durable correlation.
+    pub const fn signal_sequence(&self) -> u64 {
+        self.signal_sequence
+    }
+}
+
+#[must_use = "the settled capability must be consumed by clear_run_cancel"]
+#[derive(Debug)]
+pub struct RunCancellationSettledCapability {
+    hub_instance_id: Uuid,
+    run_key: RunKey,
+    intent_id: String,
+    signal_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunCancellationClearReceipt {
+    workspace_id: String,
+    run_id: String,
+    intent_id: String,
+    signal_sequence: u64,
+}
+
+impl RunCancellationClearReceipt {
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn intent_id(&self) -> &str {
+        &self.intent_id
+    }
+
+    /// Returns the sequence that identified this cancellation inside the clearing Hub.
+    ///
+    /// The sequence is process-local stale-capability evidence, not a durable identity.
+    pub const fn signal_sequence(&self) -> u64 {
+        self.signal_sequence
     }
 }
 
@@ -494,6 +717,33 @@ fn require_identity_text(
     Ok(())
 }
 
+fn require_matching_run_cancel_intent(
+    existing_intent_id: &str,
+    requested_intent_id: &str,
+) -> Result<(), RuntimeCancellationHubError> {
+    if existing_intent_id != requested_intent_id {
+        return Err(RuntimeCancellationHubError::RunCancelIntentConflict {
+            existing_intent_id: existing_intent_id.to_owned(),
+            requested_intent_id: requested_intent_id.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn require_canonical_sha256(
+    field: &'static str,
+    value: &str,
+) -> Result<(), RuntimeCancellationHubError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(RuntimeCancellationHubError::IdentityInvalid { field });
+    }
+    Ok(())
+}
+
 impl From<&RecoveryTaskIdentity> for AttemptOwnerKey {
     fn from(identity: &RecoveryTaskIdentity) -> Self {
         Self {
@@ -546,6 +796,23 @@ pub enum RuntimeCancellationHubError {
     AbandonAfterSentBoundary(PreSendGateState),
     #[error("global cancellation requires RuntimeShutdown or HostDisconnected")]
     GlobalCauseRequired,
+    #[error(
+        "run cancellation intent conflicts with unresolved intent `{existing_intent_id}`: requested `{requested_intent_id}`"
+    )]
+    RunCancelIntentConflict {
+        existing_intent_id: String,
+        requested_intent_id: String,
+    },
+    #[error("run cancellation is not active")]
+    RunCancelNotActive,
+    #[error("run cancellation settlement capability belongs to another Hub instance")]
+    RunCancelCapabilityHubMismatch,
+    #[error("run cancellation settlement capability is stale")]
+    RunCancelCapabilityStale,
+    #[error(
+        "run cancellation cannot be cleared while {active_registrations} task registration(s) remain active"
+    )]
+    RunCancelRegistrationsActive { active_registrations: usize },
     #[error(transparent)]
     Gate(#[from] PreSendGateError),
 }
@@ -558,6 +825,70 @@ mod tests {
     };
 
     use super::*;
+
+    const INTENT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const INTENT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn abandon_receipt_atomically_retains_run_cancel_intent_after_sticky_clear() {
+        let hub = RuntimeCancellationHub::new();
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        let registration = hub
+            .register(
+                RecoveryTaskIdentity::new(
+                    "workspace-a",
+                    "run-a",
+                    "operation-a",
+                    "execution-a",
+                    "attempt-a",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let receipt = hub.abandon_before_sent(&registration).unwrap();
+        assert_eq!(
+            receipt.cancellation_cause(),
+            Some(CancellationCause::RunCancel)
+        );
+        assert_eq!(receipt.cancellation_intent_id(), Some(INTENT_A));
+
+        let settled = hub
+            .authorize_run_cancellation_settled("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        hub.clear_run_cancel(settled).unwrap();
+        assert_eq!(receipt.cancellation_intent_id(), Some(INTENT_A));
+    }
+
+    #[test]
+    fn abandon_fails_closed_if_run_cancel_gate_lost_its_sticky_identity() {
+        let hub = RuntimeCancellationHub::new();
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        let registration = hub
+            .register(
+                RecoveryTaskIdentity::new(
+                    "workspace-a",
+                    "run-a",
+                    "operation-a",
+                    "execution-a",
+                    "attempt-a",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        hub.inner
+            .lock()
+            .unwrap()
+            .run_cancellations
+            .remove(&RunKey::from(registration.identity()));
+
+        assert_eq!(
+            hub.abandon_before_sent(&registration),
+            Err(RuntimeCancellationHubError::StateInvariant)
+        );
+        assert_eq!(hub.registered_count().unwrap(), 1);
+    }
 
     #[test]
     fn unreadable_dispatch_boundary_is_terminal_and_token_owned_cleanup_is_bounded() {
@@ -641,6 +972,203 @@ mod tests {
                 Some(other) => panic!("unexpected cancellation cause: {other:?}"),
             }
             assert_eq!(hub.registered_count().unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn settled_capability_cannot_clear_an_active_registration() {
+        let hub = RuntimeCancellationHub::new();
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        let identity = RecoveryTaskIdentity::new(
+            "workspace-a",
+            "run-a",
+            "operation-a",
+            "execution-a",
+            "attempt-a",
+        )
+        .unwrap();
+        let registration = hub.register(identity.clone()).unwrap();
+
+        let capability = hub
+            .authorize_run_cancellation_settled("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        assert_eq!(
+            hub.clear_run_cancel(capability),
+            Err(RuntimeCancellationHubError::RunCancelRegistrationsActive {
+                active_registrations: 1,
+            })
+        );
+        assert!(hub.unregister(&registration).unwrap().was_registered());
+
+        let capability = hub
+            .authorize_run_cancellation_settled("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        let receipt = hub.clear_run_cancel(capability).unwrap();
+        assert_eq!(receipt.workspace_id(), "workspace-a");
+        assert_eq!(receipt.run_id(), "run-a");
+        assert_eq!(receipt.intent_id(), INTENT_A);
+        assert!(receipt.signal_sequence() > 0);
+        assert!(
+            hub.active_run_cancellation("workspace-a", "run-a")
+                .unwrap()
+                .is_none()
+        );
+
+        let replacement = hub.register(identity).unwrap();
+        assert_eq!(
+            replacement.snapshot().unwrap().state(),
+            PreSendGateState::Open
+        );
+    }
+
+    #[test]
+    fn clear_rejects_wrong_intent_and_capability_from_another_hub() {
+        let hub = RuntimeCancellationHub::new();
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        let signal_sequence = hub
+            .active_run_cancellation("workspace-a", "run-a")
+            .unwrap()
+            .unwrap()
+            .signal_sequence();
+        let wrong_intent = RunCancellationSettledCapability {
+            hub_instance_id: hub.hub_instance_id,
+            run_key: RunKey {
+                workspace_id: "workspace-a".to_owned(),
+                run_id: "run-a".to_owned(),
+            },
+            intent_id: INTENT_B.to_owned(),
+            signal_sequence,
+        };
+        assert_eq!(
+            hub.clear_run_cancel(wrong_intent),
+            Err(RuntimeCancellationHubError::RunCancelIntentConflict {
+                existing_intent_id: INTENT_A.to_owned(),
+                requested_intent_id: INTENT_B.to_owned(),
+            })
+        );
+
+        let other_hub = RuntimeCancellationHub::new();
+        other_hub
+            .signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        let foreign_capability = hub
+            .authorize_run_cancellation_settled("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        assert_eq!(
+            other_hub.clear_run_cancel(foreign_capability),
+            Err(RuntimeCancellationHubError::RunCancelCapabilityHubMismatch)
+        );
+        assert_eq!(
+            other_hub
+                .active_run_cancellation("workspace-a", "run-a")
+                .unwrap()
+                .unwrap()
+                .intent_id(),
+            INTENT_A
+        );
+    }
+
+    #[test]
+    fn capability_from_a_cleared_generation_cannot_clear_a_reactivated_same_intent() {
+        let hub = RuntimeCancellationHub::new();
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        let first_generation = hub
+            .active_run_cancellation("workspace-a", "run-a")
+            .unwrap()
+            .unwrap();
+        let clear_capability = hub
+            .authorize_run_cancellation_settled("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        let stale_capability = hub
+            .authorize_run_cancellation_settled("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+
+        hub.clear_run_cancel(clear_capability).unwrap();
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        let second_generation = hub
+            .active_run_cancellation("workspace-a", "run-a")
+            .unwrap()
+            .unwrap();
+        assert!(second_generation.signal_sequence() > first_generation.signal_sequence());
+        assert_eq!(
+            hub.clear_run_cancel(stale_capability),
+            Err(RuntimeCancellationHubError::RunCancelCapabilityStale)
+        );
+
+        let current_capability = hub
+            .authorize_run_cancellation_settled("workspace-a", "run-a", INTENT_A)
+            .unwrap();
+        hub.clear_run_cancel(current_capability).unwrap();
+    }
+
+    #[test]
+    fn clear_vs_register_is_linearizable_without_escaping_sticky_cancellation() {
+        for iteration in 0..256 {
+            let hub = RuntimeCancellationHub::new();
+            hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+                .unwrap();
+            let capability = hub
+                .authorize_run_cancellation_settled("workspace-a", "run-a", INTENT_A)
+                .unwrap();
+            let identity = RecoveryTaskIdentity::new(
+                "workspace-a",
+                "run-a",
+                format!("operation-{iteration}"),
+                format!("execution-{iteration}"),
+                format!("attempt-{iteration}"),
+            )
+            .unwrap();
+            let barrier = Arc::new(Barrier::new(3));
+
+            let clear_hub = hub.clone();
+            let clear_barrier = Arc::clone(&barrier);
+            let clear = thread::spawn(move || {
+                clear_barrier.wait();
+                clear_hub.clear_run_cancel(capability)
+            });
+            let register_hub = hub.clone();
+            let register_barrier = Arc::clone(&barrier);
+            let register = thread::spawn(move || {
+                register_barrier.wait();
+                register_hub.register(identity)
+            });
+
+            barrier.wait();
+            let cleared = clear.join().unwrap();
+            let registration = register.join().unwrap().unwrap();
+            match cleared {
+                Ok(_) => {
+                    assert_eq!(
+                        registration.snapshot().unwrap().state(),
+                        PreSendGateState::Open
+                    );
+                    hub.signal_global(CancellationCause::RuntimeShutdown)
+                        .unwrap();
+                    assert!(hub.unregister(&registration).unwrap().was_registered());
+                }
+                Err(RuntimeCancellationHubError::RunCancelRegistrationsActive {
+                    active_registrations: 1,
+                }) => {
+                    assert_eq!(
+                        registration.snapshot().unwrap().state(),
+                        PreSendGateState::CancelledBeforeSent
+                    );
+                    assert_eq!(
+                        registration.snapshot().unwrap().cancellation_cause(),
+                        Some(CancellationCause::RunCancel)
+                    );
+                    assert!(hub.unregister(&registration).unwrap().was_registered());
+                    let replacement_capability = hub
+                        .authorize_run_cancellation_settled("workspace-a", "run-a", INTENT_A)
+                        .unwrap();
+                    hub.clear_run_cancel(replacement_capability).unwrap();
+                }
+                other => panic!("unexpected clear/register race result: {other:?}"),
+            }
         }
     }
 }

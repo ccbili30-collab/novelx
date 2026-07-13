@@ -76,6 +76,8 @@ use uuid::Uuid;
 const API_KEY: &str = "provider-dispatch-recovery-test-key";
 const WORKSPACE_ID: &str = "workspace-1";
 const PROJECT_ID: &str = "project-1";
+const RUN_CANCEL_INTENT_ID: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[tokio::test]
 async fn requested_dispatches_once_and_terminal_reentry_never_sends_again() {
@@ -610,7 +612,7 @@ async fn run_cancel_interrupts_only_the_target_recovery_while_parallel_run_dispa
         target_fixture.seed_requested(&providers, &provider, &gateway, "runtime-target-run");
     let other = other_fixture.seed_requested(&providers, &provider, &gateway, "runtime-other-run");
     cancellation_hub
-        .signal_run_cancel(WORKSPACE_ID, &target.run_id)
+        .signal_run_cancel(WORKSPACE_ID, &target.run_id, RUN_CANCEL_INTENT_ID)
         .unwrap();
 
     let target_service = ProviderDispatchRecoveryService::new(&target_fixture.path);
@@ -637,6 +639,10 @@ async fn run_cancel_interrupts_only_the_target_recovery_while_parallel_run_dispa
         panic!("target Run must be interrupted before Sent");
     };
     assert_eq!(interrupted.cause, CancellationCause::RunCancel);
+    assert_eq!(
+        interrupted.cancellation_intent_id.as_deref(),
+        Some(RUN_CANCEL_INTENT_ID)
+    );
     assert!(!interrupted.resumable);
     assert_eq!(
         completed_ref(&other_result.unwrap()).terminal,

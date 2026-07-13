@@ -610,6 +610,7 @@ fn persist_interruption_before_return(
                     execution_id: interrupted.execution_id.clone(),
                     attempt_id: interrupted.attempt_id.clone(),
                     cause: interrupted.cause,
+                    cancellation_intent_id: interrupted.cancellation_intent_id.clone(),
                     transport_boundary_crossed: interrupted.transport_boundary_crossed,
                     resumable: interrupted.resumable,
                     interrupted_at: recorded_at,

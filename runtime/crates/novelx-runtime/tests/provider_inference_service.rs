@@ -12,8 +12,9 @@ use novelx_protocol::{
 };
 use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
 use novelx_runtime::provider_attempt::{
-    ProviderAttemptAggregate, ProviderAttemptFailure, ProviderAttemptMetadata,
-    ProviderAttemptRecovery, ProviderDeliveryCertainty, ProviderResponseReceipt,
+    ProviderAttemptAggregate, ProviderAttemptCancelledBeforeSent, ProviderAttemptFailure,
+    ProviderAttemptMetadata, ProviderAttemptRecovery, ProviderDeliveryCertainty,
+    ProviderResponseReceipt,
 };
 use novelx_runtime::provider_gateway::{
     ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderGateway,
@@ -64,6 +65,61 @@ async fn ensure_requested_is_pure_idempotent_and_releases_attempt_ownership() {
             .collect::<Vec<_>>(),
         vec!["provider.requested"]
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancelled_before_sent_is_a_typed_terminal_and_never_reaches_network() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Immediate(json_response(
+        200,
+        successful_body("must not be sent"),
+    )))
+    .await;
+    let (providers, identity) = bound_registry(base_url, 2_000);
+    fixture.seed(&identity, false);
+    let gateway = ProviderGateway::new().unwrap();
+    let execution = execution(identity);
+    let mut journal = fixture.open();
+    ProviderInferenceService::new(&mut journal, &providers, &gateway)
+        .ensure_requested(execution.clone())
+        .unwrap();
+    let mut attempt = ProviderAttemptAggregate::recover(&journal, RUN_ID, ATTEMPT_ID).unwrap();
+    let expected_run_sequence = current_run_sequence(&journal);
+    drop(journal);
+    let expected_global_sequence =
+        novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&fixture.path)
+            .unwrap()
+            .current_global_sequence()
+            .unwrap();
+    let mut journal = fixture.open();
+    let cancellation =
+        ProviderAttemptCancelledBeforeSent::derive(&attempt, "9".repeat(64), expected_run_sequence)
+            .unwrap();
+    let idempotency_key = format!(
+        "provider:{ATTEMPT_ID}:cancel-before-sent:{}:{}",
+        cancellation.cancellation_intent_id, cancellation.requested_evidence_sha256
+    );
+    attempt
+        .cancel_before_sent(
+            &mut journal,
+            expected_run_sequence,
+            expected_global_sequence,
+            cancellation,
+            ProviderAttemptMetadata {
+                message_id: "cancel-before-sent-message",
+                idempotency_key: &idempotency_key,
+                created_at: "2026-07-13T00:00:00Z",
+                reason: Some("run_cancel"),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        ProviderInferenceService::new(&mut journal, &providers, &gateway)
+            .ensure_requested(execution),
+        Err(ProviderInferenceServiceError::CancelledBeforeDispatch)
+    ));
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
     server.abort();
 }
 

@@ -17,8 +17,9 @@ use crate::{
     operational_recovery_action::OperationalRecoveryAction,
     operational_recovery_aggregate::{
         OperationalRecoveryAggregateError, OperationalRecoveryEffectClass,
-        OperationalRecoveryEventMetadata, OperationalRecoveryOperation, OperationalRecoveryOutcome,
-        OperationalRecoveryRepository, ProviderDispatchResumeCapability,
+        OperationalRecoveryEventMetadata, OperationalRecoveryInterruptionCause,
+        OperationalRecoveryOperation, OperationalRecoveryOutcome, OperationalRecoveryRepository,
+        ProviderDispatchResumeCapability,
     },
     provider_attempt::{
         ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState,
@@ -61,6 +62,7 @@ pub struct ProviderDispatchAuthorizedResumeRequest {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderDispatchRecoveryTerminal {
     Responded,
+    CancelledSafe,
     FailedSafe,
     OutcomeUnknown,
 }
@@ -80,6 +82,7 @@ pub struct ProviderDispatchRecoveryReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderDispatchInterruptedBeforeSent {
     pub cause: CancellationCause,
+    pub cancellation_intent_id: Option<String>,
     pub operation_id: String,
     pub execution_id: String,
     pub attempt_id: String,
@@ -322,10 +325,11 @@ impl ProviderDispatchRecoveryService {
             ) {
                 Ok(authorizer) => authorizer,
                 Err(error) => {
-                    if let Some(cause) = abandon_before_sent_cause(cancellation_hub, &registration)?
+                    if let Some(cancellation) =
+                        abandon_before_sent_cancellation(cancellation_hub, &registration)?
                     {
                         return Ok(ProviderDispatchRecoveryResult::InterruptedBeforeSent(
-                            interrupted_before_sent(&request, &dispatch, cause),
+                            interrupted_before_sent(&request, &dispatch, cancellation)?,
                         ));
                     }
                     return Err(error.into());
@@ -344,10 +348,11 @@ impl ProviderDispatchRecoveryService {
             ) {
                 Ok(authorization) => authorization,
                 Err(error) => {
-                    if let Some(cause) = abandon_before_sent_cause(cancellation_hub, &registration)?
+                    if let Some(cancellation) =
+                        abandon_before_sent_cancellation(cancellation_hub, &registration)?
                     {
                         return Ok(ProviderDispatchRecoveryResult::InterruptedBeforeSent(
-                            interrupted_before_sent(&request, &dispatch, cause),
+                            interrupted_before_sent(&request, &dispatch, cancellation)?,
                         ));
                     }
                     return Err(error.into());
@@ -358,9 +363,12 @@ impl ProviderDispatchRecoveryService {
                 Err(RuntimeCancellationHubError::Gate(PreSendGateError::CancelledBeforeSent(
                     cause,
                 ))) => {
-                    cancellation_hub.unregister(&registration)?;
+                    let cancellation =
+                        abandon_before_sent_cancellation(cancellation_hub, &registration)?
+                            .filter(|cancellation| cancellation.cause == cause)
+                            .ok_or(RuntimeCancellationHubError::StateInvariant)?;
                     return Ok(ProviderDispatchRecoveryResult::InterruptedBeforeSent(
-                        interrupted_before_sent(&request, &dispatch, cause),
+                        interrupted_before_sent(&request, &dispatch, cancellation)?,
                     ));
                 }
                 Err(error) => return Err(error.into()),
@@ -390,24 +398,33 @@ impl ProviderDispatchRecoveryService {
                     return Ok(ProviderDispatchRecoveryResult::Completed(receipt?));
                 }
                 Err(ProviderRecoveryArmError::VerifiedRequestedNotSent(error)) => {
-                    if let Some(cause) = abandon_before_sent_cause(cancellation_hub, &registration)?
+                    if let Some(cancellation) =
+                        abandon_before_sent_cancellation(cancellation_hub, &registration)?
                     {
                         return Ok(ProviderDispatchRecoveryResult::InterruptedBeforeSent(
-                            interrupted_before_sent(&request, &dispatch, cause),
+                            interrupted_before_sent(&request, &dispatch, cancellation)?,
                         ));
                     }
                     return self.handle_dispatch_error(&request, &dispatch, *error);
                 }
                 Err(error) => {
-                    if registration.snapshot().is_ok_and(|snapshot| {
-                        matches!(
-                            snapshot.state(),
-                            PreSendGateState::CancelledBeforeSent
-                                | PreSendGateState::SentCommitted
-                                | PreSendGateState::DispatchBoundaryUnknown
-                        )
-                    }) {
-                        let _ = cancellation_hub.unregister(&registration);
+                    match registration.snapshot().map(|snapshot| snapshot.state()) {
+                        Ok(PreSendGateState::CancelledBeforeSent) => {
+                            if let Some(cancellation) =
+                                abandon_before_sent_cancellation(cancellation_hub, &registration)?
+                            {
+                                return Ok(ProviderDispatchRecoveryResult::InterruptedBeforeSent(
+                                    interrupted_before_sent(&request, &dispatch, cancellation)?,
+                                ));
+                            }
+                        }
+                        Ok(
+                            PreSendGateState::SentCommitted
+                            | PreSendGateState::DispatchBoundaryUnknown,
+                        ) => {
+                            let _ = cancellation_hub.unregister(&registration);
+                        }
+                        _ => {}
                     }
                     return Err(error.into());
                 }
@@ -477,6 +494,10 @@ impl ProviderDispatchRecoveryService {
             Err(ProviderDispatchRecoveryError::PreDispatchBlocked(Box::new(
                 error,
             )))
+        } else if state == ProviderAttemptState::CancelledBeforeSent {
+            Err(ProviderDispatchRecoveryError::PreDispatchBlocked(Box::new(
+                ProviderInferenceServiceError::CancelledBeforeDispatch,
+            )))
         } else {
             Err(error.into())
         }
@@ -496,6 +517,9 @@ impl ProviderDispatchRecoveryService {
         let evidence_sha256 = provider_attempt_evidence_sha256(&attempt)?;
         let terminal = match attempt.state() {
             ProviderAttemptState::Responded => ProviderDispatchRecoveryTerminal::Responded,
+            ProviderAttemptState::CancelledBeforeSent => {
+                ProviderDispatchRecoveryTerminal::CancelledSafe
+            }
             ProviderAttemptState::Failed => ProviderDispatchRecoveryTerminal::FailedSafe,
             ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
                 ProviderDispatchRecoveryTerminal::OutcomeUnknown
@@ -514,6 +538,7 @@ impl ProviderDispatchRecoveryService {
         self.finish_recovery_operation(
             &request,
             &manifest,
+            &attempt,
             resume_authorization_id,
             exclusive_lease.as_ref(),
         )?;
@@ -533,6 +558,7 @@ impl ProviderDispatchRecoveryService {
         &self,
         request: &ProviderDispatchRecoveryRequest,
         manifest: &ProviderDispatchRecoveryManifest,
+        attempt: &ProviderAttemptAggregate,
         resume_authorization_id: Option<&str>,
         exclusive_lease: &WorkspaceRuntimeLease,
     ) -> Result<(), ProviderDispatchRecoveryError> {
@@ -556,7 +582,7 @@ impl ProviderDispatchRecoveryService {
             return Err(ProviderDispatchRecoveryError::RecoveryFenceMismatch);
         }
         if let Some(existing) = &operation.outcome {
-            return if outcome_matches_manifest(existing, manifest) {
+            return if outcome_matches_manifest(existing, manifest, attempt) {
                 Ok(())
             } else {
                 Err(ProviderDispatchRecoveryError::OutcomeConflict)
@@ -590,6 +616,38 @@ impl ProviderDispatchRecoveryService {
                 OperationalRecoveryOutcome::failed_safe(
                     execution,
                     "PROVIDER_DISPATCH_FAILED_SAFE".to_owned(),
+                    manifest.evidence_sha256.clone(),
+                    now.clone(),
+                )?
+            }
+            ProviderDispatchRecoveryTerminal::CancelledSafe => {
+                let cancellation = attempt
+                    .cancelled_before_sent()
+                    .ok_or(ProviderDispatchRecoveryError::CancelledBeforeSentEvidenceMissing)?;
+                let interruption = operation
+                    .interruptions
+                    .iter()
+                    .find(|interruption| {
+                        interruption.cause == OperationalRecoveryInterruptionCause::RunCancel
+                            && interruption.cancellation_intent_id.as_deref()
+                                == Some(cancellation.cancellation_intent_id.as_str())
+                            && !interruption.transport_boundary_crossed
+                            && !interruption.resumable
+                            && interruption.attempt_id == attempt.attempt_id()
+                            && interruption.attempt_aggregate_sequence
+                                == cancellation.requested_aggregate_sequence
+                            && interruption.attempt_definition_sha256
+                                == cancellation.requested_definition_sha256
+                            && interruption.attempt_evidence_sha256
+                                == cancellation.requested_evidence_sha256
+                    })
+                    .ok_or(ProviderDispatchRecoveryError::CancellationInterruptionMissing)?;
+                OperationalRecoveryOutcome::cancelled_safe(
+                    execution,
+                    interruption,
+                    cancellation.cancellation_intent_id.clone(),
+                    attempt.aggregate_sequence(),
+                    provider_attempt_definition_sha256(attempt)?,
                     manifest.evidence_sha256.clone(),
                     now.clone(),
                 )?
@@ -721,6 +779,9 @@ fn verify_dispatch_actor(
         .ok_or(ProviderDispatchRecoveryError::ExecutionMissing)?;
     let expected_capability = match attempt.state() {
         ProviderAttemptState::Requested => ProviderDispatchResumeCapability::DispatchRequested,
+        ProviderAttemptState::CancelledBeforeSent => {
+            ProviderDispatchResumeCapability::FinalizeCancelledSafe
+        }
         ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
             ProviderDispatchResumeCapability::FinalizeOutcomeUnknown
         }
@@ -750,6 +811,7 @@ fn verify_dispatch_actor(
 fn outcome_matches_manifest(
     outcome: &OperationalRecoveryOutcome,
     manifest: &ProviderDispatchRecoveryManifest,
+    attempt: &ProviderAttemptAggregate,
 ) -> bool {
     match outcome {
         OperationalRecoveryOutcome::Succeeded {
@@ -785,33 +847,69 @@ fn outcome_matches_manifest(
                 && reason_code == "PROVIDER_DISPATCH_OUTCOME_UNKNOWN"
                 && evidence_sha256 == &manifest.evidence_sha256
         }
+        OperationalRecoveryOutcome::CancelledSafe {
+            execution_id,
+            cancellation_intent_id,
+            attempt_id,
+            attempt_aggregate_sequence,
+            attempt_definition_sha256,
+            attempt_evidence_sha256,
+            ..
+        } => {
+            let Some(cancellation) = attempt.cancelled_before_sent() else {
+                return false;
+            };
+            manifest.terminal == ProviderDispatchRecoveryTerminal::CancelledSafe
+                && execution_id == &manifest.execution_id
+                && cancellation_intent_id == &cancellation.cancellation_intent_id
+                && attempt_id == attempt.attempt_id()
+                && *attempt_aggregate_sequence == attempt.aggregate_sequence()
+                && attempt_definition_sha256 == &cancellation.requested_definition_sha256
+                && attempt_evidence_sha256 == &manifest.evidence_sha256
+        }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreSendCancellation {
+    cause: CancellationCause,
+    cancellation_intent_id: Option<String>,
 }
 
 fn interrupted_before_sent(
     request: &ProviderDispatchRecoveryRequest,
     dispatch: &DispatchEvidence,
-    cause: CancellationCause,
-) -> ProviderDispatchInterruptedBeforeSent {
-    ProviderDispatchInterruptedBeforeSent {
+    cancellation: PreSendCancellation,
+) -> Result<ProviderDispatchInterruptedBeforeSent, ProviderDispatchRecoveryError> {
+    let cause = cancellation.cause;
+    if (cause == CancellationCause::RunCancel) != cancellation.cancellation_intent_id.is_some() {
+        return Err(RuntimeCancellationHubError::StateInvariant.into());
+    }
+    Ok(ProviderDispatchInterruptedBeforeSent {
         cause,
+        cancellation_intent_id: cancellation.cancellation_intent_id,
         operation_id: request.operation_id.clone(),
         execution_id: request.execution_id.clone(),
         attempt_id: dispatch.attempt_id.clone(),
         transport_boundary_crossed: false,
         resumable: !matches!(cause, CancellationCause::RunCancel),
-    }
+    })
 }
 
-fn abandon_before_sent_cause(
+fn abandon_before_sent_cancellation(
     cancellation_hub: &RuntimeCancellationHub,
     registration: &RecoveryTaskRegistration,
-) -> Result<Option<CancellationCause>, ProviderDispatchRecoveryError> {
+) -> Result<Option<PreSendCancellation>, ProviderDispatchRecoveryError> {
     let receipt = cancellation_hub.abandon_before_sent(registration)?;
     if !receipt.was_registered() {
         return Err(RuntimeCancellationHubError::StateInvariant.into());
     }
-    Ok(receipt.cancellation_cause())
+    Ok(receipt
+        .cancellation_cause()
+        .map(|cause| PreSendCancellation {
+            cause,
+            cancellation_intent_id: receipt.cancellation_intent_id().map(str::to_owned),
+        }))
 }
 
 fn canonical_sha256(value: &serde_json::Value) -> Result<String, serde_json::Error> {
@@ -867,6 +965,10 @@ pub enum ProviderDispatchRecoveryError {
     AttemptSequenceMismatch,
     #[error("Provider dispatch did not cross the transport boundary")]
     DispatchDidNotCrossBoundary,
+    #[error("Cancelled Provider Attempt is missing its durable cancellation evidence")]
+    CancelledBeforeSentEvidenceMissing,
+    #[error("Cancelled Provider dispatch is missing its exact persisted RunCancel interruption")]
+    CancellationInterruptionMissing,
     #[error("Provider dispatch recovery outcome conflicts with persisted evidence")]
     OutcomeConflict,
     #[error("Provider dispatch recovery operation is waiting or quarantined")]

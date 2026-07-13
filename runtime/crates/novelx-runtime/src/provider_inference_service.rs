@@ -483,6 +483,9 @@ impl<'a> ProviderInferenceService<'a> {
                     ProviderAttemptState::Responded => recovered_outcome(&existing)
                         .map(Box::new)
                         .map(EnsuredProviderAttempt::Recovered),
+                    ProviderAttemptState::CancelledBeforeSent => {
+                        Err(ProviderInferenceServiceError::CancelledBeforeDispatch)
+                    }
                     ProviderAttemptState::Failed => Err(
                         ProviderInferenceServiceError::ExistingTerminal(existing.recovery()),
                     ),
@@ -506,6 +509,9 @@ impl<'a> ProviderInferenceService<'a> {
                 ProviderAttemptState::Responded => recovered_outcome(&existing)
                     .map(Box::new)
                     .map(EnsuredProviderAttempt::Recovered),
+                ProviderAttemptState::CancelledBeforeSent => {
+                    Err(ProviderInferenceServiceError::CancelledBeforeDispatch)
+                }
                 ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
                     Err(ProviderInferenceServiceError::OutcomeUnknown)
                 }
@@ -542,6 +548,9 @@ impl<'a> ProviderInferenceService<'a> {
             ProviderAttemptState::Responded => recovered_outcome(&created)
                 .map(Box::new)
                 .map(EnsuredProviderAttempt::Recovered),
+            ProviderAttemptState::CancelledBeforeSent => {
+                Err(ProviderInferenceServiceError::CancelledBeforeDispatch)
+            }
             ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
                 Err(ProviderInferenceServiceError::OutcomeUnknown)
             }
@@ -641,6 +650,9 @@ impl<'a> ProviderInferenceService<'a> {
                     ProviderAttemptState::Responded => recovered_outcome(&existing)
                         .map(Box::new)
                         .map(PreparedProviderAttempt::Recovered),
+                    ProviderAttemptState::CancelledBeforeSent => {
+                        Err(ProviderInferenceServiceError::CancelledBeforeDispatch)
+                    }
                     ProviderAttemptState::Failed => Err(
                         ProviderInferenceServiceError::ExistingTerminal(existing.recovery()),
                     ),
@@ -673,6 +685,9 @@ impl<'a> ProviderInferenceService<'a> {
                 ProviderAttemptState::Responded => recovered_outcome(&existing)
                     .map(Box::new)
                     .map(PreparedProviderAttempt::Recovered),
+                ProviderAttemptState::CancelledBeforeSent => {
+                    Err(ProviderInferenceServiceError::CancelledBeforeDispatch)
+                }
                 ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
                     Err(ProviderInferenceServiceError::OutcomeUnknown)
                 }

@@ -1,10 +1,10 @@
 use novelx_protocol::{ProviderInferenceToolCall, ProviderRunIdentity};
 use novelx_runtime::event_journal::{EventJournal, NewRuntimeEvent};
 use novelx_runtime::provider_attempt::{
-    ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptError,
-    ProviderAttemptFailure, ProviderAttemptMetadata, ProviderAttemptRecovery, ProviderAttemptState,
-    ProviderDeliveryCertainty, ProviderResponseReceipt, provider_attempt_definition_sha256,
-    provider_attempt_evidence_sha256,
+    ProviderAttemptAggregate, ProviderAttemptCancelledBeforeSent, ProviderAttemptDefinition,
+    ProviderAttemptError, ProviderAttemptFailure, ProviderAttemptMetadata, ProviderAttemptRecovery,
+    ProviderAttemptState, ProviderDeliveryCertainty, ProviderResponseReceipt,
+    provider_attempt_definition_sha256, provider_attempt_evidence_sha256,
 };
 use novelx_runtime::provider_retry_after::{ProviderRetryAfterKind, ProviderRetryAfterReceipt};
 use rusqlite::{Connection, params};
@@ -14,6 +14,303 @@ use uuid::Uuid;
 
 const CONTEXT_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PAYLOAD_HASH: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[test]
+fn requested_can_be_cancelled_before_sent_with_exact_durable_evidence() {
+    let fixture = Fixture::new();
+    let cancellation_intent_id = "9".repeat(64);
+    let expected_requested_evidence;
+    let cancellation;
+    {
+        let mut journal = fixture.open();
+        let mut attempt = ProviderAttemptAggregate::create(
+            &mut journal,
+            "run-1",
+            "attempt-1",
+            definition("run-1", CONTEXT_HASH),
+            0,
+            metadata("message-1", "request-key-1"),
+        )
+        .unwrap();
+        expected_requested_evidence = provider_attempt_evidence_sha256(&attempt).unwrap();
+        cancellation =
+            ProviderAttemptCancelledBeforeSent::derive(&attempt, cancellation_intent_id.clone(), 1)
+                .unwrap();
+        let idempotency_key = cancellation_idempotency_key("attempt-1", &cancellation);
+        attempt
+            .cancel_before_sent(
+                &mut journal,
+                1,
+                1,
+                cancellation.clone(),
+                metadata("message-2", &idempotency_key),
+            )
+            .unwrap();
+        assert_eq!(attempt.state(), ProviderAttemptState::CancelledBeforeSent);
+        assert_eq!(attempt.recovery(), ProviderAttemptRecovery::CancelledSafe);
+        assert_eq!(attempt.cancelled_before_sent(), Some(&cancellation));
+        assert_ne!(
+            provider_attempt_evidence_sha256(&attempt).unwrap(),
+            expected_requested_evidence
+        );
+        assert_eq!(
+            event_types(&journal, "run-1", "attempt-1"),
+            vec!["provider.requested", "provider.cancelled_before_sent"]
+        );
+        assert_eq!(event_versions(&journal, "run-1", "attempt-1"), vec![1, 3]);
+    }
+
+    let journal = fixture.open();
+    let recovered = ProviderAttemptAggregate::recover(&journal, "run-1", "attempt-1").unwrap();
+    assert_eq!(recovered.state(), ProviderAttemptState::CancelledBeforeSent);
+    assert_eq!(recovered.cancelled_before_sent(), Some(&cancellation));
+    assert_eq!(
+        cancellation.requested_evidence_sha256,
+        expected_requested_evidence
+    );
+    assert_eq!(recovered.aggregate_sequence(), 2);
+}
+
+#[test]
+fn cancellation_v3_refuses_legacy_unknown_and_post_sent_relabeling() {
+    for event_version in [1, 2, 4] {
+        let fixture = Fixture::new();
+        let mut journal = fixture.open();
+        let attempt = ProviderAttemptAggregate::create(
+            &mut journal,
+            "run-1",
+            "attempt-1",
+            definition("run-1", CONTEXT_HASH),
+            0,
+            metadata("message-1", "request-key-1"),
+        )
+        .unwrap();
+        let cancellation =
+            ProviderAttemptCancelledBeforeSent::derive(&attempt, "9".repeat(64), 1).unwrap();
+        let idempotency_key = cancellation_idempotency_key("attempt-1", &cancellation);
+        journal
+            .append(
+                raw_event(
+                    "provider.cancelled_before_sent",
+                    event_version,
+                    serde_json::json!({
+                        "kind": "cancelled_before_sent",
+                        "definition": attempt.definition(),
+                        "cancellation": cancellation,
+                    }),
+                    "message-2",
+                    &idempotency_key,
+                ),
+                1,
+                1,
+            )
+            .unwrap();
+        let recovered = ProviderAttemptAggregate::recover(&journal, "run-1", "attempt-1");
+        match event_version {
+            1 | 2 => assert!(
+                recovered.is_err(),
+                "v{event_version} must not carry v3 semantics"
+            ),
+            4 => assert!(matches!(
+                recovered,
+                Err(ProviderAttemptError::UnknownEventVersion(4))
+            )),
+            _ => unreachable!(),
+        }
+    }
+
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    let mut attempt = ProviderAttemptAggregate::create(
+        &mut journal,
+        "run-1",
+        "attempt-1",
+        definition("run-1", CONTEXT_HASH),
+        0,
+        metadata("message-1", "request-key-1"),
+    )
+    .unwrap();
+    let cancellation =
+        ProviderAttemptCancelledBeforeSent::derive(&attempt, "9".repeat(64), 2).unwrap();
+    attempt
+        .mark_sent(
+            &mut journal,
+            1,
+            "dispatch-1",
+            metadata("message-2", "sent-key-1"),
+        )
+        .unwrap();
+    let idempotency_key = cancellation_idempotency_key("attempt-1", &cancellation);
+    journal
+        .append(
+            raw_event(
+                "provider.cancelled_before_sent",
+                3,
+                serde_json::json!({
+                    "kind": "cancelled_before_sent",
+                    "definition": attempt.definition(),
+                    "cancellation": cancellation,
+                }),
+                "message-3",
+                &idempotency_key,
+            ),
+            2,
+            2,
+        )
+        .unwrap();
+    assert!(matches!(
+        ProviderAttemptAggregate::recover(&journal, "run-1", "attempt-1"),
+        Err(ProviderAttemptError::InvalidHistory)
+    ));
+}
+
+#[test]
+fn cancellation_before_sent_is_strictly_idempotent_and_never_crosses_sent() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    let mut attempt = ProviderAttemptAggregate::create(
+        &mut journal,
+        "run-1",
+        "attempt-1",
+        definition("run-1", CONTEXT_HASH),
+        0,
+        metadata("message-1", "request-key-1"),
+    )
+    .unwrap();
+    let mut stale = attempt.clone();
+    let cancellation =
+        ProviderAttemptCancelledBeforeSent::derive(&attempt, "9".repeat(64), 1).unwrap();
+    let idempotency_key = cancellation_idempotency_key("attempt-1", &cancellation);
+    attempt
+        .cancel_before_sent(
+            &mut journal,
+            1,
+            1,
+            cancellation.clone(),
+            metadata("message-2", &idempotency_key),
+        )
+        .unwrap();
+    stale
+        .cancel_before_sent(
+            &mut journal,
+            1,
+            1,
+            cancellation.clone(),
+            metadata("message-retry", &idempotency_key),
+        )
+        .unwrap();
+    attempt
+        .cancel_before_sent(
+            &mut journal,
+            1,
+            1,
+            cancellation.clone(),
+            metadata("message-retry-2", &idempotency_key),
+        )
+        .unwrap();
+    assert_eq!(attempt, stale);
+    assert_eq!(event_types(&journal, "run-1", "attempt-1").len(), 2);
+
+    let mut sent_attempt = ProviderAttemptAggregate::create(
+        &mut journal,
+        "run-2",
+        "attempt-2",
+        definition("run-2", CONTEXT_HASH),
+        0,
+        metadata("message-3", "request-key-2"),
+    )
+    .unwrap();
+    let sent_cancellation =
+        ProviderAttemptCancelledBeforeSent::derive(&sent_attempt, "8".repeat(64), 1).unwrap();
+    sent_attempt
+        .mark_sent(
+            &mut journal,
+            1,
+            "dispatch-2",
+            metadata("message-4", "sent-key-2"),
+        )
+        .unwrap();
+    let sent_idempotency_key = cancellation_idempotency_key("attempt-2", &sent_cancellation);
+    assert!(matches!(
+        sent_attempt.cancel_before_sent(
+            &mut journal,
+            2,
+            4,
+            sent_cancellation,
+            metadata("message-5", &sent_idempotency_key),
+        ),
+        Err(ProviderAttemptError::TransitionInvalid {
+            state: ProviderAttemptState::Sent
+        })
+    ));
+    assert_eq!(sent_attempt.state(), ProviderAttemptState::Sent);
+}
+
+#[test]
+fn cancellation_before_sent_enforces_global_cas_and_replay_tamper_detection() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.open();
+    let mut attempt = ProviderAttemptAggregate::create(
+        &mut journal,
+        "run-1",
+        "attempt-1",
+        definition("run-1", CONTEXT_HASH),
+        0,
+        metadata("message-1", "request-key-1"),
+    )
+    .unwrap();
+    ProviderAttemptAggregate::create(
+        &mut journal,
+        "run-2",
+        "attempt-2",
+        definition("run-2", CONTEXT_HASH),
+        0,
+        metadata("message-2", "request-key-2"),
+    )
+    .unwrap();
+    let cancellation =
+        ProviderAttemptCancelledBeforeSent::derive(&attempt, "9".repeat(64), 1).unwrap();
+    let idempotency_key = cancellation_idempotency_key("attempt-1", &cancellation);
+    assert!(matches!(
+        attempt.cancel_before_sent(
+            &mut journal,
+            1,
+            1,
+            cancellation.clone(),
+            metadata("message-3", &idempotency_key),
+        ),
+        Err(ProviderAttemptError::Journal(_))
+    ));
+    assert_eq!(attempt.state(), ProviderAttemptState::Requested);
+    attempt
+        .cancel_before_sent(
+            &mut journal,
+            1,
+            2,
+            cancellation,
+            metadata("message-3", &idempotency_key),
+        )
+        .unwrap();
+
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER runtime_events_no_update;")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE runtime_events SET payload_json = json_set(payload_json, '$.cancellation.requestedEvidenceSha256', ?) WHERE event_type = 'provider.cancelled_before_sent'",
+                ["0".repeat(64)],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    assert!(matches!(
+        ProviderAttemptAggregate::recover(&journal, "run-1", "attempt-1"),
+        Err(ProviderAttemptError::CancellationEvidenceInvalid)
+    ));
+}
 
 #[test]
 fn requested_sent_responded_persists_and_recovers() {
@@ -640,6 +937,16 @@ fn metadata<'a>(message_id: &'a str, idempotency_key: &'a str) -> ProviderAttemp
     }
 }
 
+fn cancellation_idempotency_key(
+    attempt_id: &str,
+    cancellation: &ProviderAttemptCancelledBeforeSent,
+) -> String {
+    format!(
+        "provider:{attempt_id}:cancel-before-sent:{}:{}",
+        cancellation.cancellation_intent_id, cancellation.requested_evidence_sha256
+    )
+}
+
 fn raw_event(
     event_type: &str,
     event_version: u32,
@@ -669,6 +976,15 @@ fn event_types(journal: &EventJournal, run_id: &str, attempt_id: &str) -> Vec<St
         .collect()
 }
 
+fn event_versions(journal: &EventJournal, run_id: &str, attempt_id: &str) -> Vec<u32> {
+    journal
+        .read_aggregate(run_id, "provider_attempt", attempt_id, 0)
+        .unwrap()
+        .iter()
+        .map(|event| event.event_version)
+        .collect()
+}
+
 struct Fixture {
     _temp: TempDir,
     path: std::path::PathBuf,
@@ -678,6 +994,7 @@ impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("runtime.db");
+        novelx_runtime::workspace_event_journal::WorkspaceEventJournal::open(&path).unwrap();
         Self { _temp: temp, path }
     }
 

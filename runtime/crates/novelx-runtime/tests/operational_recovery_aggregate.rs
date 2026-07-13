@@ -325,6 +325,11 @@ fn provider_dispatch_resume_capability_is_derived_from_exact_attempt_state() {
             ProviderDispatchResumeCapability::FinalizeOutcomeUnknown,
         ),
         (
+            ProviderAttemptState::CancelledBeforeSent,
+            2,
+            ProviderDispatchResumeCapability::FinalizeCancelledSafe,
+        ),
+        (
             ProviderAttemptState::OutcomeUnknown,
             3,
             ProviderDispatchResumeCapability::FinalizeOutcomeUnknown,
@@ -357,6 +362,7 @@ fn provider_dispatch_resume_capability_is_derived_from_exact_attempt_state() {
 fn provider_dispatch_resume_rejects_sent_and_terminal_state_rollback_to_requested() {
     for (state, sequence) in [
         (ProviderAttemptState::Sent, 2),
+        (ProviderAttemptState::CancelledBeforeSent, 2),
         (ProviderAttemptState::Responded, 3),
         (ProviderAttemptState::Failed, 3),
         (ProviderAttemptState::OutcomeUnknown, 3),
@@ -1953,6 +1959,7 @@ fn pre_sent_interruption_is_fenced_idempotent_non_terminal_and_tamper_evident() 
         "d".repeat(64),
         "e".repeat(64),
         OperationalRecoveryInterruptionCause::RuntimeShutdown,
+        None,
         false,
         true,
         lease.instance_id().to_owned(),
@@ -1986,6 +1993,7 @@ fn pre_sent_interruption_is_fenced_idempotent_non_terminal_and_tamper_evident() 
         "d".repeat(64),
         "e".repeat(64),
         OperationalRecoveryInterruptionCause::RuntimeShutdown,
+        None,
         false,
         true,
         lease.instance_id().to_owned(),
@@ -2020,6 +2028,7 @@ fn pre_sent_interruption_is_fenced_idempotent_non_terminal_and_tamper_evident() 
         "d".repeat(64),
         "e".repeat(64),
         OperationalRecoveryInterruptionCause::HostDisconnected,
+        None,
         false,
         true,
         lease.instance_id().to_owned(),
@@ -2069,6 +2078,238 @@ fn pre_sent_interruption_is_fenced_idempotent_non_terminal_and_tamper_evident() 
         matches!(error, OperationalRecoveryAggregateError::HashChainInvalid),
         "unexpected interruption replay error: {error:?}"
     );
+}
+
+#[test]
+fn run_cancel_interruption_requires_exact_cancelled_safe_terminal_evidence() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "c",
+        OperationalRecoveryObservedGate::ProviderDispatchReady,
+        vec![],
+    );
+    let mut repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    repository
+        .observe(subject.clone(), observation.clone(), metadata())
+        .unwrap();
+    let lease = fixture.lease("runtime-owner");
+    let claim = provider_dispatch_claim(&observation, lease.instance_id(), 1);
+    repository
+        .claim(
+            &subject.workspace_id,
+            &subject.run_id,
+            claim.clone(),
+            &lease,
+            fixture.clock(),
+            metadata(),
+        )
+        .unwrap();
+    let execution = OperationalRecoveryExecution::derive(
+        &claim,
+        OperationalRecoveryEffectClass::ProviderDispatch,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    repository
+        .start_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            execution.clone(),
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:01:00Z"),
+        )
+        .unwrap();
+    let interruption = OperationalRecoveryExecutionInterruption::derive(
+        subject.workspace_id.clone(),
+        subject.run_id.clone(),
+        observation.operation_id.clone(),
+        &execution,
+        "attempt-1".to_owned(),
+        1,
+        "d".repeat(64),
+        "e".repeat(64),
+        OperationalRecoveryInterruptionCause::RunCancel,
+        Some("9".repeat(64)),
+        false,
+        false,
+        lease.instance_id().to_owned(),
+        lease.lease_epoch().to_owned(),
+        "2026-07-13T00:02:00Z".to_owned(),
+    )
+    .unwrap();
+    let outcome = OperationalRecoveryOutcome::cancelled_safe(
+        &execution,
+        &interruption,
+        "9".repeat(64),
+        2,
+        "d".repeat(64),
+        "f".repeat(64),
+        "2026-07-13T00:03:00Z".to_owned(),
+    )
+    .unwrap();
+    assert!(matches!(
+        repository.finish_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            outcome.clone(),
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:03:00Z"),
+        ),
+        Err(OperationalRecoveryAggregateError::CancellationInterruptionRequired)
+    ));
+    repository
+        .record_execution_interruption(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            interruption.clone(),
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:02:00Z"),
+        )
+        .unwrap();
+    let finished = repository
+        .finish_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            outcome.clone(),
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:03:00Z"),
+        )
+        .unwrap();
+    assert_eq!(
+        finished.operations[&observation.operation_id].outcome,
+        Some(outcome.clone())
+    );
+    let retried = repository
+        .finish_execution(
+            &subject.workspace_id,
+            &subject.run_id,
+            &observation.operation_id,
+            outcome.clone(),
+            &lease,
+            fixture.clock(),
+            event_metadata("2026-07-13T00:03:00Z"),
+        )
+        .unwrap();
+    assert_eq!(retried.revision, finished.revision);
+    drop(repository);
+
+    let repository = OperationalRecoveryRepository::open(&fixture.path).unwrap();
+    let recovered = repository
+        .load(&subject.workspace_id, &subject.run_id)
+        .unwrap();
+    assert_eq!(
+        recovered.operations[&observation.operation_id].outcome,
+        Some(outcome)
+    );
+}
+
+#[test]
+fn shutdown_and_mismatched_attempt_evidence_cannot_be_called_cancelled_safe() {
+    let fixture = Fixture::new();
+    let subject = subject();
+    let observation = observation(
+        &subject,
+        "d",
+        OperationalRecoveryObservedGate::ProviderDispatchReady,
+        vec![],
+    );
+    let claim = provider_dispatch_claim(&observation, "runtime-owner", 1);
+    let execution = OperationalRecoveryExecution::derive(
+        &claim,
+        OperationalRecoveryEffectClass::ProviderDispatch,
+        "2026-07-13T00:01:00Z".to_owned(),
+    )
+    .unwrap();
+    let shutdown = OperationalRecoveryExecutionInterruption::derive(
+        subject.workspace_id,
+        subject.run_id,
+        observation.operation_id,
+        &execution,
+        "attempt-1".to_owned(),
+        1,
+        "d".repeat(64),
+        "e".repeat(64),
+        OperationalRecoveryInterruptionCause::RuntimeShutdown,
+        None,
+        false,
+        true,
+        "runtime-owner".to_owned(),
+        fixture.lease("runtime-owner").lease_epoch().to_owned(),
+        "2026-07-13T00:02:00Z".to_owned(),
+    )
+    .unwrap();
+    assert!(matches!(
+        OperationalRecoveryOutcome::cancelled_safe(
+            &execution,
+            &shutdown,
+            "9".repeat(64),
+            2,
+            "d".repeat(64),
+            "f".repeat(64),
+            "2026-07-13T00:03:00Z".to_owned(),
+        ),
+        Err(OperationalRecoveryAggregateError::CancellationOutcomeInvalid)
+    ));
+
+    let run_cancel = OperationalRecoveryExecutionInterruption::derive(
+        shutdown.workspace_id.clone(),
+        shutdown.run_id.clone(),
+        shutdown.operation_id.clone(),
+        &execution,
+        shutdown.attempt_id.clone(),
+        1,
+        "d".repeat(64),
+        "e".repeat(64),
+        OperationalRecoveryInterruptionCause::RunCancel,
+        Some("9".repeat(64)),
+        false,
+        false,
+        "runtime-owner".to_owned(),
+        shutdown.lease_epoch,
+        "2026-07-13T00:02:00Z".to_owned(),
+    )
+    .unwrap();
+    assert!(matches!(
+        OperationalRecoveryOutcome::cancelled_safe(
+            &execution,
+            &run_cancel,
+            "8".repeat(64),
+            2,
+            "d".repeat(64),
+            "f".repeat(64),
+            "2026-07-13T00:03:00Z".to_owned(),
+        ),
+        Err(OperationalRecoveryAggregateError::CancellationOutcomeInvalid)
+    ));
+    for (sequence, definition_hash, evidence_hash, cancelled_at) in [
+        (1, "d".repeat(64), "f".repeat(64), "2026-07-13T00:03:00Z"),
+        (2, "a".repeat(64), "f".repeat(64), "2026-07-13T00:03:00Z"),
+        (2, "d".repeat(64), "e".repeat(64), "2026-07-13T00:03:00Z"),
+        (2, "d".repeat(64), "f".repeat(64), "2026-07-13T00:01:00Z"),
+    ] {
+        assert!(matches!(
+            OperationalRecoveryOutcome::cancelled_safe(
+                &execution,
+                &run_cancel,
+                "9".repeat(64),
+                sequence,
+                definition_hash,
+                evidence_hash,
+                cancelled_at.to_owned(),
+            ),
+            Err(OperationalRecoveryAggregateError::CancellationOutcomeInvalid)
+        ));
+    }
 }
 
 fn subject() -> OperationalRecoverySubject {
@@ -2183,6 +2424,7 @@ fn provider_dispatch_resume(
 ) -> ProviderDispatchResumeAuthorization {
     let evidence_digit = match attempt_state {
         ProviderAttemptState::Requested => "1",
+        ProviderAttemptState::CancelledBeforeSent => "6",
         ProviderAttemptState::Sent => "2",
         ProviderAttemptState::Responded => "3",
         ProviderAttemptState::Failed => "4",

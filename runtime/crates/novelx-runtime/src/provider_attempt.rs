@@ -14,13 +14,16 @@ use crate::provider_retry_after::ProviderRetryAfterReceipt;
 const AGGREGATE_TYPE: &str = "provider_attempt";
 const LEGACY_EVENT_VERSION: u32 = 1;
 const AUTHORIZED_SENT_EVENT_VERSION: u32 = 2;
+const CANCELLED_BEFORE_SENT_EVENT_VERSION: u32 = 3;
 const AUTHORIZED_EVIDENCE_SCHEMA_VERSION: u16 = 2;
+const CANCELLED_BEFORE_SENT_EVIDENCE_SCHEMA_VERSION: u16 = 3;
 const MAX_INLINE_RESPONSE_TEXT_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderAttemptState {
     Requested,
+    CancelledBeforeSent,
     Sent,
     Responded,
     Failed,
@@ -30,6 +33,7 @@ pub enum ProviderAttemptState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderAttemptRecovery {
     SafeToSend,
+    CancelledSafe,
     OutcomeUnknown,
     Completed,
     RetryEligible,
@@ -90,6 +94,38 @@ pub struct ProviderAttemptFailure {
     pub diagnostic_id: Uuid,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderAttemptCancelledBeforeSent {
+    pub cancellation_intent_id: String,
+    pub cancellation_expected_run_sequence: u64,
+    pub requested_aggregate_sequence: u64,
+    pub requested_definition_sha256: String,
+    pub requested_evidence_sha256: String,
+}
+
+impl ProviderAttemptCancelledBeforeSent {
+    pub fn derive(
+        attempt: &ProviderAttemptAggregate,
+        cancellation_intent_id: String,
+        cancellation_expected_run_sequence: u64,
+    ) -> Result<Self, ProviderAttemptError> {
+        if attempt.state != ProviderAttemptState::Requested {
+            return Err(attempt.transition_error());
+        }
+        if !is_sha256(&cancellation_intent_id) {
+            return Err(ProviderAttemptError::CancellationEvidenceInvalid);
+        }
+        Ok(Self {
+            cancellation_intent_id,
+            cancellation_expected_run_sequence,
+            requested_aggregate_sequence: attempt.aggregate_sequence,
+            requested_definition_sha256: provider_attempt_definition_sha256(attempt)?,
+            requested_evidence_sha256: provider_attempt_evidence_sha256(attempt)?,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct ProviderAttemptMetadata<'a> {
     pub message_id: &'a str,
@@ -115,6 +151,7 @@ pub struct ProviderAttemptAggregate {
     response_text_sha256: Option<String>,
     tool_calls: Vec<ProviderInferenceToolCall>,
     failure: Option<ProviderAttemptFailure>,
+    cancelled_before_sent: Option<ProviderAttemptCancelledBeforeSent>,
 }
 
 impl ProviderAttemptAggregate {
@@ -196,6 +233,7 @@ impl ProviderAttemptAggregate {
     pub const fn recovery(&self) -> ProviderAttemptRecovery {
         match self.state {
             ProviderAttemptState::Requested => ProviderAttemptRecovery::SafeToSend,
+            ProviderAttemptState::CancelledBeforeSent => ProviderAttemptRecovery::CancelledSafe,
             ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
                 ProviderAttemptRecovery::OutcomeUnknown
             }
@@ -205,6 +243,69 @@ impl ProviderAttemptAggregate {
                 _ => ProviderAttemptRecovery::TerminalFailure,
             },
         }
+    }
+
+    pub const fn cancelled_before_sent(&self) -> Option<&ProviderAttemptCancelledBeforeSent> {
+        self.cancelled_before_sent.as_ref()
+    }
+
+    pub fn cancel_before_sent(
+        &mut self,
+        journal: &mut EventJournal,
+        expected_run_sequence: u64,
+        expected_global_sequence: u64,
+        cancellation: ProviderAttemptCancelledBeforeSent,
+        metadata: ProviderAttemptMetadata<'_>,
+    ) -> Result<(), ProviderAttemptError> {
+        match self.state {
+            ProviderAttemptState::Requested => {
+                validate_cancelled_before_sent(self, &cancellation, Some(expected_run_sequence))?;
+            }
+            ProviderAttemptState::CancelledBeforeSent
+                if self.cancelled_before_sent.as_ref() == Some(&cancellation)
+                    && cancellation.requested_aggregate_sequence.checked_add(1)
+                        == Some(self.aggregate_sequence)
+                    && cancellation.cancellation_expected_run_sequence == expected_run_sequence => {
+            }
+            _ => return Err(self.transition_error()),
+        }
+        if metadata.idempotency_key
+            != cancelled_before_sent_idempotency_key(&self.attempt_id, &cancellation)
+        {
+            return Err(ProviderAttemptError::CancellationEvidenceInvalid);
+        }
+        let outcome = journal.append_at_global_sequence(
+            event_with_version(
+                &self.run_id,
+                &self.attempt_id,
+                metadata,
+                "provider.cancelled_before_sent",
+                CANCELLED_BEFORE_SENT_EVENT_VERSION,
+                CancelledBeforeSentEventPayload::CancelledBeforeSent {
+                    definition: self.definition.clone(),
+                    cancellation: cancellation.clone(),
+                },
+            )?,
+            expected_run_sequence,
+            cancellation.requested_aggregate_sequence,
+            expected_global_sequence,
+        )?;
+        let recovered = Self::recover(journal, &self.run_id, &self.attempt_id)?;
+        if recovered.state != ProviderAttemptState::CancelledBeforeSent
+            || recovered.cancelled_before_sent.as_ref() != Some(&cancellation)
+            || recovered.aggregate_sequence != outcome.event.aggregate_sequence
+            || outcome.event.run_sequence
+                != cancellation
+                    .cancellation_expected_run_sequence
+                    .checked_add(1)
+                    .ok_or(ProviderAttemptError::CancellationEvidenceInvalid)?
+            || outcome.event.event_type != "provider.cancelled_before_sent"
+            || outcome.event.event_version != CANCELLED_BEFORE_SENT_EVENT_VERSION
+        {
+            return Err(ProviderAttemptError::CancellationEvidenceInvalid);
+        }
+        *self = recovered;
+        Ok(())
     }
 
     /// Writes the legacy v1 send boundary for existing callers and fixtures.
@@ -432,6 +533,7 @@ impl ProviderAttemptAggregate {
             ProviderAttemptState::Responded
                 | ProviderAttemptState::Failed
                 | ProviderAttemptState::OutcomeUnknown
+                | ProviderAttemptState::CancelledBeforeSent
         ) {
             ProviderAttemptError::TerminalState { state: self.state }
         } else {
@@ -460,18 +562,33 @@ pub fn provider_attempt_evidence_sha256(
         "toolCalls": attempt.tool_calls(),
         "failure": attempt.failure(),
     });
-    let Some(grant) = attempt.provider_effect_grant() else {
+    let grant = attempt.provider_effect_grant();
+    let cancellation = attempt.cancelled_before_sent();
+    if grant.is_none() && cancellation.is_none() {
         return canonical_sha256(&legacy);
-    };
+    }
     let mut versioned = legacy
         .as_object()
         .cloned()
         .unwrap_or_else(|| unreachable!("legacy attempt evidence is always an object"));
+    let schema_version = if cancellation.is_some() {
+        CANCELLED_BEFORE_SENT_EVIDENCE_SCHEMA_VERSION
+    } else {
+        AUTHORIZED_EVIDENCE_SCHEMA_VERSION
+    };
     versioned.insert(
         "schemaVersion".to_owned(),
-        serde_json::json!(AUTHORIZED_EVIDENCE_SCHEMA_VERSION),
+        serde_json::json!(schema_version),
     );
-    versioned.insert("grant".to_owned(), serde_json::to_value(grant)?);
+    if let Some(grant) = grant {
+        versioned.insert("grant".to_owned(), serde_json::to_value(grant)?);
+    }
+    if let Some(cancellation) = cancellation {
+        versioned.insert(
+            "cancelledBeforeSent".to_owned(),
+            serde_json::to_value(cancellation)?,
+        );
+    }
     canonical_sha256(&serde_json::Value::Object(versioned))
 }
 
@@ -497,6 +614,8 @@ pub enum ProviderAttemptError {
     ResponseInvalid,
     #[error("provider failure receipt is invalid")]
     FailureInvalid,
+    #[error("provider cancellation-before-send evidence is invalid")]
+    CancellationEvidenceInvalid,
     #[error("provider effect grant receipt is invalid: {0}")]
     ProviderEffectGrantInvalid(#[source] ProviderEffectCapabilityError),
     #[error("provider effect grant does not match the Requested Provider attempt evidence")]
@@ -563,6 +682,15 @@ impl EventPayload {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum CancelledBeforeSentEventPayload {
+    CancelledBeforeSent {
+        definition: ProviderAttemptDefinition,
+        cancellation: ProviderAttemptCancelledBeforeSent,
+    },
+}
+
 fn replay(
     run_id: &str,
     attempt_id: &str,
@@ -599,12 +727,16 @@ fn replay(
         response_text_sha256: None,
         tool_calls: Vec::new(),
         failure: None,
+        cancelled_before_sent: None,
     };
     for event in &events[1..] {
         validate_event_address(event, run_id, attempt_id, aggregate.aggregate_sequence + 1)?;
         match event.event_version {
             LEGACY_EVENT_VERSION => replay_legacy_event(&mut aggregate, event)?,
             AUTHORIZED_SENT_EVENT_VERSION => replay_authorized_sent(&mut aggregate, event)?,
+            CANCELLED_BEFORE_SENT_EVENT_VERSION => {
+                replay_cancelled_before_sent(&mut aggregate, event)?
+            }
             version => return Err(ProviderAttemptError::UnknownEventVersion(version)),
         }
         aggregate.aggregate_sequence = event.aggregate_sequence;
@@ -677,6 +809,37 @@ fn replay_legacy_event(
     Ok(())
 }
 
+fn replay_cancelled_before_sent(
+    aggregate: &mut ProviderAttemptAggregate,
+    event: &RuntimeEvent,
+) -> Result<(), ProviderAttemptError> {
+    if aggregate.state != ProviderAttemptState::Requested
+        || event.event_type != "provider.cancelled_before_sent"
+    {
+        return Err(ProviderAttemptError::InvalidHistory);
+    }
+    let CancelledBeforeSentEventPayload::CancelledBeforeSent {
+        definition,
+        cancellation,
+    } = serde_json::from_value(event.payload.clone())?;
+    if definition != aggregate.definition {
+        return Err(ProviderAttemptError::IdentityConflict);
+    }
+    if event.idempotency_key
+        != cancelled_before_sent_idempotency_key(&aggregate.attempt_id, &cancellation)
+        || cancellation
+            .cancellation_expected_run_sequence
+            .checked_add(1)
+            != Some(event.run_sequence)
+    {
+        return Err(ProviderAttemptError::CancellationEvidenceInvalid);
+    }
+    validate_cancelled_before_sent(aggregate, &cancellation, None)?;
+    aggregate.state = ProviderAttemptState::CancelledBeforeSent;
+    aggregate.cancelled_before_sent = Some(cancellation);
+    Ok(())
+}
+
 fn replay_authorized_sent(
     aggregate: &mut ProviderAttemptAggregate,
     event: &RuntimeEvent,
@@ -699,6 +862,34 @@ fn replay_authorized_sent(
     aggregate.dispatch_id = Some(dispatch_id);
     aggregate.provider_effect_grant = Some(grant);
     Ok(())
+}
+
+fn validate_cancelled_before_sent(
+    attempt: &ProviderAttemptAggregate,
+    cancellation: &ProviderAttemptCancelledBeforeSent,
+    expected_run_sequence: Option<u64>,
+) -> Result<(), ProviderAttemptError> {
+    if attempt.state != ProviderAttemptState::Requested
+        || !is_sha256(&cancellation.cancellation_intent_id)
+        || expected_run_sequence
+            .is_some_and(|expected| expected != cancellation.cancellation_expected_run_sequence)
+        || cancellation.requested_aggregate_sequence != attempt.aggregate_sequence
+        || cancellation.requested_definition_sha256 != provider_attempt_definition_sha256(attempt)?
+        || cancellation.requested_evidence_sha256 != provider_attempt_evidence_sha256(attempt)?
+    {
+        return Err(ProviderAttemptError::CancellationEvidenceInvalid);
+    }
+    Ok(())
+}
+
+fn cancelled_before_sent_idempotency_key(
+    attempt_id: &str,
+    cancellation: &ProviderAttemptCancelledBeforeSent,
+) -> String {
+    format!(
+        "provider:{attempt_id}:cancel-before-sent:{}:{}",
+        cancellation.cancellation_intent_id, cancellation.requested_evidence_sha256
+    )
 }
 
 fn validate_authorized_sent(

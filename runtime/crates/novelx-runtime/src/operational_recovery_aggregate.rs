@@ -145,6 +145,8 @@ pub struct OperationalRecoveryExecutionInterruption {
     pub attempt_definition_sha256: String,
     pub attempt_evidence_sha256: String,
     pub cause: OperationalRecoveryInterruptionCause,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_intent_id: Option<String>,
     pub transport_boundary_crossed: bool,
     pub resumable: bool,
     pub recorder_instance_id: String,
@@ -164,6 +166,7 @@ impl OperationalRecoveryExecutionInterruption {
         attempt_definition_sha256: String,
         attempt_evidence_sha256: String,
         cause: OperationalRecoveryInterruptionCause,
+        cancellation_intent_id: Option<String>,
         transport_boundary_crossed: bool,
         resumable: bool,
         recorder_instance_id: String,
@@ -180,6 +183,24 @@ impl OperationalRecoveryExecutionInterruption {
         }
         require_sha256("attempt_definition_sha256", &attempt_definition_sha256)?;
         require_sha256("attempt_evidence_sha256", &attempt_evidence_sha256)?;
+        match (cause, cancellation_intent_id.as_deref()) {
+            (OperationalRecoveryInterruptionCause::RunCancel, Some(intent_id)) => {
+                require_sha256("cancellation_intent_id", intent_id)?;
+            }
+            (OperationalRecoveryInterruptionCause::RunCancel, None)
+            | (
+                OperationalRecoveryInterruptionCause::RuntimeShutdown
+                | OperationalRecoveryInterruptionCause::HostDisconnected,
+                Some(_),
+            ) => {
+                return Err(OperationalRecoveryAggregateError::InterruptionSemanticsInvalid);
+            }
+            (
+                OperationalRecoveryInterruptionCause::RuntimeShutdown
+                | OperationalRecoveryInterruptionCause::HostDisconnected,
+                None,
+            ) => {}
+        }
         require_text("recorder_instance_id", &recorder_instance_id)?;
         require_text("lease_epoch", &lease_epoch)?;
         parse_time("interrupted_at", &interrupted_at)?;
@@ -188,7 +209,7 @@ impl OperationalRecoveryExecutionInterruption {
         {
             return Err(OperationalRecoveryAggregateError::InterruptionSemanticsInvalid);
         }
-        let interruption_id = canonical_sha256(&serde_json::json!({
+        let mut interruption_identity = serde_json::json!({
             "workspaceId": workspace_id,
             "runId": run_id,
             "operationId": operation_id,
@@ -207,7 +228,17 @@ impl OperationalRecoveryExecutionInterruption {
             "resumable": resumable,
             "recorderInstanceId": recorder_instance_id,
             "leaseEpoch": lease_epoch,
-        }))?;
+        });
+        if let Some(intent_id) = cancellation_intent_id.as_deref() {
+            interruption_identity
+                .as_object_mut()
+                .unwrap_or_else(|| unreachable!("interruption identity is always an object"))
+                .insert(
+                    "cancellationIntentId".to_owned(),
+                    serde_json::json!(intent_id),
+                );
+        }
+        let interruption_id = canonical_sha256(&interruption_identity)?;
         Ok(Self {
             interruption_id,
             workspace_id,
@@ -224,6 +255,7 @@ impl OperationalRecoveryExecutionInterruption {
             attempt_definition_sha256,
             attempt_evidence_sha256,
             cause,
+            cancellation_intent_id,
             transport_boundary_crossed,
             resumable,
             recorder_instance_id,
@@ -285,6 +317,7 @@ pub const PROVIDER_DISPATCH_RESUME_POLICY_VERSION: &str = "provider-dispatch-res
 #[serde(rename_all = "snake_case")]
 pub enum ProviderDispatchResumeCapability {
     DispatchRequested,
+    FinalizeCancelledSafe,
     FinalizeOutcomeUnknown,
     FinalizeResponded,
     FinalizeFailed,
@@ -620,6 +653,19 @@ pub enum OperationalRecoveryOutcome {
         evidence_sha256: String,
         detected_at: String,
     },
+    CancelledSafe {
+        execution_id: String,
+        claim_id: String,
+        owner_instance_id: String,
+        fencing_token: u64,
+        cancellation_intent_id: String,
+        interruption_id: String,
+        attempt_id: String,
+        attempt_aggregate_sequence: u64,
+        attempt_definition_sha256: String,
+        attempt_evidence_sha256: String,
+        cancelled_at: String,
+    },
 }
 
 impl OperationalRecoveryOutcome {
@@ -683,6 +729,57 @@ impl OperationalRecoveryOutcome {
             reason_code,
             evidence_sha256,
             detected_at,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn cancelled_safe(
+        execution: &OperationalRecoveryExecution,
+        interruption: &OperationalRecoveryExecutionInterruption,
+        cancellation_intent_id: String,
+        attempt_aggregate_sequence: u64,
+        attempt_definition_sha256: String,
+        attempt_evidence_sha256: String,
+        cancelled_at: String,
+    ) -> Result<Self, OperationalRecoveryAggregateError> {
+        validate_execution(execution)?;
+        validate_interruption(interruption)?;
+        require_sha256("cancellation_intent_id", &cancellation_intent_id)?;
+        require_sha256("attempt_definition_sha256", &attempt_definition_sha256)?;
+        require_sha256("attempt_evidence_sha256", &attempt_evidence_sha256)?;
+        let cancelled = parse_time("cancelled_at", &cancelled_at)?;
+        let interrupted = parse_time("interrupted_at", &interruption.interrupted_at)?;
+        if interruption.execution_id != execution.execution_id
+            || interruption.claim_id != execution.claim_id
+            || interruption.owner_instance_id != execution.owner_instance_id
+            || interruption.fencing_token != execution.fencing_token
+            || interruption.source_fingerprint != execution.source_fingerprint
+            || interruption.action_spec_sha256 != execution.action_spec_sha256
+            || interruption.cause != OperationalRecoveryInterruptionCause::RunCancel
+            || interruption.cancellation_intent_id.as_deref()
+                != Some(cancellation_intent_id.as_str())
+            || interruption.transport_boundary_crossed
+            || interruption.resumable
+            || interruption.attempt_aggregate_sequence.checked_add(1)
+                != Some(attempt_aggregate_sequence)
+            || interruption.attempt_definition_sha256 != attempt_definition_sha256
+            || interruption.attempt_evidence_sha256 == attempt_evidence_sha256
+            || cancelled < interrupted
+        {
+            return Err(OperationalRecoveryAggregateError::CancellationOutcomeInvalid);
+        }
+        Ok(Self::CancelledSafe {
+            execution_id: execution.execution_id.clone(),
+            claim_id: execution.claim_id.clone(),
+            owner_instance_id: execution.owner_instance_id.clone(),
+            fencing_token: execution.fencing_token,
+            cancellation_intent_id,
+            interruption_id: interruption.interruption_id.clone(),
+            attempt_id: interruption.attempt_id.clone(),
+            attempt_aggregate_sequence,
+            attempt_definition_sha256,
+            attempt_evidence_sha256,
+            cancelled_at,
         })
     }
 }
@@ -1291,6 +1388,7 @@ impl OperationalRecoveryRepository {
                 Err(OperationalRecoveryAggregateError::OperationTerminal)
             };
         }
+        validate_cancelled_safe_for_operation(&outcome, operation)?;
         self.append_at_global_sequence(
             current,
             RecoveryEventData::ExecutionFinished {
@@ -1803,7 +1901,7 @@ fn apply_event(
             operation_id,
             interruption,
         } => {
-            validate_interruption(&interruption)?;
+            validate_interruption_for_replay(&interruption)?;
             let aggregate = value
                 .as_mut()
                 .ok_or(OperationalRecoveryAggregateError::ObservedRequired)?;
@@ -1849,6 +1947,7 @@ fn apply_event(
                 return Err(OperationalRecoveryAggregateError::OperationTerminal);
             }
             validate_outcome_matches_execution(&outcome, execution)?;
+            validate_cancelled_safe_for_operation(&outcome, operation)?;
             operation.outcome = Some(outcome);
             aggregate.revision = event.aggregate_revision;
             aggregate.last_event_hash = event.event_hash;
@@ -2013,6 +2112,7 @@ fn validate_interruption(
         interruption.attempt_definition_sha256.clone(),
         interruption.attempt_evidence_sha256.clone(),
         interruption.cause,
+        interruption.cancellation_intent_id.clone(),
         interruption.transport_boundary_crossed,
         interruption.resumable,
         interruption.recorder_instance_id.clone(),
@@ -2024,6 +2124,79 @@ fn validate_interruption(
     } else {
         Err(OperationalRecoveryAggregateError::InterruptionConflict)
     }
+}
+
+fn validate_interruption_for_replay(
+    interruption: &OperationalRecoveryExecutionInterruption,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    if interruption.cause != OperationalRecoveryInterruptionCause::RunCancel
+        || interruption.cancellation_intent_id.is_some()
+    {
+        return validate_interruption(interruption);
+    }
+    let execution = OperationalRecoveryExecution {
+        execution_id: interruption.execution_id.clone(),
+        claim_id: interruption.claim_id.clone(),
+        owner_instance_id: interruption.owner_instance_id.clone(),
+        fencing_token: interruption.fencing_token,
+        source_fingerprint: interruption.source_fingerprint.clone(),
+        action_spec_sha256: interruption.action_spec_sha256.clone(),
+        effect_class: OperationalRecoveryEffectClass::ProviderDispatch,
+        started_at: interruption.interrupted_at.clone(),
+    };
+    validate_execution(&execution)?;
+    require_text("workspace_id", &interruption.workspace_id)?;
+    require_text("run_id", &interruption.run_id)?;
+    require_sha256("operation_id", &interruption.operation_id)?;
+    require_text("attempt_id", &interruption.attempt_id)?;
+    if interruption.attempt_aggregate_sequence == 0 {
+        return Err(OperationalRecoveryAggregateError::InterruptionEvidenceInvalid);
+    }
+    require_sha256(
+        "attempt_definition_sha256",
+        &interruption.attempt_definition_sha256,
+    )?;
+    require_sha256(
+        "attempt_evidence_sha256",
+        &interruption.attempt_evidence_sha256,
+    )?;
+    require_text("recorder_instance_id", &interruption.recorder_instance_id)?;
+    require_text("lease_epoch", &interruption.lease_epoch)?;
+    parse_time("interrupted_at", &interruption.interrupted_at)?;
+    if interruption.transport_boundary_crossed || interruption.resumable {
+        return Err(OperationalRecoveryAggregateError::InterruptionSemanticsInvalid);
+    }
+    let legacy_id = legacy_run_cancel_interruption_id(interruption)?;
+    if legacy_id == interruption.interruption_id {
+        Ok(())
+    } else {
+        Err(OperationalRecoveryAggregateError::InterruptionConflict)
+    }
+}
+
+fn legacy_run_cancel_interruption_id(
+    interruption: &OperationalRecoveryExecutionInterruption,
+) -> Result<String, OperationalRecoveryAggregateError> {
+    canonical_sha256(&serde_json::json!({
+        "workspaceId": interruption.workspace_id,
+        "runId": interruption.run_id,
+        "operationId": interruption.operation_id,
+        "executionId": interruption.execution_id,
+        "claimId": interruption.claim_id,
+        "ownerInstanceId": interruption.owner_instance_id,
+        "fencingToken": interruption.fencing_token,
+        "sourceFingerprint": interruption.source_fingerprint,
+        "actionSpecSha256": interruption.action_spec_sha256,
+        "attemptId": interruption.attempt_id,
+        "attemptAggregateSequence": interruption.attempt_aggregate_sequence,
+        "attemptDefinitionSha256": interruption.attempt_definition_sha256,
+        "attemptEvidenceSha256": interruption.attempt_evidence_sha256,
+        "cause": interruption.cause,
+        "transportBoundaryCrossed": interruption.transport_boundary_crossed,
+        "resumable": interruption.resumable,
+        "recorderInstanceId": interruption.recorder_instance_id,
+        "leaseEpoch": interruption.lease_epoch,
+    }))
 }
 
 fn validate_interruption_for_operation(
@@ -2095,6 +2268,9 @@ const fn provider_dispatch_capability(
 ) -> ProviderDispatchResumeCapability {
     match state {
         ProviderAttemptState::Requested => ProviderDispatchResumeCapability::DispatchRequested,
+        ProviderAttemptState::CancelledBeforeSent => {
+            ProviderDispatchResumeCapability::FinalizeCancelledSafe
+        }
         ProviderAttemptState::Sent | ProviderAttemptState::OutcomeUnknown => {
             ProviderDispatchResumeCapability::FinalizeOutcomeUnknown
         }
@@ -2342,6 +2518,7 @@ fn valid_provider_attempt_resume_transition(
         (
             ProviderAttemptState::Requested,
             ProviderAttemptState::Sent
+                | ProviderAttemptState::CancelledBeforeSent
                 | ProviderAttemptState::Responded
                 | ProviderAttemptState::Failed
                 | ProviderAttemptState::OutcomeUnknown
@@ -2416,6 +2593,26 @@ fn validate_outcome(
             require_sha256("evidence_sha256", evidence_sha256)?;
             parse_time("detected_at", detected_at)?;
         }
+        OperationalRecoveryOutcome::CancelledSafe {
+            cancellation_intent_id,
+            interruption_id,
+            attempt_id,
+            attempt_aggregate_sequence,
+            attempt_definition_sha256,
+            attempt_evidence_sha256,
+            cancelled_at,
+            ..
+        } => {
+            require_sha256("cancellation_intent_id", cancellation_intent_id)?;
+            require_sha256("interruption_id", interruption_id)?;
+            require_text("attempt_id", attempt_id)?;
+            if *attempt_aggregate_sequence == 0 {
+                return Err(OperationalRecoveryAggregateError::CancellationOutcomeInvalid);
+            }
+            require_sha256("attempt_definition_sha256", attempt_definition_sha256)?;
+            require_sha256("attempt_evidence_sha256", attempt_evidence_sha256)?;
+            parse_time("cancelled_at", cancelled_at)?;
+        }
     }
     Ok(())
 }
@@ -2442,8 +2639,80 @@ fn outcome_identity(outcome: &OperationalRecoveryOutcome) -> (&str, &str, &str, 
             owner_instance_id,
             fencing_token,
             ..
+        }
+        | OperationalRecoveryOutcome::CancelledSafe {
+            execution_id,
+            claim_id,
+            owner_instance_id,
+            fencing_token,
+            ..
         } => (execution_id, claim_id, owner_instance_id, *fencing_token),
     }
+}
+
+fn validate_cancelled_safe_for_operation(
+    outcome: &OperationalRecoveryOutcome,
+    operation: &OperationalRecoveryOperation,
+) -> Result<(), OperationalRecoveryAggregateError> {
+    let OperationalRecoveryOutcome::CancelledSafe {
+        execution_id,
+        claim_id,
+        owner_instance_id,
+        fencing_token,
+        cancellation_intent_id,
+        interruption_id,
+        attempt_id,
+        attempt_aggregate_sequence,
+        attempt_definition_sha256,
+        attempt_evidence_sha256,
+        cancelled_at,
+        ..
+    } = outcome
+    else {
+        return Ok(());
+    };
+    let execution = operation
+        .execution
+        .as_ref()
+        .ok_or(OperationalRecoveryAggregateError::ExecutionRequired)?;
+    if execution.effect_class != OperationalRecoveryEffectClass::ProviderDispatch {
+        return Err(OperationalRecoveryAggregateError::CancellationOutcomeInvalid);
+    }
+    let interruption = operation
+        .interruptions
+        .iter()
+        .find(|candidate| candidate.interruption_id == *interruption_id)
+        .ok_or(OperationalRecoveryAggregateError::CancellationInterruptionRequired)?;
+    validate_interruption_for_operation(operation, interruption)?;
+    if interruption.cause != OperationalRecoveryInterruptionCause::RunCancel
+        || interruption.cancellation_intent_id.as_deref() != Some(cancellation_intent_id.as_str())
+        || interruption.transport_boundary_crossed
+        || interruption.resumable
+        || interruption.execution_id != *execution_id
+        || interruption.claim_id != *claim_id
+        || interruption.owner_instance_id != *owner_instance_id
+        || interruption.fencing_token != *fencing_token
+        || interruption.attempt_id != *attempt_id
+        || interruption.attempt_aggregate_sequence.checked_add(1)
+            != Some(*attempt_aggregate_sequence)
+        || interruption.attempt_definition_sha256 != *attempt_definition_sha256
+        || interruption.attempt_evidence_sha256 == *attempt_evidence_sha256
+        || parse_time("cancelled_at", cancelled_at)?
+            < parse_time("interrupted_at", &interruption.interrupted_at)?
+    {
+        return Err(OperationalRecoveryAggregateError::CancellationOutcomeInvalid);
+    }
+    if let Some(authorization) = operation.latest_provider_dispatch_resume()
+        && (authorization.attempt_state != ProviderAttemptState::CancelledBeforeSent
+            || authorization.capability != ProviderDispatchResumeCapability::FinalizeCancelledSafe
+            || authorization.attempt_id != *attempt_id
+            || authorization.attempt_aggregate_sequence != *attempt_aggregate_sequence
+            || authorization.attempt_definition_sha256 != *attempt_definition_sha256
+            || authorization.attempt_evidence_sha256 != *attempt_evidence_sha256)
+    {
+        return Err(OperationalRecoveryAggregateError::CancellationOutcomeInvalid);
+    }
+    Ok(())
 }
 
 fn validate_outcome_matches_execution(
@@ -2710,6 +2979,12 @@ pub enum OperationalRecoveryAggregateError {
     InterruptionSemanticsInvalid,
     #[error("operational recovery interruption conflicts with persisted history")]
     InterruptionConflict,
+    #[error(
+        "operational recovery CancelledSafe requires its exact persisted RunCancel interruption"
+    )]
+    CancellationInterruptionRequired,
+    #[error("operational recovery CancelledSafe evidence is invalid")]
+    CancellationOutcomeInvalid,
     #[error("operational recovery local execution resume is not allowed")]
     ResumeNotAllowed,
     #[error("operational recovery local execution resume conflicts with persisted history")]
@@ -2740,4 +3015,61 @@ pub enum OperationalRecoveryAggregateError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Time(#[from] time::error::Parse),
+}
+
+#[cfg(test)]
+mod interruption_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_run_cancel_without_intent_replays_but_cannot_enter_the_new_write_path() {
+        let claim = OperationalRecoveryClaim::derive(
+            "a".repeat(64),
+            "legacy-owner".to_owned(),
+            1,
+            "b".repeat(64),
+            "2026-07-13T00:00:00Z".to_owned(),
+            "2026-07-13T00:05:00Z".to_owned(),
+            "legacy-executor".to_owned(),
+            None,
+            "c".repeat(64),
+        )
+        .unwrap();
+        let execution = OperationalRecoveryExecution::derive(
+            &claim,
+            OperationalRecoveryEffectClass::ProviderDispatch,
+            "2026-07-13T00:01:00Z".to_owned(),
+        )
+        .unwrap();
+        let mut interruption = OperationalRecoveryExecutionInterruption {
+            interruption_id: String::new(),
+            workspace_id: "workspace-legacy".to_owned(),
+            run_id: "run-legacy".to_owned(),
+            operation_id: claim.operation_id.clone(),
+            execution_id: execution.execution_id,
+            claim_id: execution.claim_id,
+            owner_instance_id: execution.owner_instance_id,
+            fencing_token: execution.fencing_token,
+            source_fingerprint: execution.source_fingerprint,
+            action_spec_sha256: execution.action_spec_sha256,
+            attempt_id: "attempt-legacy".to_owned(),
+            attempt_aggregate_sequence: 1,
+            attempt_definition_sha256: "d".repeat(64),
+            attempt_evidence_sha256: "e".repeat(64),
+            cause: OperationalRecoveryInterruptionCause::RunCancel,
+            cancellation_intent_id: None,
+            transport_boundary_crossed: false,
+            resumable: false,
+            recorder_instance_id: "legacy-recorder".to_owned(),
+            lease_epoch: "legacy-lease".to_owned(),
+            interrupted_at: "2026-07-13T00:02:00Z".to_owned(),
+        };
+        interruption.interruption_id = legacy_run_cancel_interruption_id(&interruption).unwrap();
+
+        validate_interruption_for_replay(&interruption).unwrap();
+        assert!(matches!(
+            validate_interruption(&interruption),
+            Err(OperationalRecoveryAggregateError::InterruptionSemanticsInvalid)
+        ));
+    }
 }

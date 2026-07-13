@@ -11,6 +11,9 @@ use novelx_runtime::{
     },
 };
 
+const INTENT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const INTENT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
 #[test]
 fn cancellation_before_reservation_proves_zero_sent_and_reservation_cannot_be_consumed() {
     let hub = RuntimeCancellationHub::new();
@@ -108,7 +111,9 @@ fn run_cancel_is_sticky_only_for_the_exact_workspace_and_run() {
         .register(identity_in("workspace-b", "run-a", "attempt-c"))
         .unwrap();
 
-    let receipt = hub.signal_run_cancel("workspace-a", "run-a").unwrap();
+    let receipt = hub
+        .signal_run_cancel("workspace-a", "run-a", INTENT_A)
+        .unwrap();
 
     assert_eq!(receipt.matching_tasks(), 1);
     assert_eq!(
@@ -143,6 +148,142 @@ fn run_cancel_is_sticky_only_for_the_exact_workspace_and_run() {
         late_target.snapshot().unwrap().cancellation_cause(),
         Some(CancellationCause::RunCancel)
     );
+}
+
+#[test]
+fn run_cancel_intent_is_exact_idempotent_and_auditable() {
+    let hub = RuntimeCancellationHub::new();
+    assert_eq!(
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap()
+            .matching_tasks(),
+        0
+    );
+    let first = hub
+        .active_run_cancellation("workspace-a", "run-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.intent_id(), INTENT_A);
+    assert!(first.signal_sequence() > 0);
+
+    assert_eq!(
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap()
+            .matching_tasks(),
+        0
+    );
+    assert_eq!(
+        hub.hydrate_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap()
+            .matching_tasks(),
+        0
+    );
+    assert_eq!(
+        hub.active_run_cancellation("workspace-a", "run-a")
+            .unwrap()
+            .unwrap(),
+        first
+    );
+    assert_eq!(
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_B),
+        Err(RuntimeCancellationHubError::RunCancelIntentConflict {
+            existing_intent_id: INTENT_A.to_owned(),
+            requested_intent_id: INTENT_B.to_owned(),
+        })
+    );
+}
+
+#[test]
+fn hydrated_run_cancel_is_sticky_for_late_registration() {
+    let hub = RuntimeCancellationHub::new();
+    hub.hydrate_run_cancel("workspace-a", "run-a", INTENT_A)
+        .unwrap();
+
+    let registration = hub.register(identity("run-a", "attempt-hydrated")).unwrap();
+    assert_eq!(
+        registration.snapshot().unwrap().state(),
+        PreSendGateState::CancelledBeforeSent
+    );
+    assert_eq!(
+        registration.snapshot().unwrap().cancellation_cause(),
+        Some(CancellationCause::RunCancel)
+    );
+    assert_eq!(
+        hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+            .unwrap()
+            .already_cancelled_before_sent(),
+        1
+    );
+}
+
+#[test]
+fn run_cancel_intent_requires_canonical_lowercase_sha256() {
+    let hub = RuntimeCancellationHub::new();
+    for invalid in ["short".to_owned(), "A".repeat(64), "g".repeat(64)] {
+        assert_eq!(
+            hub.signal_run_cancel("workspace-a", "run-a", &invalid),
+            Err(RuntimeCancellationHubError::IdentityInvalid { field: "intent_id" })
+        );
+    }
+    assert!(
+        hub.active_run_cancellation("workspace-a", "run-a")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn concurrent_different_run_cancel_intents_have_exactly_one_winner() {
+    for _ in 0..128 {
+        let hub = RuntimeCancellationHub::new();
+        let barrier = Arc::new(Barrier::new(3));
+
+        let left_hub = hub.clone();
+        let left_barrier = Arc::clone(&barrier);
+        let left = thread::spawn(move || {
+            left_barrier.wait();
+            left_hub.signal_run_cancel("workspace-a", "run-a", INTENT_A)
+        });
+        let right_hub = hub.clone();
+        let right_barrier = Arc::clone(&barrier);
+        let right = thread::spawn(move || {
+            right_barrier.wait();
+            right_hub.signal_run_cancel("workspace-a", "run-a", INTENT_B)
+        });
+
+        barrier.wait();
+        let left = left.join().unwrap();
+        let right = right.join().unwrap();
+        let active = hub
+            .active_run_cancellation("workspace-a", "run-a")
+            .unwrap()
+            .unwrap();
+        match (left, right) {
+            (
+                Ok(_),
+                Err(RuntimeCancellationHubError::RunCancelIntentConflict {
+                    existing_intent_id,
+                    requested_intent_id,
+                }),
+            ) => {
+                assert_eq!(active.intent_id(), INTENT_A);
+                assert_eq!(existing_intent_id, INTENT_A);
+                assert_eq!(requested_intent_id, INTENT_B);
+            }
+            (
+                Err(RuntimeCancellationHubError::RunCancelIntentConflict {
+                    existing_intent_id,
+                    requested_intent_id,
+                }),
+                Ok(_),
+            ) => {
+                assert_eq!(active.intent_id(), INTENT_B);
+                assert_eq!(existing_intent_id, INTENT_B);
+                assert_eq!(requested_intent_id, INTENT_A);
+            }
+            other => panic!("unexpected concurrent intent results: {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -273,14 +414,16 @@ fn terminal_unregister_deletes_registration_and_owner_indexes_without_tombstones
         let run_id = format!("run-{iteration}");
         let attempt_id = format!("attempt-{iteration}");
         let registration = hub.register(identity(&run_id, &attempt_id)).unwrap();
-        hub.signal_run_cancel("workspace-a", &run_id).unwrap();
+        hub.signal_run_cancel("workspace-a", &run_id, INTENT_A)
+            .unwrap();
         assert!(hub.unregister(&registration).unwrap().was_registered());
     }
     assert_eq!(hub.registered_count().unwrap(), 0);
 
     let original = identity("owner-reuse", "shared-attempt");
     let registration = hub.register(original).unwrap();
-    hub.signal_run_cancel("workspace-a", "owner-reuse").unwrap();
+    hub.signal_run_cancel("workspace-a", "owner-reuse", INTENT_A)
+        .unwrap();
     hub.unregister(&registration).unwrap();
     let replacement = RecoveryTaskIdentity::new(
         "workspace-a",
@@ -296,7 +439,9 @@ fn terminal_unregister_deletes_registration_and_owner_indexes_without_tombstones
 #[test]
 fn late_registration_uses_the_earliest_sticky_signal_across_global_and_run_scopes() {
     let run_first = RuntimeCancellationHub::new();
-    run_first.signal_run_cancel("workspace-a", "run-a").unwrap();
+    run_first
+        .signal_run_cancel("workspace-a", "run-a", INTENT_A)
+        .unwrap();
     run_first
         .signal_global(CancellationCause::HostDisconnected)
         .unwrap();
@@ -315,7 +460,7 @@ fn late_registration_uses_the_earliest_sticky_signal_across_global_and_run_scope
         .signal_global(CancellationCause::HostDisconnected)
         .unwrap();
     global_first
-        .signal_run_cancel("workspace-a", "run-a")
+        .signal_run_cancel("workspace-a", "run-a", INTENT_B)
         .unwrap();
     global_first
         .signal_global(CancellationCause::RuntimeShutdown)
@@ -328,6 +473,45 @@ fn late_registration_uses_the_earliest_sticky_signal_across_global_and_run_scope
             .unwrap()
             .cancellation_cause(),
         Some(CancellationCause::HostDisconnected)
+    );
+}
+
+#[test]
+fn already_registered_task_preserves_the_first_global_or_run_cancellation_cause() {
+    let global_first = RuntimeCancellationHub::new();
+    let global_first_registration = global_first
+        .register(identity("run-a", "attempt-global-first"))
+        .unwrap();
+    global_first
+        .signal_global(CancellationCause::HostDisconnected)
+        .unwrap();
+    global_first
+        .signal_run_cancel("workspace-a", "run-a", INTENT_A)
+        .unwrap();
+    assert_eq!(
+        global_first_registration
+            .snapshot()
+            .unwrap()
+            .cancellation_cause(),
+        Some(CancellationCause::HostDisconnected)
+    );
+
+    let run_first = RuntimeCancellationHub::new();
+    let run_first_registration = run_first
+        .register(identity("run-a", "attempt-run-first"))
+        .unwrap();
+    run_first
+        .signal_run_cancel("workspace-a", "run-a", INTENT_B)
+        .unwrap();
+    run_first
+        .signal_global(CancellationCause::RuntimeShutdown)
+        .unwrap();
+    assert_eq!(
+        run_first_registration
+            .snapshot()
+            .unwrap()
+            .cancellation_cause(),
+        Some(CancellationCause::RunCancel)
     );
 }
 
