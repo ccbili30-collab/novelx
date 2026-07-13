@@ -48,12 +48,28 @@ pub struct RuntimeActor<W> {
     progress: mpsc::Receiver<RuntimeTaskProgress>,
     tasks: JoinSet<RuntimeTaskCompletion>,
     cancellations: HashMap<RuntimeTaskKey, watch::Sender<bool>>,
+    lifecycle: RuntimeActorLifecycle,
+    commands_open: bool,
+    progress_open: bool,
 }
 
 #[derive(Clone)]
 pub struct RuntimeActorHandle {
     commands: mpsc::Sender<RuntimeActorCommand>,
     progress: mpsc::Sender<RuntimeTaskProgress>,
+}
+
+#[must_use = "a begun drain must be awaited through finish_stop"]
+pub struct RuntimeDrain {
+    commands: mpsc::Sender<RuntimeActorCommand>,
+    stopped: RuntimeOutputDraft,
+    drained: oneshot::Receiver<()>,
+}
+
+enum RuntimeActorLifecycle {
+    Running,
+    Draining { drained: oneshot::Sender<()> },
+    Drained,
 }
 
 struct RuntimeTaskProgress {
@@ -70,13 +86,21 @@ enum RuntimeActorCommand {
         failure: RuntimeOutputDraft,
         cancellation: watch::Sender<bool>,
         task: RuntimeTask,
+        acknowledged: oneshot::Sender<Result<(), RuntimeActorError>>,
     },
     CancelRun(Uuid),
     ActiveRunTasks {
         run_id: Uuid,
         reply: oneshot::Sender<Vec<RuntimeTaskKey>>,
     },
-    Shutdown(RuntimeOutputDraft),
+    BeginDrain {
+        begun: oneshot::Sender<Result<(), RuntimeActorError>>,
+        drained: oneshot::Sender<()>,
+    },
+    FinishStop {
+        stopped: RuntimeOutputDraft,
+        finished: oneshot::Sender<()>,
+    },
 }
 
 impl<W> RuntimeActor<W>
@@ -98,6 +122,9 @@ where
                 progress,
                 tasks: JoinSet::new(),
                 cancellations: HashMap::new(),
+                lifecycle: RuntimeActorLifecycle::Running,
+                commands_open: true,
+                progress_open: true,
             },
             RuntimeActorHandle {
                 commands: sender,
@@ -108,12 +135,19 @@ where
 
     pub async fn run(mut self) -> Result<(), RuntimeActorError> {
         loop {
+            if self.finish_if_idle().await? {
+                return Ok(());
+            }
             tokio::select! {
                 biased;
-                command = self.commands.recv() => {
+                command = self.commands.recv(), if self.commands_open => {
                     match command {
                         Some(RuntimeActorCommand::Emit(output)) => self.write(output).await?,
-                        Some(RuntimeActorCommand::StartTask { key, accepted, failure, cancellation, task }) => {
+                        Some(RuntimeActorCommand::StartTask { key, accepted, failure, cancellation, task, acknowledged }) => {
+                            if !matches!(self.lifecycle, RuntimeActorLifecycle::Running) {
+                                let _ = acknowledged.send(Err(RuntimeActorError::Draining));
+                                continue;
+                            }
                             if let Some(accepted) = accepted {
                                 self.write(accepted).await?;
                             }
@@ -125,6 +159,7 @@ where
                                     failure,
                                 }
                             });
+                            let _ = acknowledged.send(Ok(()));
                         }
                         Some(RuntimeActorCommand::CancelRun(run_id)) => {
                             for (key, cancellation) in &self.cancellations {
@@ -141,14 +176,24 @@ where
                                 .collect();
                             let _ = reply.send(tasks);
                         }
-                        Some(RuntimeActorCommand::Shutdown(output)) => {
-                            self.write(output).await?;
-                            self.tasks.abort_all();
+                        Some(RuntimeActorCommand::BeginDrain { begun, drained }) => {
+                            if !matches!(self.lifecycle, RuntimeActorLifecycle::Running) {
+                                let _ = begun.send(Err(RuntimeActorError::AlreadyDraining));
+                                continue;
+                            }
+                            self.lifecycle = RuntimeActorLifecycle::Draining { drained };
+                            let _ = begun.send(Ok(()));
+                        }
+                        Some(RuntimeActorCommand::FinishStop { stopped, finished }) => {
+                            if !matches!(self.lifecycle, RuntimeActorLifecycle::Drained) {
+                                return Err(RuntimeActorError::NotDrained);
+                            }
+                            self.write(stopped).await?;
+                            let _ = finished.send(());
                             return Ok(());
                         }
                         None => {
-                            self.tasks.abort_all();
-                            return Ok(());
+                            self.commands_open = false;
                         }
                     }
                 }
@@ -160,15 +205,33 @@ where
                     let output = completion.result.unwrap_or(completion.failure);
                     self.write(output).await?;
                 }
-                progress = self.progress.recv() => {
-                    let progress = progress.ok_or(RuntimeActorError::Closed)?;
-                    if self.cancellations.contains_key(&progress.key) {
-                        self.write(progress.output).await?;
-                        let _ = progress.acknowledged.send(());
+                progress = self.progress.recv(), if self.progress_open => {
+                    match progress {
+                        Some(progress) if self.cancellations.contains_key(&progress.key) => {
+                            self.write(progress.output).await?;
+                            let _ = progress.acknowledged.send(());
+                        }
+                        Some(_) => {}
+                        None => self.progress_open = false,
                     }
                 }
             }
         }
+    }
+
+    async fn finish_if_idle(&mut self) -> Result<bool, RuntimeActorError> {
+        if !self.tasks.is_empty() {
+            return Ok(false);
+        }
+        if matches!(self.lifecycle, RuntimeActorLifecycle::Draining { .. }) {
+            let lifecycle = std::mem::replace(&mut self.lifecycle, RuntimeActorLifecycle::Running);
+            let RuntimeActorLifecycle::Draining { drained } = lifecycle else {
+                unreachable!("checked draining lifecycle before replacement");
+            };
+            self.lifecycle = RuntimeActorLifecycle::Drained;
+            let _ = drained.send(());
+        }
+        Ok(!self.commands_open)
     }
 
     async fn write(&mut self, output: RuntimeOutputDraft) -> Result<(), RuntimeActorError> {
@@ -214,6 +277,7 @@ impl RuntimeActorHandle {
         task: impl FnOnce(watch::Receiver<bool>) -> RuntimeTask,
     ) -> Result<(), RuntimeActorError> {
         let (cancellation, receiver) = watch::channel(false);
+        let (acknowledged, response) = oneshot::channel();
         self.commands
             .send(RuntimeActorCommand::StartTask {
                 key,
@@ -221,9 +285,11 @@ impl RuntimeActorHandle {
                 failure,
                 cancellation,
                 task: task(receiver),
+                acknowledged,
             })
             .await
-            .map_err(|_| RuntimeActorError::Closed)
+            .map_err(|_| RuntimeActorError::Closed)?;
+        response.await.map_err(|_| RuntimeActorError::Closed)?
     }
 
     pub async fn start_streaming_task(
@@ -250,6 +316,7 @@ impl RuntimeActorHandle {
         task: impl FnOnce(watch::Receiver<bool>, RuntimeTaskProgressSender) -> RuntimeTask,
     ) -> Result<(), RuntimeActorError> {
         let (cancellation, receiver) = watch::channel(false);
+        let (acknowledged, response) = oneshot::channel();
         let progress = RuntimeTaskProgressSender {
             key,
             sender: self.progress.clone(),
@@ -261,9 +328,11 @@ impl RuntimeActorHandle {
                 failure,
                 cancellation,
                 task: task(receiver, progress),
+                acknowledged,
             })
             .await
-            .map_err(|_| RuntimeActorError::Closed)
+            .map_err(|_| RuntimeActorError::Closed)?;
+        response.await.map_err(|_| RuntimeActorError::Closed)?
     }
 
     pub async fn cancel_run(&self, run_id: Uuid) -> Result<(), RuntimeActorError> {
@@ -285,11 +354,41 @@ impl RuntimeActorHandle {
         response.await.map_err(|_| RuntimeActorError::Closed)
     }
 
-    pub async fn shutdown(&self, output: RuntimeOutputDraft) -> Result<(), RuntimeActorError> {
+    pub async fn begin_drain(
+        &self,
+        stopped: RuntimeOutputDraft,
+    ) -> Result<RuntimeDrain, RuntimeActorError> {
+        let (begun, response) = oneshot::channel();
+        let (drained, completion) = oneshot::channel();
         self.commands
-            .send(RuntimeActorCommand::Shutdown(output))
+            .send(RuntimeActorCommand::BeginDrain { begun, drained })
             .await
-            .map_err(|_| RuntimeActorError::Closed)
+            .map_err(|_| RuntimeActorError::Closed)?;
+        response.await.map_err(|_| RuntimeActorError::Closed)??;
+        Ok(RuntimeDrain {
+            commands: self.commands.clone(),
+            stopped,
+            drained: completion,
+        })
+    }
+
+    pub async fn shutdown(&self, output: RuntimeOutputDraft) -> Result<(), RuntimeActorError> {
+        self.begin_drain(output).await?.finish_stop().await
+    }
+}
+
+impl RuntimeDrain {
+    pub async fn finish_stop(self) -> Result<(), RuntimeActorError> {
+        self.drained.await.map_err(|_| RuntimeActorError::Closed)?;
+        let (finished, completion) = oneshot::channel();
+        self.commands
+            .send(RuntimeActorCommand::FinishStop {
+                stopped: self.stopped,
+                finished,
+            })
+            .await
+            .map_err(|_| RuntimeActorError::Closed)?;
+        completion.await.map_err(|_| RuntimeActorError::Closed)
     }
 }
 
@@ -312,6 +411,12 @@ impl RuntimeTaskProgressSender {
 pub enum RuntimeActorError {
     #[error("Runtime Actor mailbox is closed")]
     Closed,
+    #[error("Runtime Actor is draining and rejects new tasks")]
+    Draining,
+    #[error("Runtime Actor is already draining")]
+    AlreadyDraining,
+    #[error("Runtime Actor cannot stop before all accepted tasks are drained")]
+    NotDrained,
     #[error("Runtime Actor output sequence is exhausted")]
     SequenceExhausted,
     #[error("Runtime Actor task set returned no task")]
