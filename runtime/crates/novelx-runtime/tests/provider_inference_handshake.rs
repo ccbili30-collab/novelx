@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use novelx_protocol::{
     ContextBudgetAllocation, ContextBudgetCategory, ContextCompilationReceipt, ContextCompile,
@@ -24,6 +25,7 @@ use novelx_runtime::run_state::RunState;
 use novelx_runtime::{
     agent_loop_journal::AgentLoopJournalRepository, agent_loop_service::LoopPhase,
 };
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
@@ -149,6 +151,83 @@ fn real_provider_inference_accepts_before_completion_and_does_not_block_status()
         .unwrap();
     assert_eq!(persisted_loop.service.phase(), LoopPhase::Completed);
     assert!(!format!("{:?}", journal.read_run(&run_id.to_string(), 0).unwrap()).contains(SECRET));
+}
+
+#[test]
+fn routed_fatal_aborts_a_held_provider_task_and_emits_no_stopped() {
+    let fixture = Fixture::new();
+    let (config, config_hash, release, request_received, connection_closed, server) =
+        loopback_provider();
+    let (run_id, receipt) = fixture.seed(&config, &config_hash);
+    let (mut child, mut output) = spawn_runtime();
+    write_envelope(&mut child, &initialize_envelope(&fixture.path));
+    assert_eq!(read_envelope(&mut output).name, "runtime.ready");
+    bind_provider(&mut child, &mut output, 2, &config, &config_hash);
+
+    let payload = ProviderInferenceStart {
+        inference_id: Uuid::new_v4(),
+        attempt_id: Uuid::new_v4(),
+        invocation_id: format!("{run_id}:steward"),
+        context_compilation_id: receipt.compilation_id,
+        request_number: receipt.request_number,
+        attempt_number: 1,
+        inference_idempotency_key: "fatal-held-provider".to_owned(),
+    };
+    let mut start = command("provider.inference.start", 3, &payload);
+    start.run_id = Some(run_id);
+    write_envelope(&mut child, &start);
+    assert_eq!(
+        read_envelope(&mut output).name,
+        "provider.inference.accepted"
+    );
+    request_received.recv().unwrap();
+
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER runtime_events_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE runtime_events SET event_type = 'run.future' WHERE run_id = ?1 AND aggregate_type = 'run' AND aggregate_sequence = 1",
+            [run_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut get = command("run.get", 4, &serde_json::json!({}));
+    get.run_id = Some(run_id);
+    write_envelope(&mut child, &get);
+    let rejected = read_envelope(&mut output);
+    assert_eq!(rejected.name, "run.rejected");
+    assert_eq!(rejected.correlation_id, Some(get.message_id));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let mut stderr = String::new();
+            child
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("routed Fatal left Runtime hung; stderr={stderr}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(!status.success());
+    let mut remaining = String::new();
+    output.read_to_string(&mut remaining).unwrap();
+    assert!(!remaining.contains("runtime.stopped"));
+
+    release.send(()).unwrap();
+    assert!(connection_closed.recv().unwrap());
+    server.join().unwrap();
 }
 
 #[test]

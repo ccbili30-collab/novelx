@@ -239,6 +239,21 @@ function stoppedEnvelope(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function disconnectedStoppedEnvelope(overrides: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: 1,
+    messageId: "b8de125d-916d-442f-8fe8-1424b1e6b38d",
+    messageType: "control",
+    name: "runtime.stopped",
+    sentAt: "2026-07-12T00:00:07Z",
+    correlationId: null,
+    runId: null,
+    sequence: 4,
+    payload: { reason: "host_disconnected" },
+    ...overrides,
+  };
+}
+
 function runPinnedIdentity() {
   const policy = (id: string, digit: string) => ({ id, version: "1.0.0", sha256: digit.repeat(64) });
   return {
@@ -800,6 +815,12 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(parseRuntimeV2StoppedEnvelope(stoppedEnvelope())).toEqual(stoppedEnvelope());
   });
 
+  it("accepts the uncorrelated runtime.stopped control emitted after Host EOF", () => {
+    expect(parseRuntimeV2StoppedEnvelope(disconnectedStoppedEnvelope())).toEqual(
+      disconnectedStoppedEnvelope(),
+    );
+  });
+
   it("strictly rejects malformed shutdown commands and stopped responses", () => {
     expect(() => parseRuntimeV2ShutdownEnvelope(shutdownEnvelope({ payload: { force: true } }))).toThrow();
     expect(() => parseRuntimeV2ShutdownEnvelope(shutdownEnvelope({ name: "runtime.stop" }))).toThrow();
@@ -810,6 +831,9 @@ describe("Runtime V2 Protocol V1 TypeScript mirror", () => {
     expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ runId: MESSAGE_ID }))).toThrow();
     expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ payload: { reason: "crashed" } }))).toThrow();
     expect(() => parseRuntimeV2StoppedEnvelope(stoppedEnvelope({ payload: { reason: "requested", extra: true } }))).toThrow();
+    expect(() => parseRuntimeV2StoppedEnvelope(disconnectedStoppedEnvelope({ messageType: "response" }))).toThrow();
+    expect(() => parseRuntimeV2StoppedEnvelope(disconnectedStoppedEnvelope({ correlationId: MESSAGE_ID }))).toThrow();
+    expect(() => parseRuntimeV2StoppedEnvelope(disconnectedStoppedEnvelope({ payload: { reason: "requested" } }))).toThrow();
   });
 
   it("accepts strict run.start, run.get, run.prepare and correlated run.snapshot messages", () => {

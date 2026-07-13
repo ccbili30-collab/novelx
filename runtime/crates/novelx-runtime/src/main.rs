@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,6 +75,8 @@ use novelx_runtime::{
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[tokio::main]
@@ -264,11 +266,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime_cancellation_hub: &runtime_cancellation_hub,
         project_root: project_root.as_ref(),
     };
-    let loop_result = run_command_loop(&mut lines, &actor_handle, &mut command_context).await;
+    let host_input = HostInputPump::spawn(lines, 64);
+    let loop_result = run_command_loop(host_input, &actor_handle, &mut command_context).await;
     drop(actor_handle);
     let actor_result = actor_task.await?;
-    loop_result?;
     actor_result?;
+    if let Err(error) = loop_result {
+        eprintln!("runtime command loop terminated fatally: {error}");
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -297,42 +303,363 @@ fn validate_initialize_envelope(envelope: &Envelope) -> Result<(), String> {
     Ok(())
 }
 
+const HOST_INPUT_QUEUE_CAPACITY: usize = 64;
+
+enum ValidatedHostCommand {
+    Sensitive(Box<ProviderBindSensitiveEnvelope>),
+    Command(Envelope),
+    Shutdown(Envelope),
+    Disconnected,
+    Fatal(RuntimeFatal),
+}
+
+impl ValidatedHostCommand {
+    fn message_id(&self) -> Uuid {
+        match self {
+            Self::Sensitive(command) => command.message_id,
+            Self::Command(command) => command.message_id,
+            Self::Shutdown(command) => command.message_id,
+            Self::Disconnected => Uuid::nil(),
+            Self::Fatal(fatal) => fatal.correlation_id.unwrap_or_else(Uuid::nil),
+        }
+    }
+
+    fn run_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Sensitive(_) => None,
+            Self::Command(command) => command.run_id,
+            Self::Shutdown(_) | Self::Disconnected | Self::Fatal(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeFatalSource {
+    HostProtocol,
+    HostInputInternal,
+    OperationalRecoveryInternal,
+    RoutedCommand,
+}
+
+#[derive(Debug)]
+struct RuntimeFatal {
+    source: RuntimeFatalSource,
+    correlation_id: Option<Uuid>,
+    message: String,
+}
+
+impl RuntimeFatal {
+    fn host_protocol(correlation_id: Option<Uuid>, message: String) -> Self {
+        Self {
+            source: RuntimeFatalSource::HostProtocol,
+            correlation_id,
+            message,
+        }
+    }
+
+    fn host_input_internal(message: String) -> Self {
+        Self {
+            source: RuntimeFatalSource::HostInputInternal,
+            correlation_id: None,
+            message,
+        }
+    }
+
+    fn operational_recovery_internal(message: String) -> Self {
+        Self {
+            source: RuntimeFatalSource::OperationalRecoveryInternal,
+            correlation_id: None,
+            message,
+        }
+    }
+
+    fn routed_command(message: String) -> Self {
+        Self {
+            source: RuntimeFatalSource::RoutedCommand,
+            correlation_id: None,
+            message,
+        }
+    }
+
+    fn permits_in_flight_response(&self) -> bool {
+        self.source == RuntimeFatalSource::HostProtocol
+    }
+}
+
+enum HostControlInput {
+    Shutdown(Envelope),
+    Disconnected,
+    Fatal(RuntimeFatal),
+}
+
+struct HostInputPump {
+    commands: mpsc::Receiver<ValidatedHostCommand>,
+    commands_open: bool,
+    stop: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl HostInputPump {
+    fn spawn(
+        mut lines: tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+        queue_capacity: usize,
+    ) -> Self {
+        let (command_sender, commands) = mpsc::channel(queue_capacity.max(1));
+        let (stop, mut stop_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut expected_host_sequence = 2_u64;
+            loop {
+                let line = tokio::select! {
+                    biased;
+                    _ = &mut stop_receiver => return,
+                    line = lines.next_line() => line,
+                };
+                let line = match line {
+                    Ok(Some(line)) => line,
+                    Ok(None) => {
+                        enqueue_host_command(
+                            &command_sender,
+                            &mut stop_receiver,
+                            ValidatedHostCommand::Disconnected,
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(error) => {
+                        enqueue_host_command(
+                            &command_sender,
+                            &mut stop_receiver,
+                            ValidatedHostCommand::Fatal(RuntimeFatal::host_input_internal(
+                                format!("Host input read failed: {error}"),
+                            )),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let value: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        enqueue_host_command(
+                            &command_sender,
+                            &mut stop_receiver,
+                            ValidatedHostCommand::Fatal(RuntimeFatal::host_protocol(
+                                None,
+                                format!("invalid runtime command JSON: {error}"),
+                            )),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let command = if value.get("messageType").and_then(serde_json::Value::as_str)
+                    == Some("sensitive_command")
+                {
+                    let sensitive: ProviderBindSensitiveEnvelope =
+                        match serde_json::from_value(value) {
+                            Ok(command) => command,
+                            Err(error) => {
+                                enqueue_host_command(
+                                    &command_sender,
+                                    &mut stop_receiver,
+                                    ValidatedHostCommand::Fatal(RuntimeFatal::host_protocol(
+                                        None,
+                                        format!("invalid sensitive runtime command: {error}"),
+                                    )),
+                                )
+                                .await;
+                                return;
+                            }
+                        };
+                    if let Err(error) = sensitive.validate(expected_host_sequence) {
+                        enqueue_host_command(
+                            &command_sender,
+                            &mut stop_receiver,
+                            ValidatedHostCommand::Fatal(RuntimeFatal::host_protocol(
+                                Some(sensitive.message_id),
+                                error.to_string(),
+                            )),
+                        )
+                        .await;
+                        return;
+                    }
+                    ValidatedHostCommand::Sensitive(Box::new(sensitive))
+                } else {
+                    let command: Envelope = match serde_json::from_value(value) {
+                        Ok(command) => command,
+                        Err(error) => {
+                            enqueue_host_command(
+                                &command_sender,
+                                &mut stop_receiver,
+                                ValidatedHostCommand::Fatal(RuntimeFatal::host_protocol(
+                                    None,
+                                    format!("invalid runtime command envelope: {error}"),
+                                )),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    if let Err(error) = validate_command(&command, expected_host_sequence) {
+                        enqueue_host_command(
+                            &command_sender,
+                            &mut stop_receiver,
+                            ValidatedHostCommand::Fatal(RuntimeFatal::host_protocol(
+                                Some(command.message_id),
+                                error,
+                            )),
+                        )
+                        .await;
+                        return;
+                    }
+                    if command.name == "runtime.shutdown" {
+                        enqueue_host_command(
+                            &command_sender,
+                            &mut stop_receiver,
+                            ValidatedHostCommand::Shutdown(command),
+                        )
+                        .await;
+                        return;
+                    }
+                    ValidatedHostCommand::Command(command)
+                };
+                if !enqueue_host_command(&command_sender, &mut stop_receiver, command).await {
+                    return;
+                }
+                expected_host_sequence = match expected_host_sequence.checked_add(1) {
+                    Some(sequence) => sequence,
+                    None => {
+                        enqueue_host_command(
+                            &command_sender,
+                            &mut stop_receiver,
+                            ValidatedHostCommand::Fatal(RuntimeFatal::host_input_internal(
+                                "Host sequence was exhausted".to_owned(),
+                            )),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+            }
+        });
+        Self {
+            commands,
+            commands_open: true,
+            stop: Some(stop),
+            task: Some(task),
+        }
+    }
+
+    async fn stop_and_join(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.await?;
+        }
+        Ok(())
+    }
+}
+
+async fn enqueue_host_command(
+    command_sender: &mpsc::Sender<ValidatedHostCommand>,
+    stop_receiver: &mut oneshot::Receiver<()>,
+    command: ValidatedHostCommand,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = stop_receiver => false,
+        result = command_sender.send(command) => result.is_ok(),
+    }
+}
+
 async fn run_command_loop(
-    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+    mut host_input: HostInputPump,
     output: &RuntimeActorHandle,
     context: &mut RuntimeCommandContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut expected_host_sequence = 2_u64;
-    while let Some(line) = lines.next_line().await? {
-        let value: serde_json::Value = serde_json::from_str(&line)?;
-        if value.get("messageType").and_then(serde_json::Value::as_str) == Some("sensitive_command")
-        {
-            let sensitive: ProviderBindSensitiveEnvelope = serde_json::from_value(value)?;
-            if let Err(error) = sensitive.validate(expected_host_sequence) {
-                output
-                    .emit(protocol_error_draft(
-                        sensitive.message_id,
-                        &error.to_string(),
-                    )?)
-                    .await?;
-                return Err(io::Error::new(io::ErrorKind::InvalidData, error.to_string()).into());
+    let result = run_command_loop_inner(&mut host_input, output, context).await;
+    let stop_result = host_input.stop_and_join().await;
+    match (result, stop_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+async fn run_command_loop_inner(
+    host_input: &mut HostInputPump,
+    output: &RuntimeActorHandle,
+    context: &mut RuntimeCommandContext<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut pending_commands = VecDeque::new();
+    loop {
+        let input = if let Some(command) = pending_commands.pop_front() {
+            command
+        } else if host_input.commands_open {
+            match host_input.commands.recv().await {
+                Some(command) => command,
+                None => {
+                    host_input.commands_open = false;
+                    ValidatedHostCommand::Fatal(RuntimeFatal::host_input_internal(
+                        "Host input Pump terminated without a lifecycle marker".to_owned(),
+                    ))
+                }
             }
-            output
-                .emit(handle_provider_bind(sensitive, context).await?)
+        } else {
+            ValidatedHostCommand::Fatal(RuntimeFatal::host_input_internal(
+                "Host input Pump terminated without a lifecycle marker".to_owned(),
+            ))
+        };
+        let command = match input {
+            ValidatedHostCommand::Sensitive(sensitive) => {
+                let outcome = handle_provider_bind_with_host_control(
+                    *sensitive,
+                    output,
+                    context,
+                    host_input,
+                    &mut pending_commands,
+                )
                 .await?;
-            expected_host_sequence += 1;
-            continue;
-        }
-        let command: Envelope = serde_json::from_value(value)?;
-        if let Err(error) = validate_command(&command, expected_host_sequence) {
-            output
-                .emit(protocol_error_draft(command.message_id, &error)?)
-                .await?;
-            return Err(io::Error::new(io::ErrorKind::InvalidData, error).into());
-        }
+                if outcome == ProviderBindHostOutcome::Stop {
+                    return Ok(());
+                }
+                continue;
+            }
+            ValidatedHostCommand::Shutdown(command) => {
+                return handle_host_control_outside_recovery(
+                    HostControlInput::Shutdown(command),
+                    output,
+                    context,
+                    host_input,
+                    &mut pending_commands,
+                )
+                .await;
+            }
+            ValidatedHostCommand::Disconnected => {
+                return handle_host_control_outside_recovery(
+                    HostControlInput::Disconnected,
+                    output,
+                    context,
+                    host_input,
+                    &mut pending_commands,
+                )
+                .await;
+            }
+            ValidatedHostCommand::Fatal(fatal) => {
+                return handle_host_control_outside_recovery(
+                    HostControlInput::Fatal(fatal),
+                    output,
+                    context,
+                    host_input,
+                    &mut pending_commands,
+                )
+                .await;
+            }
+            ValidatedHostCommand::Command(command) => command,
+        };
         if let Some(rejected) = operational_recovery_guard(&command, context)? {
             output.emit(rejected).await?;
-            expected_host_sequence += 1;
             continue;
         }
 
@@ -375,16 +702,7 @@ async fn run_command_loop(
                 context.quarantined_assignment_ids,
             )?,
             "runtime.shutdown" => {
-                output
-                    .shutdown(response_draft(
-                        &command,
-                        "runtime.stopped",
-                        RuntimeStopped {
-                            reason: "requested".to_owned(),
-                        },
-                    )?)
-                    .await?;
-                return Ok(());
+                unreachable!("runtime.shutdown is routed through the Host control channel")
             }
             "run.start" => handle_run_start(
                 &command,
@@ -403,7 +721,6 @@ async fn run_command_loop(
                         handle_active_inference_cancel(&command, context.journal, &active_tasks)?;
                     output.emit(routed.output).await?;
                     output.cancel_run(run_id).await?;
-                    expected_host_sequence += 1;
                     continue;
                 }
             }
@@ -412,16 +729,78 @@ async fn run_command_loop(
             }
             "run.reconcile" => {
                 let routed = handle_run_reconcile(&command, context.journal)?;
-                refresh_operational_recovery(context).await?;
-                routed
+                let barrier = run_operational_recovery_barrier_with_host_control(
+                    output,
+                    context,
+                    host_input,
+                    &mut pending_commands,
+                )
+                .await?;
+                let barrier_permits_response = match &barrier {
+                    OperationalRecoveryBarrierOutcome::Fatal(fatal) => {
+                        fatal.permits_in_flight_response()
+                    }
+                    _ => true,
+                };
+                if barrier_permits_response {
+                    output.emit(routed.output).await?;
+                }
+                if routed.fatal {
+                    if matches!(&barrier, OperationalRecoveryBarrierOutcome::Fatal(_)) {
+                        finish_recovery_barrier_termination(
+                            barrier,
+                            output,
+                            host_input,
+                            &mut pending_commands,
+                        )
+                        .await?;
+                        unreachable!("Fatal recovery barrier cannot return successfully")
+                    }
+                    return handle_host_control_outside_recovery(
+                        HostControlInput::Fatal(RuntimeFatal::routed_command(
+                            routed.fatal_message.to_owned(),
+                        )),
+                        output,
+                        context,
+                        host_input,
+                        &mut pending_commands,
+                    )
+                    .await;
+                }
+                if finish_recovery_barrier_termination(
+                    barrier,
+                    output,
+                    host_input,
+                    &mut pending_commands,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+                continue;
             }
             "context.compile" => {
                 handle_context_compile(&command, context.journal, context.provider_registry)?
             }
             "tool.authorization.resolve" => {
                 handle_tool_authorization_resolve(output, &command, context).await?;
-                refresh_operational_recovery(context).await?;
-                expected_host_sequence += 1;
+                let barrier = run_operational_recovery_barrier_with_host_control(
+                    output,
+                    context,
+                    host_input,
+                    &mut pending_commands,
+                )
+                .await?;
+                if finish_recovery_barrier_termination(
+                    barrier,
+                    output,
+                    host_input,
+                    &mut pending_commands,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
                 continue;
             }
             "provider.inference.start" => {
@@ -442,19 +821,24 @@ async fn run_command_loop(
                     context.provider_gateway,
                 )
                 .await?;
-                expected_host_sequence += 1;
                 continue;
             }
             _ => unreachable!("validated command name"),
         };
         output.emit(routed.output).await?;
         if routed.fatal {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, routed.fatal_message).into());
+            return handle_host_control_outside_recovery(
+                HostControlInput::Fatal(RuntimeFatal::routed_command(
+                    routed.fatal_message.to_owned(),
+                )),
+                output,
+                context,
+                host_input,
+                &mut pending_commands,
+            )
+            .await;
         }
-        expected_host_sequence += 1;
     }
-
-    Ok(())
 }
 
 fn operational_recovery_guard(
@@ -794,7 +1178,7 @@ fn require_empty_payload(command: &Envelope) -> Result<(), String> {
     }
 }
 
-async fn handle_provider_bind(
+fn handle_provider_bind(
     command: ProviderBindSensitiveEnvelope,
     context: &mut RuntimeCommandContext<'_>,
 ) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
@@ -804,14 +1188,7 @@ async fn handle_provider_bind(
         .provider_registry
         .bind(payload.config, &payload.config_sha256, payload.credential)
     {
-        Ok(receipt) => {
-            refresh_operational_recovery(context).await?;
-            #[cfg(feature = "runtime-test-failpoints")]
-            novelx_runtime::runtime_test_failpoint::hit(
-                "provider_bind.recovery_persisted_before_response",
-            );
-            correlated_response_draft(correlation_id, "provider.bound", receipt)
-        }
+        Ok(receipt) => correlated_response_draft(correlation_id, "provider.bound", receipt),
         Err(error) => {
             eprintln!("provider.bind rejected: {error}");
             correlated_response_draft(
@@ -823,18 +1200,559 @@ async fn handle_provider_bind(
     }
 }
 
-async fn refresh_operational_recovery(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderBindHostOutcome {
+    Continue,
+    Stop,
+}
+
+enum RecoveryBarrierTermination {
+    Shutdown(Envelope),
+    Disconnected,
+    Fatal(RuntimeFatal),
+}
+
+enum OperationalRecoveryBarrierOutcome {
+    Completed,
+    Shutdown(Envelope),
+    Disconnected,
+    Fatal(RuntimeFatal),
+}
+
+async fn handle_provider_bind_with_host_control(
+    command: ProviderBindSensitiveEnvelope,
+    output: &RuntimeActorHandle,
     context: &mut RuntimeCommandContext<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    host_input: &mut HostInputPump,
+    pending_commands: &mut VecDeque<ValidatedHostCommand>,
+) -> Result<ProviderBindHostOutcome, Box<dyn std::error::Error>> {
+    let provider_bound = handle_provider_bind(command, context)?;
+    if provider_bound.name != "provider.bound" {
+        output.emit(provider_bound).await?;
+        return Ok(ProviderBindHostOutcome::Continue);
+    }
+    let barrier = run_operational_recovery_barrier_with_host_control(
+        output,
+        context,
+        host_input,
+        pending_commands,
+    )
+    .await?;
+
+    #[cfg(feature = "runtime-test-failpoints")]
+    novelx_runtime::runtime_test_failpoint::hit("provider_bind.recovery_persisted_before_response");
+
+    match barrier {
+        OperationalRecoveryBarrierOutcome::Completed => {
+            output.emit(provider_bound).await?;
+            Ok(ProviderBindHostOutcome::Continue)
+        }
+        OperationalRecoveryBarrierOutcome::Shutdown(command) => {
+            output.emit(provider_bound).await?;
+            reject_queued_commands(output, host_input, pending_commands).await?;
+            stop_runtime(
+                output,
+                response_draft(
+                    &command,
+                    "runtime.stopped",
+                    RuntimeStopped {
+                        reason: "requested".to_owned(),
+                    },
+                )?,
+            )
+            .await?;
+            Ok(ProviderBindHostOutcome::Stop)
+        }
+        OperationalRecoveryBarrierOutcome::Disconnected => {
+            output.emit(provider_bound).await?;
+            reject_queued_commands(output, host_input, pending_commands).await?;
+            stop_runtime(output, disconnected_stopped_draft()?).await?;
+            Ok(ProviderBindHostOutcome::Stop)
+        }
+        OperationalRecoveryBarrierOutcome::Fatal(fatal) => {
+            if fatal.permits_in_flight_response() {
+                output.emit(provider_bound).await?;
+            }
+            finalize_fatal_host_control(fatal, output, host_input, pending_commands).await?;
+            unreachable!("fatal Host finalization always returns an error")
+        }
+    }
+}
+
+async fn run_operational_recovery_barrier_with_host_control(
+    output: &RuntimeActorHandle,
+    context: &mut RuntimeCommandContext<'_>,
+    host_input: &mut HostInputPump,
+    pending_commands: &mut VecDeque<ValidatedHostCommand>,
+) -> Result<OperationalRecoveryBarrierOutcome, Box<dyn std::error::Error>> {
     let Some(spec) = prepare_operational_recovery_pass(context) else {
-        return Ok(());
+        return Ok(OperationalRecoveryBarrierOutcome::Completed);
     };
-    let report = tokio::spawn(run_operational_recovery_pass(spec)).await??;
+    let mut recovery_task = tokio::spawn(run_operational_recovery_pass(spec));
+    let mut termination = None;
+    let mut control_failure = None;
+    let recovery_result = loop {
+        tokio::select! {
+            biased;
+            joined = &mut recovery_task => break joined,
+            command = host_input.commands.recv(), if termination.is_none() && host_input.commands_open => {
+                match command {
+                    Some(ValidatedHostCommand::Shutdown(command)) => {
+                        let (next, failure) = begin_recovery_termination(
+                            HostControlInput::Shutdown(command),
+                            context.runtime_cancellation_hub,
+                            host_input,
+                        ).await;
+                        termination = Some(next);
+                        control_failure = failure;
+                    }
+                    Some(ValidatedHostCommand::Disconnected) => {
+                        let (next, failure) = begin_recovery_termination(
+                            HostControlInput::Disconnected,
+                            context.runtime_cancellation_hub,
+                            host_input,
+                        ).await;
+                        termination = Some(next);
+                        control_failure = failure;
+                    }
+                    Some(ValidatedHostCommand::Fatal(fatal)) => {
+                        let (next, failure) = begin_recovery_termination(
+                            HostControlInput::Fatal(fatal),
+                            context.runtime_cancellation_hub,
+                            host_input,
+                        ).await;
+                        termination = Some(next);
+                        control_failure = failure;
+                    }
+                    Some(command) if pending_commands.len() < HOST_INPUT_QUEUE_CAPACITY => {
+                        pending_commands.push_back(command);
+                    }
+                    Some(command) => {
+                        output.emit(runtime_busy_rejection_draft(&command)?).await?;
+                    }
+                    None => {
+                        host_input.commands_open = false;
+                        let (next, failure) = begin_recovery_termination(
+                            HostControlInput::Fatal(RuntimeFatal::host_input_internal(
+                                "Host input Pump terminated without a lifecycle marker".to_owned(),
+                            )),
+                            context.runtime_cancellation_hub,
+                            host_input,
+                        ).await;
+                        termination = Some(next);
+                        control_failure = failure;
+                    }
+                }
+            }
+        }
+    };
+    while termination.is_none() {
+        match host_input.commands.try_recv() {
+            Ok(ValidatedHostCommand::Shutdown(command)) => {
+                let (next, failure) = begin_recovery_termination(
+                    HostControlInput::Shutdown(command),
+                    context.runtime_cancellation_hub,
+                    host_input,
+                )
+                .await;
+                termination = Some(next);
+                control_failure = failure;
+            }
+            Ok(ValidatedHostCommand::Disconnected) => {
+                let (next, failure) = begin_recovery_termination(
+                    HostControlInput::Disconnected,
+                    context.runtime_cancellation_hub,
+                    host_input,
+                )
+                .await;
+                termination = Some(next);
+                control_failure = failure;
+            }
+            Ok(ValidatedHostCommand::Fatal(fatal)) => {
+                let (next, failure) = begin_recovery_termination(
+                    HostControlInput::Fatal(fatal),
+                    context.runtime_cancellation_hub,
+                    host_input,
+                )
+                .await;
+                termination = Some(next);
+                control_failure = failure;
+            }
+            Ok(command) if pending_commands.len() < HOST_INPUT_QUEUE_CAPACITY => {
+                pending_commands.push_back(command);
+            }
+            Ok(command) => {
+                output.emit(runtime_busy_rejection_draft(&command)?).await?;
+            }
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                host_input.commands_open = false;
+                break;
+            }
+        }
+    }
+    let report = match recovery_result {
+        Ok(Ok(report)) => Some(report),
+        Ok(Err(error)) => {
+            let message = format!("Operational recovery pass failed: {error}");
+            if termination.is_none() {
+                let (next, failure) = begin_recovery_termination(
+                    HostControlInput::Fatal(RuntimeFatal::operational_recovery_internal(
+                        message.clone(),
+                    )),
+                    context.runtime_cancellation_hub,
+                    host_input,
+                )
+                .await;
+                termination = Some(next);
+                control_failure = failure;
+            } else {
+                termination = Some(RecoveryBarrierTermination::Fatal(
+                    RuntimeFatal::operational_recovery_internal(message),
+                ));
+            }
+            None
+        }
+        Err(error) => {
+            let message = format!("Operational recovery task failed: {error}");
+            if termination.is_none() {
+                let (next, failure) = begin_recovery_termination(
+                    HostControlInput::Fatal(RuntimeFatal::operational_recovery_internal(
+                        message.clone(),
+                    )),
+                    context.runtime_cancellation_hub,
+                    host_input,
+                )
+                .await;
+                termination = Some(next);
+                control_failure = failure;
+            } else {
+                termination = Some(RecoveryBarrierTermination::Fatal(
+                    RuntimeFatal::operational_recovery_internal(message),
+                ));
+            }
+            None
+        }
+    };
+    if let Some(report) = report {
+        apply_operational_recovery_report(context, report);
+    }
+    if let Err(error) = ensure_recovery_tasks_drained(context.runtime_cancellation_hub) {
+        termination = Some(RecoveryBarrierTermination::Fatal(
+            RuntimeFatal::operational_recovery_internal(format!(
+                "Operational recovery did not drain safely: {error}"
+            )),
+        ));
+    }
+    if let Some(failure) = control_failure {
+        termination = Some(RecoveryBarrierTermination::Fatal(
+            RuntimeFatal::operational_recovery_internal(failure),
+        ));
+    }
+    match termination {
+        None => Ok(OperationalRecoveryBarrierOutcome::Completed),
+        Some(RecoveryBarrierTermination::Shutdown(command)) => {
+            Ok(OperationalRecoveryBarrierOutcome::Shutdown(command))
+        }
+        Some(RecoveryBarrierTermination::Disconnected) => {
+            Ok(OperationalRecoveryBarrierOutcome::Disconnected)
+        }
+        Some(RecoveryBarrierTermination::Fatal(fatal)) => {
+            Ok(OperationalRecoveryBarrierOutcome::Fatal(fatal))
+        }
+    }
+}
+
+async fn begin_recovery_termination(
+    control: HostControlInput,
+    cancellation_hub: &RuntimeCancellationHub,
+    host_input: &mut HostInputPump,
+) -> (RecoveryBarrierTermination, Option<String>) {
+    let (cause, termination) = recovery_termination(control);
+    let mut failures = Vec::new();
+    if let Err(error) = cancellation_hub.signal_global(cause) {
+        failures.push(format!("Recovery cancellation signal failed: {error}"));
+    }
+    if let Err(error) = host_input.stop_and_join().await {
+        failures.push(format!("Host input Pump stop failed: {error}"));
+    }
+    let failure = (!failures.is_empty()).then(|| failures.join("; "));
+    (termination, failure)
+}
+
+fn recovery_termination(
+    control: HostControlInput,
+) -> (
+    novelx_runtime::runtime_cancellation_hub::CancellationCause,
+    RecoveryBarrierTermination,
+) {
+    match control {
+        HostControlInput::Shutdown(command) => (
+            novelx_runtime::runtime_cancellation_hub::CancellationCause::RuntimeShutdown,
+            RecoveryBarrierTermination::Shutdown(command),
+        ),
+        HostControlInput::Disconnected => (
+            novelx_runtime::runtime_cancellation_hub::CancellationCause::HostDisconnected,
+            RecoveryBarrierTermination::Disconnected,
+        ),
+        HostControlInput::Fatal(fatal) => (
+            novelx_runtime::runtime_cancellation_hub::CancellationCause::HostDisconnected,
+            RecoveryBarrierTermination::Fatal(fatal),
+        ),
+    }
+}
+
+async fn finish_recovery_barrier_termination(
+    barrier: OperationalRecoveryBarrierOutcome,
+    output: &RuntimeActorHandle,
+    host_input: &mut HostInputPump,
+    pending_commands: &mut VecDeque<ValidatedHostCommand>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match barrier {
+        OperationalRecoveryBarrierOutcome::Completed => Ok(false),
+        OperationalRecoveryBarrierOutcome::Shutdown(command) => {
+            reject_queued_commands(output, host_input, pending_commands).await?;
+            stop_runtime(
+                output,
+                response_draft(
+                    &command,
+                    "runtime.stopped",
+                    RuntimeStopped {
+                        reason: "requested".to_owned(),
+                    },
+                )?,
+            )
+            .await?;
+            Ok(true)
+        }
+        OperationalRecoveryBarrierOutcome::Disconnected => {
+            reject_queued_commands(output, host_input, pending_commands).await?;
+            stop_runtime(output, disconnected_stopped_draft()?).await?;
+            Ok(true)
+        }
+        OperationalRecoveryBarrierOutcome::Fatal(fatal) => {
+            finalize_fatal_host_control(fatal, output, host_input, pending_commands).await?;
+            unreachable!("fatal Host finalization always returns an error")
+        }
+    }
+}
+
+async fn handle_host_control_outside_recovery(
+    control: HostControlInput,
+    output: &RuntimeActorHandle,
+    context: &RuntimeCommandContext<'_>,
+    host_input: &mut HostInputPump,
+    pending_commands: &mut VecDeque<ValidatedHostCommand>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match control {
+        HostControlInput::Shutdown(command) => {
+            context.runtime_cancellation_hub.signal_global(
+                novelx_runtime::runtime_cancellation_hub::CancellationCause::RuntimeShutdown,
+            )?;
+            host_input.stop_and_join().await?;
+            ensure_recovery_tasks_drained(context.runtime_cancellation_hub)?;
+            reject_queued_commands(output, host_input, pending_commands).await?;
+            stop_runtime(
+                output,
+                response_draft(
+                    &command,
+                    "runtime.stopped",
+                    RuntimeStopped {
+                        reason: "requested".to_owned(),
+                    },
+                )?,
+            )
+            .await
+        }
+        HostControlInput::Disconnected => {
+            context.runtime_cancellation_hub.signal_global(
+                novelx_runtime::runtime_cancellation_hub::CancellationCause::HostDisconnected,
+            )?;
+            host_input.stop_and_join().await?;
+            ensure_recovery_tasks_drained(context.runtime_cancellation_hub)?;
+            reject_queued_commands(output, host_input, pending_commands).await?;
+            stop_runtime(output, disconnected_stopped_draft()?).await
+        }
+        HostControlInput::Fatal(mut fatal) => {
+            let mut failures = Vec::new();
+            if let Err(error) = context.runtime_cancellation_hub.signal_global(
+                novelx_runtime::runtime_cancellation_hub::CancellationCause::HostDisconnected,
+            ) {
+                failures.push(format!("Fatal cancellation signal failed: {error}"));
+            }
+            if let Err(error) = host_input.stop_and_join().await {
+                failures.push(format!("Host input Pump stop failed: {error}"));
+            }
+            if let Err(error) = ensure_recovery_tasks_drained(context.runtime_cancellation_hub) {
+                failures.push(format!("Recovery tasks did not drain after Fatal: {error}"));
+            }
+            if !failures.is_empty() {
+                failures.insert(0, fatal.message);
+                fatal = RuntimeFatal::host_input_internal(failures.join("; "));
+            }
+            finalize_fatal_host_control(fatal, output, host_input, pending_commands).await
+        }
+    }
+}
+
+async fn finalize_fatal_host_control(
+    fatal: RuntimeFatal,
+    output: &RuntimeActorHandle,
+    host_input: &mut HostInputPump,
+    pending_commands: &mut VecDeque<ValidatedHostCommand>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let message = fatal.message.clone();
+    let mut finalization_failures = Vec::new();
+    if let Err(error) = reject_pending_commands(output, pending_commands).await {
+        finalization_failures.push(format!("rejecting commands before Fatal failed: {error}"));
+    }
+    let fatal_output = match fatal.source {
+        RuntimeFatalSource::HostProtocol => {
+            fatal_protocol_error_draft(fatal.correlation_id, &message).map(Some)
+        }
+        RuntimeFatalSource::HostInputInternal | RuntimeFatalSource::OperationalRecoveryInternal => {
+            internal_runtime_fatal_draft(fatal.source, &message).map(Some)
+        }
+        RuntimeFatalSource::RoutedCommand => Ok(None),
+    };
+    match fatal_output {
+        Ok(Some(error)) => {
+            if let Err(error) = output.emit(error).await {
+                finalization_failures
+                    .push(format!("emitting Fatal protocol error failed: {error}"));
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            finalization_failures.push(format!("building Fatal protocol error failed: {error}"));
+        }
+    }
+    if let Err(error) = reject_queued_commands(output, host_input, pending_commands).await {
+        finalization_failures.push(format!("rejecting commands after Fatal failed: {error}"));
+    }
+    if let Err(error) = output.terminate_fatal().await {
+        finalization_failures.push(format!(
+            "terminating Runtime Actor after Fatal failed: {error}"
+        ));
+    }
+    if finalization_failures.is_empty() {
+        Err(io::Error::new(io::ErrorKind::InvalidData, message).into())
+    } else {
+        Err(io::Error::other(format!("{message}; {}", finalization_failures.join("; "))).into())
+    }
+}
+
+async fn reject_queued_commands(
+    output: &RuntimeActorHandle,
+    host_input: &mut HostInputPump,
+    pending_commands: &mut VecDeque<ValidatedHostCommand>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    while let Ok(command) = host_input.commands.try_recv() {
+        pending_commands.push_back(command);
+    }
+    reject_pending_commands(output, pending_commands).await
+}
+
+async fn reject_pending_commands(
+    output: &RuntimeActorHandle,
+    pending_commands: &mut VecDeque<ValidatedHostCommand>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    while let Some(command) = pending_commands.pop_front() {
+        if matches!(
+            command,
+            ValidatedHostCommand::Disconnected | ValidatedHostCommand::Fatal(_)
+        ) {
+            continue;
+        }
+        output
+            .emit(shutting_down_rejection_draft(&command)?)
+            .await?;
+    }
+    Ok(())
+}
+
+fn shutting_down_rejection_draft(
+    command: &ValidatedHostCommand,
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut draft = output_draft(
+        MessageType::Event,
+        "runtime.error",
+        RuntimeError {
+            code: "RUNTIME_SHUTTING_DOWN".to_owned(),
+            class: RuntimeErrorClass::Protocol,
+            retryable: true,
+            public_message: "Runtime is shutting down; this queued command was not executed."
+                .to_owned(),
+            stage: "runtime.command.dispatch".to_owned(),
+            attempt: 0,
+            diagnostic_id: Uuid::new_v4(),
+        },
+    )?;
+    draft.correlation_id = Some(command.message_id());
+    draft.run_id = command.run_id();
+    Ok(draft)
+}
+
+fn runtime_busy_rejection_draft(
+    command: &ValidatedHostCommand,
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let mut draft = output_draft(
+        MessageType::Event,
+        "runtime.error",
+        RuntimeError {
+            code: "RUNTIME_BUSY".to_owned(),
+            class: RuntimeErrorClass::Validation,
+            retryable: true,
+            public_message: "Runtime is busy; retry this command.".to_owned(),
+            stage: "operational_recovery.backpressure".to_owned(),
+            attempt: 0,
+            diagnostic_id: Uuid::new_v4(),
+        },
+    )?;
+    draft.correlation_id = Some(command.message_id());
+    draft.run_id = command.run_id();
+    Ok(draft)
+}
+
+fn disconnected_stopped_draft() -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    output_draft(
+        MessageType::Control,
+        "runtime.stopped",
+        RuntimeStopped {
+            reason: "host_disconnected".to_owned(),
+        },
+    )
+}
+
+async fn stop_runtime(
+    output: &RuntimeActorHandle,
+    stopped: RuntimeOutputDraft,
+) -> Result<(), Box<dyn std::error::Error>> {
+    output.begin_drain(stopped).await?.finish_stop().await?;
+    Ok(())
+}
+
+fn ensure_recovery_tasks_drained(
+    cancellation_hub: &RuntimeCancellationHub,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let registered = cancellation_hub.registered_count()?;
+    if registered != 0 {
+        return Err(io::Error::other(format!(
+            "Runtime cannot stop while {registered} recovery tasks remain registered"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn apply_operational_recovery_report(
+    context: &mut RuntimeCommandContext<'_>,
+    report: Vec<OperationalRecoveryRun>,
+) {
     context.operational_recovery_runs.clear();
     context
         .operational_recovery_runs
         .extend(report.into_iter().map(|run| (run.run_id.clone(), run)));
-    Ok(())
 }
 
 struct OperationalRecoveryPassSpec {
@@ -874,6 +1792,12 @@ fn prepare_operational_recovery_pass(
 async fn run_operational_recovery_pass(
     spec: OperationalRecoveryPassSpec,
 ) -> Result<Vec<OperationalRecoveryRun>, String> {
+    #[cfg(feature = "runtime-test-failpoints")]
+    if novelx_runtime::runtime_test_failpoint::hit(
+        "operational_recovery.before_injected_internal_failure",
+    ) {
+        return Err("injected internal Operational Recovery failure".to_owned());
+    }
     run_operational_recovery_pass_inner(spec)
         .await
         .map_err(|error| error.to_string())
@@ -2351,6 +3275,13 @@ fn protocol_error_draft(
     correlation_id: Uuid,
     error: &str,
 ) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    fatal_protocol_error_draft(Some(correlation_id), error)
+}
+
+fn fatal_protocol_error_draft(
+    correlation_id: Option<Uuid>,
+    error: &str,
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
     let mut output = output_draft(
         MessageType::Event,
         "runtime.error",
@@ -2364,9 +3295,42 @@ fn protocol_error_draft(
             diagnostic_id: Uuid::new_v4(),
         },
     )?;
-    output.correlation_id = Some(correlation_id);
+    output.correlation_id = correlation_id;
     eprintln!("runtime protocol error: {error}");
     Ok(output)
+}
+
+fn internal_runtime_fatal_draft(
+    source: RuntimeFatalSource,
+    error: &str,
+) -> Result<RuntimeOutputDraft, Box<dyn std::error::Error>> {
+    let (code, stage) = match source {
+        RuntimeFatalSource::HostInputInternal => {
+            ("RUNTIME_HOST_INPUT_FAILED", "runtime.host_input")
+        }
+        RuntimeFatalSource::OperationalRecoveryInternal => (
+            "RUNTIME_OPERATIONAL_RECOVERY_FAILED",
+            "operational_recovery.runtime",
+        ),
+        RuntimeFatalSource::HostProtocol | RuntimeFatalSource::RoutedCommand => {
+            return Err(io::Error::other("invalid internal Runtime Fatal source").into());
+        }
+    };
+    eprintln!("runtime internal fatal: {error}");
+    output_draft(
+        MessageType::Event,
+        "runtime.error",
+        RuntimeError {
+            code: code.to_owned(),
+            class: RuntimeErrorClass::RuntimeCrash,
+            retryable: false,
+            public_message: "Runtime stopped because an internal execution invariant failed."
+                .to_owned(),
+            stage: stage.to_owned(),
+            attempt: 0,
+            diagnostic_id: Uuid::new_v4(),
+        },
+    )
 }
 
 async fn write_protocol_error(

@@ -154,7 +154,10 @@ describe("RuntimeV2ProcessSupervisor", () => {
   });
 
   it("keeps the protocol connection open for correlated status and graceful shutdown", async () => {
-    const supervisor = createSupervisor(createFixture("success"));
+    const failures: RuntimeV2SupervisorError[] = [];
+    const supervisor = createSupervisor(createFixture("success"), {
+      onRuntimeFailure: (error) => failures.push(error),
+    });
     await supervisor.start();
 
     await expect(supervisor.status()).resolves.toEqual({
@@ -169,6 +172,7 @@ describe("RuntimeV2ProcessSupervisor", () => {
     await supervisor.stop();
     expect(supervisor.pid).toBeNull();
     expect(isAlive(pid)).toBe(false);
+    expect(failures).toEqual([]);
   });
 
   it("routes Agent Assignment commands and preserves typed rejections", async () => {
@@ -219,6 +223,62 @@ describe("RuntimeV2ProcessSupervisor", () => {
     unsubscribe();
     await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
     expect(events).toHaveLength(1);
+  });
+
+  it.each(["host-disconnected-stopped", "host-disconnected-stopped-nonzero-exit"] as const)(
+    "fails closed for an unproven Host EOF stop frame from %s",
+    async (scenario) => {
+      const events: string[] = [];
+      const failures: RuntimeV2SupervisorError[] = [];
+      const supervisor = createSupervisor(createFixture(scenario), {
+        onRuntimeFailure: (error) => failures.push(error),
+      });
+      supervisor.subscribeRuntimeEvents((event) => events.push(event.name));
+
+      await supervisor.start();
+      await expect(supervisor.status()).resolves.toMatchObject({ initialized: true });
+      await waitUntil(() => failures.length === 1);
+
+      expect(events).toEqual([]);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({ code: "RUNTIME_V2_PROTOCOL_INVALID" });
+      expect(failures[0]?.message).toContain("missing correlationId");
+    },
+  );
+
+  it("fails closed immediately when Host EOF stop arrives with a pending command", async () => {
+    const events: string[] = [];
+    const failures: RuntimeV2SupervisorError[] = [];
+    const supervisor = createSupervisor(createFixture("host-disconnected-stopped-with-pending"), {
+      commandTimeoutMs: 3_000,
+      onRuntimeFailure: (error) => failures.push(error),
+    });
+    supervisor.subscribeRuntimeEvents((event) => events.push(event.name));
+    await supervisor.start();
+
+    await expect(supervisor.status()).rejects.toMatchObject({ code: "RUNTIME_V2_PROTOCOL_INVALID" });
+
+    expect(events).toEqual([]);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.message).toContain("missing correlationId");
+  });
+
+  it("fails closed when Host EOF stop arrives with an accepted inference still active", async () => {
+    const events: string[] = [];
+    const failures: RuntimeV2SupervisorError[] = [];
+    const supervisor = createSupervisor(createFixture("inference-accepted-then-host-disconnected-stopped"), {
+      onRuntimeFailure: (error) => failures.push(error),
+    });
+    supervisor.subscribeRuntimeEvents((event) => events.push(event.name));
+    await supervisor.start();
+
+    await supervisor.startProviderInference(INFERENCE_RUN_ID, inferenceStartPayload());
+    await waitUntil(() => failures.length === 1);
+
+    expect(events).toEqual([]);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ code: "RUNTIME_V2_PROTOCOL_INVALID" });
+    expect(failures[0]?.message).toContain("missing correlationId");
   });
 
   it.each(["unknown-event-on-status", "bad-event-sequence", "orphan-correlated-event"] as const)(
@@ -509,7 +569,10 @@ input.on("line", (line) => {
     runtimeSequence += 1;
     if (scenario === "exit-on-status" && command.name === "runtime.status.get") process.exit(9);
     if (scenario === "ignore-status" && command.name === "runtime.status.get") return;
-    if (command.name === "provider.inference.start" && scenario.startsWith("inference-terminal-")) {
+    if (command.name === "provider.inference.start" && (
+      scenario.startsWith("inference-terminal-")
+      || scenario === "inference-accepted-then-host-disconnected-stopped"
+    )) {
       const identity = {
         runId: command.runId,
         inferenceId: command.payload.inferenceId,
@@ -524,6 +587,12 @@ input.on("line", (line) => {
       acceptedEnvelope.runId = command.runId;
       process.stdout.write(JSON.stringify(acceptedEnvelope) + "\n");
       runtimeSequence += 1;
+      if (scenario === "inference-accepted-then-host-disconnected-stopped") {
+        process.stdout.write(JSON.stringify(envelope(
+          1, "runtime.stopped", { reason: "host_disconnected" }, null, runtimeSequence, "control",
+        )) + "\n");
+        return;
+      }
       const terminalIdentity = scenario === "inference-terminal-identity-mismatch"
         ? { ...identity, attemptId: randomUUID() }
         : identity;
@@ -621,6 +690,12 @@ input.on("line", (line) => {
       }, randomUUID(), runtimeSequence, "event")) + "\n");
       return;
     }
+    if (command.name === "runtime.status.get" && scenario === "host-disconnected-stopped-with-pending") {
+      process.stdout.write(JSON.stringify(envelope(
+        1, "runtime.stopped", { reason: "host_disconnected" }, null, runtimeSequence, "control",
+      )) + "\n");
+      return;
+    }
     if (command.name === "provider.bind") {
       process.stdout.write(JSON.stringify(envelope(1, "provider.bound", {
         profileId: command.payload.config.profileId,
@@ -665,10 +740,20 @@ input.on("line", (line) => {
         }, null, runtimeSequence, "event")) + "\n");
         runtimeSequence += 1;
       }
-      process.stdout.write(JSON.stringify(envelope(1, "runtime.status", {
+      const statusEnvelope = envelope(1, "runtime.status", {
         initialized: true, workspaceDatabaseConfigured: false, recoveredRunCount: 0,
         protocolVersion: 1, runtimeVersion: "0.1.0",
-      }, command.messageId, runtimeSequence, "response")) + "\n");
+      }, command.messageId, runtimeSequence, "response");
+      if (scenario === "host-disconnected-stopped" || scenario === "host-disconnected-stopped-nonzero-exit") {
+        process.stdout.write(JSON.stringify(statusEnvelope) + "\n", () => {
+          runtimeSequence += 1;
+          process.stdout.write(JSON.stringify(envelope(
+            1, "runtime.stopped", { reason: "host_disconnected" }, null, runtimeSequence, "control",
+          )) + "\n", () => process.exit(scenario === "host-disconnected-stopped" ? 0 : 9));
+        });
+      } else {
+        process.stdout.write(JSON.stringify(statusEnvelope) + "\n");
+      }
       return;
     }
     if (command.name === "runtime.shutdown") {

@@ -196,6 +196,7 @@ export class RuntimeV2ProcessSupervisor {
   #stderr = "";
   #ready = false;
   #stopping = false;
+  #validatedStopReason: "requested" | null = null;
   #nextHostSequence = 2;
   #expectedRuntimeSequence = 3;
   #pending = new Map<string, PendingCommand>();
@@ -241,6 +242,7 @@ export class RuntimeV2ProcessSupervisor {
     this.#child = child;
     this.#stderr = "";
     this.#stopping = false;
+    this.#validatedStopReason = null;
     this.#nextHostSequence = 2;
     this.#expectedRuntimeSequence = 3;
     this.#activeInferences.clear();
@@ -452,7 +454,7 @@ export class RuntimeV2ProcessSupervisor {
     const child = this.#child;
     if (!child) return;
     this.#stopping = true;
-    if (this.#ready) {
+    if (this.#ready && this.#validatedStopReason === null) {
       try {
         const response = await this.#sendCommand("runtime.shutdown", "runtime.stopped", null, {}, this.#options.stopTimeoutMs);
         parseRuntimeV2StoppedEnvelope(response);
@@ -568,7 +570,11 @@ export class RuntimeV2ProcessSupervisor {
       { cause: error, stderr: this.#stderr },
     )));
     child.once("exit", (code, signal) => {
-      if (!this.#ready || this.#stopping) return;
+      if (!this.#ready) return;
+      if (this.#validatedStopReason !== null && code === 0 && signal === null) {
+        this.#completeCleanRuntimeExit(child);
+        return;
+      }
       this.#failRuntime(new RuntimeV2SupervisorError(
         "RUNTIME_V2_EXITED_AFTER_READY",
         `Runtime V2 exited after ready (code=${String(code)}, signal=${String(signal)}).${stderrSuffix(this.#stderr)}`,
@@ -690,6 +696,17 @@ export class RuntimeV2ProcessSupervisor {
       if (response.name !== pending.expectedName) {
         throw new Error(`expected ${pending.expectedName}, received ${response.name}.`);
       }
+      if (response.name === "runtime.stopped") {
+        if (!this.#stopping || response.payload.reason !== "requested") {
+          throw new Error("runtime.stopped(requested) arrived outside an active Host shutdown.");
+        }
+        if (this.#pending.size !== 1 || this.#activeInferences.size !== 0) {
+          throw new Error(
+            `runtime.stopped(requested) arrived with ${this.#pending.size - 1} unrelated pending command(s) and ${this.#activeInferences.size} active inference(s).`,
+          );
+        }
+        this.#validatedStopReason = "requested";
+      }
       if (response.name === "provider.inference.accepted") {
         if (!pending.inference) throw new Error("Provider inference acceptance has no pending inference identity.");
         assertInferenceIdentity(response.payload, pending.inference);
@@ -735,7 +752,7 @@ export class RuntimeV2ProcessSupervisor {
     credential: string,
   ): Promise<unknown> {
     const child = this.#child;
-    if (!child || !this.#ready || child.stdin.destroyed) {
+    if (!child || !this.#ready || this.#stopping || child.stdin.destroyed) {
       return Promise.reject(new RuntimeV2SupervisorError("RUNTIME_V2_NOT_READY", "Runtime V2 is not ready."));
     }
     const sequence = this.#nextHostSequence;
@@ -793,7 +810,7 @@ export class RuntimeV2ProcessSupervisor {
     toolAuthorization?: PendingToolAuthorization,
   ): Promise<unknown> {
     const child = this.#child;
-    if (!child || !this.#ready || child.stdin.destroyed) {
+    if (!child || !this.#ready || (this.#stopping && name !== "runtime.shutdown") || child.stdin.destroyed) {
       return Promise.reject(new RuntimeV2SupervisorError("RUNTIME_V2_NOT_READY", "Runtime V2 is not ready."));
     }
     const sequence = this.#nextHostSequence;
@@ -901,10 +918,21 @@ export class RuntimeV2ProcessSupervisor {
     if (child) void this.#terminateChild(child);
   }
 
+  #completeCleanRuntimeExit(child: ChildProcessWithoutNullStreams): void {
+    if (this.#child === child) this.#child = null;
+    this.#ready = false;
+    this.#stopping = false;
+    this.#validatedStopReason = null;
+    this.#activeInferences.clear();
+    this.#lines?.close();
+    this.#lines = null;
+  }
+
   async #terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
     if (this.#child === child) this.#child = null;
     this.#ready = false;
     this.#stopping = false;
+    this.#validatedStopReason = null;
     this.#activeInferences.clear();
     this.#lines?.close();
     this.#lines = null;

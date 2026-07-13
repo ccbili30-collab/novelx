@@ -518,6 +518,83 @@ async fn cancellation_after_sent_reservation_keeps_one_sent_and_projects_outcome
 }
 
 #[tokio::test]
+async fn aborting_a_post_sent_recovery_drops_its_registration_and_reentry_never_resends() {
+    let fixture = Fixture::new();
+    let (base_url, request_count, _, server) = spawn_server(ServerReply::Delayed {
+        delay: Duration::from_secs(30),
+        response: json_response(200, successful_body("must be abandoned with the task")),
+    })
+    .await;
+    let (providers, provider) = bound_registry(base_url, 60_000);
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway, "runtime-post-sent-abort");
+
+    let task = {
+        let path = fixture.path.clone();
+        let request = seeded.request.clone();
+        let providers = providers.clone();
+        let gateway = gateway.clone();
+        let cancellation_hub = fixture.cancellation_hub.clone();
+        let lease = Arc::clone(&seeded.lease);
+        tokio::spawn(async move {
+            ProviderDispatchRecoveryService::new(path)
+                .execute_requested(request, &providers, &gateway, &cancellation_hub, &lease)
+                .await
+        })
+    };
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if request_count.load(Ordering::SeqCst) == 1
+                && fixture.attempt_state(&seeded) == ProviderAttemptState::Sent
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("authorized recovery did not enter the held post-Sent HTTP window");
+
+    task.abort();
+    let join_error = task.await.unwrap_err();
+    assert!(join_error.is_cancelled());
+    assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
+    assert_eq!(fixture.attempt_state(&seeded), ProviderAttemptState::Sent);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        ["provider.requested", "provider.sent"]
+    );
+
+    let recovered = ProviderDispatchRecoveryService::new(&fixture.path)
+        .execute_requested(
+            seeded.request.clone(),
+            &providers,
+            &gateway,
+            &fixture.cancellation_hub,
+            &seeded.lease,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        completed_ref(&recovered).terminal,
+        ProviderDispatchRecoveryTerminal::OutcomeUnknown
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        ["provider.requested", "provider.sent"]
+    );
+    assert!(matches!(
+        fixture.outcome(&seeded),
+        Some(OperationalRecoveryOutcome::OutcomeUnknown { .. })
+    ));
+    assert_eq!(fixture.cancellation_hub.registered_count().unwrap(), 0);
+    server.abort();
+}
+
+#[tokio::test]
 async fn run_cancel_interrupts_only_the_target_recovery_while_parallel_run_dispatches() {
     let target_fixture = Fixture::new();
     let other_fixture = Fixture::new();

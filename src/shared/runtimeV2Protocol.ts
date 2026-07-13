@@ -197,17 +197,39 @@ export const runtimeV2ShutdownEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   payload: emptyRuntimeV2PayloadSchema,
 }).strict();
 
-export const runtimeV2StoppedPayloadSchema = z.object({
+const runtimeV2RequestedStoppedPayloadSchema = z.object({
   reason: z.literal("requested"),
 }).strict();
 
-export const runtimeV2StoppedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+const runtimeV2DisconnectedStoppedPayloadSchema = z.object({
+  reason: z.literal("host_disconnected"),
+}).strict();
+
+export const runtimeV2StoppedPayloadSchema = z.union([
+  runtimeV2RequestedStoppedPayloadSchema,
+  runtimeV2DisconnectedStoppedPayloadSchema,
+]);
+
+const runtimeV2RequestedStoppedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
   messageType: z.literal("response"),
   name: z.literal("runtime.stopped"),
   correlationId: z.uuid(),
   runId: z.null(),
-  payload: runtimeV2StoppedPayloadSchema,
+  payload: runtimeV2RequestedStoppedPayloadSchema,
 }).strict();
+
+const runtimeV2DisconnectedStoppedEnvelopeSchema = runtimeV2EnvelopeSchema.extend({
+  messageType: z.literal("control"),
+  name: z.literal("runtime.stopped"),
+  correlationId: z.null(),
+  runId: z.null(),
+  payload: runtimeV2DisconnectedStoppedPayloadSchema,
+}).strict();
+
+export const runtimeV2StoppedEnvelopeSchema = z.union([
+  runtimeV2RequestedStoppedEnvelopeSchema,
+  runtimeV2DisconnectedStoppedEnvelopeSchema,
+]);
 
 const legacyRevisionReferenceSchema = z.object({
   id: identityStringSchema,

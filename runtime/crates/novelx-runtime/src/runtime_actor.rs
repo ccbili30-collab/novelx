@@ -101,6 +101,9 @@ enum RuntimeActorCommand {
         stopped: RuntimeOutputDraft,
         finished: oneshot::Sender<()>,
     },
+    TerminateFatal {
+        finished: oneshot::Sender<()>,
+    },
 }
 
 impl<W> RuntimeActor<W>
@@ -148,6 +151,13 @@ where
                                 let _ = acknowledged.send(Err(RuntimeActorError::Draining));
                                 continue;
                             }
+                            if self.cancellations.contains_key(&key) {
+                                let _ = acknowledged.send(Err(RuntimeActorError::TaskAlreadyActive {
+                                    run_id: key.run_id,
+                                    attempt_id: key.attempt_id,
+                                }));
+                                continue;
+                            }
                             if let Some(accepted) = accepted {
                                 self.write(accepted).await?;
                             }
@@ -189,6 +199,16 @@ where
                                 return Err(RuntimeActorError::NotDrained);
                             }
                             self.write(stopped).await?;
+                            let _ = finished.send(());
+                            return Ok(());
+                        }
+                        Some(RuntimeActorCommand::TerminateFatal { finished }) => {
+                            for cancellation in self.cancellations.values() {
+                                let _ = cancellation.send(true);
+                            }
+                            self.tasks.abort_all();
+                            while self.tasks.join_next().await.is_some() {}
+                            self.cancellations.clear();
                             let _ = finished.send(());
                             return Ok(());
                         }
@@ -375,6 +395,15 @@ impl RuntimeActorHandle {
     pub async fn shutdown(&self, output: RuntimeOutputDraft) -> Result<(), RuntimeActorError> {
         self.begin_drain(output).await?.finish_stop().await
     }
+
+    pub async fn terminate_fatal(&self) -> Result<(), RuntimeActorError> {
+        let (finished, completion) = oneshot::channel();
+        self.commands
+            .send(RuntimeActorCommand::TerminateFatal { finished })
+            .await
+            .map_err(|_| RuntimeActorError::Closed)?;
+        completion.await.map_err(|_| RuntimeActorError::Closed)
+    }
 }
 
 impl RuntimeDrain {
@@ -415,6 +444,8 @@ pub enum RuntimeActorError {
     Draining,
     #[error("Runtime Actor is already draining")]
     AlreadyDraining,
+    #[error("Runtime Actor task is already active for run {run_id} and attempt {attempt_id}")]
+    TaskAlreadyActive { run_id: Uuid, attempt_id: Uuid },
     #[error("Runtime Actor cannot stop before all accepted tasks are drained")]
     NotDrained,
     #[error("Runtime Actor output sequence is exhausted")]

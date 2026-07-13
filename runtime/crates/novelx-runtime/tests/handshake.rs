@@ -200,6 +200,33 @@ fn serves_multiple_status_requests_and_shutdown_with_continuous_sequences() {
 }
 
 #[test]
+fn ordered_dispatcher_finishes_an_earlier_status_before_pipelined_shutdown() {
+    let (mut child, _hello) = spawn_and_read_hello();
+    let initialize = initialize_envelope(PROTOCOL_VERSION, "runtime.initialize");
+    write_envelope(&mut child, &initialize);
+    assert_eq!(read_next_envelope(&mut child).name, "runtime.ready");
+
+    let status = command_envelope("runtime.status.get", 2, serde_json::json!({}));
+    let shutdown = command_envelope("runtime.shutdown", 3, serde_json::json!({}));
+    write_envelope(&mut child, &status);
+    write_envelope(&mut child, &shutdown);
+
+    assert_response(
+        &read_next_envelope(&mut child),
+        &status,
+        "runtime.status",
+        3,
+    );
+    assert_response(
+        &read_next_envelope(&mut child),
+        &shutdown,
+        "runtime.stopped",
+        4,
+    );
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn persists_gets_and_idempotently_retries_a_run_over_the_real_protocol() {
     let fixture = Fixture::new();
     let (mut child, _hello) = spawn_and_read_hello();

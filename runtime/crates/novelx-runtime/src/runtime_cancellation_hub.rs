@@ -278,7 +278,11 @@ impl RuntimeCancellationHub {
                 signal
             }
         };
-        signal_matching(state.registrations.iter(), effective.cause, |_| true)
+        let receipt = signal_matching(state.registrations.iter(), effective.cause, |_| true)?;
+        drop(state);
+        #[cfg(feature = "runtime-test-failpoints")]
+        crate::runtime_test_failpoint::observe("runtime_cancellation.global_signalled");
+        Ok(receipt)
     }
 
     pub fn signal_run_cancel(

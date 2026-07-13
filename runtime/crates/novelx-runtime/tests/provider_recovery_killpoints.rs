@@ -28,8 +28,8 @@ use novelx_runtime::{
     context_compile_service::ContextCompileService,
     event_journal::{EventJournal, RuntimeEvent},
     operational_recovery_aggregate::{
-        OperationalRecoveryEffectClass, OperationalRecoveryOperation, OperationalRecoveryOutcome,
-        OperationalRecoveryRepository,
+        OperationalRecoveryEffectClass, OperationalRecoveryInterruptionCause,
+        OperationalRecoveryOperation, OperationalRecoveryOutcome, OperationalRecoveryRepository,
     },
     provider_attempt::{
         ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptMetadata,
@@ -44,7 +44,7 @@ use novelx_runtime::{
         ProviderInputCapability, ProviderRegistry, ProviderRetryPolicy, provider_config_sha256,
     },
     run_aggregate::{EventMetadata, RunAggregate},
-    runtime_test_failpoint::{DIRECTORY_ENV, NAME_ENV, TOKEN_ENV},
+    runtime_test_failpoint::{DIRECTORY_ENV, NAME_ENV, OBSERVER_NAME_ENV, TOKEN_ENV},
     workspace_event_journal::WorkspaceEventJournal,
 };
 use sha2::{Digest, Sha256};
@@ -57,6 +57,11 @@ const SECRET: &str = "provider-recovery-killpoint-secret";
 const WORKSPACE_ID: &str = "workspace-1";
 const PROJECT_ID: &str = "project-1";
 const EXECUTION_STARTED: &str = "provider_dispatch.execution_started";
+const BEFORE_CANCELLATION_REGISTRATION: &str = "provider_dispatch.before_cancellation_registration";
+const BEFORE_INJECTED_INTERNAL_RECOVERY_FAILURE: &str =
+    "operational_recovery.before_injected_internal_failure";
+const GLOBAL_CANCELLATION_SIGNALLED: &str = "runtime_cancellation.global_signalled";
+const HOST_BACKLOG_CAPACITY: usize = 64;
 const SENT_BEFORE_HTTP: &str = "provider_attempt.authorized_sent_before_http";
 const RESPONSE_BEFORE_TERMINAL: &str = "provider_attempt.authorized_response_before_terminal";
 const RESPONDED_BEFORE_RECOVERY_OUTCOME: &str =
@@ -356,6 +361,317 @@ fn kill_after_recovery_persisted_before_host_response_is_restart_idempotent() {
     assert_eq!(provider.request_bodies().len(), 1);
 }
 
+#[test]
+fn shutdown_before_recovery_registration_persists_interruption_without_sent_or_http() {
+    assert_host_stop_before_recovery_registration(HostPreSentStop::Shutdown);
+}
+
+#[test]
+fn eof_before_recovery_registration_persists_interruption_without_sent_or_http() {
+    assert_host_stop_before_recovery_registration(HostPreSentStop::Disconnect);
+}
+
+#[test]
+fn recovery_backlog_rejects_overflow_as_busy_and_still_reaches_shutdown() {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let fixture = Fixture::new();
+    let provider = LoopbackProvider::start();
+    let configured = ConfiguredProvider::new(provider.base_url.clone());
+    let seeded = fixture.seed_requested(&configured);
+    let arm = fixture.arm_with_observer(
+        BEFORE_CANCELLATION_REGISTRATION,
+        GLOBAL_CANCELLATION_SIGNALLED,
+    );
+    let mut runtime = RuntimeProcess::spawn(Some(&arm));
+    runtime.initialize(&fixture.path);
+    let bind_message_id = runtime.send_provider_bind_with_message_id(2, &configured);
+    arm.wait_until_reached(&mut runtime);
+
+    let statuses = (0..70)
+        .map(|offset| {
+            Envelope::new(
+                MessageType::Command,
+                "runtime.status.get",
+                "2026-07-13T00:00:02Z",
+                3 + offset,
+                serde_json::json!({}),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for status in &statuses {
+        write_envelope(&mut runtime.child, status);
+    }
+    let shutdown = Envelope::new(
+        MessageType::Command,
+        "runtime.shutdown",
+        "2026-07-13T00:00:03Z",
+        73,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    write_envelope(&mut runtime.child, &shutdown);
+
+    arm.wait_until_observed(&mut runtime);
+    arm.release();
+
+    for status in statuses.iter().skip(HOST_BACKLOG_CAPACITY) {
+        let busy = runtime.read_envelope("RUNTIME_BUSY overflow rejection");
+        assert_eq!(busy.name, "runtime.error");
+        assert_eq!(busy.correlation_id, Some(status.message_id));
+        assert_eq!(busy.payload["code"], "RUNTIME_BUSY");
+        assert_eq!(busy.payload["retryable"], true);
+        assert_eq!(busy.payload["stage"], "operational_recovery.backpressure");
+    }
+    let bound = runtime.read_envelope("provider.bound after backlog shutdown");
+    assert_eq!(bound.name, "provider.bound");
+    assert_eq!(bound.correlation_id, Some(bind_message_id));
+    for status in statuses.iter().take(HOST_BACKLOG_CAPACITY) {
+        let rejected = runtime.read_envelope("queued command shutdown rejection");
+        assert_eq!(rejected.name, "runtime.error");
+        assert_eq!(rejected.correlation_id, Some(status.message_id));
+        assert_eq!(rejected.payload["code"], "RUNTIME_SHUTTING_DOWN");
+    }
+    let stopped = runtime.read_envelope("runtime.stopped after backlog shutdown");
+    assert_eq!(stopped.name, "runtime.stopped");
+    assert_eq!(stopped.correlation_id, Some(shutdown.message_id));
+    assert_eq!(stopped.payload["reason"], "requested");
+    runtime.wait_success();
+
+    assert_eq!(provider.request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        vec!["provider.requested"]
+    );
+    assert_eq!(fixture.execution_interrupted_event_count(&seeded.run_id), 1);
+}
+
+#[test]
+fn recovery_fatal_waits_then_rejects_earlier_commands_without_faking_stopped() {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let fixture = Fixture::new();
+    let provider = LoopbackProvider::start();
+    let configured = ConfiguredProvider::new(provider.base_url.clone());
+    let seeded = fixture.seed_requested(&configured);
+    let arm = fixture.arm_with_observer(
+        BEFORE_CANCELLATION_REGISTRATION,
+        GLOBAL_CANCELLATION_SIGNALLED,
+    );
+    let mut runtime = RuntimeProcess::spawn(Some(&arm));
+    runtime.initialize(&fixture.path);
+    let bind_message_id = runtime.send_provider_bind_with_message_id(2, &configured);
+    arm.wait_until_reached(&mut runtime);
+
+    let first = Envelope::new(
+        MessageType::Command,
+        "runtime.status.get",
+        "2026-07-13T00:00:02Z",
+        3,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let second = Envelope::new(
+        MessageType::Command,
+        "runtime.status.get",
+        "2026-07-13T00:00:02Z",
+        4,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let fatal = Envelope::new(
+        MessageType::Command,
+        "runtime.unknown",
+        "2026-07-13T00:00:03Z",
+        5,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    write_envelope(&mut runtime.child, &first);
+    write_envelope(&mut runtime.child, &second);
+    write_envelope(&mut runtime.child, &fatal);
+
+    arm.wait_until_observed(&mut runtime);
+    arm.release();
+
+    let bound = runtime.read_envelope("provider.bound before later Fatal");
+    assert_eq!(bound.name, "provider.bound");
+    assert_eq!(bound.correlation_id, Some(bind_message_id));
+    for command in [&first, &second] {
+        let rejected = runtime.read_envelope("earlier command rejection before Fatal");
+        assert_eq!(rejected.name, "runtime.error");
+        assert_eq!(rejected.correlation_id, Some(command.message_id));
+        assert_eq!(rejected.payload["code"], "RUNTIME_SHUTTING_DOWN");
+    }
+    let protocol_error = runtime.read_envelope("ordered Fatal protocol error");
+    assert_eq!(protocol_error.name, "runtime.error");
+    assert_eq!(protocol_error.correlation_id, Some(fatal.message_id));
+    assert_eq!(protocol_error.payload["code"], "RUNTIME_PROTOCOL_ERROR");
+    let remaining = runtime.wait_failure();
+    assert!(
+        remaining
+            .iter()
+            .all(|envelope| envelope.name != "runtime.stopped"),
+        "Fatal must not forge a normal runtime.stopped lifecycle frame"
+    );
+
+    assert_eq!(provider.request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        vec!["provider.requested"]
+    );
+    let (_, operation) = fixture.dispatch_operation(&seeded.run_id);
+    assert_eq!(operation.interruptions.len(), 1);
+    assert_eq!(
+        operation.interruptions[0].cause,
+        OperationalRecoveryInterruptionCause::HostDisconnected
+    );
+}
+
+#[test]
+fn internal_recovery_fatal_suppresses_provider_bound_and_stops_without_stopped() {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let fixture = Fixture::new();
+    let provider = LoopbackProvider::start();
+    let configured = ConfiguredProvider::new(provider.base_url.clone());
+    let seeded = fixture.seed_requested(&configured);
+    let arm = fixture.arm(BEFORE_INJECTED_INTERNAL_RECOVERY_FAILURE);
+    let mut runtime = RuntimeProcess::spawn(Some(&arm));
+    runtime.initialize(&fixture.path);
+    runtime.send_provider_bind(2, &configured);
+    arm.wait_until_reached(&mut runtime);
+    arm.release();
+
+    let fatal = runtime.read_envelope("internal Operational Recovery Fatal");
+    assert_eq!(fatal.name, "runtime.error");
+    assert_eq!(fatal.correlation_id, None);
+    assert_eq!(fatal.payload["code"], "RUNTIME_OPERATIONAL_RECOVERY_FAILED");
+    let remaining = runtime.wait_failure();
+    assert!(
+        remaining
+            .iter()
+            .all(|envelope| envelope.name != "provider.bound" && envelope.name != "runtime.stopped")
+    );
+    assert_eq!(provider.request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        vec!["provider.requested"]
+    );
+}
+
+#[derive(Clone, Copy)]
+enum HostPreSentStop {
+    Shutdown,
+    Disconnect,
+}
+
+fn assert_host_stop_before_recovery_registration(stop: HostPreSentStop) {
+    let _serial = TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let fixture = Fixture::new();
+    let provider = LoopbackProvider::start();
+    let configured = ConfiguredProvider::new(provider.base_url.clone());
+    let seeded = fixture.seed_requested(&configured);
+    let arm = fixture.arm_with_observer(
+        BEFORE_CANCELLATION_REGISTRATION,
+        GLOBAL_CANCELLATION_SIGNALLED,
+    );
+    let mut runtime = RuntimeProcess::spawn(Some(&arm));
+    runtime.initialize(&fixture.path);
+    let bind_message_id = runtime.send_provider_bind_with_message_id(2, &configured);
+    arm.wait_until_reached(&mut runtime);
+
+    assert_eq!(provider.request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        vec!["provider.requested"],
+        "the blocking point must precede both recovery registration and provider.sent"
+    );
+
+    let shutdown_message_id = match stop {
+        HostPreSentStop::Shutdown => {
+            let shutdown = Envelope::new(
+                MessageType::Command,
+                "runtime.shutdown",
+                "2026-07-13T00:00:02Z",
+                3,
+                serde_json::json!({}),
+            )
+            .unwrap();
+            let message_id = shutdown.message_id;
+            write_envelope(&mut runtime.child, &shutdown);
+            Some(message_id)
+        }
+        HostPreSentStop::Disconnect => {
+            drop(runtime.child.stdin.take());
+            None
+        }
+    };
+
+    arm.wait_until_observed(&mut runtime);
+    assert_eq!(provider.request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        vec!["provider.requested"],
+        "sticky Host cancellation must be committed while recovery is still pre-registration"
+    );
+    arm.release();
+
+    let bound = runtime.read_envelope("provider.bound after pre-Sent interruption");
+    assert_eq!(bound.name, "provider.bound", "{:?}", bound.payload);
+    assert_eq!(bound.correlation_id, Some(bind_message_id));
+
+    let (operation_id, operation) = fixture.dispatch_operation(&seeded.run_id);
+    assert!(operation.outcome.is_none());
+    assert_eq!(operation.interruptions.len(), 1);
+    let interruption = &operation.interruptions[0];
+    assert_eq!(interruption.operation_id, operation_id);
+    assert_eq!(interruption.attempt_id, seeded.attempt_id);
+    assert!(!interruption.transport_boundary_crossed);
+    assert!(interruption.resumable);
+    assert_eq!(
+        interruption.cause,
+        match stop {
+            HostPreSentStop::Shutdown => OperationalRecoveryInterruptionCause::RuntimeShutdown,
+            HostPreSentStop::Disconnect => OperationalRecoveryInterruptionCause::HostDisconnected,
+        }
+    );
+    assert_eq!(
+        fixture.execution_interrupted_event_count(&seeded.run_id),
+        1,
+        "provider.bound must not be emitted until execution_interrupted is durable"
+    );
+    assert_eq!(
+        fixture.attempt_event_types(&seeded),
+        vec!["provider.requested"],
+    );
+    assert_eq!(provider.request_count.load(Ordering::SeqCst), 0);
+
+    let stopped = runtime.read_envelope("runtime.stopped after pre-Sent interruption");
+    assert_eq!(stopped.name, "runtime.stopped", "{:?}", stopped.payload);
+    assert_eq!(stopped.correlation_id, shutdown_message_id);
+    assert_eq!(
+        stopped.payload["reason"],
+        match stop {
+            HostPreSentStop::Shutdown => "requested",
+            HostPreSentStop::Disconnect => "host_disconnected",
+        }
+    );
+    runtime.wait_success();
+
+    assert_eq!(
+        fixture.attempt_state(&seeded),
+        ProviderAttemptState::Requested
+    );
+    assert_eq!(provider.request_count.load(Ordering::SeqCst), 0);
+}
+
 struct RuntimeProcess {
     child: Child,
     output: mpsc::Receiver<RuntimeOutput>,
@@ -388,11 +704,17 @@ impl RuntimeProcess {
                 .env(NAME_ENV, arm.name)
                 .env(TOKEN_ENV, arm.token.to_string())
                 .env(DIRECTORY_ENV, &arm.directory);
+            if let Some(observer_name) = arm.observer_name {
+                command.env(OBSERVER_NAME_ENV, observer_name);
+            } else {
+                command.env_remove(OBSERVER_NAME_ENV);
+            }
         } else {
             command
                 .env_remove(NAME_ENV)
                 .env_remove(TOKEN_ENV)
-                .env_remove(DIRECTORY_ENV);
+                .env_remove(DIRECTORY_ENV)
+                .env_remove(OBSERVER_NAME_ENV);
         }
         let mut child = command.spawn().expect("Runtime child must spawn");
         let stdout = child.stdout.take().expect("Runtime stdout must be piped");
@@ -461,11 +783,20 @@ impl RuntimeProcess {
     }
 
     fn send_provider_bind(&mut self, sequence: u64, provider: &ConfiguredProvider) {
+        let _ = self.send_provider_bind_with_message_id(sequence, provider);
+    }
+
+    fn send_provider_bind_with_message_id(
+        &mut self,
+        sequence: u64,
+        provider: &ConfiguredProvider,
+    ) -> Uuid {
+        let message_id = Uuid::new_v4();
         write_json(
             &mut self.child,
             serde_json::json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "messageId": Uuid::new_v4(),
+                "messageId": message_id,
                 "messageType": "sensitive_command",
                 "name": "provider.bind",
                 "sentAt": "2026-07-13T00:00:01Z",
@@ -479,6 +810,7 @@ impl RuntimeProcess {
                 }
             }),
         );
+        message_id
     }
 
     fn bind_provider(&mut self, sequence: u64, provider: &ConfiguredProvider) {
@@ -501,11 +833,56 @@ impl RuntimeProcess {
             self.read_envelope("runtime.stopped").name,
             "runtime.stopped"
         );
+        self.wait_success();
+    }
+
+    fn wait_success(&mut self) {
         drop(self.child.stdin.take());
-        let status = self.child.wait().expect("Runtime shutdown must wait");
+        let deadline = Instant::now() + RUNTIME_RESPONSE_TIMEOUT;
+        let status = loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .expect("Runtime status must be readable")
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                self.fail_and_cleanup(
+                    "Runtime successful exit",
+                    "Runtime did not exit before the hard timeout",
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         self.finished = true;
         self.join_readers();
-        assert!(status.success());
+        assert!(status.success(), "Runtime exited unsuccessfully: {status}");
+    }
+
+    fn wait_failure(&mut self) -> Vec<Envelope> {
+        drop(self.child.stdin.take());
+        let deadline = Instant::now() + RUNTIME_RESPONSE_TIMEOUT;
+        let status = loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .expect("Runtime status must be readable")
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                self.fail_and_cleanup(
+                    "Runtime Fatal exit",
+                    "Runtime did not exit before the hard timeout",
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        self.finished = true;
+        self.join_readers();
+        assert!(!status.success(), "Fatal Runtime exit must be non-zero");
+        self.remaining_envelopes()
     }
 
     fn read_envelope(&mut self, expected_stage: &'static str) -> Envelope {
@@ -639,9 +1016,12 @@ impl Drop for RuntimeProcess {
 
 struct FailpointArm {
     name: &'static str,
+    observer_name: Option<&'static str>,
     token: Uuid,
     directory: PathBuf,
     reached_path: PathBuf,
+    observed_path: Option<PathBuf>,
+    release_path: PathBuf,
 }
 
 impl FailpointArm {
@@ -672,6 +1052,44 @@ impl FailpointArm {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn wait_until_observed(&self, runtime: &mut RuntimeProcess) {
+        let observed_path = self
+            .observed_path
+            .as_ref()
+            .expect("this failpoint arm has no observer");
+        let observer_name = self.observer_name.expect("observer name must exist");
+        let deadline = Instant::now() + RUNTIME_RESPONSE_TIMEOUT;
+        loop {
+            if observed_path.exists() {
+                let marker: serde_json::Value = serde_json::from_slice(
+                    &fs::read(observed_path).expect("observer marker must be readable"),
+                )
+                .expect("observer marker must be valid JSON");
+                assert_eq!(marker["name"], observer_name);
+                assert_eq!(marker["token"], self.token.to_string());
+                assert_eq!(marker["processId"], runtime.child.id());
+                return;
+            }
+            if let Some(status) = runtime
+                .child
+                .try_wait()
+                .expect("Runtime status must be readable")
+            {
+                runtime.unexpected_exit(status);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Runtime did not publish observer `{observer_name}` within the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn release(&self) {
+        fs::write(&self.release_path, b"release\n")
+            .expect("Runtime test failpoint release marker must be written");
     }
 }
 
@@ -805,17 +1223,54 @@ impl Fixture {
     }
 
     fn arm(&self, name: &'static str) -> FailpointArm {
+        self.arm_optional_observer(name, None)
+    }
+
+    fn arm_with_observer(&self, name: &'static str, observer_name: &'static str) -> FailpointArm {
+        self.arm_optional_observer(name, Some(observer_name))
+    }
+
+    fn arm_optional_observer(
+        &self,
+        name: &'static str,
+        observer_name: Option<&'static str>,
+    ) -> FailpointArm {
         let token = Uuid::new_v4();
         let directory = self.temp.path().join(format!("failpoint-{token}"));
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join(format!("armed-{token}")), name).unwrap();
+        if let Some(observer_name) = observer_name {
+            fs::write(
+                directory.join(format!("observer-armed-{token}")),
+                observer_name,
+            )
+            .unwrap();
+        }
         let directory = directory.canonicalize().unwrap();
         FailpointArm {
             name,
+            observer_name,
             token,
             reached_path: directory.join(format!("reached-{token}.json")),
+            observed_path: observer_name.map(|_| directory.join(format!("observed-{token}.json"))),
+            release_path: directory.join(format!("release-{token}")),
             directory,
         }
+    }
+
+    fn execution_interrupted_event_count(&self, run_id: &str) -> usize {
+        WorkspaceEventJournal::open(&self.path)
+            .unwrap()
+            .read_stream(
+                WORKSPACE_ID,
+                "operational_recovery",
+                &format!("run:{run_id}"),
+                0,
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.payload["data"]["kind"] == "execution_interrupted")
+            .count()
     }
 
     fn seed_requested(&self, provider: &ConfiguredProvider) -> SeededRun {

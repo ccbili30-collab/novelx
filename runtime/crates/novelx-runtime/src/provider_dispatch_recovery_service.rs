@@ -310,6 +310,10 @@ impl ProviderDispatchRecoveryService {
                 request.execution_id.clone(),
                 dispatch.attempt_id.clone(),
             )?;
+            #[cfg(feature = "runtime-test-failpoints")]
+            crate::runtime_test_failpoint::hit(
+                "provider_dispatch.before_cancellation_registration",
+            );
             let registration = cancellation_hub.register(task_identity)?;
             let authorizer = match ProviderRecoveryEffectAuthorizationService::new(
                 &self.database_path,

@@ -10,13 +10,16 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use novelx_protocol::{
     ContextCompilationReceipt, ContextDisclosure, ContextItem, ContextMessageRole, Envelope,
     MessageType, PROTOCOL_VERSION, ProviderRunIdentity, RuntimeApplicationIdentity,
-    RuntimeInitialize, ToolPermissionPolicy, ToolSourceScope,
+    RuntimeInitialize, RuntimeStopped, ToolPermissionPolicy, ToolSourceScope,
 };
 use novelx_runtime::{
     agent_assignment_recovery::recover_agent_assignments,
@@ -171,6 +174,133 @@ fn runtime_bind_recovers_old_owner_dispatch_projects_locally_and_never_resends()
         authority.actor,
         OperationalRecoveryActorBinding::ResumeAuthorized { .. }
     ));
+    server.stop();
+}
+
+#[test]
+fn held_provider_http_shutdown_persists_outcome_unknown_before_stopped() {
+    assert_held_provider_lifecycle(HostStop::Shutdown);
+}
+
+#[test]
+fn held_provider_http_eof_persists_outcome_unknown_before_stopped() {
+    assert_held_provider_lifecycle(HostStop::Disconnect);
+}
+
+#[derive(Clone, Copy)]
+enum HostStop {
+    Shutdown,
+    Disconnect,
+}
+
+fn assert_held_provider_lifecycle(stop: HostStop) {
+    let fixture = Fixture::new();
+    let server = HeldLoopbackProvider::start();
+    let config = test_provider_config(server.base_url.clone());
+    let config_sha256 = provider_config_sha256(&config).unwrap();
+    let provider = ProviderRunIdentity {
+        profile_id: config.profile_id.clone(),
+        provider_id: config.provider_id.clone(),
+        model_id: config.model_id.clone(),
+        config_sha256: config_sha256.clone(),
+    };
+    let mut providers = ProviderRegistry::default();
+    providers
+        .bind(config.clone(), &config_sha256, SECRET.to_owned())
+        .unwrap();
+    let gateway = ProviderGateway::new().unwrap();
+    let seeded = fixture.seed_requested(&providers, &provider, &gateway);
+    let started = fixture.start_provider_dispatch(&seeded, "dead-runtime-owner-held");
+    drop(started.lease);
+
+    let mut runtime = TimedRuntime::spawn();
+    runtime.send(serde_json::to_value(initialize_envelope(&fixture.path)).unwrap());
+    assert_eq!(runtime.read("runtime.ready").name, "runtime.ready");
+    let bind_message_id = Uuid::new_v4();
+    runtime.send(serde_json::json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "messageId": bind_message_id,
+        "messageType": "sensitive_command",
+        "name": "provider.bind",
+        "sentAt": "2026-07-13T00:00:01Z",
+        "correlationId": null,
+        "runId": null,
+        "sequence": 2,
+        "payload": {
+            "config": config,
+            "configSha256": config_sha256,
+            "credential": SECRET,
+        }
+    }));
+    server.wait_for_request();
+    assert!(
+        WorkspaceRuntimeLease::acquire(&fixture.path, "held-http-contender").is_err(),
+        "the Runtime must retain the workspace lease while recovery HTTP is in flight"
+    );
+
+    let queued_status = Envelope::new(
+        MessageType::Command,
+        "runtime.status.get",
+        "2026-07-13T00:00:01Z",
+        3,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let queued_status_message_id = queued_status.message_id;
+    runtime.send(serde_json::to_value(queued_status).unwrap());
+
+    let shutdown_message_id = match stop {
+        HostStop::Shutdown => {
+            let shutdown = Envelope::new(
+                MessageType::Command,
+                "runtime.shutdown",
+                "2026-07-13T00:00:02Z",
+                4,
+                serde_json::json!({}),
+            )
+            .unwrap();
+            let message_id = shutdown.message_id;
+            runtime.send(serde_json::to_value(shutdown).unwrap());
+            Some(message_id)
+        }
+        HostStop::Disconnect => {
+            runtime.disconnect();
+            None
+        }
+    };
+
+    let bound = runtime.read("provider.bound");
+    assert_eq!(bound.name, "provider.bound");
+    assert_eq!(bound.correlation_id, Some(bind_message_id));
+    let rejected = runtime.read("runtime.error for queued command");
+    assert_eq!(rejected.name, "runtime.error");
+    assert_eq!(rejected.correlation_id, Some(queued_status_message_id));
+    assert_eq!(rejected.payload["code"], "RUNTIME_SHUTTING_DOWN");
+    let stopped = runtime.read("runtime.stopped");
+    assert_eq!(stopped.name, "runtime.stopped");
+    assert_eq!(stopped.correlation_id, shutdown_message_id);
+    let stopped: RuntimeStopped = serde_json::from_value(stopped.payload).unwrap();
+    assert_eq!(
+        stopped.reason,
+        match stop {
+            HostStop::Shutdown => "requested",
+            HostStop::Disconnect => "host_disconnected",
+        }
+    );
+    assert_eq!(server.request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.attempt_state(&seeded),
+        ProviderAttemptState::OutcomeUnknown
+    );
+    assert!(matches!(
+        fixture.dispatch_outcome(&seeded.run_id, &started.operation_id),
+        Some(OperationalRecoveryOutcome::OutcomeUnknown { .. })
+    ));
+    runtime.wait_success();
+    drop(
+        WorkspaceRuntimeLease::acquire(&fixture.path, "held-http-after-stop")
+            .expect("runtime.stopped must be followed by root workspace lease release"),
+    );
     server.stop();
 }
 
@@ -482,6 +612,221 @@ impl LoopbackProvider {
     fn stop(self) {
         self.stop.send(()).unwrap();
         self.thread.join().unwrap();
+    }
+}
+
+struct HeldLoopbackProvider {
+    base_url: String,
+    request_count: Arc<AtomicUsize>,
+    request_seen: mpsc::Receiver<()>,
+    stop: mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HeldLoopbackProvider {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&request_count);
+        let (request_sender, request_seen) = mpsc::channel();
+        let (stop, stop_receiver) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            loop {
+                if stop_receiver.try_recv().is_ok() {
+                    return;
+                }
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        socket.set_nonblocking(false).unwrap();
+                        socket
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = [0_u8; 65_536];
+                        let length = socket.read(&mut request).unwrap();
+                        let request = String::from_utf8_lossy(&request[..length]);
+                        assert!(request.contains(&format!("Bearer {SECRET}")));
+                        request_sender.send(()).unwrap();
+                        loop {
+                            if stop_receiver
+                                .recv_timeout(Duration::from_millis(50))
+                                .is_ok()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("held loopback Provider accept failed: {error}"),
+                }
+            }
+        });
+        Self {
+            base_url: format!("http://{address}/v1"),
+            request_count,
+            request_seen,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn wait_for_request(&self) {
+        self.request_seen
+            .recv_timeout(Duration::from_secs(10))
+            .expect("held Provider did not receive the Runtime request before the hard timeout");
+    }
+
+    fn stop(mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+impl Drop for HeldLoopbackProvider {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct TimedRuntime {
+    child: Option<Child>,
+    output: mpsc::Receiver<Result<Envelope, String>>,
+    output_thread: Option<std::thread::JoinHandle<()>>,
+    stderr_thread: Option<std::thread::JoinHandle<String>>,
+}
+
+impl TimedRuntime {
+    fn spawn() -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_novelx-runtime"));
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+        let mut child = command.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (output_sender, output) = mpsc::channel();
+        let output_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => return,
+                    Ok(_) => {
+                        let parsed = serde_json::from_str(line.trim())
+                            .map_err(|error| format!("invalid Runtime output: {error}; {line}"));
+                        if output_sender.send(parsed).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ =
+                            output_sender.send(Err(format!("Runtime output read failed: {error}")));
+                        return;
+                    }
+                }
+            }
+        });
+        let stderr_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut captured = String::new();
+            let _ = reader.read_to_string(&mut captured);
+            captured
+        });
+        let mut runtime = Self {
+            child: Some(child),
+            output,
+            output_thread: Some(output_thread),
+            stderr_thread: Some(stderr_thread),
+        };
+        assert_eq!(runtime.read("runtime.hello").name, "runtime.hello");
+        runtime
+    }
+
+    fn send(&mut self, value: serde_json::Value) {
+        let stdin = self
+            .child
+            .as_mut()
+            .and_then(|child| child.stdin.as_mut())
+            .expect("Runtime stdin is closed");
+        writeln!(stdin, "{}", serde_json::to_string(&value).unwrap()).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    fn disconnect(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            drop(child.stdin.take());
+        }
+    }
+
+    fn read(&mut self, expected: &str) -> Envelope {
+        match self.output.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(envelope)) => envelope,
+            Ok(Err(error)) => {
+                self.kill_and_wait();
+                panic!("failed while waiting for {expected}: {error}");
+            }
+            Err(error) => {
+                self.kill_and_wait();
+                panic!("hard timeout while waiting for {expected}: {error}");
+            }
+        }
+    }
+
+    fn wait_success(mut self) {
+        self.disconnect();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            let child = self.child.as_mut().expect("Runtime child exists");
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                self.kill_and_wait();
+                panic!("Runtime did not exit before the hard timeout");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        self.child.take();
+        self.join_readers();
+        assert!(status.success(), "Runtime exited unsuccessfully: {status}");
+    }
+
+    fn kill_and_wait(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            drop(child.stdin.take());
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+        self.join_readers();
+    }
+
+    fn join_readers(&mut self) {
+        if let Some(thread) = self.output_thread.take() {
+            let _ = thread.join();
+        }
+        if let Some(thread) = self.stderr_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for TimedRuntime {
+    fn drop(&mut self) {
+        self.kill_and_wait();
     }
 }
 

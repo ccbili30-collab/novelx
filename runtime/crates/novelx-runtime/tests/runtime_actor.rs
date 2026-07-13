@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tokio::time::{Duration, timeout};
 
 #[tokio::test]
@@ -107,6 +107,37 @@ async fn drain_waits_for_pending_task_terminal_before_stopped() {
     assert_eq!(stopped.sequence, 23);
     shutdown.await.unwrap().unwrap();
     assert!(actor_task.await.unwrap().is_ok());
+    assert!(lines.next_line().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn fatal_termination_aborts_a_permanent_task_without_faking_stopped() {
+    let (writer, reader) = tokio::io::duplex(16 * 1024);
+    let (actor, handle) = RuntimeActor::new(writer, 30, 4);
+    let actor_task = tokio::spawn(actor.run());
+    let mut lines = BufReader::new(reader).lines();
+
+    handle
+        .start_task(
+            task_key(),
+            draft("task.accepted", MessageType::Response),
+            draft("runtime.error", MessageType::Event),
+            |_| {
+                Box::pin(async move {
+                    std::future::pending::<Result<RuntimeOutputDraft, String>>().await
+                })
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(next_envelope(&mut lines).await.name, "task.accepted");
+
+    timeout(Duration::from_secs(1), handle.terminate_fatal())
+        .await
+        .expect("Fatal termination must not wait forever for a permanent task")
+        .unwrap();
+    assert!(actor_task.await.unwrap().is_ok());
+    drop(handle);
     assert!(lines.next_line().await.unwrap().is_none());
 }
 
@@ -317,6 +348,196 @@ async fn cancel_run_signals_the_matching_run_attempt() {
         .shutdown(draft("runtime.stopped", MessageType::Control))
         .await
         .unwrap();
+    assert!(actor_task.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_task_keys_allow_exactly_one_active_owner() {
+    let (writer, reader) = tokio::io::duplex(16 * 1024);
+    let (actor, handle) = RuntimeActor::new(writer, 45, 8);
+    let actor_task = tokio::spawn(actor.run());
+    let mut lines = BufReader::new(reader).lines();
+    let key = task_key();
+    let release = Arc::new(Notify::new());
+
+    let first = {
+        let handle = handle.clone();
+        let release = Arc::clone(&release);
+        async move {
+            handle
+                .start_task(
+                    key,
+                    draft("first.accepted", MessageType::Response),
+                    draft("first.failed", MessageType::Event),
+                    move |_| {
+                        Box::pin(async move {
+                            release.notified().await;
+                            Ok(draft("first.completed", MessageType::Event))
+                        })
+                    },
+                )
+                .await
+        }
+    };
+    let second = {
+        let handle = handle.clone();
+        let release = Arc::clone(&release);
+        async move {
+            handle
+                .start_task(
+                    key,
+                    draft("second.accepted", MessageType::Response),
+                    draft("second.failed", MessageType::Event),
+                    move |_| {
+                        Box::pin(async move {
+                            release.notified().await;
+                            Ok(draft("second.completed", MessageType::Event))
+                        })
+                    },
+                )
+                .await
+        }
+    };
+
+    let (first_result, second_result) = tokio::join!(first, second);
+    let results = [first_result, second_result];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let rejected = results
+        .iter()
+        .find_map(|result| result.as_ref().err())
+        .expect("one duplicate start must be rejected");
+    assert!(matches!(
+        rejected,
+        RuntimeActorError::TaskAlreadyActive { run_id, attempt_id }
+            if *run_id == key.run_id && *attempt_id == key.attempt_id
+    ));
+
+    let accepted = next_envelope(&mut lines).await;
+    assert!(matches!(
+        accepted.name.as_str(),
+        "first.accepted" | "second.accepted"
+    ));
+    assert!(
+        timeout(Duration::from_millis(50), lines.next_line())
+            .await
+            .is_err(),
+        "a rejected duplicate must not emit an accepted frame"
+    );
+
+    release.notify_one();
+    let completed = next_envelope(&mut lines).await;
+    assert!(matches!(
+        completed.name.as_str(),
+        "first.completed" | "second.completed"
+    ));
+    handle
+        .shutdown(draft("runtime.stopped", MessageType::Control))
+        .await
+        .unwrap();
+    assert_eq!(next_envelope(&mut lines).await.name, "runtime.stopped");
+    assert!(actor_task.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn completed_task_key_can_be_reused() {
+    let (writer, reader) = tokio::io::duplex(16 * 1024);
+    let (actor, handle) = RuntimeActor::new(writer, 60, 8);
+    let actor_task = tokio::spawn(actor.run());
+    let mut lines = BufReader::new(reader).lines();
+    let key = task_key();
+
+    handle
+        .start_task(
+            key,
+            draft("first.accepted", MessageType::Response),
+            draft("first.failed", MessageType::Event),
+            |_| Box::pin(async { Ok(draft("first.completed", MessageType::Event)) }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next_envelope(&mut lines).await.name, "first.accepted");
+    assert_eq!(next_envelope(&mut lines).await.name, "first.completed");
+
+    handle
+        .start_task(
+            key,
+            draft("second.accepted", MessageType::Response),
+            draft("second.failed", MessageType::Event),
+            |_| Box::pin(async { Ok(draft("second.completed", MessageType::Event)) }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next_envelope(&mut lines).await.name, "second.accepted");
+    assert_eq!(next_envelope(&mut lines).await.name, "second.completed");
+
+    handle
+        .shutdown(draft("runtime.stopped", MessageType::Control))
+        .await
+        .unwrap();
+    assert_eq!(next_envelope(&mut lines).await.name, "runtime.stopped");
+    assert!(actor_task.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn duplicate_rejection_preserves_original_task_cancellation_reachability() {
+    let (writer, reader) = tokio::io::duplex(16 * 1024);
+    let (actor, handle) = RuntimeActor::new(writer, 70, 8);
+    let actor_task = tokio::spawn(actor.run());
+    let mut lines = BufReader::new(reader).lines();
+    let key = task_key();
+
+    handle
+        .start_task(
+            key,
+            draft("original.accepted", MessageType::Response),
+            draft("original.failed", MessageType::Event),
+            |mut cancellation| {
+                Box::pin(async move {
+                    cancellation
+                        .changed()
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if *cancellation.borrow() {
+                        Ok(draft("original.cancelled", MessageType::Event))
+                    } else {
+                        Err("cancellation signal was false".to_owned())
+                    }
+                })
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(next_envelope(&mut lines).await.name, "original.accepted");
+
+    let duplicate = handle
+        .start_task(
+            key,
+            draft("duplicate.accepted", MessageType::Response),
+            draft("duplicate.failed", MessageType::Event),
+            |_| Box::pin(async { Ok(draft("duplicate.completed", MessageType::Event)) }),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        duplicate,
+        RuntimeActorError::TaskAlreadyActive { run_id, attempt_id }
+            if run_id == key.run_id && attempt_id == key.attempt_id
+    ));
+
+    handle.cancel_run(key.run_id).await.unwrap();
+    assert_eq!(next_envelope(&mut lines).await.name, "original.cancelled");
+    assert!(
+        timeout(Duration::from_millis(50), lines.next_line())
+            .await
+            .is_err(),
+        "the rejected duplicate must not replace or complete beside the original task"
+    );
+
+    handle
+        .shutdown(draft("runtime.stopped", MessageType::Control))
+        .await
+        .unwrap();
+    assert_eq!(next_envelope(&mut lines).await.name, "runtime.stopped");
     assert!(actor_task.await.unwrap().is_ok());
 }
 
