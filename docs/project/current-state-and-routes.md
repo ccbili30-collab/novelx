@@ -7,7 +7,9 @@
 
 - 应用：NovelX Desktop `0.2.7`。
 - 技术栈：Electron 43、React 19、TypeScript 6、SQLite 领域存储、Rust Runtime V2。
-- 当前本地分支来源：`codex/stage4-memory-stage5-6`。
+- 迁移来源分支：`codex/stage4-memory-stage5-6`。
+- 长远分支：`codex/long-term-main`，产品基线提交 `a119da8`。
+- 黑客松分支：`codex/hackathon-10day`，当前 WIP 提交 `cc17aab`。
 - 远端：`https://github.com/ccbili30-collab/novelx.git`。
 - 最近一次已验证且提交的工作树头：`8bb1695`。
 - GitHub 推送曾因本机凭据失效而失败；以下状态首先是本地事实，不能据此宣称远端 Release 已更新。
@@ -37,9 +39,9 @@ A2.2 只证明一批可靠性地基：Bound Lease、Provider legacy 封口、bin
 
 验收记录：`notes/status/2026-07-14-hackathon-creative-showcase.md`。该提交记录 Unit 440/440、Integration 22/22、合计 462/462、E2E 2/2、typecheck 和 build 通过。
 
-## 4. 当前 WIP（不得描述为完成）
+## 4. 已保存的黑客松 WIP（不得描述为完成）
 
-源工作树存在 6 个未提交文件：
+`cc17aab wip(hackathon): preserve showcase player launch slice` 保存以下 6 个文件：
 
 - `src/renderer/src/App.tsx`
 - `src/renderer/src/features/player/PlayerWorkbench.tsx`
@@ -48,7 +50,9 @@ A2.2 只证明一批可靠性地基：Bound Lease、Provider legacy 封口、bin
 - `tests/e2e/creative-showcase.spec.ts`
 - `tests/e2e/player-workbench.spec.ts`
 
-其目标是从作品预览显式选择世界，建立/复用 Story Profile 和 Playthrough，进入 Player Workbench，并在回合卡显示严格来源绑定的 ready 场景图。迁移前这批代码只是 WIP；只有通过定向 E2E、typecheck、build 和真实 GM/Writer 回合后，才能更新状态。
+其目标是从作品预览显式选择世界，建立/复用 Story Profile 和 Playthrough，进入 Player Workbench，并在回合卡显示严格来源绑定的 ready 场景图。迁移前验证：`npm run typecheck` 通过；`creative-showcase.spec.ts` 与 `player-workbench.spec.ts` 单 worker 合计 4/4 通过；当前测试 Electron / Node 残留进程为 0。
+
+这只是安全保存 WIP 的定向证据。该提交没有运行全量 `npm test`、生产 build、真实文本 Provider 或真实图片 Provider，因此不能更新为完整玩家链或黑客松闭环完成。
 
 ## 5. 仍未完成的黑客松闭环
 
@@ -60,7 +64,7 @@ A2.2 只证明一批可靠性地基：Bound Lease、Provider legacy 封口、bin
 6. 连续运行三次完整演示脚本和失败场景。
 7. 验证 Windows 安装、非 C 盘安装、升级保留配置和测试进程清理。
 
-## 6. 迁移后的分支与目录
+## 6. 已完成的目录迁移
 
 ```text
 D:\CodexW\NovelX_Desktop\
@@ -80,6 +84,14 @@ D:\CodexW\NovelX_Desktop\
 - `codex/hackathon-10day` 保留经过最小编译/E2E验证的 WIP；若 WIP 不能通过，不提交为代码，只在备份中保存 patch 并记录失败。
 - 黑客松结束后不直接 merge；先审计 Runtime 边界、领域模型、测试和迁移，再挑选可复用提交。
 - 旧 Codex 工作树在确认新目录和备份可恢复前不删除。迁移完成后也不自动删除，以避免误伤用户数据。
+
+迁移验证：
+
+- `work\main`：`codex/long-term-main` @ `a119da8`（后续状态文档提交会前移分支头，但不移动产品基线标签）。
+- `work\worktree`：`codex/hackathon-10day` @ `cc17aab`（后续状态文档提交会前移分支头，但 WIP 代码仍由该提交标识）。
+- `repository.bundle` 通过 `git bundle verify`，包含完整历史和 20 个 refs。
+- `source-at-baseline.zip` 含 751 个已跟踪条目，来自 `a119da8`；其中 `PlayerWorkbench.tsx` 不含 `PlayerLaunchTarget` WIP。
+- 新 clone 通过 `git fsck --full`；只报告来源仓库已有的 dangling commits/blobs，没有缺失或损坏对象。
 
 ## 7. 后续会话角色
 

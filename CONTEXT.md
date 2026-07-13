@@ -73,11 +73,13 @@ SQLite + Artifact Store
 ## 6. 当前事实（2026-07-14）
 
 - 桌面端版本：`0.2.7`。
-- 已验证基线提交：`8bb1695`；其中联合创作展台实现提交为 `c5526d1`。
+- 产品与架构基线：`a119da8`，标签 `novelx-desktop-baseline-2026-07-14`；其中最后一个完成全量验收的代码头为 `8bb1695`，联合创作展台实现提交为 `c5526d1`。
+- 长远开发目录：`D:\CodexW\NovelX_Desktop\work\main`，分支 `codex/long-term-main`。
+- 黑客松目录：`D:\CodexW\NovelX_Desktop\work\worktree`，分支 `codex/hackathon-10day`；玩家入口 WIP 保存在 `cc17aab`。
 - Runtime V2 A2.2 冻结标签：`runtime-v2-a2.2-freeze`，对应冻结文档记录的提交 `284d742`。
 - 已完成的展台仅证明稳定正文、来源绑定图片资产、OC 与范围图谱可同屏展示。
 - 真实图片 Provider 的完整 Live 链尚未重新验收；测试图片是 Fixture，不是生图成功证据。
-- “从展台进入玩家模式并继续一回合”仍是 WIP，不能宣称完成。
+- “从展台进入玩家模式”的界面 WIP 通过 typecheck 和定向 E2E 4/4，但没有全量测试、真实 GM / Writer 回合和图片 Live 验收，不能宣称闭环完成。
 - GitHub 推送曾因本机凭据失效而阻塞；本地提交不能等同于远端已发布。
 
 ## 7. 不可违反的红线
