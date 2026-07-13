@@ -848,7 +848,7 @@ async fn refresh_operational_recovery(
                 &dispatch_project_id,
                 &dispatch_providers,
                 &dispatch_gateway,
-                dispatch_lease.as_ref(),
+                &dispatch_lease,
             )
             .await
     })

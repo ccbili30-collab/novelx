@@ -9,9 +9,8 @@ use std::{
 };
 
 use novelx_protocol::{
-    ContextBudgetAllocation, ContextBudgetCategory, ContextCompilationReceipt, ContextDisclosure,
-    ContextRepresentation, ProviderRunIdentity, TokenizerIdentity, TokenizerKind,
-    ToolPermissionPolicy, ToolSourceScope,
+    ContextCompilationReceipt, ContextDisclosure, ContextItem, ContextMessageRole,
+    ProviderRunIdentity, ToolPermissionPolicy, ToolSourceScope,
 };
 use novelx_runtime::{
     agent_assignment_recovery::recover_agent_assignments,
@@ -19,7 +18,8 @@ use novelx_runtime::{
     agent_loop_service::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, InferenceDispatchIdentity,
     },
-    event_journal::{EventJournal, NewRuntimeEvent},
+    context_compile_service::ContextCompileService,
+    event_journal::EventJournal,
     operational_recovery_aggregate::{OperationalRecoveryOutcome, OperationalRecoveryRepository},
     operational_recovery_claim_service::{
         OperationalRecoveryClaimRequest, OperationalRecoveryClaimService,
@@ -40,6 +40,9 @@ use novelx_runtime::{
     provider_dispatch_resume_authorization_service::{
         ProviderDispatchResumeAuthorizationRequest, ProviderDispatchResumeAuthorizationService,
     },
+    provider_effect_capability::{
+        OperationalRecoveryActorBinding, ProviderEffectAuthorityBinding, ProviderEffectGrantReceipt,
+    },
     provider_gateway::{
         ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderGateway,
         ProviderInferenceMessage, ProviderInferenceRequest, ProviderInferenceRole,
@@ -54,6 +57,7 @@ use novelx_runtime::{
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
@@ -81,6 +85,7 @@ async fn requested_dispatches_once_and_terminal_reentry_never_sends_again() {
     server.await.unwrap();
     assert_eq!(first.terminal, ProviderDispatchRecoveryTerminal::Responded);
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    fixture.assert_authorized_sent(&seeded, None);
     assert_eq!(
         fixture.attempt_state(&seeded),
         ProviderAttemptState::Responded
@@ -423,6 +428,7 @@ async fn requested_attempt_requires_new_owner_authorization_and_dispatches_exact
     assert_eq!(request_count.load(Ordering::SeqCst), 0);
 
     let authorization = fixture.authorize_resume(&seeded);
+    let authorization_id = authorization.authorization_id.clone();
     let resume_request = ProviderDispatchAuthorizedResumeRequest {
         recovery: seeded.request.clone(),
         authorization_id: authorization.authorization_id,
@@ -434,6 +440,7 @@ async fn requested_attempt_requires_new_owner_authorization_and_dispatches_exact
     server.await.unwrap();
     assert_eq!(first.terminal, ProviderDispatchRecoveryTerminal::Responded);
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    fixture.assert_authorized_sent(&seeded, Some(&authorization_id));
 
     let repeated = recovery
         .resume_authorized(
@@ -646,7 +653,7 @@ struct SeededRecovery {
     provider: ProviderRunIdentity,
     execution: ProviderInferenceExecution,
     request: ProviderDispatchRecoveryRequest,
-    lease: WorkspaceRuntimeLease,
+    lease: Arc<WorkspaceRuntimeLease>,
 }
 
 impl SeededRecovery {
@@ -678,8 +685,8 @@ impl Fixture {
         Self { _temp: temp, path }
     }
 
-    fn lease(&self, instance_id: &str) -> WorkspaceRuntimeLease {
-        WorkspaceRuntimeLease::acquire(&self.path, instance_id).unwrap()
+    fn lease(&self, instance_id: &str) -> Arc<WorkspaceRuntimeLease> {
+        Arc::new(WorkspaceRuntimeLease::acquire(&self.path, instance_id).unwrap())
     }
 
     fn seed_requested(
@@ -694,23 +701,10 @@ impl Fixture {
         let invocation_id = format!("{run_id}:steward");
         let inference_id = Uuid::new_v4();
         let attempt_id = Uuid::new_v4();
-        let compilation_id = Uuid::new_v4();
-        let receipt = compilation_receipt(compilation_id);
-        let prepared_request = authoritative_request(receipt.clone());
         let bound = providers.resolve(provider).unwrap();
-        let prepared = gateway.prepare_inference(bound, prepared_request).unwrap();
-        let execution = ProviderInferenceExecution {
-            run_id: run_id.clone(),
-            attempt_id: attempt_id.to_string(),
-            inference_id: inference_id.to_string(),
-            invocation_id: invocation_id.clone(),
-            inference_idempotency_key: format!("{run_id}:inference:1"),
-            attempt_number: 1,
-            provider: provider.clone(),
-            request: authoritative_request(receipt.clone()),
-        };
         let mut identity = pinned_identity();
         identity.provider = provider.clone();
+        let context_policy = identity.context_policy.clone();
         let source_scope = ToolSourceScope {
             source_checkpoint_id: identity.source_checkpoint_id.clone(),
             resource_ids: identity.scope_resource_ids.clone(),
@@ -734,42 +728,32 @@ impl Fixture {
             .unwrap();
         run.start(&mut journal, metadata("run-start", "run-start-key"))
             .unwrap();
-        let normalized = serde_json::json!({
-            "messages": [{
-                "role": "user",
-                "content": "权威正文",
-            }],
-            "tools": [],
-        });
-        let normalized_sha256 = format!(
-            "{:x}",
-            Sha256::digest(
-                r#"{"messages":[{"role":"user","content":"权威正文"}],"tools":[]}"#.as_bytes()
-            )
-        );
-        let expected_run_sequence = current_run_sequence(&journal, &run_id);
-        journal
-            .append(
-                NewRuntimeEvent {
-                    run_id: run_id.clone(),
-                    aggregate_type: "context".to_owned(),
-                    aggregate_id: format!("{invocation_id}:1"),
-                    message_id: "context-message-1".to_owned(),
-                    idempotency_key: "context-key-1".to_owned(),
-                    event_type: "context.compiled".to_owned(),
-                    event_version: 1,
-                    payload: serde_json::json!({
-                        "requestSha256": "9".repeat(64),
-                        "receipt": receipt,
-                        "normalizedInput": normalized,
-                        "normalizedInputSha256": normalized_sha256,
-                    }),
-                    created_at: "2026-07-13T00:00:01Z".to_owned(),
-                },
-                expected_run_sequence,
-                0,
+        let receipt = ContextCompileService::new(&mut journal, providers)
+            .compile(
+                run_uuid,
+                Uuid::new_v4(),
+                context_command(
+                    &invocation_id,
+                    provider.clone(),
+                    context_policy,
+                    bound.config(),
+                ),
             )
             .unwrap();
+        let compilation_id = receipt.compilation_id;
+        let prepared = gateway
+            .prepare_inference(bound, authoritative_request(receipt.clone()))
+            .unwrap();
+        let execution = ProviderInferenceExecution {
+            run_id: run_id.clone(),
+            attempt_id: attempt_id.to_string(),
+            inference_id: inference_id.to_string(),
+            invocation_id: invocation_id.clone(),
+            inference_idempotency_key: format!("{run_id}:inference:1"),
+            attempt_number: 1,
+            provider: provider.clone(),
+            request: authoritative_request(receipt.clone()),
+        };
         let loop_service = AgentLoopService::new(
             AgentLoopIdentity {
                 run_id: run_uuid,
@@ -821,13 +805,19 @@ impl Fixture {
             max_total_delay_ms: bound.config().retry_policy.max_total_delay_ms,
         };
         let sequence = current_run_sequence(&journal, &run_id);
+        let requested_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
         ProviderAttemptAggregate::create(
             &mut journal,
             &run_id,
             &attempt_id_string,
             attempt_definition,
             sequence,
-            provider_metadata("provider-requested", "provider-requested-key"),
+            ProviderAttemptMetadata {
+                message_id: "provider-requested",
+                idempotency_key: &format!("{run_id}:inference:1"),
+                created_at: &requested_at,
+                reason: None,
+            },
         )
         .unwrap();
         drop(journal);
@@ -999,6 +989,47 @@ impl Fixture {
         .state()
     }
 
+    fn assert_authorized_sent(
+        &self,
+        seeded: &SeededRecovery,
+        expected_resume_authorization_id: Option<&str>,
+    ) {
+        let sent = EventJournal::open(&self.path)
+            .unwrap()
+            .read_aggregate(&seeded.run_id, "provider_attempt", &seeded.attempt_id, 0)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_type == "provider.sent")
+            .expect("authorized recovery must persist provider.sent");
+        assert_eq!(sent.event_version, 2);
+        let grant: ProviderEffectGrantReceipt =
+            serde_json::from_value(sent.payload["grant"].clone()).unwrap();
+        grant.validate().unwrap();
+        assert_eq!(grant.material().workspace_id, WORKSPACE_ID);
+        assert_eq!(grant.material().project_id, PROJECT_ID);
+        assert_eq!(grant.material().run_id.to_string(), seeded.run_id);
+        assert_eq!(grant.material().attempt_id.to_string(), seeded.attempt_id);
+        let ProviderEffectAuthorityBinding::OperationalRecovery(authority) =
+            &grant.material().authority
+        else {
+            panic!("recovery dispatch used a non-recovery Provider effect grant");
+        };
+        assert_eq!(authority.operation_id, seeded.request.operation_id);
+        assert_eq!(authority.execution_id, seeded.request.execution_id);
+        match (&authority.actor, expected_resume_authorization_id) {
+            (OperationalRecoveryActorBinding::OriginalOwner { .. }, None) => {}
+            (
+                OperationalRecoveryActorBinding::ResumeAuthorized {
+                    authorization_id, ..
+                },
+                Some(expected),
+            ) => assert_eq!(authorization_id, expected),
+            (actual, expected) => panic!(
+                "recovery actor mismatch: actor={actual:?}, expected resume authorization={expected:?}"
+            ),
+        }
+    }
+
     fn outcome(&self, seeded: &SeededRecovery) -> Option<OperationalRecoveryOutcome> {
         OperationalRecoveryRepository::open(&self.path)
             .unwrap()
@@ -1030,36 +1061,41 @@ fn authorized_request(
     }
 }
 
-fn compilation_receipt(compilation_id: Uuid) -> ContextCompilationReceipt {
-    ContextCompilationReceipt {
-        compilation_id,
+fn context_command(
+    invocation_id: &str,
+    provider: ProviderRunIdentity,
+    context_policy: novelx_protocol::VersionedPolicyIdentity,
+    config: &ProviderConfig,
+) -> novelx_protocol::ContextCompile {
+    let content = "权威正文";
+    novelx_protocol::ContextCompile {
+        compile_idempotency_key: "context-key-1".to_owned(),
+        invocation_id: invocation_id.to_owned(),
         request_number: 1,
+        provider,
+        context_policy,
         compiler_version: "1.0.0".to_owned(),
-        tokenizer: TokenizerIdentity {
-            kind: TokenizerKind::FallbackEstimate,
-            id: "unicode-mixed".to_owned(),
-            version: "1.0.0".to_owned(),
-            provider_id: Some("deepseek".to_owned()),
-            model_id: Some("deepseek-chat".to_owned()),
-        },
-        representation: ContextRepresentation::NormalizedMessages,
-        canonical_context_sha256: "1".repeat(64),
-        serialized_input_bytes: 1_024,
-        estimated_input_tokens: 256,
-        exact_input_tokens: None,
-        context_window: 64_000,
+        context_window: config.context_window,
+        configured_max_output_tokens: config.max_tokens,
         safety_reserve_tokens: 6_400,
-        output_reserve_tokens: 8_000,
-        available_input_tokens: 49_600,
-        accepted: true,
-        incomplete: false,
-        budget: vec![ContextBudgetAllocation {
-            category: ContextBudgetCategory::SessionHistory,
-            estimated_tokens: 256,
-        }],
-        included_item_ids: vec!["current-user-turn".to_owned()],
-        omitted_item_ids: vec![],
-        disclosure: ContextDisclosure::AgentInternal,
+        items: vec![
+            ContextItem::SessionMessage {
+                item_id: "current-user-turn".to_owned(),
+                message_id: "current-user-message".to_owned(),
+                role: ContextMessageRole::User,
+                content: content.to_owned(),
+                content_sha256: format!("{:x}", Sha256::digest(content.as_bytes())),
+                created_at: "2026-07-13T00:00:00Z".to_owned(),
+                disclosure: ContextDisclosure::AgentInternal,
+                required: true,
+            },
+            ContextItem::OutputReserve {
+                item_id: "output-reserve".to_owned(),
+                requested_tokens: config.max_tokens.unwrap_or(8_000),
+                policy_id: "auto".to_owned(),
+                disclosure: ContextDisclosure::AgentInternal,
+            },
+        ],
     }
 }
 
@@ -1094,7 +1130,7 @@ fn bound_registry(
         reasoning: false,
         input: vec![ProviderInputCapability::Text],
         request_timeout_ms,
-        total_deadline_ms: request_timeout_ms + 1_000,
+        total_deadline_ms: request_timeout_ms + 60_000,
         retry_policy: ProviderRetryPolicy {
             max_attempts: 1,
             max_total_delay_ms: 0,

@@ -184,15 +184,6 @@ impl<'a> ProviderInferenceService<'a> {
         self.execute_prepared(prepared).await
     }
 
-    pub(crate) async fn execute_guarded(
-        &mut self,
-        execution: ProviderInferenceExecution,
-        execution_guard: ProviderAttemptExecutionGuard,
-    ) -> Result<ProviderInferenceOutcome, ProviderInferenceServiceError> {
-        let prepared = self.prepare_attempt_guarded(execution, execution_guard)?;
-        self.execute_prepared(prepared).await
-    }
-
     async fn execute_prepared(
         &mut self,
         prepared: PreparedProviderAttempt,

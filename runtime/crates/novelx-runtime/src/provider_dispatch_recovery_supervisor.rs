@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use novelx_protocol::ProviderRunIdentity;
@@ -82,7 +83,7 @@ impl ProviderDispatchRecoverySupervisor {
         project_id: &str,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorReport, ProviderDispatchRecoverySupervisorError>
     {
         require_text("workspace_id", workspace_id)?;
@@ -141,7 +142,7 @@ impl ProviderDispatchRecoverySupervisor {
         bound_providers: &[ProviderRunIdentity],
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
         let aggregate =
@@ -312,7 +313,7 @@ impl ProviderDispatchRecoverySupervisor {
         bound_providers: &[ProviderRunIdentity],
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
         let aggregate =
@@ -368,7 +369,7 @@ impl ProviderDispatchRecoverySupervisor {
         current_gate: OperationalRecoveryGate,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
         let aggregate =
@@ -476,7 +477,7 @@ impl ProviderDispatchRecoverySupervisor {
         execution_id: String,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoverySupervisorRun, ProviderDispatchRecoverySupervisorError>
     {
         let receipt = ProviderDispatchRecoveryService::new(&self.database_path)

@@ -1,15 +1,19 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use novelx_protocol::ProviderRunIdentity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
-    agent_loop_journal::{AgentLoopJournalError, AgentLoopJournalRepository},
-    context_compile_service::{ContextCompileServiceError, recover_compilation_receipt},
+    agent_loop_journal::AgentLoopJournalError,
+    context_compile_service::ContextCompileServiceError,
     event_journal::{EventJournal, EventJournalError},
     operational_recovery_action::OperationalRecoveryAction,
     operational_recovery_aggregate::{
@@ -21,12 +25,15 @@ use crate::{
         ProviderAttemptAggregate, ProviderAttemptError, ProviderAttemptState,
         provider_attempt_definition_sha256, provider_attempt_evidence_sha256,
     },
-    provider_gateway::{ProviderGateway, ProviderInferenceRequest, ProviderRegistry},
-    provider_inference_service::{
-        ProviderAttemptExecutionGuard, ProviderInferenceExecution, ProviderInferenceService,
-        ProviderInferenceServiceError,
+    provider_effect_authorization_service::recovery::{
+        ProviderRecoveryEffectAuthorizationError, ProviderRecoveryEffectAuthorizationRequest,
+        ProviderRecoveryEffectAuthorizationService,
     },
-    run_aggregate::{RunAggregate, RunAggregateError},
+    provider_gateway::{ProviderGateway, ProviderRegistry},
+    provider_inference_service::{
+        ProviderAttemptExecutionGuard, ProviderInferenceService, ProviderInferenceServiceError,
+    },
+    run_aggregate::RunAggregateError,
     workspace_event_journal::{WorkspaceEventJournal, WorkspaceEventJournalError},
     workspace_runtime_lease::WorkspaceRuntimeLease,
 };
@@ -125,7 +132,7 @@ impl ProviderDispatchRecoveryService {
         request: ProviderDispatchRecoveryRequest,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
         self.execute(request, None, providers, gateway, exclusive_lease)
             .await
@@ -136,7 +143,7 @@ impl ProviderDispatchRecoveryService {
         request: ProviderDispatchAuthorizedResumeRequest,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
         if request.authorization_id.trim().is_empty() {
             return Err(ProviderDispatchRecoveryError::ResumeAuthorizationMissing);
@@ -157,7 +164,7 @@ impl ProviderDispatchRecoveryService {
         resume_authorization_id: Option<&str>,
         providers: &ProviderRegistry,
         gateway: &ProviderGateway,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
         if !exclusive_lease.protects_database(&self.database_path) {
             return Err(ProviderDispatchRecoveryError::WorkspaceLeaseMismatch);
@@ -192,14 +199,21 @@ impl ProviderDispatchRecoveryService {
             return Err(ProviderDispatchRecoveryError::RecoveryFenceMismatch);
         }
         let dispatch = DispatchEvidence::from_action(action)?;
-        let execution_guard = {
-            let journal = EventJournal::open(&self.database_path)?;
-            ProviderAttemptExecutionGuard::acquire(&journal, &request.run_id, &dispatch.attempt_id)?
-        };
         let attempt_before = {
             let journal = EventJournal::open(&self.database_path)?;
             ProviderAttemptAggregate::recover(&journal, &request.run_id, &dispatch.attempt_id)?
         };
+        let _terminal_projection_guard =
+            if attempt_before.state() == ProviderAttemptState::Requested {
+                None
+            } else {
+                let journal = EventJournal::open(&self.database_path)?;
+                Some(ProviderAttemptExecutionGuard::acquire(
+                    &journal,
+                    &request.run_id,
+                    &dispatch.attempt_id,
+                )?)
+            };
         dispatch.verify_attempt(&request.run_id, &attempt_before)?;
         if operation.outcome.is_some() {
             return self.finish_from_attempt(
@@ -217,17 +231,52 @@ impl ProviderDispatchRecoveryService {
             &attempt_before,
             &dispatch,
             resume_authorization_id,
-            exclusive_lease,
+            exclusive_lease.as_ref(),
         )?;
         if attempt_before.state() == ProviderAttemptState::Requested {
-            let provider_execution = self.reconstruct_execution(&request.run_id, &dispatch)?;
-            let result = {
+            let run_id = Uuid::parse_str(&request.run_id)?;
+            let authorization = ProviderRecoveryEffectAuthorizationService::new(
+                &self.database_path,
+                request.workspace_id.clone(),
+                recovery.subject.project_id.clone(),
+            )?
+            .authorize_recovery(
+                ProviderRecoveryEffectAuthorizationRequest {
+                    run_id,
+                    operation_id: request.operation_id.clone(),
+                    execution_id: request.execution_id.clone(),
+                    resume_authorization_id: resume_authorization_id.map(str::to_owned),
+                },
+                providers,
+                gateway,
+                Arc::clone(exclusive_lease),
+            )?;
+            let armed = {
                 let mut journal = EventJournal::open(&self.database_path)?;
                 ProviderInferenceService::new(&mut journal, providers, gateway)
-                    .execute_guarded(provider_execution, execution_guard.clone())
-                    .await
+                    .arm_authorized_dispatch(authorization, &self.database_path, false)
             };
-            if let Err(error) = result {
+            let armed = match armed {
+                Ok(armed) => armed,
+                Err(error) => {
+                    return self.handle_dispatch_error(&request, &dispatch, error);
+                }
+            };
+            // Startup recovery currently has no user-facing cancellation source. The receiver is
+            // still threaded through the Gateway so a real source can replace this local open
+            // channel without changing the authorized effect boundary.
+            let (_cancellation_sender, mut cancellation) = watch::channel(false);
+            let dispatched = ProviderInferenceService::dispatch_authorized_attempt(
+                gateway,
+                armed,
+                &mut cancellation,
+            )
+            .await;
+            let finalized = {
+                let mut journal = EventJournal::open(&self.database_path)?;
+                ProviderInferenceService::finalize_authorized_attempt_in(&mut journal, dispatched)
+            };
+            if let Err(error) = finalized {
                 let state_after = {
                     let journal = EventJournal::open(&self.database_path)?;
                     ProviderAttemptAggregate::recover(
@@ -247,48 +296,23 @@ impl ProviderDispatchRecoveryService {
         self.finish_from_attempt(request, &dispatch, resume_authorization_id, exclusive_lease)
     }
 
-    fn reconstruct_execution(
+    fn handle_dispatch_error(
         &self,
-        run_id: &str,
+        request: &ProviderDispatchRecoveryRequest,
         dispatch: &DispatchEvidence,
-    ) -> Result<ProviderInferenceExecution, ProviderDispatchRecoveryError> {
-        let mut journal = EventJournal::open(&self.database_path)?;
-        let loop_record = AgentLoopJournalRepository::new(&mut journal)
-            .recover(run_id, &dispatch.invocation_id)?;
-        if loop_record.service.checkpoint_sha256()? != dispatch.expected_loop_checkpoint_sha256 {
-            return Err(ProviderDispatchRecoveryError::LoopCheckpointMismatch);
+        error: ProviderInferenceServiceError,
+    ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
+        let journal = EventJournal::open(&self.database_path)?;
+        let state =
+            ProviderAttemptAggregate::recover(&journal, &request.run_id, &dispatch.attempt_id)?
+                .state();
+        if state == ProviderAttemptState::Requested {
+            Err(ProviderDispatchRecoveryError::PreDispatchBlocked(Box::new(
+                error,
+            )))
+        } else {
+            Err(error.into())
         }
-        let pending = loop_record
-            .service
-            .pending_inference()
-            .ok_or(ProviderDispatchRecoveryError::PendingInferenceMissing)?;
-        if pending.attempt_id.to_string() != dispatch.attempt_id
-            || pending.inference_id.to_string() != dispatch.inference_id
-            || pending.context_compilation_id.to_string() != dispatch.context_compilation_id
-            || pending.attempt_number != dispatch.attempt_number
-        {
-            return Err(ProviderDispatchRecoveryError::ProviderIdentityMismatch);
-        }
-        let run = RunAggregate::recover(&journal, run_id)?;
-        if run.pinned_identity().provider != dispatch.provider {
-            return Err(ProviderDispatchRecoveryError::ProviderIdentityMismatch);
-        }
-        let compilation_id = Uuid::parse_str(&dispatch.context_compilation_id)?;
-        let receipt = recover_compilation_receipt(&journal, run_id, compilation_id)?;
-        Ok(ProviderInferenceExecution {
-            run_id: run_id.to_owned(),
-            attempt_id: dispatch.attempt_id.clone(),
-            inference_id: dispatch.inference_id.clone(),
-            invocation_id: dispatch.invocation_id.clone(),
-            inference_idempotency_key: pending.inference_idempotency_key.clone(),
-            attempt_number: dispatch.attempt_number,
-            provider: dispatch.provider.clone(),
-            request: ProviderInferenceRequest {
-                compilation: receipt,
-                messages: vec![],
-                tools: vec![],
-            },
-        })
     }
 
     fn finish_from_attempt(
@@ -296,7 +320,7 @@ impl ProviderDispatchRecoveryService {
         request: ProviderDispatchRecoveryRequest,
         dispatch: &DispatchEvidence,
         resume_authorization_id: Option<&str>,
-        exclusive_lease: &WorkspaceRuntimeLease,
+        exclusive_lease: &Arc<WorkspaceRuntimeLease>,
     ) -> Result<ProviderDispatchRecoveryReceipt, ProviderDispatchRecoveryError> {
         let journal = EventJournal::open(&self.database_path)?;
         let attempt =
@@ -324,7 +348,7 @@ impl ProviderDispatchRecoveryService {
             &request,
             &manifest,
             resume_authorization_id,
-            exclusive_lease,
+            exclusive_lease.as_ref(),
         )?;
         Ok(ProviderDispatchRecoveryReceipt {
             run_id: request.run_id,
@@ -662,6 +686,8 @@ pub enum ProviderDispatchRecoveryError {
     ResumeEvidenceChanged,
     #[error("Provider dispatch was blocked before crossing the transport boundary: {0}")]
     PreDispatchBlocked(Box<ProviderInferenceServiceError>),
+    #[error(transparent)]
+    Authorization(#[from] ProviderRecoveryEffectAuthorizationError),
     #[error(transparent)]
     RuntimeJournal(#[from] EventJournalError),
     #[error(transparent)]

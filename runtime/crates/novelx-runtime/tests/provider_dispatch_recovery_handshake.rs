@@ -14,10 +14,9 @@ use std::{
 };
 
 use novelx_protocol::{
-    ContextBudgetAllocation, ContextBudgetCategory, ContextCompilationReceipt, ContextDisclosure,
-    ContextRepresentation, Envelope, MessageType, PROTOCOL_VERSION, ProviderRunIdentity,
-    RuntimeApplicationIdentity, RuntimeInitialize, TokenizerIdentity, TokenizerKind,
-    ToolPermissionPolicy, ToolSourceScope,
+    ContextCompilationReceipt, ContextDisclosure, ContextItem, ContextMessageRole, Envelope,
+    MessageType, PROTOCOL_VERSION, ProviderRunIdentity, RuntimeApplicationIdentity,
+    RuntimeInitialize, ToolPermissionPolicy, ToolSourceScope,
 };
 use novelx_runtime::{
     agent_assignment_recovery::recover_agent_assignments,
@@ -25,7 +24,8 @@ use novelx_runtime::{
     agent_loop_service::{
         AgentLoopIdentity, AgentLoopPolicy, AgentLoopService, InferenceDispatchIdentity, LoopPhase,
     },
-    event_journal::{EventJournal, NewRuntimeEvent},
+    context_compile_service::ContextCompileService,
+    event_journal::EventJournal,
     operational_recovery_aggregate::{OperationalRecoveryOutcome, OperationalRecoveryRepository},
     operational_recovery_claim_service::{
         OperationalRecoveryClaimRequest, OperationalRecoveryClaimService,
@@ -36,6 +36,9 @@ use novelx_runtime::{
     provider_attempt::{
         ProviderAttemptAggregate, ProviderAttemptDefinition, ProviderAttemptMetadata,
         ProviderAttemptState,
+    },
+    provider_effect_capability::{
+        OperationalRecoveryActorBinding, ProviderEffectAuthorityBinding, ProviderEffectGrantReceipt,
     },
     provider_gateway::{
         ProviderApiFlavor, ProviderAuthScheme, ProviderConfig, ProviderGateway,
@@ -48,6 +51,7 @@ use novelx_runtime::{
 use sha2::{Digest, Sha256};
 use support::pinned_identity;
 use tempfile::TempDir;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 const SECRET: &str = "provider-dispatch-handshake-secret";
@@ -138,16 +142,35 @@ fn runtime_bind_recovers_old_owner_dispatch_projects_locally_and_never_resends()
     shutdown(&mut restarted, &mut restarted_output, 3);
 
     assert_eq!(fixture.loop_phase(&seeded), LoopPhase::Completed);
+    let attempt_events = EventJournal::open(&fixture.path)
+        .unwrap()
+        .read_aggregate(&seeded.run_id, "provider_attempt", &seeded.attempt_id, 0)
+        .unwrap();
     assert_eq!(
-        EventJournal::open(&fixture.path)
-            .unwrap()
-            .read_aggregate(&seeded.run_id, "provider_attempt", &seeded.attempt_id, 0,)
-            .unwrap()
+        attempt_events
             .iter()
             .map(|event| event.event_type.as_str())
             .collect::<Vec<_>>(),
         vec!["provider.requested", "provider.sent", "provider.responded"]
     );
+    let sent = attempt_events
+        .iter()
+        .find(|event| event.event_type == "provider.sent")
+        .unwrap();
+    assert_eq!(sent.event_version, 2);
+    let grant: ProviderEffectGrantReceipt =
+        serde_json::from_value(sent.payload["grant"].clone()).unwrap();
+    grant.validate().unwrap();
+    let ProviderEffectAuthorityBinding::OperationalRecovery(authority) =
+        &grant.material().authority
+    else {
+        panic!("runtime recovery dispatch used a non-recovery grant");
+    };
+    assert_eq!(authority.operation_id, started.operation_id);
+    assert!(matches!(
+        authority.actor,
+        OperationalRecoveryActorBinding::ResumeAuthorized { .. }
+    ));
     server.stop();
 }
 
@@ -190,14 +213,10 @@ impl Fixture {
         let invocation_id = format!("{run_id}:steward");
         let inference_id = Uuid::new_v4();
         let attempt_id = Uuid::new_v4();
-        let compilation_id = Uuid::new_v4();
-        let receipt = compilation_receipt(compilation_id);
         let bound = providers.resolve(provider).unwrap();
-        let prepared = gateway
-            .prepare_inference(bound, authoritative_request(receipt.clone()))
-            .unwrap();
         let mut identity = pinned_identity();
         identity.provider = provider.clone();
+        let context_policy = identity.context_policy.clone();
         let source_scope = ToolSourceScope {
             source_checkpoint_id: identity.source_checkpoint_id.clone(),
             resource_ids: identity.scope_resource_ids.clone(),
@@ -221,38 +240,21 @@ impl Fixture {
             .unwrap();
         run.start(&mut journal, metadata("run-start", "run-start-key"))
             .unwrap();
-        let normalized = serde_json::json!({
-            "messages": [{"role": "user", "content": "权威正文"}],
-            "tools": [],
-        });
-        let normalized_sha256 = format!(
-            "{:x}",
-            Sha256::digest(
-                r#"{"messages":[{"role":"user","content":"权威正文"}],"tools":[]}"#.as_bytes()
+        let receipt = ContextCompileService::new(&mut journal, providers)
+            .compile(
+                run_uuid,
+                Uuid::new_v4(),
+                context_command(
+                    &invocation_id,
+                    provider.clone(),
+                    context_policy,
+                    bound.config(),
+                ),
             )
-        );
-        let sequence = current_run_sequence(&journal, &run_id);
-        journal
-            .append(
-                NewRuntimeEvent {
-                    run_id: run_id.clone(),
-                    aggregate_type: "context".to_owned(),
-                    aggregate_id: format!("{invocation_id}:1"),
-                    message_id: "context-message-1".to_owned(),
-                    idempotency_key: "context-key-1".to_owned(),
-                    event_type: "context.compiled".to_owned(),
-                    event_version: 1,
-                    payload: serde_json::json!({
-                        "requestSha256": "9".repeat(64),
-                        "receipt": receipt,
-                        "normalizedInput": normalized,
-                        "normalizedInputSha256": normalized_sha256,
-                    }),
-                    created_at: "2026-07-13T00:00:01Z".to_owned(),
-                },
-                sequence,
-                0,
-            )
+            .unwrap();
+        let compilation_id = receipt.compilation_id;
+        let prepared = gateway
+            .prepare_inference(bound, authoritative_request(receipt.clone()))
             .unwrap();
         let loop_service = AgentLoopService::new(
             AgentLoopIdentity {
@@ -305,13 +307,19 @@ impl Fixture {
             max_total_delay_ms: bound.config().retry_policy.max_total_delay_ms,
         };
         let sequence = current_run_sequence(&journal, &run_id);
+        let requested_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
         ProviderAttemptAggregate::create(
             &mut journal,
             &run_id,
             &attempt_id,
             definition,
             sequence,
-            provider_metadata("provider-requested", "provider-requested-key"),
+            ProviderAttemptMetadata {
+                message_id: "provider-requested",
+                idempotency_key: &format!("{run_id}:inference:1"),
+                created_at: &requested_at,
+                reason: None,
+            },
         )
         .unwrap();
         SeededRun {
@@ -602,7 +610,7 @@ fn test_provider_config(base_url: String) -> ProviderConfig {
         reasoning: false,
         input: vec![ProviderInputCapability::Text],
         request_timeout_ms: 2_000,
-        total_deadline_ms: 3_000,
+        total_deadline_ms: 62_000,
         retry_policy: ProviderRetryPolicy {
             max_attempts: 1,
             max_total_delay_ms: 0,
@@ -620,36 +628,41 @@ fn claim_request(run_id: &str, operation_id: &str) -> OperationalRecoveryClaimRe
     }
 }
 
-fn compilation_receipt(compilation_id: Uuid) -> ContextCompilationReceipt {
-    ContextCompilationReceipt {
-        compilation_id,
+fn context_command(
+    invocation_id: &str,
+    provider: ProviderRunIdentity,
+    context_policy: novelx_protocol::VersionedPolicyIdentity,
+    config: &ProviderConfig,
+) -> novelx_protocol::ContextCompile {
+    let content = "权威正文";
+    novelx_protocol::ContextCompile {
+        compile_idempotency_key: "context-key-1".to_owned(),
+        invocation_id: invocation_id.to_owned(),
         request_number: 1,
+        provider,
+        context_policy,
         compiler_version: "1.0.0".to_owned(),
-        tokenizer: TokenizerIdentity {
-            kind: TokenizerKind::FallbackEstimate,
-            id: "unicode-mixed".to_owned(),
-            version: "1.0.0".to_owned(),
-            provider_id: Some("deepseek".to_owned()),
-            model_id: Some("deepseek-chat".to_owned()),
-        },
-        representation: ContextRepresentation::NormalizedMessages,
-        canonical_context_sha256: "1".repeat(64),
-        serialized_input_bytes: 1_024,
-        estimated_input_tokens: 256,
-        exact_input_tokens: None,
-        context_window: 64_000,
+        context_window: config.context_window,
+        configured_max_output_tokens: config.max_tokens,
         safety_reserve_tokens: 6_400,
-        output_reserve_tokens: 8_000,
-        available_input_tokens: 49_600,
-        accepted: true,
-        incomplete: false,
-        budget: vec![ContextBudgetAllocation {
-            category: ContextBudgetCategory::SessionHistory,
-            estimated_tokens: 256,
-        }],
-        included_item_ids: vec!["current-user-turn".to_owned()],
-        omitted_item_ids: vec![],
-        disclosure: ContextDisclosure::AgentInternal,
+        items: vec![
+            ContextItem::SessionMessage {
+                item_id: "current-user-turn".to_owned(),
+                message_id: "current-user-message".to_owned(),
+                role: ContextMessageRole::User,
+                content: content.to_owned(),
+                content_sha256: format!("{:x}", Sha256::digest(content.as_bytes())),
+                created_at: "2026-07-13T00:00:00Z".to_owned(),
+                disclosure: ContextDisclosure::AgentInternal,
+                required: true,
+            },
+            ContextItem::OutputReserve {
+                item_id: "output-reserve".to_owned(),
+                requested_tokens: config.max_tokens.unwrap_or(8_000),
+                policy_id: "auto".to_owned(),
+                disclosure: ContextDisclosure::AgentInternal,
+            },
+        ],
     }
 }
 
@@ -671,18 +684,6 @@ fn metadata<'a>(message_id: &'a str, idempotency_key: &'a str) -> EventMetadata<
         message_id,
         idempotency_key,
         created_at: "2026-07-13T00:00:00Z",
-        reason: None,
-    }
-}
-
-fn provider_metadata<'a>(
-    message_id: &'a str,
-    idempotency_key: &'a str,
-) -> ProviderAttemptMetadata<'a> {
-    ProviderAttemptMetadata {
-        message_id,
-        idempotency_key,
-        created_at: "2026-07-13T00:00:02Z",
         reason: None,
     }
 }
