@@ -8,6 +8,12 @@ import {
   type ProviderTestResult,
 } from "./providerContract";
 import type { DesktopUpdateState } from "./desktopUpdateContract";
+import type {
+  ImageProviderSaveRequest,
+  ImageProviderStatusResult,
+  ImageProviderTestRequest,
+  ImageProviderTestResult,
+} from "./imageProviderContract";
 
 export const desktopIpcChannels = {
   systemStatus: "novax:system-status",
@@ -91,6 +97,10 @@ export const desktopIpcChannels = {
   providerSave: "novax:provider-save",
   providerClearCredential: "novax:provider-clear-credential",
   providerTest: "novax:provider-test",
+  imageProviderStatus: "novax:image-provider-status",
+  imageProviderSave: "novax:image-provider-save",
+  imageProviderClearCredential: "novax:image-provider-clear-credential",
+  imageProviderTest: "novax:image-provider-test",
   agentStart: "novax:agent-start",
   agentCancel: "novax:agent-cancel",
   agentEvent: "novax:agent-event",
@@ -1424,6 +1434,12 @@ export interface DesktopApi {
     save(request: ProviderSaveRequest): Promise<ProviderStatusResult>;
     clearCredential(): Promise<ProviderStatusResult>;
     test(request: ProviderTestRequest): Promise<ProviderTestResult>;
+  };
+  imageProvider: {
+    getStatus(): Promise<ImageProviderStatusResult>;
+    save(request: ImageProviderSaveRequest): Promise<ImageProviderStatusResult>;
+    clearCredential(): Promise<ImageProviderStatusResult>;
+    test(request: ImageProviderTestRequest): Promise<ImageProviderTestResult>;
   };
   agent: {
     start(request: AgentRunStartRequest): Promise<AgentRunStartResponse>;

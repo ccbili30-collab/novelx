@@ -1124,6 +1124,7 @@ button { letter-spacing: 0; }
 .provider-field { display: grid; align-content: start; gap: 5px; min-width: 0; color: var(--novax-color-text); font-size: 11px; font-weight: 620; }
 .provider-field[data-wide="true"] { grid-column: 1 / -1; }
 .provider-field > input,
+.provider-field > select,
 .secret-input {
   width: 100%;
   height: 32px;
@@ -1136,7 +1137,9 @@ button { letter-spacing: 0; }
   font-weight: 400;
 }
 .provider-field > input { padding: 0 9px; }
+.provider-field > select { padding: 0 8px; }
 .provider-field > input:focus,
+.provider-field > select:focus,
 .secret-input:focus-within { border-color: var(--novax-color-accent); box-shadow: 0 0 0 2px var(--novax-color-focus-ring); }
 .provider-field > input[aria-invalid="true"],
 .secret-input:has(input[aria-invalid="true"]) { border-color: var(--novax-color-danger-border); }
@@ -1174,6 +1177,12 @@ button { letter-spacing: 0; }
 .clear-confirm { display: flex; align-items: center; gap: 6px; color: var(--novax-color-danger-strong); font-size: 11px; }
 .clear-confirm button { min-height: 26px; border: 1px solid var(--novax-color-danger-border); background: var(--novax-color-surface-control); color: var(--novax-color-danger-border); }
 .clear-confirm button:last-child { border-color: var(--novax-color-text-subtle); color: var(--novax-color-text-subtle); }
+.image-provider-settings { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.image-provider-settings > header { display: grid; gap: 4px; margin-bottom: 10px; }
+.image-provider-settings > header > div { display: flex; align-items: center; gap: 7px; color: var(--novax-color-text-strong); }
+.image-provider-settings > header h2 { margin: 0; font-size: 13px; }
+.image-provider-settings > header > span { color: var(--novax-color-text-subtle); font-size: 10px; }
+.image-provider-cost-note { margin-top: 12px; color: var(--novax-color-text-subtle); font-size: 10px; }
 
 @media (max-width: 760px) {
   .settings-backdrop { padding: 12px; }

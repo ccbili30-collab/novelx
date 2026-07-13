@@ -26,6 +26,7 @@ import {
 import type { NovaxTheme } from "../../../../shared/themePreference";
 import type { NovaxBackgroundPreference } from "../../../../shared/backgroundPreference";
 import { DesktopUpdatePanel } from "../update/DesktopUpdatePanel";
+import { ImageProviderSettingsSection } from "./ImageProviderSettingsSection";
 
 interface ProviderSettingsDialogProps {
   theme: NovaxTheme;
@@ -457,6 +458,7 @@ export function ProviderSettingsDialog({ theme, background, onThemeChange, onBac
               </div>
             ) : null}
           </form>
+          <ImageProviderSettingsSection />
         </div>
       </section>
     </div>

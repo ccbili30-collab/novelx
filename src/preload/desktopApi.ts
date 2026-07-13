@@ -114,6 +114,12 @@ import {
   providerTestRequestSchema,
   providerTestResultSchema,
 } from "../shared/providerContract";
+import {
+  imageProviderSaveRequestSchema,
+  imageProviderStatusResultSchema,
+  imageProviderTestRequestSchema,
+  imageProviderTestResultSchema,
+} from "../shared/imageProviderContract";
 
 const flushSubscribers = new Set<(request: import("../shared/ipcContract").WorkspaceFlushRequest) => void>();
 const pendingFlushRequests: import("../shared/ipcContract").WorkspaceFlushRequest[] = [];
@@ -455,6 +461,22 @@ export function exposeDesktopApi(): void {
       async test(request) {
         const safeRequest = providerTestRequestSchema.parse(request);
         return providerTestResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.providerTest, safeRequest));
+      },
+    },
+    imageProvider: {
+      async getStatus() {
+        return imageProviderStatusResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.imageProviderStatus));
+      },
+      async save(request) {
+        const safeRequest = imageProviderSaveRequestSchema.parse(request);
+        return imageProviderStatusResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.imageProviderSave, safeRequest));
+      },
+      async clearCredential() {
+        return imageProviderStatusResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.imageProviderClearCredential));
+      },
+      async test(request) {
+        const safeRequest = imageProviderTestRequestSchema.parse(request);
+        return imageProviderTestResultSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.imageProviderTest, safeRequest));
       },
     },
     changeSet: {
