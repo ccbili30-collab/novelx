@@ -28,6 +28,13 @@ Scope: this repository and all descendants.
 - Do not merge the hackathon branch into long-term development without a post-event architecture and data-compatibility review.
 - A2.2 Runtime foundation is frozen unless the user explicitly reopens it.
 
+### Route heads
+
+- Main Head owns long-term product architecture, Runtime V2 direction, global ADRs, and post-hackathon integration decisions.
+- Worktree Head owns hackathon tactical architecture, task decomposition, file ownership, demonstration acceptance, and review inside `codex/hackathon-10day`.
+- Worktree Head is not merely an execution worker. It may delegate bounded implementation tasks to separate execution sessions, but it may not redefine the global product baseline or long-term Runtime architecture.
+- Any hackathon need that changes public protocol, schema, permissions, Canon semantics, durable migration, or the frozen A2.2 boundary must be returned to the product owner and Main Head.
+
 ## Work style
 
 - Windows first: PowerShell, Windows paths, UTF-8.
