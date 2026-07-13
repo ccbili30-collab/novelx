@@ -21,6 +21,8 @@ import {
   listTaskNotesResultSchema,
   retrieveGraphEvidenceArgsSchema,
   retrieveGraphEvidenceResultSchema,
+  generateImageArgsSchema,
+  generateImageResultSchema,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
   type InspectProjectFilesArgs,
@@ -41,6 +43,8 @@ import {
   type ListTaskNotesResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
+  type GenerateImageArgs,
+  type GenerateImageResult,
 } from "../../shared/agentWorkerProtocol";
 
 const identifier = Type.String({ minLength: 1, maxLength: 240 });
@@ -89,6 +93,14 @@ const saveTaskNoteParameters = Type.Object({
 const listTaskNotesParameters = Type.Object({
   offset: Type.Optional(Type.Integer({ minimum: 0, default: 0 })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 100 })),
+}, { additionalProperties: false });
+const generateImageParameters = Type.Object({
+  title: Type.String({ minLength: 1, maxLength: 240 }),
+  purpose: Type.Union([Type.Literal("character_portrait"), Type.Literal("scene")]),
+  prompt: Type.String({ minLength: 1, maxLength: 50_000 }),
+  sourceResourceIds: Type.Array(identifier, { minItems: 1, maxItems: 100 }),
+  sourceVersionIds: Type.Array(identifier, { minItems: 1, maxItems: 100 }),
+  idempotencyKey: Type.String({ minLength: 1, maxLength: 200 }),
 }, { additionalProperties: false });
 
 const assertionItem = Type.Object({
@@ -242,6 +254,7 @@ export interface AgentToolExecutor {
   readProjectFile(args: ReadProjectFileArgs, signal?: AbortSignal): Promise<ReadProjectFileResult>;
   saveTaskNote(args: SaveTaskNoteArgs, signal?: AbortSignal): Promise<SaveTaskNoteResult>;
   listTaskNotes(args: ListTaskNotesArgs, signal?: AbortSignal): Promise<ListTaskNotesResult>;
+  generateImage(args: GenerateImageArgs, signal?: AbortSignal): Promise<GenerateImageResult>;
   proposeChangeSet(args: ProposeChangeSetArgs, signal?: AbortSignal): Promise<ProposeChangeSetResult>;
 }
 
@@ -392,7 +405,30 @@ export function createAgentTools(executor: AgentToolExecutor): AgentTool[] {
     ),
   };
 
-  return [retrieve, listDirectory, statFile, globFiles, searchFiles, readFile, saveNote, listNotes, inspectFiles, propose];
+  const generateImage: AgentTool<typeof generateImageParameters> = {
+    name: "generate_image",
+    label: "生成角色或场景图片",
+    description: "Generate one real, source-bound character portrait or scene image using the separately configured image Provider. Retrieve stable project sources first and reuse the same idempotencyKey for retries of the same image request.",
+    parameters: generateImageParameters,
+    execute: async (_toolCallId, params, signal) => {
+      const result = generateImageResultSchema.parse(await executor.generateImage(
+        generateImageArgsSchema.parse(params),
+        signal,
+      ));
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            result,
+            novaxInstruction: "The source-bound image asset is committed and ready. Do not repeat generation. Cite its source versions and submit the final structured result.",
+          }),
+        }],
+        details: result,
+      };
+    },
+  };
+
+  return [retrieve, listDirectory, statFile, globFiles, searchFiles, readFile, saveNote, listNotes, inspectFiles, generateImage, propose];
 }
 
 function fileToolResult<T>(result: T, novaxInstruction: string) {

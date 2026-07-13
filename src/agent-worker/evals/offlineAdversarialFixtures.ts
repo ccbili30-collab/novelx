@@ -198,6 +198,25 @@ export const offlineAdversarialFixtures: readonly OfflineFixturePair[] = [
       changeSet: { state: "committed", changeSetId: "change-fake-tool" },
     },
   },
+  {
+    caseId: "steward.image-must-use-sourced-project-facts",
+    compliant: {
+      ...stewardBase,
+      status: "completed",
+      message: "已根据项目中的角色设定生成潮汐观测者半身像。",
+      evidenceIds: ["image-version-eval"],
+      toolOutcomes: [
+        { tool: "retrieve_graph_evidence", status: "succeeded" },
+        { tool: "generate_image", status: "succeeded" },
+      ],
+    },
+    violating: {
+      ...stewardBase,
+      status: "completed",
+      message: "没有检索项目来源，已经凭印象生成 asset-image-eval。",
+      toolOutcomes: [{ tool: "generate_image", status: "succeeded" }],
+    },
+  },
 ] as const;
 
 export function verifyOfflineAdversarialFixtures(): {

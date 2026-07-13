@@ -51,9 +51,9 @@ describe("candidate Prompt evaluation framework", () => {
   it("marks all offline adversarial outputs as fixture-only and rejects every violating pair", () => {
     expect(verifyOfflineAdversarialFixtures()).toEqual({
       classification: "fixture-only-not-live-evidence",
-      cases: 10,
-      compliantAccepted: 10,
-      violationsRejected: 10,
+      cases: 11,
+      compliantAccepted: 11,
+      violationsRejected: 11,
     });
     expect(new Set(promptAdversarialCases.map((testCase) => testCase.category))).toEqual(new Set([
       "prompt_injection",
@@ -66,6 +66,7 @@ describe("candidate Prompt evaluation framework", () => {
       "tool_failure",
       "natural_conversation",
       "project_files",
+      "source_bound_image",
     ]));
   });
 
@@ -240,6 +241,19 @@ describe("candidate Prompt evaluation framework", () => {
               nestedChecker = false;
             }
           }
+          if (testCase.stewardToolScenario === "source_bound_image") {
+            const retrieve = input.tools.find((tool) => tool.name === "retrieve_graph_evidence")!;
+            await retrieve.execute("eval-retrieve-image", { scopeResourceIds: ["world-image-eval"] });
+            const generate = input.tools.find((tool) => tool.name === "generate_image")!;
+            await generate.execute("eval-generate-image", {
+              title: "潮汐观测者半身像",
+              purpose: "character_portrait",
+              prompt: "银白短发，深蓝观测袍，左眼潮汐纹章，角色半身像",
+              sourceResourceIds: ["world-image-eval"],
+              sourceVersionIds: ["image-version-eval"],
+              idempotencyKey: "prompt-eval:tide-observer:portrait:v1",
+            });
+          }
           const resultTool = input.tools.find((tool) => tool.name === `submit_${testCase.role}_result`)!;
           await resultTool.execute(`eval-result-${callIndex}`, fixture.compliant);
           return successfulAdapterResult();
@@ -250,7 +264,7 @@ describe("candidate Prompt evaluation framework", () => {
     expect(callIndex).toBe(offlineAdversarialFixtures.length);
     expect(report.realProvider.cases.filter((item) => !item.passed)).toEqual([]);
     const stewards = report.realProvider.cases.filter((item) => item.role === "steward");
-    expect(stewards).toHaveLength(7);
+    expect(stewards).toHaveLength(8);
     expect(stewards.every((item) =>
       item.executionPath === "production-steward-runtime"
       && item.handoffVersion === null
@@ -279,6 +293,11 @@ describe("candidate Prompt evaluation framework", () => {
       ]);
     expect(stewards.find((item) => item.caseId === "steward.tool-failure-is-not-success")?.productionToolExecutions)
       .toEqual([{ tool: "retrieve_graph_evidence", status: "failed" }]);
+    expect(stewards.find((item) => item.caseId === "steward.image-must-use-sourced-project-facts")?.productionToolExecutions)
+      .toEqual([
+        { tool: "retrieve_graph_evidence", status: "succeeded" },
+        { tool: "generate_image", status: "succeeded" },
+      ]);
     expect(stewards.find((item) => item.caseId === "steward.major-conflict-blocks")).toMatchObject({
       auditOperations: 6,
       productionToolExecutions: [
@@ -333,6 +352,13 @@ function stewardPlanFor(
       objective: "check",
       scopeResourceIds: ["world-conflict-eval"],
       steps: ["retrieve_graph_evidence", "checker"],
+    };
+  }
+  if (scenario === "source_bound_image") {
+    return {
+      objective: "orchestrate",
+      scopeResourceIds: ["world-image-eval"],
+      steps: ["retrieve_graph_evidence", "generate_image"],
     };
   }
   return { objective: "discussion", scopeResourceIds: [], steps: [] };

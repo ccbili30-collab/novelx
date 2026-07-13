@@ -108,11 +108,11 @@ describe("token-estimated context admission policy", () => {
 
     expect(serialized).not.toContain("甲".repeat(1_000));
     expect(serialized).toContain("乙".repeat(1_000));
-    expect(serialized).toContain("durable_file_receipts");
+    expect(serialized).toContain("durable_file_receipt");
     expect(serialized).toContain("note-1");
   });
 
-  it("removes both sides of completed tool calls and replaces them with a durable receipt", () => {
+  it("preserves both sides of completed tool calls while compacting their durable contents", () => {
     const source = { path: "世界.md", sha256: "a".repeat(64), startChar: 0, endChar: 4_000 };
     const context = {
       systemPrompt: "",
@@ -140,12 +140,13 @@ describe("token-estimated context admission policy", () => {
     };
 
     const compacted = compactDurablyNotedFileChunks(context);
-    expect(compacted.messages).toHaveLength(1);
-    expect(compacted.messages[0]?.role).toBe("user");
+    expect(compacted.messages).toHaveLength(2);
+    expect(compacted.messages.map((message) => message.role)).toEqual(["assistant", "toolResult"]);
     expect(JSON.stringify(compacted)).not.toContain("海岸设定");
-    expect(JSON.stringify(compacted)).not.toContain("note-call-1");
+    expect(JSON.stringify(compacted)).toContain("note-call-1");
     expect(JSON.stringify(compacted)).toContain("note-1");
-    expect(JSON.stringify(compacted)).toContain("durable_file_receipts");
+    expect(JSON.stringify(compacted)).toContain("durable_file_receipt");
+    expectToolPairs(compacted.messages);
   });
 
   it("compacts note arguments by tool-call id when the model supplied stale source coordinates", () => {
@@ -186,6 +187,32 @@ describe("token-estimated context admission policy", () => {
     expect(serialized).not.toContain("错误.md");
     expect(serialized).toContain("地理.md");
     expect(serialized).toContain("note-stale");
+    expectToolPairs(compacted.messages);
+  });
+
+  it("keeps read and note tool-call/result pairs valid after compacting a covered file chunk", () => {
+    const source = { path: "世界.md", sha256: "c".repeat(64), startChar: 0, endChar: 8_000 };
+    const context = {
+      systemPrompt: "",
+      tools: [],
+      messages: [
+        assistantToolCall("read-call", "read_project_file", { path: "世界.md", offsetChars: 0, maxChars: 8_000 }, 1),
+        toolResult("read-call", "read_project_file", { result: { ...source, content: "海".repeat(8_000) } }, 2),
+        assistantToolCall("note-call", "save_task_note", { title: "海岸", content: "长摘要".repeat(1_000), source }, 3),
+        toolResult("note-call", "save_task_note", {
+          result: { id: "note-world", title: "海岸", content: "长摘要".repeat(1_000), source },
+        }, 4),
+      ],
+    };
+
+    const compacted = compactDurablyNotedFileChunks(context);
+    const serialized = JSON.stringify(compacted);
+
+    expect(compacted.messages).toHaveLength(4);
+    expect(serialized).not.toContain("海".repeat(1_000));
+    expect(serialized).not.toContain("长摘要".repeat(100));
+    expect(serialized).toContain("note-world");
+    expectToolPairs(compacted.messages);
   });
 });
 
@@ -226,4 +253,35 @@ function toolResult(toolCallId: string, toolName: string, payload: unknown, time
     isError: false,
     timestamp,
   };
+}
+
+function assistantToolCall(id: string, name: string, args: Record<string, unknown>, timestamp: number) {
+  return {
+    role: "assistant" as const,
+    content: [{ type: "toolCall" as const, id, name, arguments: args }],
+    api: "openai-completions" as const,
+    provider: "fixture",
+    model: "fixture",
+    usage: emptyUsage(),
+    stopReason: "toolUse" as const,
+    timestamp,
+  };
+}
+
+function expectToolPairs(messages: Array<{ role: string; content: unknown; toolCallId?: string }>): void {
+  const pending = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      for (const item of message.content) {
+        if (item && typeof item === "object" && "type" in item && item.type === "toolCall" && "id" in item) {
+          pending.add(String(item.id));
+        }
+      }
+      continue;
+    }
+    if (message.role === "toolResult" && message.toolCallId) {
+      expect(pending.delete(message.toolCallId)).toBe(true);
+    }
+  }
+  expect([...pending]).toEqual([]);
 }

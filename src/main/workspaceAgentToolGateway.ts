@@ -9,6 +9,7 @@ import {
   statProjectFileResultSchema,
   saveTaskNoteResultSchema,
   listTaskNotesResultSchema,
+  generateImageResultSchema,
   type ProposeChangeSetArgs,
 } from "../shared/agentWorkerProtocol";
 import { ChangeSetService, type ChangeSetItem, type ChangeSetPolicyEvaluator } from "../domain/changeSet/changeSetService";
@@ -19,11 +20,21 @@ import type { WorkspaceDatabase } from "../domain/workspace/workspaceRepository"
 import type { AgentToolGateway } from "./agentProcessSupervisor";
 import { ProjectFileService } from "../domain/workspace/projectFileService";
 import { AgentTaskNoteRepository } from "../domain/agent/agentTaskNoteRepository";
+import type { ImageProviderRuntimeProfile } from "../shared/imageProviderContract";
+import { ImageAssetRepository } from "../domain/asset/imageAssetRepository";
+import { ImageAssetStore } from "../domain/asset/imageAssetStore";
+import { ImageGenerationService } from "../domain/asset/imageGenerationService";
+
+interface WorkspaceAgentToolGatewayOptions {
+  getImageProviderProfile?(): ImageProviderRuntimeProfile | null;
+  createImageGenerationService?(workspace: WorkspaceDatabase): ImageGenerationService;
+}
 
 export function createWorkspaceAgentToolGateway(
   workspace: WorkspaceDatabase,
   policy: ChangeSetPolicyEvaluator,
   isCurrentWorkspace: () => boolean,
+  options: WorkspaceAgentToolGatewayOptions = {},
 ): AgentToolGateway {
   const assertAvailable = (signal: AbortSignal): void => {
     if (signal.aborted) throw gatewayError("AGENT_RUN_CANCELLED", "Agent run was cancelled.");
@@ -96,6 +107,62 @@ export function createWorkspaceAgentToolGateway(
         nextOffset: offset + page.length < notes.length ? offset + page.length : null,
       });
     },
+    generateImage: async (args, context) => {
+      assertAvailable(context.signal);
+      new AgentAuditRepository(workspace).assertToolInvocation({
+        toolInvocationId: context.requestId,
+        runId: context.runId,
+        invocationId: context.invocationId,
+        toolName: "generate_image",
+      });
+      const configuredProfile = options.getImageProviderProfile?.() ?? null;
+      if (!configuredProfile) throw gatewayError("IMAGE_PROVIDER_REQUIRED", "A configured image Provider is required.");
+      const profile = { ...configuredProfile };
+      const repository = new ImageAssetRepository(workspace);
+      const idempotencyKey = `steward:${args.idempotencyKey}`;
+      const service = options.createImageGenerationService?.(workspace)
+        ?? new ImageGenerationService(repository, new ImageAssetStore(workspace.rootPath));
+      try {
+        const result = await service.generate({
+          idempotencyKey,
+          title: args.title,
+          purpose: args.purpose,
+          prompt: args.prompt,
+          sourceResourceIds: args.sourceResourceIds,
+          sourceVersionIds: args.sourceVersionIds,
+        }, profile, context.signal);
+        assertAvailable(context.signal);
+        return generateImageResultSchema.parse({
+          jobId: result.job.id,
+          assetId: result.asset.id,
+          status: "ready",
+          title: result.job.title,
+          purpose: result.job.purpose,
+          sourceResourceIds: result.job.sourceResourceIds,
+          sourceVersionIds: result.job.sourceVersionIds,
+          mimeType: result.asset.mimeType,
+          width: result.asset.width,
+          height: result.asset.height,
+          byteLength: result.asset.byteLength,
+          sha256: result.asset.sha256,
+          thumbnailUrl: `novax-asset://image/${encodeURIComponent(result.asset.id)}`,
+        });
+      } catch (error) {
+        if (context.signal.aborted || readCode(error) === "IMAGE_JOB_CANCELLED") {
+          throw gatewayError("AGENT_RUN_CANCELLED", "Agent run was cancelled.");
+        }
+        const job = repository.getJobByIdempotencyKey(idempotencyKey);
+        if (job?.status === "reconciliation_required") {
+          throw gatewayError(
+            "IMAGE_GENERATION_RECONCILIATION_REQUIRED",
+            "The image request outcome is unknown and cannot be retried automatically.",
+          );
+        }
+        throw gatewayError("IMAGE_GENERATION_FAILED", "The image Provider did not return a committed image asset.");
+      } finally {
+        profile.apiKey = "";
+      }
+    },
     proposeChangeSet: async (args, context) => {
       assertAvailable(context.signal);
       new AgentAuditRepository(workspace).assertToolInvocation({
@@ -161,4 +228,8 @@ function mapProposedItems(
 
 function gatewayError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
+}
+
+function readCode(error: unknown): string {
+  return error && typeof error === "object" && "code" in error ? String(error.code) : "";
 }

@@ -129,6 +129,21 @@ function createGateway(overrides: Partial<AgentToolGateway> = {}): AgentToolGate
       updatedAt: "2026-01-01T00:00:00.000Z",
     }),
     listTaskNotes: async () => ({ notes: [], total: 0, nextOffset: null }),
+    generateImage: async (args) => ({
+      jobId: "image-job-1",
+      assetId: "image-asset-1",
+      status: "ready",
+      title: args.title,
+      purpose: args.purpose,
+      sourceResourceIds: args.sourceResourceIds,
+      sourceVersionIds: args.sourceVersionIds,
+      mimeType: "image/png",
+      width: 1024,
+      height: 1024,
+      byteLength: 1024,
+      sha256: "b".repeat(64),
+      thumbnailUrl: "novax-asset://image/image-asset-1",
+    }),
     proposeChangeSet: async (_args, context) => ({
       changeSetId: `change-${context.requestId}`,
       mode: context.mode,
@@ -266,6 +281,45 @@ describe("Agent Process Supervisor internal tool gateway", () => {
       type: "run.activity",
       phase: "completed",
     }));
+  });
+
+  it("dispatches a source-bound image tool and emits only the structured ready result", async () => {
+    const child = new FakeWorkerProcess();
+    const events: unknown[] = [];
+    const generateImage = vi.fn(createGateway().generateImage);
+    const supervisor = new AgentProcessSupervisor("worker.js", {
+      acquireRuntimeLease: () => createLease(createGateway({ generateImage })),
+      spawnWorker: () => child,
+    });
+    const runId = supervisor.start(runRequest(), (event) => events.push(event));
+    child.spawn();
+    child.receive({
+      type: "tool.request",
+      runId,
+      requestId: "33333333-3333-4333-8333-333333333333",
+      tool: "generate_image",
+      args: {
+        title: "银湾夜潮",
+        purpose: "scene",
+        prompt: "月光下的银湾海岸",
+        sourceResourceIds: ["world-1"],
+        sourceVersionIds: ["version-1"],
+        idempotencyKey: "silver-bay-night-v1",
+      },
+    });
+
+    await vi.waitFor(() => expect(child.sent).toHaveLength(2));
+    expect(generateImage).toHaveBeenCalledOnce();
+    expect(child.sent[1]).toMatchObject({
+      ok: true,
+      tool: "generate_image",
+      result: { status: "ready", assetId: "image-asset-1" },
+    });
+    expect(JSON.stringify(child.sent[1])).not.toContain("apiKey");
+    expect(events).toEqual([
+      { type: "run.activity", runId, label: "生成角色或场景图片", phase: "started", domains: ["asset"] },
+      { type: "run.activity", runId, label: "生成角色或场景图片", phase: "completed", domains: ["asset"] },
+    ]);
   });
 
   it("passes only Main-admitted private session history to the Worker", () => {
@@ -439,6 +493,52 @@ describe("Agent Process Supervisor internal tool gateway", () => {
       expect(events).toContainEqual(expect.objectContaining({ type: "run.failed", code: "AGENT_RUN_CANCELLED" }));
       await vi.advanceTimersByTimeAsync(26);
       expect(child.killed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the longer image timeout and aborts a still-running generation at its own deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakeWorkerProcess();
+      let invocationSignal: AbortSignal | undefined;
+      const supervisor = new AgentProcessSupervisor("worker.js", {
+        acquireRuntimeLease: () => createLease(createGateway({
+          generateImage: (_args, context) => {
+            invocationSignal = context.signal;
+            return new Promise(() => undefined);
+          },
+        })),
+        toolTimeoutMs: 5,
+        imageToolTimeoutMs: 50,
+        spawnWorker: () => child,
+      });
+      const runId = supervisor.start(runRequest(), () => undefined);
+      child.spawn();
+      child.receive({
+        type: "tool.request",
+        runId,
+        requestId: "55555555-5555-4555-8555-555555555555",
+        tool: "generate_image",
+        args: {
+          title: "银湾夜潮", purpose: "scene", prompt: "月光下的银湾海岸",
+          sourceResourceIds: ["world-1"], sourceVersionIds: ["version-1"],
+          idempotencyKey: "silver-bay-image-v1",
+        },
+      });
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(6);
+      expect(invocationSignal?.aborted).toBe(false);
+      expect(child.sent).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(44);
+      expect(invocationSignal?.aborted).toBe(true);
+      expect(child.sent.at(-1)).toMatchObject({
+        type: "tool.response",
+        ok: false,
+        error: { code: "AGENT_TOOL_TIMEOUT" },
+      });
+      supervisor.dispose();
     } finally {
       vi.useRealTimers();
     }

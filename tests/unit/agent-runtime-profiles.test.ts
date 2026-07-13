@@ -32,8 +32,8 @@ describe("Agent runtime correction profiles", () => {
 
   it("versions the Steward runtime profile with the correction contract", () => {
     expect(getAgentRuntimeProfile("steward")).toMatchObject({
-      version: "1.17.0",
-      sha256: "f7ccddd821331d6c8bf64476c48a1f591bbf0c5df5f7f717a2c21baf590f9f98",
+      version: "1.18.0",
+      sha256: "49f49e6fc083ec36028d1574fe7a313cd318692bd54e16b52b27e77249fa8af4",
     });
   });
 });

@@ -15,6 +15,15 @@ describe("ImageAssetStore", () => {
     expect(first).toMatchObject({ mimeType: "image/png", width: 1, height: 1, created: true });
     expect(fs.readFileSync(first.absolutePath)).toEqual(ONE_PIXEL_PNG);
     expect(store.save(ONE_PIXEL_PNG)).toMatchObject({ sha256: first.sha256, relativePath: first.relativePath, created: false });
+    expect(store.readVerified(first.relativePath, first.sha256)).toEqual(ONE_PIXEL_PNG);
+  });
+
+  it("refuses to serve a managed file after its content no longer matches the committed hash", () => {
+    const store = createStore();
+    const image = store.save(ONE_PIXEL_PNG);
+    fs.writeFileSync(image.absolutePath, Buffer.concat([ONE_PIXEL_PNG, Buffer.from("tampered")]));
+    expect(() => store.readVerified(image.relativePath, image.sha256))
+      .toThrowError(expect.objectContaining({ code: "IMAGE_ASSET_HASH_CONFLICT" }));
   });
 
   it("rejects invalid bytes, oversized content, and path traversal", () => {

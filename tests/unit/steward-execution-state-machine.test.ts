@@ -76,10 +76,12 @@ describe("Steward tool handoff state machine", () => {
     const propose = successfulTool("propose_change_set", { changeSetId: "must-not-run" });
     const machine = createMachine("assist", [retrieve, propose]);
     await submitPlan(machine.tools, "change_set", ["retrieve_graph_evidence", "propose_change_set"]);
-    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve-empty", { scopeResourceIds: ["world-1"] });
+    const retrieval = await tool(machine.tools, "retrieve_graph_evidence")
+      .execute("retrieve-empty", { scopeResourceIds: ["world-1"] });
 
     await expect(tool(machine.tools, "propose_change_set").execute("propose-blocked", {}))
       .rejects.toMatchObject({ code: "STEWARD_EXECUTION_BLOCKED" });
+    expect(retrieval.terminate).toBeUndefined();
     await tool(machine.tools, "submit_steward_result").execute("result-empty", {
       status: "blocked",
       message: "没有可定位来源，不能建立候选变更。",
@@ -172,6 +174,70 @@ describe("Steward tool handoff state machine", () => {
       changeSet: { state: "none", changeSetId: null },
       escalations: [{ code: "tool_failed", message: "检索工具失败。", evidenceIds: [] }],
     });
+  });
+
+  it("requires stable retrieved versions before a final source-bound image step", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", retrievalResult([
+      assertion("version-image-1", "外观", "银白长发与潮汐纹披风"),
+    ]));
+    const generate = successfulTool("generate_image", {
+      jobId: "job-image-1",
+      assetId: "asset-image-1",
+      status: "ready",
+      title: "潮汐使者",
+      purpose: "character_portrait",
+      sourceResourceIds: ["world-1"],
+      sourceVersionIds: ["version-image-1"],
+      mimeType: "image/png",
+      width: 1024,
+      height: 1024,
+      byteLength: 1024,
+      sha256: "c".repeat(64),
+      thumbnailUrl: "novax-asset://image/asset-image-1",
+    });
+    const machine = createMachine("free", [retrieve, generate]);
+
+    await expect(tool(machine.tools, "submit_steward_plan").execute("plan-invalid", {
+      objective: "orchestrate",
+      scopeResourceIds: ["world-1"],
+      steps: ["generate_image"],
+    })).rejects.toMatchObject({ code: "STEWARD_PLAN_INVALID" });
+    await tool(machine.tools, "submit_steward_plan").execute("plan-image", {
+      objective: "orchestrate",
+      scopeResourceIds: ["world-1"],
+      steps: ["retrieve_graph_evidence", "generate_image"],
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve-image", { scopeResourceIds: ["world-1"] });
+    await expect(tool(machine.tools, "generate_image").execute("image-wrong-source", {
+      title: "潮汐使者",
+      purpose: "character_portrait",
+      prompt: "银白长发的潮汐使者",
+      sourceResourceIds: ["world-1"],
+      sourceVersionIds: ["unretrieved-version"],
+      idempotencyKey: "tide-messenger-v1",
+    })).rejects.toMatchObject({ code: "STEWARD_IMAGE_SOURCE_MISMATCH" });
+    await tool(machine.tools, "generate_image").execute("image-valid", {
+      title: "潮汐使者",
+      purpose: "character_portrait",
+      prompt: "银白长发的潮汐使者，披着潮汐纹披风",
+      sourceResourceIds: ["world-1"],
+      sourceVersionIds: ["version-image-1"],
+      idempotencyKey: "tide-messenger-v1",
+    });
+    await tool(machine.tools, "submit_steward_result").execute("result-image", {
+      status: "completed",
+      message: "角色立绘已经生成。",
+      evidenceIds: ["version-image-1"],
+      toolOutcomes: [
+        { tool: "retrieve_graph_evidence", status: "succeeded" },
+        { tool: "generate_image", status: "succeeded" },
+      ],
+      changeSet: { state: "none", changeSetId: null },
+      escalations: [],
+    });
+
+    expect(machine.snapshot().generatedImages).toHaveLength(1);
+    expect(machine.snapshot().generatedImages[0]).toMatchObject({ assetId: "asset-image-1", status: "ready" });
   });
 
   it("rejects opaque echo markers from explicitly untrusted external documents", async () => {

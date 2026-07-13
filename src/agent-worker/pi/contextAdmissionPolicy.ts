@@ -144,9 +144,9 @@ export function assertContextAdmission(input: Parameters<typeof evaluateContextA
 }
 
 export function compactDurablyNotedFileChunks(context: Context): Context {
-  const durableNotes = new Map<string, string>();
-  const coveredToolCallIds = new Set<string>();
-  const receipts: Array<{ noteId: string; source: Record<string, unknown> }> = [];
+  const durableNotes = new Map<string, { noteId: string; source: Record<string, unknown> }>();
+  const noteReceiptsByToolCallId = new Map<string, { noteId: string; source: Record<string, unknown> }>();
+  const readReceiptsByToolCallId = new Map<string, { noteId: string; source: Record<string, unknown> }>();
   for (const message of context.messages) {
     if (message.role !== "toolResult" || message.toolName !== "save_task_note" || message.isError) continue;
     const payload = readToolPayload(message.content);
@@ -155,9 +155,9 @@ export function compactDurablyNotedFileChunks(context: Context): Context {
     if (!note || !source || typeof note.id !== "string") continue;
     const key = sourceRangeKey(source);
     if (key) {
-      durableNotes.set(key, note.id);
-      coveredToolCallIds.add(message.toolCallId);
-      receipts.push({ noteId: note.id, source });
+      const receipt = { noteId: note.id, source };
+      durableNotes.set(key, receipt);
+      noteReceiptsByToolCallId.set(message.toolCallId, receipt);
     }
   }
   if (durableNotes.size === 0) return context;
@@ -165,49 +165,65 @@ export function compactDurablyNotedFileChunks(context: Context): Context {
     if (message.role !== "toolResult" || message.toolName !== "read_project_file" || message.isError) continue;
     const result = readResultObject(readToolPayload(message.content));
     const key = result && sourceRangeKey(result);
-    if (key && durableNotes.has(key)) coveredToolCallIds.add(message.toolCallId);
+    const receipt = key ? durableNotes.get(key) : undefined;
+    if (receipt) readReceiptsByToolCallId.set(message.toolCallId, receipt);
   }
 
-  const messages: Context["messages"] = [];
-  let receiptInserted = false;
-  for (const message of context.messages) {
-    if (message.role === "toolResult" && coveredToolCallIds.has(message.toolCallId)) {
-      if (!receiptInserted) {
-        messages.push(createDurableReceiptMessage(receipts, message.timestamp));
-        receiptInserted = true;
-      }
-      continue;
+  const messages: Context["messages"] = context.messages.map((message) => {
+    if (message.role === "toolResult") {
+      const receipt = message.toolName === "read_project_file"
+        ? readReceiptsByToolCallId.get(message.toolCallId)
+        : message.toolName === "save_task_note"
+          ? noteReceiptsByToolCallId.get(message.toolCallId)
+          : undefined;
+      return receipt ? compactToolResult(message, receipt) : message;
     }
     if (message.role === "assistant") {
-      const content = message.content.filter((item) => item.type !== "toolCall" || !coveredToolCallIds.has(item.id));
-      if (content.length === 0) {
-        if (!receiptInserted) {
-          messages.push(createDurableReceiptMessage(receipts, message.timestamp));
-          receiptInserted = true;
-        }
-        continue;
-      }
-      messages.push(content.length === message.content.length ? message : { ...message, content });
-      continue;
+      let changed = false;
+      const content = message.content.map((item) => {
+        if (item.type !== "toolCall") return item;
+        const receipt = noteReceiptsByToolCallId.get(item.id);
+        if (!receipt) return item;
+        changed = true;
+        return {
+          ...item,
+          arguments: {
+            title: "[stored task note]",
+            content: "[content stored durably in workspace task note]",
+            source: receipt.source,
+          },
+        };
+      });
+      return changed ? { ...message, content } : message;
     }
-    messages.push(message);
-  }
-  if (!receiptInserted) messages.push(createDurableReceiptMessage(receipts, Date.now()));
+    return message;
+  });
   return { ...context, messages };
 }
 
-function createDurableReceiptMessage(
-  receipts: Array<{ noteId: string; source: Record<string, unknown> }>,
-  timestamp: number,
-): Context["messages"][number] {
+function compactToolResult(
+  message: Extract<Context["messages"][number], { role: "toolResult" }>,
+  receipt: { noteId: string; source: Record<string, unknown> },
+): Extract<Context["messages"][number], { role: "toolResult" }> {
   return {
-    role: "user",
-    content: JSON.stringify({
-      novaxState: "durable_file_receipts",
-      instruction: "Covered source ranges are stored in workspace task notes. Continue with the Harness-required tool.",
-      receipts,
-    }),
-    timestamp,
+    ...message,
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        result: {
+          novaxState: "durable_file_receipt",
+          noteId: receipt.noteId,
+          source: receipt.source,
+          contentStored: true,
+        },
+      }),
+    }],
+    details: {
+      novaxState: "durable_file_receipt",
+      noteId: receipt.noteId,
+      source: receipt.source,
+      contentStored: true,
+    },
   };
 }
 

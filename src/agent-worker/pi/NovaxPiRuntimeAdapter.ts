@@ -141,6 +141,11 @@ export class NovaxPiRuntimeAdapter {
       },
       streamFn: guardedStreamFn,
       toolExecution: "sequential",
+      afterToolCall: input.completionGuard
+        ? async (context) => context.toolCall.name === input.completionGuard!.toolName && context.isError
+          ? { terminate: true }
+          : undefined
+        : undefined,
     });
 
     agent.subscribe((event) => {
@@ -168,6 +173,7 @@ export class NovaxPiRuntimeAdapter {
       while (
         input.completionGuard
         && !input.completionGuard.isSatisfied()
+        && !isTerminalProviderMessage(finalMessage)
         && correctionAttempts < STRUCTURED_SUBMISSION_CORRECTION.maxAttempts
       ) {
         correctionAttempts += 1;
@@ -297,6 +303,12 @@ function forceOpenAiToolChoice(payload: unknown, toolName: string): unknown {
     ...(payload as Record<string, unknown>),
     tool_choice: { type: "function", function: { name: toolName } },
   };
+}
+
+function isTerminalProviderMessage(message: AssistantMessage | undefined): boolean {
+  return message?.stopReason === "error"
+    || message?.stopReason === "aborted"
+    || message?.stopReason === "length";
 }
 
 export function createOpenAiCompatiblePiAdapter(profileInput: unknown): NovaxPiRuntimeAdapter {

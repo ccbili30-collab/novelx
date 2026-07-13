@@ -9,7 +9,7 @@ import { stewardOutputSchema, type StewardOutput } from "./contracts/roleOutputs
 import type { SafePiEvent } from "./pi/eventProjection";
 import type { RuntimeAdapter } from "./pi/runtimeAdapterContract";
 import type { PublishedPrompt } from "./promptRegistry";
-import { createStewardExecutionStateMachine, type InspectedProjectFileReference, type RetrievedDocumentReference } from "./stewardExecutionStateMachine";
+import { createStewardExecutionStateMachine, type GeneratedImageReference, type InspectedProjectFileReference, type RetrievedDocumentReference } from "./stewardExecutionStateMachine";
 
 export interface StewardRuntimeAudit {
   record(runId: string, operation: AgentWorkerAuditOperation, signal?: AbortSignal): Promise<void>;
@@ -22,6 +22,7 @@ export interface StewardRuntimeResult {
   submissionCount: number;
   retrievedDocuments: RetrievedDocumentReference[];
   inspectedFiles: InspectedProjectFileReference[];
+  generatedImages: GeneratedImageReference[];
 }
 
 export async function runStewardRuntime(input: {
@@ -118,6 +119,7 @@ export async function runStewardRuntime(input: {
       submissionCount,
       retrievedDocuments: machine.snapshot().retrievedDocuments,
       inspectedFiles: machine.snapshot().inspectedFiles,
+      generatedImages: machine.snapshot().generatedImages,
     };
   } catch (cause) {
     const effectiveCause = stateMachine?.lastFinalRejectionCode()
@@ -148,7 +150,7 @@ export function resolveLongReadMaxChars(contextWindow: number): number {
 
 function attachPublicTrace(
   cause: unknown,
-  executions: Array<{ tool: "retrieve_graph_evidence" | "inspect_project_files" | "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "save_task_note" | "list_task_notes" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
+  executions: Array<{ tool: "retrieve_graph_evidence" | "inspect_project_files" | "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "save_task_note" | "list_task_notes" | "generate_image" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
 ): unknown {
   if (!cause || typeof cause !== "object") return cause;
   return Object.assign(cause, { publicToolOutcomes: executions.map((execution) => ({ ...execution })) });

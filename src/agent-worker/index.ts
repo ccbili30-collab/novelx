@@ -90,6 +90,7 @@ process.on("message", (payload: unknown) => {
         readProjectFile: (args, signal) => toolBridge.invoke(command.runId, "read_project_file", args, signal),
         saveTaskNote: (args, signal) => toolBridge.invoke(command.runId, "save_task_note", args, signal),
         listTaskNotes: (args, signal) => toolBridge.invoke(command.runId, "list_task_notes", args, signal),
+        generateImage: (args, signal) => toolBridge.invoke(command.runId, "generate_image", args, signal),
         proposeChangeSet: (args, signal) => toolBridge.invoke(
           command.runId,
           "propose_change_set",

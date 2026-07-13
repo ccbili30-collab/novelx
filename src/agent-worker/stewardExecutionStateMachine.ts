@@ -13,6 +13,8 @@ import {
   listTaskNotesResultSchema,
   proposeChangeSetResultSchema,
   retrieveGraphEvidenceResultSchema,
+  generateImageArgsSchema,
+  generateImageResultSchema,
 } from "../shared/agentWorkerProtocol";
 
 const operationalToolNames = [
@@ -28,6 +30,7 @@ const operationalToolNames = [
   "checker",
   "writer",
   "propose_change_set",
+  "generate_image",
 ] as const;
 
 type OperationalToolName = (typeof operationalToolNames)[number];
@@ -90,6 +93,13 @@ const planSchema = z.object({
   if (plan.objective === "change_set" && plan.steps.at(-1) !== "propose_change_set") {
     context.addIssue({ code: "custom", message: "Change Set plans must propose only after evidence and checks." });
   }
+  if (plan.steps.includes("generate_image") && (
+    !plan.steps.includes("retrieve_graph_evidence")
+    || plan.steps.indexOf("retrieve_graph_evidence") > plan.steps.indexOf("generate_image")
+    || plan.steps.at(-1) !== "generate_image"
+  )) {
+    context.addIssue({ code: "custom", message: "Image generation must be the final step after sourced retrieval." });
+  }
 });
 
 type StewardPlan = z.infer<typeof planSchema>;
@@ -107,6 +117,7 @@ export interface StewardExecutionSnapshot {
   blockReason: BlockReason | null;
   retrievedDocuments: RetrievedDocumentReference[];
   inspectedFiles: InspectedProjectFileReference[];
+  generatedImages: GeneratedImageReference[];
 }
 
 export interface RetrievedDocumentReference {
@@ -122,6 +133,8 @@ export interface InspectedProjectFileReference {
   kind: "text" | "binary";
   complete: boolean;
 }
+
+export type GeneratedImageReference = z.infer<typeof generateImageResultSchema>;
 
 export function createStewardExecutionStateMachine(input: {
   mode: "free" | "assist";
@@ -145,6 +158,8 @@ export function createStewardExecutionStateMachine(input: {
   const executions: ExecutionRecord[] = [];
   let retrievedDocuments: RetrievedDocumentReference[] = [];
   let inspectedFiles: InspectedProjectFileReference[] = [];
+  const generatedImages: GeneratedImageReference[] = [];
+  let pendingImageRequest: z.infer<typeof generateImageArgsSchema> | null = null;
   let pendingReadRange: z.infer<typeof readProjectFileResultSchema> | null = null;
   const longReadFiles = new Map<string, { nextOffset: number; complete: boolean }>();
   let longReadDiscoveryComplete = false;
@@ -267,6 +282,11 @@ export function createStewardExecutionStateMachine(input: {
       blockReason,
       retrievedDocuments: retrievedDocuments.map((document) => ({ ...document })),
       inspectedFiles: inspectedFiles.map((file) => ({ ...file })),
+      generatedImages: generatedImages.map((image) => ({
+        ...image,
+        sourceResourceIds: [...image.sourceResourceIds],
+        sourceVersionIds: [...image.sourceVersionIds],
+      })),
     }),
     requiredNextTool: () => {
       return requiredNextTool();
@@ -326,8 +346,9 @@ export function createStewardExecutionStateMachine(input: {
 
   function requireCurrentStep(name: OperationalToolName, params: unknown): void {
     if (!plan) throw stateError("STEWARD_PLAN_REQUIRED");
+    const activePlan = plan;
     if (blockReason) throw stateError("STEWARD_EXECUTION_BLOCKED");
-    if (plan.objective === "inspect_files") {
+    if (activePlan.objective === "inspect_files") {
       if (requiredNextTool() !== name) throw stateError("STEWARD_STEP_OUT_OF_ORDER");
       if (name === "read_project_file") {
         const read = readObject(params);
@@ -342,10 +363,10 @@ export function createStewardExecutionStateMachine(input: {
         const offset = typeof page?.offset === "number" ? page.offset : 0;
         if (offset !== nextTaskNoteOffset) throw stateError("STEWARD_TASK_NOTE_PAGE_MISMATCH");
       }
-    } else if (plan.steps[nextStepIndex] !== name) throw stateError("STEWARD_STEP_OUT_OF_ORDER");
+    } else if (activePlan.steps[nextStepIndex] !== name) throw stateError("STEWARD_STEP_OUT_OF_ORDER");
     if (name === "retrieve_graph_evidence") {
       const scopes = readScopeResourceIds(params);
-      if (!sameStrings(scopes, plan.scopeResourceIds)) throw stateError("STEWARD_PLAN_SCOPE_MISMATCH");
+      if (!sameStrings(scopes, activePlan.scopeResourceIds)) throw stateError("STEWARD_PLAN_SCOPE_MISMATCH");
     }
     if (name === "save_task_note") {
       const note = saveTaskNoteArgsSchema.safeParse(params);
@@ -355,6 +376,15 @@ export function createStewardExecutionStateMachine(input: {
         || note.data.source.endChar !== pendingReadRange.endChar) {
         throw stateError("STEWARD_TASK_NOTE_SOURCE_MISMATCH");
       }
+    }
+    if (name === "generate_image") {
+      const image = generateImageArgsSchema.safeParse(params);
+      if (!image.success
+        || image.data.sourceResourceIds.some((resourceId) => !activePlan.scopeResourceIds.includes(resourceId))
+        || image.data.sourceVersionIds.some((versionId) => !allowedEvidenceIds.has(versionId))) {
+        throw stateError("STEWARD_IMAGE_SOURCE_MISMATCH");
+      }
+      pendingImageRequest = image.data;
     }
   }
 
@@ -472,6 +502,20 @@ export function createStewardExecutionStateMachine(input: {
       if (proposal.data.status === "failed" || proposal.data.status === "rejected" || proposal.data.gateStatus === "blocked") {
         blockReason = "tool_failed";
       }
+      return;
+    }
+    if (name === "generate_image") {
+      const generated = generateImageResultSchema.safeParse(details);
+      if (!generated.success || !pendingImageRequest
+        || generated.data.title !== pendingImageRequest.title
+        || generated.data.purpose !== pendingImageRequest.purpose
+        || !sameStringSets(generated.data.sourceResourceIds, pendingImageRequest.sourceResourceIds)
+        || !sameStringSets(generated.data.sourceVersionIds, pendingImageRequest.sourceVersionIds)) {
+        throw stateError("STEWARD_TOOL_RESULT_INVALID");
+      }
+      generatedImages.push(generated.data);
+      pendingImageRequest = null;
+      for (const versionId of generated.data.sourceVersionIds) allowedEvidenceIds.add(versionId);
       return;
     }
     if (name === "checker") {
@@ -628,6 +672,10 @@ function readScopeResourceIds(params: unknown): string[] {
 
 function sameStrings(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameStringSets(left: string[], right: string[]): boolean {
+  return sameStrings([...left].sort(), [...right].sort());
 }
 
 function containsStructuralConflict(assertions: z.infer<typeof retrieveGraphEvidenceResultSchema>["assertions"]): boolean {

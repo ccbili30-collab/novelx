@@ -12,6 +12,7 @@ import stewardPromptV1_6 from "./prompts/steward/v1.6.md?raw";
 import stewardPromptV1_7 from "./prompts/steward/v1.7.md?raw";
 import stewardPromptV1_8FileToolsAddendum from "./prompts/steward/v1.8-file-tools-addendum.md?raw";
 import stewardPromptV1_9LongContextAddendum from "./prompts/steward/v1.9-long-context-addendum.md?raw";
+import stewardPromptV1_10ImageGenerationAddendum from "./prompts/steward/v1.10-image-generation-addendum.md?raw";
 import writerPrompt from "./prompts/writer/v1.md?raw";
 
 const promptContent: Record<string, string> = {
@@ -27,6 +28,7 @@ const promptContent: Record<string, string> = {
   "novax.steward@1.9.0": stewardPromptV1_7,
   "novax.steward@1.10.0": `${stewardPromptV1_7}\n${stewardPromptV1_8FileToolsAddendum}`,
   "novax.steward@1.11.0": `${stewardPromptV1_7}\n${stewardPromptV1_8FileToolsAddendum}\n${stewardPromptV1_9LongContextAddendum}`,
+  "novax.steward@1.12.0": `${stewardPromptV1_7}\n${stewardPromptV1_8FileToolsAddendum}\n${stewardPromptV1_9LongContextAddendum}\n${stewardPromptV1_10ImageGenerationAddendum}`,
   "novax.writer@1.0.0": writerPrompt,
   "novax.writer@1.1.0": writerPrompt,
   "novax.writer@1.2.0": writerPrompt,
@@ -34,6 +36,7 @@ const promptContent: Record<string, string> = {
   "novax.writer@1.4.0": writerPrompt,
   "novax.writer@1.5.0": writerPrompt,
   "novax.writer@1.6.0": writerPrompt,
+  "novax.writer@1.7.0": writerPrompt,
   "novax.checker@1.0.0": checkerPrompt,
   "novax.checker@1.1.0": checkerPromptV1_1,
   "novax.checker@1.2.0": checkerPromptV1_1,
@@ -42,6 +45,7 @@ const promptContent: Record<string, string> = {
   "novax.checker@1.5.0": checkerPromptV1_1,
   "novax.checker@1.6.0": checkerPromptV1_1,
   "novax.checker@1.7.0": checkerPromptV1_1,
+  "novax.checker@1.8.0": checkerPromptV1_1,
 };
 
 export interface PublishedPrompt {

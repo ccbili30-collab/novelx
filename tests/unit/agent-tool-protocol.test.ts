@@ -7,7 +7,7 @@ import {
 } from "../../src/shared/agentWorkerProtocol";
 
 describe("Agent Worker internal tool protocol", () => {
-  it("accepts exactly the two allowlisted tool names and rejects extra fields", () => {
+  it("accepts allowlisted tools and rejects unknown names or extra fields", () => {
     const base = {
       type: "tool.request",
       runId: "run-1",
@@ -16,6 +16,18 @@ describe("Agent Worker internal tool protocol", () => {
     };
 
     expect(agentWorkerToolRequestSchema.safeParse({ ...base, tool: "retrieve_graph_evidence" }).success).toBe(true);
+    expect(agentWorkerToolRequestSchema.safeParse({
+      ...base,
+      tool: "generate_image",
+      args: {
+        title: "银湾夜潮",
+        purpose: "scene",
+        prompt: "月光下的银湾海岸",
+        sourceResourceIds: ["world-1"],
+        sourceVersionIds: ["version-1"],
+        idempotencyKey: "silver-bay-night-v1",
+      },
+    }).success).toBe(true);
     expect(agentWorkerToolRequestSchema.safeParse({ ...base, tool: "read_workspace_file" }).success).toBe(false);
     expect(agentWorkerToolRequestSchema.safeParse({
       ...base,

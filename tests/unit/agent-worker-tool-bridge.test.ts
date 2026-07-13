@@ -26,6 +26,7 @@ describe("Agent Worker tool bridge", () => {
       readProjectFile: (args, signal) => bridge.invoke("run-1", "read_project_file", args, signal),
       saveTaskNote: (args, signal) => bridge.invoke("run-1", "save_task_note", args, signal),
       listTaskNotes: (args, signal) => bridge.invoke("run-1", "list_task_notes", args, signal),
+      generateImage: (args, signal) => bridge.invoke("run-1", "generate_image", args, signal),
       proposeChangeSet: (args, signal) => bridge.invoke(
         "run-1",
         "propose_change_set",
@@ -44,6 +45,7 @@ describe("Agent Worker tool bridge", () => {
       "save_task_note",
       "list_task_notes",
       "inspect_project_files",
+      "generate_image",
       "propose_change_set",
     ]);
     expect(tools.find((tool) => tool.name === "inspect_project_files")?.parameters).toMatchObject({
@@ -104,6 +106,39 @@ describe("Agent Worker tool bridge", () => {
     }
   });
 
+  it("keeps image generation pending beyond the ordinary tool timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let sent: AgentWorkerToolRequest | undefined;
+      const bridge = new AgentWorkerToolBridge((request) => { sent = request; return true; }, 50, 500);
+      const pending = bridge.invoke("run-image", "generate_image", {
+        title: "银湾夜潮",
+        purpose: "scene",
+        prompt: "月光下的银湾海岸",
+        sourceResourceIds: ["world-1"],
+        sourceVersionIds: ["version-1"],
+        idempotencyKey: "silver-bay-image-v1",
+      });
+      await vi.advanceTimersByTimeAsync(51);
+      expect(bridge.handleResponse({
+        type: "tool.response",
+        runId: "run-image",
+        requestId: sent!.requestId,
+        ok: true,
+        tool: "generate_image",
+        result: {
+          jobId: "job-1", assetId: "asset-1", status: "ready", title: "银湾夜潮", purpose: "scene",
+          sourceResourceIds: ["world-1"], sourceVersionIds: ["version-1"], mimeType: "image/png",
+          width: 1024, height: 1024, byteLength: 1024, sha256: "a".repeat(64),
+          thumbnailUrl: "novax-asset://image/asset-1",
+        },
+      })).toBe(true);
+      await expect(pending).resolves.toMatchObject({ assetId: "asset-1" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("preserves safe project-file failure codes from main", async () => {
     let sent: AgentWorkerToolRequest | undefined;
     const bridge = new AgentWorkerToolBridge((request) => { sent = request; return true; });
@@ -116,5 +151,41 @@ describe("Agent Worker tool bridge", () => {
       error: { code: "PROJECT_FILE_NOT_FOUND", message: "Project file or directory was not found." },
     })).toBe(true);
     await expect(pending).rejects.toMatchObject({ code: "PROJECT_FILE_NOT_FOUND" });
+  });
+
+  it("returns only a correlated managed image result", async () => {
+    let sent: AgentWorkerToolRequest | undefined;
+    const bridge = new AgentWorkerToolBridge((request) => { sent = request; return true; });
+    const pending = bridge.invoke("run-image", "generate_image", {
+      title: "银湾夜潮",
+      purpose: "scene",
+      prompt: "月光下的银湾海岸",
+      sourceResourceIds: ["world-1"],
+      sourceVersionIds: ["version-1"],
+      idempotencyKey: "silver-bay-night-v1",
+    });
+    expect(bridge.handleResponse({
+      type: "tool.response",
+      runId: "run-image",
+      requestId: sent!.requestId,
+      ok: true,
+      tool: "generate_image",
+      result: {
+        jobId: "job-1",
+        assetId: "asset-1",
+        status: "ready",
+        title: "银湾夜潮",
+        purpose: "scene",
+        sourceResourceIds: ["world-1"],
+        sourceVersionIds: ["version-1"],
+        mimeType: "image/png",
+        width: 1024,
+        height: 1024,
+        byteLength: 1024,
+        sha256: "d".repeat(64),
+        thumbnailUrl: "novax-asset://image/asset-1",
+      },
+    })).toBe(true);
+    await expect(pending).resolves.toMatchObject({ assetId: "asset-1", status: "ready" });
   });
 });

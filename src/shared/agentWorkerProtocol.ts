@@ -441,6 +441,39 @@ export const proposeChangeSetResultSchema = z.object({
   itemCount: z.number().int().min(1).max(500),
 }).strict();
 
+export const generateImageArgsSchema = z.object({
+  title: z.string().trim().min(1).max(240),
+  purpose: z.enum(["character_portrait", "scene"]),
+  prompt: z.string().trim().min(1).max(50_000),
+  sourceResourceIds: z.array(identifierSchema).min(1).max(100),
+  sourceVersionIds: z.array(identifierSchema).min(1).max(100),
+  idempotencyKey: z.string().trim().min(1).max(200),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.sourceResourceIds).size !== value.sourceResourceIds.length
+    || new Set(value.sourceVersionIds).size !== value.sourceVersionIds.length) {
+    context.addIssue({ code: "custom", message: "Image sources must be unique." });
+  }
+});
+
+export const generateImageResultSchema = z.object({
+  jobId: identifierSchema,
+  assetId: identifierSchema,
+  status: z.literal("ready"),
+  title: z.string().trim().min(1).max(240),
+  purpose: z.enum(["character_portrait", "scene"]),
+  sourceResourceIds: z.array(identifierSchema).min(1).max(100),
+  sourceVersionIds: z.array(identifierSchema).min(1).max(100),
+  mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+  width: z.number().int().positive().max(16_384),
+  height: z.number().int().positive().max(16_384),
+  byteLength: z.number().int().positive().max(100_000_000),
+  sha256: sha256Schema,
+  thumbnailUrl: z.string().max(4_000).refine(
+    (value) => value.startsWith("novax-asset:"),
+    "Generated images must use a managed Novax asset URL.",
+  ),
+}).strict();
+
 export const agentToolNameSchema = z.enum([
   "retrieve_graph_evidence",
   "list_project_directory",
@@ -452,6 +485,7 @@ export const agentToolNameSchema = z.enum([
   "list_task_notes",
   "inspect_project_files",
   "propose_change_set",
+  "generate_image",
 ]);
 
 export const agentSessionHistorySchema = z.object({
@@ -538,6 +572,13 @@ export const agentWorkerToolRequestSchema = z.discriminatedUnion("tool", [
     tool: z.literal("propose_change_set"),
     args: proposeChangeSetArgsSchema,
   }).strict(),
+  z.object({
+    type: z.literal("tool.request"),
+    runId: z.string().min(1).max(120),
+    requestId: requestIdSchema,
+    tool: z.literal("generate_image"),
+    args: generateImageArgsSchema,
+  }).strict(),
 ]);
 
 export const agentToolInternalErrorCodeSchema = z.enum([
@@ -555,6 +596,9 @@ export const agentToolInternalErrorCodeSchema = z.enum([
   "PROJECT_FILE_QUERY_INVALID",
   "PROJECT_FILE_RANGE_INVALID",
   "PROJECT_FILE_OPERATION_FAILED",
+  "IMAGE_PROVIDER_REQUIRED",
+  "IMAGE_GENERATION_RECONCILIATION_REQUIRED",
+  "IMAGE_GENERATION_FAILED",
 ]);
 
 const agentWorkerToolSuccessResponseSchema = z.discriminatedUnion("tool", [
@@ -588,6 +632,14 @@ const agentWorkerToolSuccessResponseSchema = z.discriminatedUnion("tool", [
     ok: z.literal(true),
     tool: z.literal("propose_change_set"),
     result: proposeChangeSetResultSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("tool.response"),
+    runId: z.string().min(1).max(120),
+    requestId: requestIdSchema,
+    ok: z.literal(true),
+    tool: z.literal("generate_image"),
+    result: generateImageResultSchema,
   }).strict(),
 ]);
 
@@ -756,6 +808,8 @@ export type ListTaskNotesArgs = z.input<typeof listTaskNotesArgsSchema>;
 export type ListTaskNotesResult = z.infer<typeof listTaskNotesResultSchema>;
 export type ProposeChangeSetArgs = z.infer<typeof proposeChangeSetArgsSchema>;
 export type ProposeChangeSetResult = z.infer<typeof proposeChangeSetResultSchema>;
+export type GenerateImageArgs = z.infer<typeof generateImageArgsSchema>;
+export type GenerateImageResult = z.infer<typeof generateImageResultSchema>;
 export type AgentToolName = z.infer<typeof agentToolNameSchema>;
 export type AgentSessionHistory = z.infer<typeof agentSessionHistorySchema>;
 export type AgentCollaborationContext = z.infer<typeof agentCollaborationContextSchema>;

@@ -360,13 +360,18 @@ function createEvaluationToolExecutor(
         executions.push({ tool: "retrieve_graph_evidence", status: "failed" });
         throw evalRunnerError("AGENT_TOOL_TIMEOUT", "Evaluation graph retrieval timed out.");
       }
-      if (scenario !== "empty_graph" && scenario !== "assist_pending_change_set" && scenario !== "major_conflict") {
+      if (scenario !== "empty_graph" && scenario !== "assist_pending_change_set" && scenario !== "major_conflict"
+        && scenario !== "source_bound_image") {
         executions.push({ tool: "retrieve_graph_evidence", status: "failed" });
         throw evalRunnerError("AGENT_TOOL_FAILED", "Graph retrieval is not configured for this evaluation case.");
       }
       executions.push({ tool: "retrieve_graph_evidence", status: "succeeded" });
       const assertions = scenario === "assist_pending_change_set"
         ? [evaluationAssertion(args.scopeResourceIds[0] ?? "world-assist-eval", "coast-source", "银湾海岸", "形成原因", { cause: "沉降与海水倒灌" })]
+        : scenario === "source_bound_image"
+          ? [evaluationAssertion(args.scopeResourceIds[0] ?? "world-image-eval", "image-version-eval", "潮汐观测者", "外观", {
+              appearance: "银白短发、深蓝观测袍、左眼潮汐纹章",
+            })]
         : scenario === "major_conflict"
           ? [
               evaluationAssertion(args.scopeResourceIds[0] ?? "world-conflict-eval", "source-old", "精灵", "起源", { cause: "世界树孕育" }),
@@ -406,6 +411,28 @@ function createEvaluationToolExecutor(
             relevanceRanking: "not_applied",
           },
         },
+      };
+    },
+    generateImage: async (args) => {
+      if (scenario !== "source_bound_image") {
+        executions.push({ tool: "generate_image", status: "failed" });
+        throw evalRunnerError("IMAGE_PROVIDER_REQUIRED", "Image generation is not configured for this prompt evaluation case.");
+      }
+      executions.push({ tool: "generate_image", status: "succeeded" });
+      return {
+        jobId: "job-image-eval",
+        assetId: "asset-image-eval",
+        status: "ready" as const,
+        title: args.title,
+        purpose: args.purpose,
+        sourceResourceIds: [...args.sourceResourceIds],
+        sourceVersionIds: [...args.sourceVersionIds],
+        mimeType: "image/png" as const,
+        width: 1024,
+        height: 1024,
+        byteLength: 4096,
+        sha256: "5f70bf18a08660b5b4f5bb614df7ad74a64c4a2bca68c0f305f5a0f8316f6fcb",
+        thumbnailUrl: "novax-asset://image/asset-image-eval",
       };
     },
     proposeChangeSet: async (_args: ProposeChangeSetArgs) => {
@@ -455,6 +482,7 @@ function evaluationScopeResourceIds(testCase: (typeof promptAdversarialCases)[nu
     case "major_conflict": return ["world-conflict-eval"];
     case "graph_timeout": return ["world-timeout-eval"];
     case "project_overview": return ["world-files-eval"];
+    case "source_bound_image": return ["world-image-eval"];
     default: return [];
   }
 }

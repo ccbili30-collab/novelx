@@ -26,7 +26,7 @@ export const stewardOutputSchema = z.object({
   toolOutcomes: z.array(z.object({
     tool: z.enum([
       "retrieve_graph_evidence", "inspect_project_files", "list_project_directory", "stat_project_file",
-      "glob_project_files", "search_project_files", "read_project_file", "save_task_note", "list_task_notes", "propose_change_set", "writer", "checker",
+      "glob_project_files", "search_project_files", "read_project_file", "save_task_note", "list_task_notes", "generate_image", "propose_change_set", "writer", "checker",
     ]),
     status: z.enum(["succeeded", "failed", "not_run"]),
   }).strict()).max(100),

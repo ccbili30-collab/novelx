@@ -12,6 +12,7 @@ import {
   statProjectFileResultSchema,
   proposeChangeSetResultSchema,
   retrieveGraphEvidenceResultSchema,
+  generateImageResultSchema,
   type AgentToolName,
   type AgentWorkerToolRequest,
   type InspectProjectFilesArgs,
@@ -27,6 +28,8 @@ import {
   type ProposeChangeSetResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
+  type GenerateImageArgs,
+  type GenerateImageResult,
 } from "../../shared/agentWorkerProtocol";
 
 interface PendingRequest {
@@ -43,11 +46,13 @@ type SendToMain = (message: AgentWorkerToolRequest) => boolean | void;
 export class AgentWorkerToolBridge {
   readonly #send: SendToMain;
   readonly #timeoutMs: number;
+  readonly #imageTimeoutMs: number;
   readonly #pending = new Map<string, PendingRequest>();
 
-  constructor(send: SendToMain, timeoutMs = 20_000) {
+  constructor(send: SendToMain, timeoutMs = 20_000, imageTimeoutMs = 190_000) {
     this.#send = send;
     this.#timeoutMs = timeoutMs;
+    this.#imageTimeoutMs = imageTimeoutMs;
   }
 
   invoke(
@@ -75,12 +80,13 @@ export class AgentWorkerToolBridge {
     args: ProposeChangeSetArgs,
     signal?: AbortSignal,
   ): Promise<ProposeChangeSetResult>;
+  invoke(runId: string, tool: "generate_image", args: GenerateImageArgs, signal?: AbortSignal): Promise<GenerateImageResult>;
   invoke(
     runId: string,
     tool: AgentToolName,
-    args: RetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ListProjectDirectoryArgs | StatProjectFileArgs | GlobProjectFilesArgs | SearchProjectFilesArgs | ReadProjectFileArgs | SaveTaskNoteArgs | ListTaskNotesArgs | ProposeChangeSetArgs,
+    args: RetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ListProjectDirectoryArgs | StatProjectFileArgs | GlobProjectFilesArgs | SearchProjectFilesArgs | ReadProjectFileArgs | SaveTaskNoteArgs | ListTaskNotesArgs | ProposeChangeSetArgs | GenerateImageArgs,
     signal?: AbortSignal,
-  ): Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ListProjectDirectoryResult | StatProjectFileResult | GlobProjectFilesResult | SearchProjectFilesResult | ReadProjectFileResult | SaveTaskNoteResult | ListTaskNotesResult | ProposeChangeSetResult> {
+  ): Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ListProjectDirectoryResult | StatProjectFileResult | GlobProjectFilesResult | SearchProjectFilesResult | ReadProjectFileResult | SaveTaskNoteResult | ListTaskNotesResult | ProposeChangeSetResult | GenerateImageResult> {
     if (signal?.aborted) return Promise.reject(toolBridgeError("AGENT_RUN_CANCELLED", "Agent run was cancelled."));
     const request = agentWorkerToolRequestSchema.parse({
       type: "tool.request",
@@ -97,7 +103,7 @@ export class AgentWorkerToolBridge {
       signal?.addEventListener("abort", onAbort, { once: true });
       const timer = setTimeout(() => {
         this.#settle(request.requestId, undefined, toolBridgeError("AGENT_TOOL_TIMEOUT", "Agent tool request timed out."));
-      }, this.#timeoutMs);
+      }, tool === "generate_image" ? this.#imageTimeoutMs : this.#timeoutMs);
       this.#pending.set(request.requestId, {
         runId,
         tool,
@@ -144,7 +150,8 @@ export class AgentWorkerToolBridge {
                 : response.tool === "read_project_file" ? readProjectFileResultSchema
                   : response.tool === "save_task_note" ? saveTaskNoteResultSchema
                     : response.tool === "list_task_notes" ? listTaskNotesResultSchema
-                      : proposeChangeSetResultSchema;
+                      : response.tool === "generate_image" ? generateImageResultSchema
+                        : proposeChangeSetResultSchema;
     const result = resultSchema.safeParse(response.result);
     if (!result.success) {
       this.#settle(response.requestId, undefined, toolBridgeError("AGENT_TOOL_PROTOCOL_FAILED", "Agent tool response is invalid."));

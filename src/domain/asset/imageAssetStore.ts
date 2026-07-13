@@ -80,6 +80,19 @@ export class ImageAssetStore {
     return target;
   }
 
+  readVerified(relativePath: string, expectedSha256: string): Buffer {
+    if (!/^[a-f0-9]{64}$/.test(expectedSha256)) throw storeError("IMAGE_ASSET_SHA256_INVALID");
+    const target = this.resolveManagedPath(relativePath);
+    let stat: fs.Stats;
+    try { stat = fs.statSync(target); } catch { throw storeError("IMAGE_ASSET_NOT_FOUND"); }
+    if (!stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES) throw storeError("IMAGE_ASSET_SIZE_INVALID");
+    const bytes = fs.readFileSync(target);
+    if (createHash("sha256").update(bytes).digest("hex") !== expectedSha256) {
+      throw storeError("IMAGE_ASSET_HASH_CONFLICT");
+    }
+    return bytes;
+  }
+
   removeCreated(file: StoredImageFile): void {
     if (!file.created) return;
     const target = this.resolveManagedPath(file.relativePath);

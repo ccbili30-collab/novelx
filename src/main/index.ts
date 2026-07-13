@@ -14,8 +14,10 @@ import { ApplicationRegistryRepository } from "../domain/application/application
 import { registerPath, registerProjectSessionIpc } from "./projectRegistryIpc";
 import { createDesktopUpdateService } from "./desktopUpdateService";
 import { registerDesktopUpdateIpc } from "./desktopUpdateIpc";
+import { registerImageAssetProtocol, registerImageAssetScheme } from "./imageAssetProtocol";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
+registerImageAssetScheme();
 const e2eUserDataPath = !app.isPackaged ? process.env.NOVAX_DESKTOP_E2E_USER_DATA : undefined;
 if (e2eUserDataPath) app.setPath("userData", path.resolve(e2eUserDataPath));
 
@@ -53,7 +55,10 @@ app.whenReady().then(() => {
   applicationRegistry.removeSafeE2eRegistrations();
   registerProviderIpc(providerStore);
   registerImageProviderIpc(imageProviderStore);
-  const workspaceSession = registerWorkspaceIpc();
+  const workspaceSession = registerWorkspaceIpc({
+    getImageProviderProfile: () => imageProviderStore.loadRuntimeProfile(),
+  });
+  const disposeImageAssetProtocol = registerImageAssetProtocol(workspaceSession);
   registerProjectSessionIpc(applicationRegistry, workspaceSession);
   const e2eWorkspace = !app.isPackaged ? process.env.NOVAX_DESKTOP_E2E_WORKSPACE : undefined;
   if (e2eWorkspace) registerPath(applicationRegistry, workspaceSession, e2eWorkspace);
@@ -68,6 +73,7 @@ app.whenReady().then(() => {
   );
   app.once("before-quit", () => {
     disposeUpdateEvents();
+    disposeImageAssetProtocol();
     supervisor.dispose();
     workspaceSession.close();
     applicationRegistry.close();

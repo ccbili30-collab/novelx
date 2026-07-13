@@ -138,6 +138,9 @@ import { ImportCandidateChangeSetService } from "../domain/import/importCandidat
 import type { DecomposerRuntimeLease } from "./decomposerProcessSupervisor";
 import { SourceLibraryRepository, type SourceLibraryEntry } from "../domain/import/sourceLibraryRepository";
 import type { DecompositionCandidateRecord } from "../domain/import/decompositionCandidateRepository";
+import type { ImageProviderRuntimeProfile } from "../shared/imageProviderContract";
+import { ImageAssetRepository } from "../domain/asset/imageAssetRepository";
+import { ImageAssetStore } from "../domain/asset/imageAssetStore";
 
 export class WorkspaceSession {
   #workspace: WorkspaceDatabase | null = null;
@@ -145,7 +148,10 @@ export class WorkspaceSession {
   #activeAgentLeases = 0;
   #writeQueue = new ProjectWriteQueue();
 
-  constructor(readonly createChangeSetPolicy: ((workspace: WorkspaceDatabase) => ChangeSetPolicyEvaluator) | null = null) {}
+  constructor(
+    readonly createChangeSetPolicy: ((workspace: WorkspaceDatabase) => ChangeSetPolicyEvaluator) | null = null,
+    readonly getImageProviderProfile: () => ImageProviderRuntimeProfile | null = () => null,
+  ) {}
 
   openPath(rootPath: string): WorkspaceSnapshot {
     if (this.#activeAgentLeases > 0) {
@@ -156,6 +162,8 @@ export class WorkspaceSession {
     this.#writeQueue = new ProjectWriteQueue();
     this.#changeSetPolicy = this.createChangeSetPolicy?.(this.#workspace) ?? null;
     new AgentAuditRepository(this.#workspace).recoverOpenRuns();
+    new ImageAssetRepository(this.#workspace).recoverInterruptedJobs();
+    new ImageAssetStore(this.#workspace.rootPath).recoverTemporaryFiles();
     return this.snapshot();
   }
 
@@ -248,6 +256,7 @@ export class WorkspaceSession {
       workspace,
       policy,
       () => this.#workspace === workspace,
+      { getImageProviderProfile: this.getImageProviderProfile },
     ));
   }
 
@@ -259,7 +268,12 @@ export class WorkspaceSession {
     const scopes = resolveWorkspaceAgentScopes(workspace);
     let released = false;
     return {
-      gateway: this.#serializeWrites(createWorkspaceAgentToolGateway(workspace, policy, () => this.#workspace === workspace)),
+      gateway: this.#serializeWrites(createWorkspaceAgentToolGateway(
+        workspace,
+        policy,
+        () => this.#workspace === workspace,
+        { getImageProviderProfile: this.getImageProviderProfile },
+      )),
       audit: new AgentAuditRepository(workspace),
       authorizedScopeResourceIds: scopes.authorized,
       defaultScopeResourceIds: scopes.defaults,
@@ -297,6 +311,13 @@ export class WorkspaceSession {
     return { service: new DecomposerRunService(workspace), release: () => {
       if (released) return; released = true; this.#activeAgentLeases -= 1;
     } };
+  }
+
+  readImageAsset(assetId: string): { bytes: Buffer; mimeType: "image/png" | "image/jpeg" | "image/webp"; sha256: string } {
+    const workspace = this.requireWorkspace();
+    const asset = new ImageAssetRepository(workspace).getRequiredAsset(assetId);
+    const bytes = new ImageAssetStore(workspace.rootPath).readVerified(asset.relativePath, asset.sha256);
+    return { bytes, mimeType: asset.mimeType, sha256: asset.sha256 };
   }
 
   getDocument(resourceId: string): EditorDocumentSnapshot {
@@ -458,6 +479,10 @@ export class WorkspaceSession {
         () => gateway.saveTaskNote(args, context),
       ),
       listTaskNotes: (args, context) => gateway.listTaskNotes(args, context),
+      generateImage: (args, context) => this.#writeQueue.run(
+        context.signal,
+        () => gateway.generateImage(args, context),
+      ),
       proposeChangeSet: (args, context) => this.#writeQueue.run(
         context.signal,
         () => gateway.proposeChangeSet(args, context),
@@ -488,11 +513,14 @@ export class ProjectWriteQueue {
   }
 }
 
-export function registerWorkspaceIpc(options: { changeSetPolicy?: ChangeSetPolicyEvaluator } = {}): WorkspaceSession {
+export function registerWorkspaceIpc(options: {
+  changeSetPolicy?: ChangeSetPolicyEvaluator;
+  getImageProviderProfile?: () => ImageProviderRuntimeProfile | null;
+} = {}): WorkspaceSession {
   const createPolicy = options.changeSetPolicy
     ? () => options.changeSetPolicy!
     : (workspace: WorkspaceDatabase) => new WorkspaceChangeSetPolicy(workspace);
-  const session = new WorkspaceSession(createPolicy);
+  const session = new WorkspaceSession(createPolicy, options.getImageProviderProfile);
   ipcMain.handle(desktopIpcChannels.workspaceCurrent, () => session.getCurrent());
   ipcMain.handle(desktopIpcChannels.workspaceHistory, () => workspaceHistoryResult(() => session.listCheckpointHistory()));
   ipcMain.handle(desktopIpcChannels.workspaceContextBudget, () => (

@@ -131,6 +131,28 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
     })).rejects.toMatchObject({ code: "PROVIDER_RUNTIME_FAILED", message: "模型服务运行失败。" });
   });
 
+  it("does not spend correction attempts after the Provider has already returned an error", async () => {
+    const faux = fauxProvider({ provider: "novax-terminal-error-fixture" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider rejected request" }),
+      fauxAssistantMessage(fauxToolCall("submit_result", { status: "done" })),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const adapter = new NovaxPiRuntimeAdapter({
+      model: faux.getModel(),
+      streamFn: (model, context, options) => models.streamSimple(model, context, options),
+    });
+
+    await expect(adapter.run({
+      systemPrompt: "Contract fixture only.",
+      userInput: "测试",
+      tools: [],
+      completionGuard: { toolName: "submit_result", isSatisfied: () => false, forceTool: true },
+    })).rejects.toMatchObject({ code: "PROVIDER_RUNTIME_FAILED" });
+    expect(faux.state.callCount).toBe(1);
+  });
+
   it("uses one audited follow-up turn when the model omits the required result tool", async () => {
     const faux = fauxProvider({
       provider: "novax-correction-fixture",
@@ -166,6 +188,45 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
     });
 
     expect(submitted).toBe(true);
+    expect(result.receipt.correctionAttempts).toBe(1);
+    expect(faux.state.callCount).toBe(3);
+  });
+
+  it("ends a rejected final-tool turn so the bounded correction loop can repair it", async () => {
+    const faux = fauxProvider({ provider: "novax-rejected-final-fixture" });
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("submit_result", { status: "bad" })),
+      fauxAssistantMessage(fauxToolCall("submit_result", { status: "done" })),
+      fauxAssistantMessage("完成"),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    let attempts = 0;
+    let submitted = false;
+    const adapter = new NovaxPiRuntimeAdapter({
+      model: faux.getModel(),
+      streamFn: (model, context, options) => models.streamSimple(model, context, options),
+    });
+
+    const result = await adapter.run({
+      systemPrompt: "Contract fixture only.",
+      userInput: "测试",
+      tools: [{
+        name: "submit_result",
+        label: "提交",
+        description: "Submit the result.",
+        parameters: Type.Object({ status: Type.String() }, { additionalProperties: false }),
+        execute: async (_id, params) => {
+          attempts += 1;
+          if ((params as { status: string }).status !== "done") throw new Error("FINAL_SCHEMA_INVALID");
+          submitted = true;
+          return { content: [{ type: "text", text: "accepted" }], details: { accepted: true } };
+        },
+      }],
+      completionGuard: { toolName: "submit_result", isSatisfied: () => submitted, forceTool: true },
+    });
+
+    expect(attempts).toBe(2);
     expect(result.receipt.correctionAttempts).toBe(1);
     expect(faux.state.callCount).toBe(3);
   });
@@ -282,6 +343,6 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
     expect(contexts[1]).toContain("甲".repeat(1_000));
     expect(contexts[2]).not.toContain("甲".repeat(1_000));
     expect(contexts[2]).not.toContain("海岸设定");
-    expect(contexts[2]).toContain("durable_file_receipts");
+    expect(contexts[2]).toContain("durable_file_receipt");
   });
 });

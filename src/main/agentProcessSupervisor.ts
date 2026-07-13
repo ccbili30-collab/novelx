@@ -20,6 +20,7 @@ import {
   statProjectFileResultSchema,
   saveTaskNoteResultSchema,
   listTaskNotesResultSchema,
+  generateImageResultSchema,
   agentToolInternalErrorCodeSchema,
   type AgentWorkerToolRequest,
   type AgentToolName,
@@ -45,6 +46,8 @@ import {
   type ListTaskNotesResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
+  type GenerateImageArgs,
+  type GenerateImageResult,
 } from "../shared/agentWorkerProtocol";
 import { getAgentRuntimeProfile } from "../shared/agentRuntimeProfiles";
 import { toPublicError } from "../shared/publicErrors";
@@ -80,6 +83,7 @@ export interface AgentToolGateway {
   readProjectFile(args: ReadProjectFileArgs, context: AgentToolInvocationContext): Promise<ReadProjectFileResult>;
   saveTaskNote(args: SaveTaskNoteArgs, context: AgentToolInvocationContext): Promise<SaveTaskNoteResult>;
   listTaskNotes(args: ListTaskNotesArgs, context: AgentToolInvocationContext): Promise<ListTaskNotesResult>;
+  generateImage(args: GenerateImageArgs, context: AgentToolInvocationContext): Promise<GenerateImageResult>;
   proposeChangeSet(
     args: ProposeChangeSetArgs,
     context: AgentToolInvocationContext,
@@ -117,6 +121,7 @@ interface AgentProcessSupervisorOptions {
   acquireRuntimeLease?(): AgentRuntimeLease | null;
   getProviderProfile?(): ProviderRuntimeProfile | null;
   toolTimeoutMs?: number;
+  imageToolTimeoutMs?: number;
   cancelGraceMs?: number;
   spawnWorker?(workerPath: string): AgentWorkerProcess;
   reportWorkerDiagnostic?(diagnostic: AgentWorkerDiagnostic): void;
@@ -146,6 +151,7 @@ export class AgentProcessSupervisor {
   readonly #acquireRuntimeLease: () => AgentRuntimeLease | null;
   readonly #getProviderProfile: () => ProviderRuntimeProfile | null;
   readonly #toolTimeoutMs: number;
+  readonly #imageToolTimeoutMs: number;
   readonly #cancelGraceMs: number;
   readonly #spawnWorker: (workerPath: string) => AgentWorkerProcess;
   readonly #reportWorkerDiagnostic: (diagnostic: AgentWorkerDiagnostic) => void;
@@ -155,6 +161,7 @@ export class AgentProcessSupervisor {
     this.#acquireRuntimeLease = options.acquireRuntimeLease ?? (() => null);
     this.#getProviderProfile = options.getProviderProfile ?? (() => null);
     this.#toolTimeoutMs = options.toolTimeoutMs ?? 15_000;
+    this.#imageToolTimeoutMs = options.imageToolTimeoutMs ?? 180_000;
     this.#cancelGraceMs = options.cancelGraceMs ?? 1_000;
     this.#spawnWorker = options.spawnWorker ?? spawnWorkerProcess;
     this.#reportWorkerDiagnostic = options.reportWorkerDiagnostic ?? (() => undefined);
@@ -395,7 +402,7 @@ export class AgentProcessSupervisor {
         return;
       }
       this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_TIMEOUT");
-    }, this.#toolTimeoutMs);
+    }, request.tool === "generate_image" ? this.#imageToolTimeoutMs : this.#toolTimeoutMs);
     run.pendingTools.set(request.requestId, { controller, timer });
     const context: AgentToolInvocationContext = {
       runId,
@@ -415,6 +422,7 @@ export class AgentProcessSupervisor {
         case "read_project_file": return await run.gateway!.readProjectFile(request.args, context);
         case "save_task_note": return await run.gateway!.saveTaskNote(request.args, context);
         case "list_task_notes": return await run.gateway!.listTaskNotes(request.args, context);
+        case "generate_image": return await run.gateway!.generateImage(request.args, context);
         case "propose_change_set": return await run.gateway!.proposeChangeSet(request.args, context);
       }
     })();
@@ -506,6 +514,43 @@ export class AgentProcessSupervisor {
           runId,
           label: presentation.label,
           phase: "completed",
+        });
+        return;
+      }
+      if (request.tool === "generate_image") {
+        const parsed = generateImageResultSchema.safeParse(result);
+        if (!parsed.success) {
+          if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+          this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
+          return;
+        }
+        try {
+          run.audit.appendToolTerminal({
+            runId,
+            invocationId: stewardInvocationId(runId),
+            toolInvocationId: request.requestId,
+            eventType: "succeeded",
+            errorCode: null,
+            resultSha256: canonicalAuditHash(parsed.data),
+          });
+        } catch {
+          this.#failAudit(runId);
+          return;
+        }
+        this.#sendToolSuccess(run, {
+          type: "tool.response",
+          runId,
+          requestId: request.requestId,
+          ok: true,
+          tool: request.tool,
+          result: parsed.data,
+        });
+        run.emit({
+          type: "run.activity",
+          runId,
+          label: "生成角色或场景图片",
+          phase: "completed",
+          domains: ["asset"],
         });
         return;
       }
@@ -858,6 +903,7 @@ function toolPresentation(request: AgentWorkerToolRequest): { label: string; dom
   if (isProjectFileTool(request.tool)) return { label: "检查项目文件" };
   if (request.tool === "retrieve_graph_evidence") return { label: "检索项目事实", domains: ["graph"] };
   if (request.tool === "inspect_project_files") return { label: "检查项目文件" };
+  if (request.tool === "generate_image") return { label: "生成角色或场景图片", domains: ["asset"] };
   return { label: "生成候选变更", domains: proposalDomains(request.args as ProposeChangeSetArgs) };
 }
 
@@ -995,4 +1041,7 @@ const TOOL_ERROR_MESSAGES = {
   PROJECT_FILE_QUERY_INVALID: "Project file search query is invalid.",
   PROJECT_FILE_RANGE_INVALID: "Project file read range is invalid.",
   PROJECT_FILE_OPERATION_FAILED: "Project file operation failed.",
+  IMAGE_PROVIDER_REQUIRED: "A configured image Provider is required.",
+  IMAGE_GENERATION_RECONCILIATION_REQUIRED: "The image request outcome requires manual reconciliation.",
+  IMAGE_GENERATION_FAILED: "Image generation failed without a committed asset.",
 } as const;

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { validateToolArguments } from "@earendil-works/pi-ai/compat";
 import { handleAgentWorkerCommand, projectPublicArtifacts } from "../../src/agent-worker/workerController";
 import { createRoleOutputTool } from "../../src/agent-worker/contracts/roleOutputTool";
 import type { PublishedPrompt } from "../../src/agent-worker/promptRegistry";
@@ -25,6 +26,28 @@ describe("agent worker fail-closed contract", () => {
     expect(writer.properties?.reasons).toMatchObject({ type: "array", items: { type: "object" } });
     expect(checker.properties?.findings).toMatchObject({ type: "array", items: { type: "object" } });
     expect(checker.properties?.reasons).toMatchObject({ type: "array", items: { type: "object" } });
+  });
+
+  it("accepts a source-bound image outcome at the Pi tool-argument boundary", () => {
+    const tool = createRoleOutputTool("steward").tool;
+    const args = {
+      status: "completed",
+      message: "角色立绘已经生成。",
+      evidenceIds: ["image-version-1"],
+      toolOutcomes: [
+        { tool: "retrieve_graph_evidence", status: "succeeded" },
+        { tool: "generate_image", status: "succeeded" },
+      ],
+      changeSet: { state: "none", changeSetId: null },
+      escalations: [],
+    };
+
+    expect(validateToolArguments(tool, {
+      type: "toolCall",
+      id: "submit-image-result",
+      name: "submit_steward_result",
+      arguments: args,
+    })).toEqual(args);
   });
 
   it("emits only started then provider-required when no provider profile exists", async () => {
@@ -220,6 +243,35 @@ describe("agent worker fail-closed contract", () => {
         versionId: "version-cited",
         locator: { kind: "line", start: 1, end: 3 },
         excerpt: "第一行\n第二行\n第三行\n第四行",
+      },
+    ]);
+  });
+
+  it("projects a committed managed image as a ready public artifact", () => {
+    expect(projectPublicArtifacts({
+      status: "completed",
+      message: "场景图已生成。",
+      evidenceIds: ["version-1"],
+      toolOutcomes: [{ tool: "generate_image", status: "succeeded" }],
+      changeSet: { state: "none", changeSetId: null },
+      escalations: [],
+    }, [], [], [{
+      assetId: "asset-1",
+      title: "银湾夜潮",
+      status: "ready",
+      purpose: "scene",
+      sourceVersionIds: ["version-1"],
+      thumbnailUrl: "novax-asset://image/asset-1",
+    }])).toEqual([
+      { kind: "tool_call", tool: "generate_image", label: "生成角色或场景图片", status: "succeeded" },
+      {
+        kind: "image",
+        assetId: "asset-1",
+        title: "银湾夜潮",
+        status: "ready",
+        purpose: "故事场景",
+        sourceLabel: "基于 1 个稳定版本",
+        thumbnailUrl: "novax-asset://image/asset-1",
       },
     ]);
   });

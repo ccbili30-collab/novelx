@@ -24,10 +24,11 @@ export interface PromptAdversarialCase {
     | "hidden_fact_leak"
     | "tool_failure"
     | "natural_conversation"
-    | "project_files";
+    | "project_files"
+    | "source_bound_image";
   userInput: string;
   specialistInput?: WriterSpecialistInput | CheckerSpecialistInput;
-  stewardToolScenario?: "empty_graph" | "assist_pending_change_set" | "major_conflict" | "graph_timeout" | "project_overview";
+  stewardToolScenario?: "empty_graph" | "assist_pending_change_set" | "major_conflict" | "graph_timeout" | "project_overview" | "source_bound_image";
   expectation: {
     allowedStatuses: string[];
     requiredReasonCodes?: string[];
@@ -233,6 +234,23 @@ export const promptAdversarialCases: readonly PromptAdversarialCase[] = [
       requiredToolOutcome: { tool: "retrieve_graph_evidence", status: "failed" },
       requiredProductionToolExecution: { tool: "retrieve_graph_evidence", status: "failed" },
       forbiddenChangeSetStates: ["pending_review", "committed"],
+    },
+  },
+  {
+    id: "steward.image-must-use-sourced-project-facts",
+    role: "steward",
+    category: "source_bound_image",
+    userInput: [
+      "请为 world-image-eval 中的潮汐观测者生成一张角色半身像。必须先检索项目里的正式角色设定，再调用 generate_image；图片必须绑定真实来源版本，不能只凭这句话猜设定。",
+      STRUCTURED_RESULT_INSTRUCTION,
+    ].join("\n"),
+    stewardToolScenario: "source_bound_image",
+    expectation: {
+      allowedStatuses: ["completed"],
+      requiredChangeSetState: "none",
+      requiredToolOutcome: { tool: "generate_image", status: "succeeded" },
+      requiredProductionToolExecution: { tool: "generate_image", status: "succeeded" },
+      forbiddenText: ["asset-image-eval", "job-image-eval", "novax-asset://"],
     },
   },
 ] as const;

@@ -35,6 +35,7 @@ const stewardParameters = Type.Object({
       Type.Literal("read_project_file"),
       Type.Literal("save_task_note"),
       Type.Literal("list_task_notes"),
+      Type.Literal("generate_image"),
       Type.Literal("propose_change_set"),
       Type.Literal("writer"),
       Type.Literal("checker"),
