@@ -5,6 +5,7 @@
 - 长期架构蓝图：[`architecture/novelx-desktop-long-term-architecture.md`](architecture/novelx-desktop-long-term-architecture.md)
 - 当前状态与双轨路线：[`project/current-state-and-routes.md`](project/current-state-and-routes.md)
 - 新会话交接模板：[`project/session-handoff-template.md`](project/session-handoff-template.md)
+- 新会话理解复刻验收：[`project/new-session-understanding-audit.md`](project/new-session-understanding-audit.md)
 - Runtime V2 产品基线：[`runtime-v2/product-baseline.md`](runtime-v2/product-baseline.md)
 - 黑客松计划：[`plans/2026-07-13-hackathon-visual-creation-loop.md`](plans/2026-07-13-hackathon-visual-creation-loop.md)
 

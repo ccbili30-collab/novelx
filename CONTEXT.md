@@ -69,6 +69,7 @@ SQLite + Artifact Store
 | 接手长远 Runtime | `docs/runtime-v2/product-baseline.md` + `notes/status/2026-07-13-runtime-v2-a2-2-freeze.md` |
 | 接手黑客松 | `docs/plans/2026-07-13-hackathon-visual-creation-loop.md` + `notes/status/2026-07-14-hackathon-creative-showcase.md` |
 | 新会话交接 | `docs/project/session-handoff-template.md` |
+| 验证新会话是否真正理解 | `docs/project/new-session-understanding-audit.md` |
 
 ## 6. 当前事实（2026-07-14）
 
