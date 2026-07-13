@@ -1,6 +1,6 @@
 # 黑客松 Day 1：大管家来源绑定生图工具
 
-日期：2026-07-13
+日期：2026-07-14
 
 实现提交：`0af8546 feat(image): connect source-bound steward generation`
 
@@ -17,13 +17,12 @@
 - 图片成功后形成结构化 Artifact（产物），包含 Job、Asset、用途、来源版本、尺寸、MIME 和 SHA-256，不暴露磁盘路径或凭据。
 - 注册 `novax-asset:` 受管协议；只按不透明 Asset ID 读取当前工作区已提交图片，并在返回前复核路径、大小与 SHA-256。
 - 工作区启动时恢复未完成图片 Job，并清理受管临时文件；已发送但结果未知的任务只隔离，不重新收费。
-- 新增可复现的正式 Electron 图片 Live Smoke（真实冒烟测试）入口。它从 Windows `safeStorage` 读取配置，在隔离工作区创建来源文档、调用正式图片服务并验证落盘资产，不接受源码内密钥。
 
 ## Harness P0 修复
 
 - 长文档压缩不再删除 ToolCall / ToolResult（工具调用/工具结果）后插入普通用户消息；现在保留严格配对，只压缩已经由持久化任务笔记覆盖的正文和参数。
 - Provider 返回 `stopReason=error/aborted/length` 后不再执行最多六次无意义纠正请求。
-- 业务步骤到达最终提交时先结束当前工具轮，再进入有界的契约纠正回合。
+- 业务工具成功后保持 Pi 的正常自动跟进，由 `requiredNextTool` 在同一工具链强制进入最终结构化提交，不再用 `terminate` 制造额外补救回合。
 - 最终提交工具被状态机拒绝后结束当前轮，避免 Pi 在单次 `agent.prompt()` 内无限强制重试。
 - 修正 Steward 提交工具 TypeBox（工具参数协议）漏掉 `generate_image` 的错误。该漏项曾导致图片已经生成，但最终工具参数在进入状态机前被无限拒绝。
 
@@ -49,10 +48,10 @@
 
 ## 真实图片验收阻塞
 
-- `npm run eval:image-provider:saved-profile` 在创建工作区和发送网络请求前失败关闭，最终本地错误为 `IMAGE_PROVIDER_STORAGE_FAILED`。
+- 一次临时 Electron Live Smoke 在创建工作区和发送网络请求前失败关闭，最终本地错误为 `IMAGE_PROVIDER_STORAGE_FAILED`；未验收的 Smoke CLI 和 npm 脚本已从最终工作树移除。
 - `%APPDATA%\\novelx-desktop\\image-provider-profile.v1.json` 中存在配置与加密凭据字段，但当前 Electron/Windows `safeStorage` 无法解密该旧密文。
 - 这次失败没有调用图片 Provider、没有创建 Job、没有产生可能未知的收费结果。
-- 恢复方式：用户在 NovelX「设置 → 图片模型」中重新输入并保存 API Key，然后重新运行同一 Live Smoke。不得把聊天中的明文 Key 写入源码、脚本、Git 或命令日志。
+- 恢复方式：用户在 NovelX「设置 → 图片模型」中重新输入并保存 API Key；下一批先建立经过测试的隔离 Smoke 入口，再执行真实图片验收。不得把聊天中的明文 Key 写入源码、脚本、Git 或命令日志。
 
 ## 未完成与冻结边界
 
