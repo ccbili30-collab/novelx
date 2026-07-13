@@ -40,6 +40,7 @@ pub mod provider_effect_capability;
 pub mod provider_gateway;
 pub mod provider_inference_protocol;
 pub mod provider_inference_service;
+pub mod provider_pre_send_gate;
 pub mod provider_retry_after;
 pub mod provider_retry_aggregate;
 pub mod provider_tool_materializer;
@@ -50,6 +51,7 @@ pub mod run_pin_validator;
 pub mod run_reconciliation_service;
 pub mod run_state;
 pub mod runtime_actor;
+pub mod runtime_cancellation_hub;
 #[cfg(feature = "runtime-test-failpoints")]
 #[doc(hidden)]
 pub mod runtime_test_failpoint;
