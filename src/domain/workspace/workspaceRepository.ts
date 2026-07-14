@@ -228,7 +228,11 @@ function migrate(db: DatabaseSync): void {
     migrateWorldMapImagePurposeSchema(db);
     schema = { version: 22 };
   }
-  if (schema.version !== 22) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 22) {
+    migrateGrowthPersistenceSchema(db);
+    schema = { version: 23 };
+  }
+  if (schema.version !== 23) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -403,6 +407,166 @@ function migrateWorldMapImagePurposeSchema(db: DatabaseSync): void {
       CREATE INDEX image_generation_jobs_status_idx ON image_generation_jobs(status, created_at, id);
       CREATE INDEX image_assets_sha256_idx ON image_assets(sha256);
       UPDATE schema_meta SET version = 22 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateGrowthPersistenceSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE growth_goals (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        branch_id TEXT NOT NULL REFERENCES branches(id),
+        seed_kind TEXT NOT NULL CHECK (seed_kind IN ('text', 'source_document', 'resource')),
+        seed_text TEXT,
+        seed_source_document_id TEXT,
+        seed_source_version_id TEXT,
+        seed_resource_id TEXT REFERENCES resources(id),
+        seed_resource_version_id TEXT,
+        status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'blocked', 'cancelled', 'reconciliation_required')),
+        current_rule_revision INTEGER NOT NULL CHECK (current_rule_revision >= 1),
+        current_cycle_sequence INTEGER NOT NULL DEFAULT 0 CHECK (current_cycle_sequence >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (seed_kind = 'text' AND seed_text IS NOT NULL AND seed_source_document_id IS NULL AND seed_source_version_id IS NULL AND seed_resource_id IS NULL AND seed_resource_version_id IS NULL)
+          OR (seed_kind = 'source_document' AND seed_text IS NULL AND seed_source_document_id IS NOT NULL AND seed_source_version_id IS NOT NULL AND seed_resource_id IS NULL AND seed_resource_version_id IS NULL)
+          OR (seed_kind = 'resource' AND seed_text IS NULL AND seed_source_document_id IS NULL AND seed_source_version_id IS NULL AND seed_resource_id IS NOT NULL)
+        )
+      );
+      CREATE TABLE growth_goal_scopes (
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        resource_id TEXT NOT NULL REFERENCES resources(id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (goal_id, resource_id),
+        UNIQUE (goal_id, ordinal)
+      );
+      CREATE TABLE growth_goal_rule_revisions (
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        rule_text TEXT NOT NULL,
+        source_message_id TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (goal_id, revision)
+      );
+      CREATE TABLE growth_cycles (
+        id TEXT PRIMARY KEY,
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        input_checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+        run_id TEXT UNIQUE REFERENCES agent_runs(id),
+        receipt_id TEXT UNIQUE REFERENCES growth_retrieval_receipts(id),
+        change_set_id TEXT UNIQUE REFERENCES change_sets(id),
+        output_checkpoint_id TEXT REFERENCES checkpoints(id),
+        status TEXT NOT NULL CHECK (status IN ('planned', 'running', 'committed', 'blocked', 'failed', 'cancelled', 'reconciliation_required')),
+        failure_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        terminal_at TEXT,
+        UNIQUE (goal_id, sequence),
+        FOREIGN KEY (goal_id, rule_revision) REFERENCES growth_goal_rule_revisions(goal_id, revision),
+        CHECK (
+          (status = 'planned' AND run_id IS NULL AND receipt_id IS NULL AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NULL AND terminal_at IS NULL)
+          OR (status = 'running' AND run_id IS NOT NULL AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NULL AND terminal_at IS NULL)
+          OR (status = 'committed' AND run_id IS NOT NULL AND receipt_id IS NOT NULL AND change_set_id IS NOT NULL AND output_checkpoint_id IS NOT NULL AND failure_code IS NULL AND terminal_at IS NOT NULL)
+          OR (status IN ('blocked', 'failed', 'cancelled', 'reconciliation_required') AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NOT NULL AND terminal_at IS NOT NULL)
+        )
+      );
+      CREATE INDEX growth_cycles_goal_status_idx ON growth_cycles(goal_id, status, sequence);
+      CREATE TABLE growth_retrieval_receipts (
+        id TEXT PRIMARY KEY,
+        cycle_id TEXT NOT NULL UNIQUE REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id),
+        tool_invocation_id TEXT NOT NULL REFERENCES agent_tool_invocations(id),
+        branch_id TEXT NOT NULL REFERENCES branches(id),
+        checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        lens TEXT NOT NULL CHECK (lens = 'creator'),
+        query_text TEXT NOT NULL,
+        valid_time_from TEXT,
+        valid_time_to TEXT,
+        recorded_time_from TEXT,
+        recorded_time_to TEXT,
+        max_hops INTEGER NOT NULL CHECK (max_hops BETWEEN 0 AND 8),
+        cpu_budget_ms INTEGER NOT NULL CHECK (cpu_budget_ms BETWEEN 1 AND 60000),
+        expansion_budget INTEGER NOT NULL CHECK (expansion_budget BETWEEN 1 AND 100000),
+        result_budget INTEGER NOT NULL CHECK (result_budget BETWEEN 1 AND 100000),
+        token_budget INTEGER NOT NULL CHECK (token_budget BETWEEN 1 AND 1000000),
+        policy_version TEXT NOT NULL,
+        query_hash TEXT NOT NULL CHECK (length(query_hash) = 64),
+        result_hash TEXT NOT NULL CHECK (length(result_hash) = 64),
+        hit_count INTEGER NOT NULL CHECK (hit_count >= 0),
+        conflict_count INTEGER NOT NULL CHECK (conflict_count >= 0),
+        locator_count INTEGER NOT NULL CHECK (locator_count >= 0),
+        coverage_state TEXT NOT NULL CHECK (coverage_state IN ('complete', 'partial', 'unknown')),
+        coverage_searched_scope_count INTEGER NOT NULL CHECK (coverage_searched_scope_count >= 0),
+        coverage_omitted_count INTEGER NOT NULL CHECK (coverage_omitted_count >= 0),
+        truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE growth_retrieval_receipt_scopes (
+        receipt_id TEXT NOT NULL REFERENCES growth_retrieval_receipts(id) ON DELETE CASCADE,
+        resource_id TEXT NOT NULL REFERENCES resources(id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (receipt_id, resource_id),
+        UNIQUE (receipt_id, ordinal)
+      );
+      CREATE TABLE growth_retrieval_receipt_aliases (
+        receipt_id TEXT NOT NULL REFERENCES growth_retrieval_receipts(id) ON DELETE CASCADE,
+        alias TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (receipt_id, alias),
+        UNIQUE (receipt_id, ordinal)
+      );
+      CREATE TABLE growth_retrieval_receipt_links (
+        receipt_id TEXT NOT NULL REFERENCES growth_retrieval_receipts(id) ON DELETE CASCADE,
+        rank INTEGER NOT NULL CHECK (rank >= 1),
+        target_kind TEXT NOT NULL CHECK (target_kind IN ('document', 'resource', 'assertion', 'relation', 'image', 'change_set')),
+        target_id TEXT NOT NULL,
+        target_version_id TEXT,
+        score REAL NOT NULL CHECK (score >= 0 AND score <= 1),
+        reason_codes_json TEXT NOT NULL CHECK (json_valid(reason_codes_json) AND json_type(reason_codes_json) = 'array'),
+        path_target_ids_json TEXT NOT NULL CHECK (json_valid(path_target_ids_json) AND json_type(path_target_ids_json) = 'array'),
+        stable_locator TEXT,
+        stable_version_id TEXT,
+        stable_hash TEXT CHECK (stable_hash IS NULL OR length(stable_hash) = 64),
+        PRIMARY KEY (receipt_id, rank),
+        CHECK ((stable_locator IS NULL AND stable_version_id IS NULL) OR (stable_locator IS NOT NULL AND stable_version_id IS NOT NULL))
+      );
+      CREATE TABLE growth_events (
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        cycle_id TEXT NOT NULL REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        run_id TEXT REFERENCES agent_runs(id),
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        safe_summary TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK (phase IN ('goal_created', 'rule_appended', 'cycle_planned', 'run_attached', 'receipt_recorded', 'change_set_committed', 'cycle_terminal')),
+        target_kind TEXT NOT NULL CHECK (target_kind IN ('document', 'resource', 'assertion', 'relation', 'image', 'change_set')),
+        target_id TEXT NOT NULL,
+        target_version_id TEXT,
+        durable_state TEXT NOT NULL CHECK (durable_state IN ('planned', 'running', 'committed', 'blocked', 'failed', 'cancelled', 'reconciliation_required')),
+        content_ref_kind TEXT CHECK (content_ref_kind IN ('document', 'resource', 'assertion', 'relation', 'image', 'change_set')),
+        content_ref_id TEXT,
+        content_ref_version_id TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (goal_id, sequence),
+        CHECK (
+          (content_ref_kind IS NULL AND content_ref_id IS NULL AND content_ref_version_id IS NULL)
+          OR (content_ref_kind IS NOT NULL AND content_ref_id IS NOT NULL AND content_ref_version_id IS NOT NULL)
+        ),
+        CHECK (durable_state <> 'committed' OR phase = 'change_set_committed'),
+        CHECK (phase <> 'change_set_committed' OR target_kind = 'change_set')
+      );
+      CREATE INDEX growth_events_cycle_idx ON growth_events(cycle_id, sequence);
+      UPDATE schema_meta SET version = 23 WHERE singleton = 1;
     `);
     db.exec("COMMIT");
   } catch (error) {

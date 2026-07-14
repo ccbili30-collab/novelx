@@ -18,14 +18,14 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates schema 21 creative, audit, import, playthrough, task-note, and image asset storage", () => {
+  it("creates schema 23 creative, audit, import, image, and Growth persistence storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 22 });
+      .toEqual({ version: 23 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
@@ -58,6 +58,13 @@ describe("local workspace persistence", () => {
       "project_file_versions",
       "image_generation_jobs",
       "image_assets",
+      "growth_goals",
+      "growth_goal_scopes",
+      "growth_goal_rule_revisions",
+      "growth_cycles",
+      "growth_retrieval_receipts",
+      "growth_retrieval_receipt_links",
+      "growth_events",
     ]));
     expect(listIndexes(workspace)).toEqual(expect.arrayContaining([
       "creative_documents_resource_idx",
@@ -69,10 +76,73 @@ describe("local workspace persistence", () => {
       "projection_artifacts_run_idx",
       "image_generation_jobs_status_idx",
       "image_assets_sha256_idx",
+      "growth_cycles_goal_status_idx",
+      "growth_events_cycle_idx",
     ]));
     expect(workspace.db.prepare("SELECT id, kind, sealed_at FROM creative_commits").all()).toMatchObject([
       { kind: "initialization", sealed_at: null },
     ]);
+  });
+
+  it("migrates a v22 database additively without rewriting stable domain or image rows", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-22-growth-"));
+    roots.push(root);
+    let workspace = openWorkspace(root);
+    opened.push(workspace);
+    const checkpoints = new CheckpointRepository(workspace);
+    const resources = new ResourceRepository(workspace);
+    const documents = new DocumentRepository(workspace);
+    const assertions = new AssertionRepository(workspace);
+    const changes = new ChangeSetRepository(workspace);
+    const changeSet = changes.propose({ idempotencyKey: "v22-growth-preserve", mode: "free", summary: "v22 preservation" });
+    changes.commit(changeSet.id, "v22 preservation", () => undefined);
+    const checkpointId = checkpoints.getActiveBranch().headCheckpointId;
+    const world = resources.listCurrent().find((resource) => resource.type === "world")!;
+    documents.putVersion({ resourceId: world.id, checkpointId, content: "stable v22 document", authorKind: "user" });
+    assertions.putVersion({
+      assertionId: "v22.assertion", checkpointId, scopeType: "world", scopeId: world.id, subject: "v22", predicate: "keeps",
+      object: { text: "stable assertion" }, status: "current", source: { kind: "confirmed_change_set", ref: changeSet.id },
+    });
+    const hash = "a".repeat(64);
+    const now = new Date().toISOString();
+    workspace.db.prepare(`
+      INSERT INTO image_generation_jobs (
+        id, idempotency_key, request_sha256, provider_id, model_id, title, purpose, prompt, prompt_sha256, size, quality,
+        background, source_resource_ids_json, source_version_ids_json, status, request_sent_at, provider_response_id_sha256,
+        error_code, error_message, created_at, updated_at
+      ) VALUES ('job-v22', 'job-v22-key', ?, 'provider', 'model', 'map', 'world_map', 'prompt', ?, '1024x1024', 'auto',
+        'auto', '[]', '[]', 'succeeded', NULL, NULL, NULL, NULL, ?, ?)
+    `).run(hash, hash, now, now);
+    workspace.db.prepare(`
+      INSERT INTO image_assets (id, job_id, mime_type, width, height, byte_length, sha256, relative_path, status, created_at, updated_at)
+      VALUES ('asset-v22', 'job-v22', 'image/png', 1, 1, 4, ?, 'images/asset-v22.png', 'ready', ?, ?)
+    `).run(hash, now, now);
+    workspace.db.exec(`
+      DROP TABLE growth_events;
+      DROP TABLE growth_retrieval_receipt_links;
+      DROP TABLE growth_retrieval_receipt_aliases;
+      DROP TABLE growth_retrieval_receipt_scopes;
+      DROP TABLE growth_retrieval_receipts;
+      DROP TABLE growth_cycles;
+      DROP TABLE growth_goal_rule_revisions;
+      DROP TABLE growth_goal_scopes;
+      DROP TABLE growth_goals;
+      UPDATE schema_meta SET version = 22 WHERE singleton = 1;
+    `);
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 23 });
+    expect(workspace.db.prepare("SELECT purpose, request_sha256 FROM image_generation_jobs WHERE id = 'job-v22'").get())
+      .toEqual({ purpose: "world_map", request_sha256: hash });
+    expect(workspace.db.prepare("SELECT sha256 FROM image_assets WHERE id = 'asset-v22'").get()).toEqual({ sha256: hash });
+    expect(new ChangeSetRepository(workspace).get(changeSet.id)?.status).toBe("committed");
+    expect(new DocumentRepository(workspace).getCurrentStable(world.id)?.content).toBe("stable v22 document");
+    expect(new AssertionRepository(workspace).listCurrent()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ assertionId: "v22.assertion" }),
+    ]));
   });
 
   it("keeps logical domain roots internal until they contain user content or are renamed", () => {
