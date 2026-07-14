@@ -1048,6 +1048,9 @@ const TOOL_ERROR_MESSAGES = {
   PROJECT_FILE_RANGE_INVALID: "Project file read range is invalid.",
   PROJECT_FILE_OPERATION_FAILED: "Project file operation failed.",
   IMAGE_PROVIDER_REQUIRED: "A configured image Provider is required.",
+  WORLD_MAP_SOURCE_RESOURCE_INVALID: "World map sources must be active resources on the current branch.",
+  WORLD_MAP_SOURCE_WORLD_REQUIRED: "A world map requires a current formal world resource.",
+  WORLD_MAP_SOURCE_VERSION_INVALID: "World map sources must be current stable versions bound to the supplied resources.",
   IMAGE_GENERATION_RECONCILIATION_REQUIRED: "The image request outcome requires manual reconciliation.",
   IMAGE_GENERATION_FAILED: "Image generation failed without a committed asset.",
 } as const;

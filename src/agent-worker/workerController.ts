@@ -130,7 +130,7 @@ export function projectPublicArtifacts(
     assetId: string;
     title: string;
     status: "ready";
-    purpose: "character_portrait" | "scene";
+    purpose: "character_portrait" | "scene" | "world_map";
     sourceVersionIds: string[];
     thumbnailUrl: string;
   }> = [],

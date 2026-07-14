@@ -451,7 +451,7 @@ export const workspaceImageAssetSchema = z.object({
   assetId: opaqueIdSchema,
   jobId: opaqueIdSchema,
   title: z.string().trim().min(1).max(240),
-  purpose: z.enum(["character_portrait", "scene"]),
+  purpose: z.enum(["character_portrait", "scene", "world_map"]),
   status: z.enum(["ready", "stale"]),
   thumbnailUrl: z.string().max(4_000).refine(
     (value) => value.startsWith("novax-asset://image/"),
@@ -502,7 +502,7 @@ const showcaseImageSchema = z.object({
   jobId: opaqueIdSchema,
   assetId: opaqueIdSchema.nullable(),
   title: z.string().min(1).max(240),
-  purpose: z.enum(["character_portrait", "scene"]),
+  purpose: z.enum(["character_portrait", "scene", "world_map"]),
   status: z.enum(["queued", "generating", "ready", "stale", "failed", "reconciliation_required"]),
   statusMessage: z.string().min(1).max(240),
   thumbnailUrl: z.string().max(4_000).refine(

@@ -224,7 +224,11 @@ function migrate(db: DatabaseSync): void {
     migrateImageAssetSchema(db);
     schema = { version: 21 };
   }
-  if (schema.version !== 21) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 21) {
+    migrateWorldMapImagePurposeSchema(db);
+    schema = { version: 22 };
+  }
+  if (schema.version !== 22) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -319,6 +323,86 @@ function migrateImageAssetSchema(db: DatabaseSync): void {
       );
       CREATE INDEX IF NOT EXISTS image_assets_sha256_idx ON image_assets(sha256);
       UPDATE schema_meta SET version = 21 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateWorldMapImagePurposeSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      ALTER TABLE image_assets RENAME TO image_assets_v21;
+      ALTER TABLE image_generation_jobs RENAME TO image_generation_jobs_v21;
+
+      CREATE TABLE image_generation_jobs (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        request_sha256 TEXT NOT NULL CHECK (length(request_sha256) = 64),
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        purpose TEXT NOT NULL CHECK (purpose IN ('character_portrait', 'scene', 'world_map')),
+        prompt TEXT NOT NULL,
+        prompt_sha256 TEXT NOT NULL CHECK (length(prompt_sha256) = 64),
+        size TEXT NOT NULL,
+        quality TEXT NOT NULL CHECK (quality IN ('auto', 'low', 'medium', 'high')),
+        background TEXT NOT NULL CHECK (background IN ('auto', 'transparent', 'opaque')),
+        source_resource_ids_json TEXT NOT NULL CHECK (
+          json_valid(source_resource_ids_json) AND json_type(source_resource_ids_json) = 'array'
+        ),
+        source_version_ids_json TEXT NOT NULL CHECK (
+          json_valid(source_version_ids_json) AND json_type(source_version_ids_json) = 'array'
+        ),
+        status TEXT NOT NULL CHECK (status IN (
+          'queued', 'running', 'succeeded', 'failed', 'reconciliation_required'
+        )),
+        request_sent_at TEXT,
+        provider_response_id_sha256 TEXT CHECK (
+          provider_response_id_sha256 IS NULL OR length(provider_response_id_sha256) = 64
+        ),
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO image_generation_jobs (
+        id, idempotency_key, request_sha256, provider_id, model_id, title, purpose,
+        prompt, prompt_sha256, size, quality, background, source_resource_ids_json, source_version_ids_json,
+        status, request_sent_at, provider_response_id_sha256, error_code, error_message, created_at, updated_at
+      ) SELECT
+        id, idempotency_key, request_sha256, provider_id, model_id, title, purpose,
+        prompt, prompt_sha256, size, quality, background, source_resource_ids_json, source_version_ids_json,
+        status, request_sent_at, provider_response_id_sha256, error_code, error_message, created_at, updated_at
+      FROM image_generation_jobs_v21;
+
+      CREATE TABLE image_assets (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL UNIQUE REFERENCES image_generation_jobs(id) ON DELETE RESTRICT,
+        mime_type TEXT NOT NULL CHECK (mime_type IN ('image/png', 'image/jpeg', 'image/webp')),
+        width INTEGER NOT NULL CHECK (width > 0 AND width <= 16384),
+        height INTEGER NOT NULL CHECK (height > 0 AND height <= 16384),
+        byte_length INTEGER NOT NULL CHECK (byte_length > 0 AND byte_length <= 104857600),
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+        relative_path TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('ready', 'stale')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO image_assets (
+        id, job_id, mime_type, width, height, byte_length, sha256, relative_path, status, created_at, updated_at
+      ) SELECT
+        id, job_id, mime_type, width, height, byte_length, sha256, relative_path, status, created_at, updated_at
+      FROM image_assets_v21;
+
+      DROP TABLE image_assets_v21;
+      DROP TABLE image_generation_jobs_v21;
+      CREATE INDEX image_generation_jobs_status_idx ON image_generation_jobs(status, created_at, id);
+      CREATE INDEX image_assets_sha256_idx ON image_assets(sha256);
+      UPDATE schema_meta SET version = 22 WHERE singleton = 1;
     `);
     db.exec("COMMIT");
   } catch (error) {

@@ -59,7 +59,11 @@ describe("CreativeShowcaseService", () => {
       putAssertion(workspace, otherStory.id, "其他故事秘密", "发生");
 
       const images = new ImageAssetRepository(workspace);
-      const queued = images.createOrGetJob(imageJob("queued", story.id, stable.stableVersionId!));
+      const queued = images.createOrGetJob({
+        ...imageJob("queued", world.id, stable.stableVersionId!),
+        title: "潮雾世界地图",
+        purpose: "world_map",
+      });
       const ready = images.createOrGetJob(imageJob("ready", character.id, stable.stableVersionId!));
       images.claim(ready.id);
       images.markRequestSent(ready.id);
@@ -82,6 +86,7 @@ describe("CreativeShowcaseService", () => {
         [ready.id, "ready"],
         [queued.id, "queued"],
       ]));
+      expect(result.images.find((image) => image.jobId === queued.id)?.purpose).toBe("world_map");
       expect(result.graphScopeResourceIds).toContain(story.id);
       expect(result.graph.nodes.some((node) => node.label.includes("选中故事事件"))).toBe(true);
       expect(result.graph.nodes.some((node) => node.label.includes("其他故事秘密"))).toBe(false);

@@ -22,9 +22,21 @@ import {
   sessionListRequestSchema,
   sessionExportResultSchema,
   sessionMessageListResultSchema,
+  workspaceImageAssetSchema,
 } from "../../src/shared/ipcContract";
 
 describe("desktop IPC contract", () => {
+  it("projects world_map as a first-class managed image purpose", () => {
+    const image = {
+      assetId: "asset-map", jobId: "job-map", title: "雾港群岛地图", purpose: "world_map",
+      status: "ready", thumbnailUrl: "novax-asset://image/asset-map", mimeType: "image/png",
+      width: 1024, height: 1024, sourceResourceIds: ["world-1"], sourceVersionIds: ["version-1"],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    expect(workspaceImageAssetSchema.parse(image).purpose).toBe("world_map");
+    expect(workspaceImageAssetSchema.safeParse({ ...image, purpose: "placeholder_map" }).success).toBe(false);
+  });
+
   it("accepts auditable artifacts and rejects unstructured document locations", () => {
     expect(agentArtifactSchema.parse({
       kind: "document_reference",

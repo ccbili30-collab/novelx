@@ -41,7 +41,7 @@ export interface ShowcaseImage {
   jobId: string;
   assetId: string | null;
   title: string;
-  purpose: "character_portrait" | "scene";
+  purpose: "character_portrait" | "scene" | "world_map";
   status: ShowcaseImageStatus;
   statusMessage: string;
   thumbnailUrl: string | null;

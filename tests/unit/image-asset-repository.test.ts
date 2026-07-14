@@ -74,13 +74,44 @@ describe("ImageAssetRepository", () => {
     );
   });
 
-  it("upgrades an existing v20 workspace to the image schema", () => {
+  it("upgrades an existing v20 workspace to the current image schema", () => {
     const repository = openRepository();
     expect(repository.createOrGetJob(jobInput()).status).toBe("queued");
     workspace!.db.exec("DROP TABLE image_assets; DROP TABLE image_generation_jobs; UPDATE schema_meta SET version = 20 WHERE singleton = 1;");
     workspace!.close(); workspace = openWorkspace(root);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 21 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 22 });
     expect(new ImageAssetRepository(workspace).createOrGetJob(jobInput("after-upgrade")).status).toBe("queued");
+  });
+
+  it("rebuilds v21 image tables without losing portrait or scene jobs and assets", () => {
+    const repository = openRepository();
+    const portrait = repository.createOrGetJob({ ...jobInput("portrait-v21"), purpose: "character_portrait" });
+    repository.claim(portrait.id);
+    repository.markRequestSent(portrait.id);
+    const asset = repository.complete(portrait.id, assetInput());
+    const scene = repository.createOrGetJob(jobInput("scene-v21"));
+
+    workspace!.db.prepare("UPDATE schema_meta SET version = 21 WHERE singleton = 1").run();
+    workspace!.close(); workspace = openWorkspace(root);
+    const migrated = new ImageAssetRepository(workspace);
+
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 22 });
+    expect(migrated.getRequiredJob(portrait.id)).toMatchObject({
+      idempotencyKey: portrait.idempotencyKey,
+      purpose: "character_portrait",
+      status: "succeeded",
+      sourceResourceIds: portrait.sourceResourceIds,
+      sourceVersionIds: portrait.sourceVersionIds,
+    });
+    expect(migrated.getAssetByJob(portrait.id)).toEqual(asset);
+    expect(migrated.getRequiredJob(scene.id)).toMatchObject({ purpose: "scene", status: "queued" });
+  });
+
+  it("accepts world_map and rejects an unknown purpose", () => {
+    const repository = openRepository();
+    expect(repository.createOrGetJob({ ...jobInput("world-map"), purpose: "world_map" }).purpose).toBe("world_map");
+    expect(() => repository.createOrGetJob({ ...jobInput("invalid-purpose"), purpose: "unknown" as never }))
+      .toThrowError(expect.objectContaining({ code: "IMAGE_JOB_PURPOSE_INVALID" }));
   });
 });
 

@@ -96,7 +96,7 @@ const listTaskNotesParameters = Type.Object({
 }, { additionalProperties: false });
 const generateImageParameters = Type.Object({
   title: Type.String({ minLength: 1, maxLength: 240 }),
-  purpose: Type.Union([Type.Literal("character_portrait"), Type.Literal("scene")]),
+  purpose: Type.Union([Type.Literal("character_portrait"), Type.Literal("scene"), Type.Literal("world_map")]),
   prompt: Type.String({ minLength: 1, maxLength: 50_000 }),
   sourceResourceIds: Type.Array(identifier, { minItems: 1, maxItems: 100 }),
   sourceVersionIds: Type.Array(identifier, { minItems: 1, maxItems: 100 }),

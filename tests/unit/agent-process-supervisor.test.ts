@@ -283,7 +283,7 @@ describe("Agent Process Supervisor internal tool gateway", () => {
     }));
   });
 
-  it("dispatches a source-bound image tool and emits only the structured ready result", async () => {
+  it("dispatches a source-bound world_map tool and emits only the structured ready result", async () => {
     const child = new FakeWorkerProcess();
     const events: unknown[] = [];
     const generateImage = vi.fn(createGateway().generateImage);
@@ -300,7 +300,7 @@ describe("Agent Process Supervisor internal tool gateway", () => {
       tool: "generate_image",
       args: {
         title: "银湾夜潮",
-        purpose: "scene",
+        purpose: "world_map",
         prompt: "月光下的银湾海岸",
         sourceResourceIds: ["world-1"],
         sourceVersionIds: ["version-1"],

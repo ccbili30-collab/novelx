@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { canonicalAuditHash } from "../audit/canonicalAuditHash";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 
-export type ImageGenerationPurpose = "character_portrait" | "scene";
+export type ImageGenerationPurpose = "character_portrait" | "scene" | "world_map";
 export type ImageGenerationJobStatus = "queued" | "running" | "succeeded" | "failed" | "reconciliation_required";
 export type ImageAssetStatus = "ready" | "stale";
 
@@ -344,7 +344,7 @@ function normalizeJobInput(input: CreateImageGenerationJobInput): CreateImageGen
     sourceResourceIds: normalizeIds(input.sourceResourceIds),
     sourceVersionIds: normalizeIds(input.sourceVersionIds),
   };
-  if (!(["character_portrait", "scene"] as const).includes(normalized.purpose)) {
+  if (!(["character_portrait", "scene", "world_map"] as const).includes(normalized.purpose)) {
     throw repositoryError("IMAGE_JOB_PURPOSE_INVALID");
   }
   if (!/^\d{2,4}x\d{2,4}$/.test(normalized.size)) throw repositoryError("IMAGE_JOB_SIZE_INVALID");

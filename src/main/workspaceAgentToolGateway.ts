@@ -31,6 +31,7 @@ import { ImageAssetRepository } from "../domain/asset/imageAssetRepository";
 import { ImageAssetStore } from "../domain/asset/imageAssetStore";
 import { ImageGenerationService } from "../domain/asset/imageGenerationService";
 import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeSetPolicy";
+import { ResourceRepository } from "../domain/workspace/resourceRepository";
 
 interface WorkspaceAgentToolGatewayOptions {
   getImageProviderProfile?(): ImageProviderRuntimeProfile | null;
@@ -127,6 +128,7 @@ export function createWorkspaceAgentToolGateway(
       const profile = { ...configuredProfile };
       const repository = new ImageAssetRepository(workspace);
       const idempotencyKey = `steward:${args.idempotencyKey}`;
+      if (args.purpose === "world_map") assertCurrentWorldMapSources(workspace, args);
       const service = options.createImageGenerationService?.(workspace)
         ?? new ImageGenerationService(repository, new ImageAssetStore(workspace.rootPath));
       try {
@@ -214,6 +216,51 @@ export function createWorkspaceAgentToolGateway(
       });
     },
   };
+}
+
+function assertCurrentWorldMapSources(
+  workspace: WorkspaceDatabase,
+  args: { sourceResourceIds: string[]; sourceVersionIds: string[] },
+): void {
+  const branch = new CheckpointRepository(workspace).getActiveBranch();
+  const currentResources = new Map(new ResourceRepository(workspace).listCurrent(branch.id)
+    .map((resource) => [resource.id, resource]));
+  if (args.sourceResourceIds.some((resourceId) => !currentResources.has(resourceId))) {
+    throw gatewayError("WORLD_MAP_SOURCE_RESOURCE_INVALID", "World map sources must be active resources on the current branch.");
+  }
+  if (!args.sourceResourceIds.some((resourceId) => {
+    const resource = currentResources.get(resourceId);
+    return resource?.type === "world" && resource.objectKind === "world";
+  })) {
+    throw gatewayError("WORLD_MAP_SOURCE_WORLD_REQUIRED", "A world map requires a current formal world resource.");
+  }
+  const rows = workspace.db.prepare(`
+    WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+      SELECT head_checkpoint_id, 0 FROM branches WHERE id = ?
+      UNION ALL
+      SELECT checkpoints.parent_checkpoint_id, ancestry.depth + 1
+      FROM checkpoints JOIN ancestry ON checkpoints.id = ancestry.checkpoint_id
+      WHERE checkpoints.parent_checkpoint_id IS NOT NULL
+    ), current_resource_versions AS (
+      SELECT resource_id, id, ROW_NUMBER() OVER (PARTITION BY resource_id ORDER BY ancestry.depth ASC) AS revision_rank
+      FROM resource_revisions JOIN ancestry ON ancestry.checkpoint_id = resource_revisions.created_checkpoint_id
+    ), current_document_versions AS (
+      SELECT resource_id, id, ROW_NUMBER() OVER (
+        PARTITION BY resource_id ORDER BY ancestry.depth ASC, document_versions.created_at DESC, document_versions.rowid DESC
+      ) AS version_rank
+      FROM document_versions JOIN ancestry ON ancestry.checkpoint_id = document_versions.created_checkpoint_id
+    )
+    SELECT resource_id, id FROM current_resource_versions WHERE revision_rank = 1
+    UNION ALL
+    SELECT resource_id, id FROM current_document_versions WHERE version_rank = 1
+  `).all(branch.id) as Array<{ resource_id: string; id: string }>;
+  const versionOwners = new Map(rows.map((row) => [row.id, row.resource_id]));
+  if (args.sourceVersionIds.some((versionId) => !args.sourceResourceIds.includes(versionOwners.get(versionId) ?? ""))) {
+    throw gatewayError(
+      "WORLD_MAP_SOURCE_VERSION_INVALID",
+      "World map sources must be current stable versions bound to the supplied resources.",
+    );
+  }
 }
 
 function assertGreenfieldCreateOnly(

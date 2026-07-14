@@ -250,7 +250,7 @@ describe("agent worker fail-closed contract", () => {
   it("projects a committed managed image as a ready public artifact", () => {
     expect(projectPublicArtifacts({
       status: "completed",
-      message: "场景图已生成。",
+      message: "世界地图已生成。",
       evidenceIds: ["version-1"],
       toolOutcomes: [{ tool: "generate_image", status: "succeeded" }],
       changeSet: { state: "none", changeSetId: null },
@@ -259,7 +259,7 @@ describe("agent worker fail-closed contract", () => {
       assetId: "asset-1",
       title: "银湾夜潮",
       status: "ready",
-      purpose: "scene",
+      purpose: "world_map",
       sourceVersionIds: ["version-1"],
       thumbnailUrl: "novax-asset://image/asset-1",
     }])).toEqual([

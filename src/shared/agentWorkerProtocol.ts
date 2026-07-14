@@ -466,7 +466,7 @@ export function isExplicitGreenfieldFreeCreateRequest(mode: "free" | "assist", u
 
 export const generateImageArgsSchema = z.object({
   title: z.string().trim().min(1).max(240),
-  purpose: z.enum(["character_portrait", "scene"]),
+  purpose: z.enum(["character_portrait", "scene", "world_map"]),
   prompt: z.string().trim().min(1).max(50_000),
   sourceResourceIds: z.array(identifierSchema).min(1).max(100),
   sourceVersionIds: z.array(identifierSchema).min(1).max(100),
@@ -483,7 +483,7 @@ export const generateImageResultSchema = z.object({
   assetId: identifierSchema,
   status: z.literal("ready"),
   title: z.string().trim().min(1).max(240),
-  purpose: z.enum(["character_portrait", "scene"]),
+  purpose: z.enum(["character_portrait", "scene", "world_map"]),
   sourceResourceIds: z.array(identifierSchema).min(1).max(100),
   sourceVersionIds: z.array(identifierSchema).min(1).max(100),
   mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]),
@@ -620,6 +620,9 @@ export const agentToolInternalErrorCodeSchema = z.enum([
   "PROJECT_FILE_RANGE_INVALID",
   "PROJECT_FILE_OPERATION_FAILED",
   "IMAGE_PROVIDER_REQUIRED",
+  "WORLD_MAP_SOURCE_RESOURCE_INVALID",
+  "WORLD_MAP_SOURCE_WORLD_REQUIRED",
+  "WORLD_MAP_SOURCE_VERSION_INVALID",
   "IMAGE_GENERATION_RECONCILIATION_REQUIRED",
   "IMAGE_GENERATION_FAILED",
 ]);

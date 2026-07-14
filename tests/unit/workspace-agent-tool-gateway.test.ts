@@ -270,6 +270,102 @@ describe("Workspace Agent tool gateway", () => {
     expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
   });
 
+  it("accepts a world_map only for a current formal world and its bound stable version", async () => {
+    const { root, workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    const receipt = new ResourceRepository(workspace).putRevisionWithReceipt({
+      resourceId: "world.map-source", create: true,
+      checkpointId: new CheckpointRepository(workspace).getActiveBranch().headCheckpointId,
+      type: "world", objectKind: "world", title: "雾港群岛", parentId: worldRoot.id, state: "active",
+    });
+    seedTool(workspace, "generate_image");
+    const client = vi.fn().mockResolvedValue({ bytes: ONE_PIXEL_PNG, responseId: "world-map-1" });
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true, {
+      getImageProviderProfile: imageProfile,
+      createImageGenerationService: () => new ImageGenerationService(
+        new ImageAssetRepository(workspace), new ImageAssetStore(root), client,
+      ),
+    });
+
+    const result = await gateway.generateImage({
+      title: "雾港群岛地图", purpose: "world_map", prompt: "群岛航路地图",
+      sourceResourceIds: [receipt.resourceId], sourceVersionIds: [receipt.revisionId], idempotencyKey: "world-map-v1",
+    }, invocationContext("assist"));
+
+    expect(result).toMatchObject({ purpose: "world_map", status: "ready" });
+    expect(client).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a world_map source that is not a formal world before calling the Provider", async () => {
+    const { root, workspace } = createWorkspace();
+    const source = imageSource(workspace);
+    seedTool(workspace, "generate_image");
+    const client = vi.fn();
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true, {
+      getImageProviderProfile: imageProfile,
+      createImageGenerationService: () => new ImageGenerationService(
+        new ImageAssetRepository(workspace), new ImageAssetStore(root), client,
+      ),
+    });
+
+    await expect(gateway.generateImage({
+      ...imageRequest(source), purpose: "world_map", title: "非法地图",
+    }, invocationContext("assist"))).rejects.toMatchObject({ code: "WORLD_MAP_SOURCE_WORLD_REQUIRED" });
+    expect(client).not.toHaveBeenCalled();
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects an old world resource revision before calling the Provider", async () => {
+    const { workspace } = createWorkspace();
+    const resources = new ResourceRepository(workspace);
+    const checkpoints = new CheckpointRepository(workspace);
+    const worldRoot = resources.listCurrent().find((resource) => resource.type === "world")!;
+    const original = resources.putRevisionWithReceipt({
+      resourceId: "world.versioned", create: true, checkpointId: checkpoints.getActiveBranch().headCheckpointId,
+      type: "world", objectKind: "world", title: "旧雾港", parentId: worldRoot.id, state: "active",
+    });
+    const replacementCheckpointId = checkpoints.appendCheckpoint(checkpoints.getActiveBranch().id, "更新世界版本");
+    resources.putRevisionWithReceipt({
+      resourceId: original.resourceId, checkpointId: replacementCheckpointId,
+      type: "world", objectKind: "world", title: "新雾港", parentId: worldRoot.id, state: "active",
+    });
+    seedTool(workspace, "generate_image");
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true, {
+      getImageProviderProfile: imageProfile,
+    });
+
+    await expect(gateway.generateImage({
+      title: "旧版本地图", purpose: "world_map", prompt: "旧版本地图",
+      sourceResourceIds: [original.resourceId], sourceVersionIds: [original.revisionId], idempotencyKey: "old-version-map",
+    }, invocationContext("assist"))).rejects.toMatchObject({ code: "WORLD_MAP_SOURCE_VERSION_INVALID" });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects a current version whose owner is absent from world_map source resources", async () => {
+    const { workspace } = createWorkspace();
+    const resources = new ResourceRepository(workspace);
+    const checkpointId = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+    const worldRoot = resources.listCurrent().find((resource) => resource.type === "world")!;
+    const owner = resources.putRevisionWithReceipt({
+      resourceId: "world.version-owner", create: true, checkpointId,
+      type: "world", objectKind: "world", title: "来源世界", parentId: worldRoot.id, state: "active",
+    });
+    const reported = resources.putRevisionWithReceipt({
+      resourceId: "world.reported", create: true, checkpointId,
+      type: "world", objectKind: "world", title: "所报世界", parentId: worldRoot.id, state: "active",
+    });
+    seedTool(workspace, "generate_image");
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true, {
+      getImageProviderProfile: imageProfile,
+    });
+
+    await expect(gateway.generateImage({
+      title: "错绑地图", purpose: "world_map", prompt: "错绑地图",
+      sourceResourceIds: [reported.resourceId], sourceVersionIds: [owner.revisionId], idempotencyKey: "owner-mismatch-map",
+    }, invocationContext("assist"))).rejects.toMatchObject({ code: "WORLD_MAP_SOURCE_VERSION_INVALID" });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
+  });
+
   it("commits one source-bound image and reuses it without a second Provider call", async () => {
     const { root, workspace } = createWorkspace();
     const source = imageSource(workspace);

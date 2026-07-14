@@ -170,6 +170,71 @@ describe("Steward tool handoff state machine", () => {
     expect(machine.snapshot().blockReason).toBeNull();
   });
 
+  it("allows exactly one final world_map using only committed Greenfield outputs", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", retrievalResult([]));
+    const propose = successfulTool("propose_change_set", greenfieldCommittedProposal());
+    const generate = successfulTool("generate_image", worldMapResult());
+    const machine = createStewardExecutionStateMachine({
+      mode: "free",
+      userInput: "不要讨论，自行创建世界包",
+      authorizedScopeResourceIds: ["world-root"],
+      operationalTools: [retrieve, propose, generate],
+      resultCapture: createRoleOutputTool("steward"),
+    });
+    await tool(machine.tools, "submit_steward_plan").execute("plan", {
+      objective: "change_set",
+      scopeResourceIds: ["world-root"],
+      steps: ["retrieve_graph_evidence", "propose_change_set", "generate_image"],
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", { scopeResourceIds: ["world-root"] });
+    await tool(machine.tools, "propose_change_set").execute("propose", { summary: "创建世界", items: [{}] });
+    await expect(tool(machine.tools, "generate_image").execute("bad-map", {
+      ...worldMapRequest(), sourceVersionIds: ["uncommitted-version"],
+    })).rejects.toMatchObject({ code: "STEWARD_IMAGE_SOURCE_MISMATCH" });
+    await tool(machine.tools, "generate_image").execute("map", worldMapRequest());
+    await tool(machine.tools, "submit_steward_result").execute("result", {
+      status: "completed",
+      message: "文本世界包和地图均已提交。",
+      evidenceIds: ["change-greenfield", "version-world-document"],
+      toolOutcomes: [],
+      changeSet: { state: "committed", changeSetId: "change-greenfield" },
+      escalations: [],
+    });
+    expect(machine.snapshot().generatedImages[0]).toMatchObject({ purpose: "world_map", status: "ready" });
+  });
+
+  it("keeps a committed Greenfield Change Set when the final world_map fails", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", retrievalResult([]));
+    const propose = successfulTool("propose_change_set", greenfieldCommittedProposal());
+    const generate: AgentTool = {
+      name: "generate_image", label: "generate", description: "generate", parameters: { type: "object" } as never,
+      execute: async () => { throw Object.assign(new Error("provider rejected"), { code: "IMAGE_GENERATION_FAILED" }); },
+    };
+    const machine = createStewardExecutionStateMachine({
+      mode: "free",
+      userInput: "不要讨论，自行创建世界包",
+      authorizedScopeResourceIds: ["world-root"],
+      operationalTools: [retrieve, propose, generate],
+      resultCapture: createRoleOutputTool("steward"),
+    });
+    await tool(machine.tools, "submit_steward_plan").execute("plan", {
+      objective: "change_set", scopeResourceIds: ["world-root"],
+      steps: ["retrieve_graph_evidence", "propose_change_set", "generate_image"],
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", { scopeResourceIds: ["world-root"] });
+    await tool(machine.tools, "propose_change_set").execute("propose", { summary: "创建世界", items: [{}] });
+    await expect(tool(machine.tools, "generate_image").execute("map", worldMapRequest()))
+      .rejects.toMatchObject({ code: "IMAGE_GENERATION_FAILED" });
+    await tool(machine.tools, "submit_steward_result").execute("result", {
+      status: "blocked",
+      message: "文本世界包已提交，地图生成失败。",
+      evidenceIds: ["change-greenfield", "version-world-document"],
+      toolOutcomes: [],
+      changeSet: { state: "committed", changeSetId: "change-greenfield" },
+      escalations: [{ code: "tool_failed", message: "地图生成失败。", evidenceIds: ["version-world-document"] }],
+    });
+  });
+
   it("inserts Checker before writes when retrieval contains structural conflicts", async () => {
     const retrieve = successfulTool("retrieve_graph_evidence", retrievalResult([
       assertion("source-old", "起源", "世界树"),
@@ -461,6 +526,35 @@ function assertion(versionId: string, predicate: string, cause: string) {
       type: "assertion",
       assertion: { assertionId: `assertion-${versionId}`, versionId, subject: "精灵", predicate },
     }],
+  };
+}
+
+function greenfieldCommittedProposal() {
+  return {
+    changeSetId: "change-greenfield", mode: "free", status: "committed", gateStatus: "ready",
+    blockedReason: null, itemCount: 3,
+    committedOutputs: [
+      { itemId: "world-resource", kind: "resource_revision", outputId: "version-world-resource" },
+      { itemId: "world-document", kind: "document_version", outputId: "version-world-document" },
+      { itemId: "world-assertion", kind: "assertion_version", outputId: "version-world-assertion" },
+    ],
+  } as const;
+}
+
+function worldMapRequest() {
+  return {
+    title: "雾港群岛地图", purpose: "world_map" as const, prompt: "群岛航路地图",
+    sourceResourceIds: ["world.greenfield"], sourceVersionIds: ["version-world-document"],
+    idempotencyKey: "greenfield-world-map-v1",
+  };
+}
+
+function worldMapResult() {
+  const { idempotencyKey: _idempotencyKey, prompt: _prompt, ...request } = worldMapRequest();
+  return {
+    jobId: "job-world-map", assetId: "asset-world-map", status: "ready" as const,
+    ...request, mimeType: "image/png" as const, width: 1024, height: 1024,
+    byteLength: 1024, sha256: "d".repeat(64), thumbnailUrl: "novax-asset://image/asset-world-map",
   };
 }
 
