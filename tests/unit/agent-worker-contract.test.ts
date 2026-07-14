@@ -7,25 +7,67 @@ import type { PublishedPrompt } from "../../src/agent-worker/promptRegistry";
 const auditRecorder = { record: async () => undefined };
 
 describe("agent worker fail-closed contract", () => {
-  it("uses Provider-compatible root object schemas for every structured result tool", () => {
-    for (const role of ["steward", "writer", "checker"] as const) {
-      const parameters = createRoleOutputTool(role).tool.parameters as { type?: string; anyOf?: unknown };
-      expect(parameters.type).toBe("object");
-      expect(parameters.anyOf).toBeUndefined();
-    }
+  it("exposes strict Writer and Checker branch schemas at the Provider tool boundary", () => {
+    const steward = createRoleOutputTool("steward").tool.parameters as { type?: string; anyOf?: unknown };
+    const writer = createRoleOutputTool("writer").tool.parameters as { anyOf?: unknown[] };
+    const checker = createRoleOutputTool("checker").tool.parameters as { anyOf?: unknown[] };
+
+    expect(steward.type).toBe("object");
+    expect(writer.anyOf).toHaveLength(2);
+    expect(checker.anyOf).toHaveLength(3);
   });
 
-  it("describes Specialist result members without root unions", () => {
-    const writer = createRoleOutputTool("writer").tool.parameters as {
-      properties?: Record<string, { type?: string; items?: { type?: string } }>;
+  it("accepts only valid Writer branches and rejects cross-branch or extra fields", () => {
+    const tool = createRoleOutputTool("writer").tool;
+    const candidate = {
+      status: "candidate",
+      candidateText: "候选段落。",
+      evidenceIds: ["source-1"],
+      gmResolutionId: null,
+      authorityChanges: [],
     };
-    const checker = createRoleOutputTool("checker").tool.parameters as {
-      properties?: Record<string, { type?: string; items?: { type?: string } }>;
+    const blocked = {
+      status: "blocked",
+      reasons: [{ code: "missing_gm_resolution", message: "缺少 GM 裁决。", evidenceIds: ["source-1"] }],
     };
+    expect(validateToolArguments(tool, { type: "toolCall", id: "writer-candidate", name: tool.name, arguments: candidate })).toEqual(candidate);
+    expect(validateToolArguments(tool, { type: "toolCall", id: "writer-blocked", name: tool.name, arguments: blocked })).toEqual(blocked);
+    expect(() => validateToolArguments(tool, {
+      type: "toolCall", id: "writer-cross", name: tool.name,
+      arguments: { ...blocked, candidateText: "不得混用" },
+    })).toThrow();
+    expect(() => validateToolArguments(tool, {
+      type: "toolCall", id: "writer-extra", name: tool.name,
+      arguments: { ...candidate, reasons: [] },
+    })).toThrow();
+  });
 
-    expect(writer.properties?.reasons).toMatchObject({ type: "array", items: { type: "object" } });
-    expect(checker.properties?.findings).toMatchObject({ type: "array", items: { type: "object" } });
-    expect(checker.properties?.reasons).toMatchObject({ type: "array", items: { type: "object" } });
+  it("accepts only valid Checker branches and rejects cross-branch or extra fields", () => {
+    const tool = createRoleOutputTool("checker").tool;
+    const passed = { status: "passed", findings: [] };
+    const findings = {
+      status: "findings",
+      findings: [{
+        severity: "major", category: "writer_authority",
+        evidence: [{ sourceId: "source-1", claim: "GM 未裁决。" }],
+        location: "第一段", scope: "当前场景", reason: "Writer 越过 GM 权限。",
+      }],
+    };
+    const blocked = {
+      status: "blocked",
+      reasons: [{ code: "major_conflict", message: "来源冲突。", evidenceIds: ["source-1"] }],
+    };
+    for (const [id, arguments_] of [["checker-passed", passed], ["checker-findings", findings], ["checker-blocked", blocked]] as const) {
+      expect(validateToolArguments(tool, { type: "toolCall", id, name: tool.name, arguments: arguments_ })).toEqual(arguments_);
+    }
+    expect(() => validateToolArguments(tool, {
+      type: "toolCall", id: "checker-cross", name: tool.name,
+      arguments: { ...passed, reasons: [] },
+    })).toThrow();
+    expect(() => validateToolArguments(tool, {
+      type: "toolCall", id: "checker-extra", name: tool.name,
+      arguments: { ...findings, replacementProse: "不允许" },
+    })).toThrow();
   });
 
   it("accepts a source-bound image outcome at the Pi tool-argument boundary", () => {

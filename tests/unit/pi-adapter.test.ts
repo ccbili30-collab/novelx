@@ -128,7 +128,7 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
       systemPrompt: "Contract fixture only.",
       userInput: "测试",
       tools: [],
-    })).rejects.toMatchObject({ code: "PROVIDER_RUNTIME_FAILED", message: "模型服务运行失败。" });
+    })).rejects.toMatchObject({ code: "PROVIDER_RUNTIME_FAILED", message: "模型服务运行失败：apiKey=[REDACTED]" });
   });
 
   it("does not spend correction attempts after the Provider has already returned an error", async () => {
@@ -178,8 +178,9 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
         name: "submit_result",
         label: "提交",
         description: "Submit the result.",
-        parameters: Type.Object({ status: Type.Literal("done") }, { additionalProperties: false }),
-        execute: async () => {
+        parameters: Type.Object({ status: Type.String() }, { additionalProperties: false }),
+        execute: async (_id, params) => {
+          if ((params as { status: string }).status !== "done") throw new Error("RESULT_SCHEMA_INVALID");
           submitted = true;
           return { content: [{ type: "text", text: "accepted" }], details: { accepted: true } };
         },
@@ -227,6 +228,79 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
     });
 
     expect(attempts).toBe(2);
+    expect(result.receipt.correctionAttempts).toBe(1);
+    expect(faux.state.callCount).toBe(3);
+  });
+
+  it("repairs one schema-invalid guarded result call with exactly one structured correction", async () => {
+    const faux = fauxProvider({ provider: "novax-invalid-guarded-result-fixture" });
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("submit_result", { status: "invalid" })),
+      fauxAssistantMessage(fauxToolCall("submit_result", { status: "done" })),
+      fauxAssistantMessage("完成"),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    let submitted = false;
+    const adapter = new NovaxPiRuntimeAdapter({
+      model: faux.getModel(),
+      streamFn: (model, context, options) => models.streamSimple(model, context, options),
+    });
+
+    const result = await adapter.run({
+      systemPrompt: "Contract fixture only.",
+      userInput: "测试",
+      tools: [{
+        name: "submit_result",
+        label: "提交",
+        description: "Submit the result.",
+        parameters: Type.Object({ status: Type.String() }, { additionalProperties: false }),
+        execute: async (_id, params) => {
+          if ((params as { status: string }).status !== "done") throw new Error("RESULT_SCHEMA_INVALID");
+          submitted = true;
+          return { content: [{ type: "text", text: "accepted" }], details: { accepted: true } };
+        },
+      }],
+      completionGuard: { toolName: "submit_result", isSatisfied: () => submitted, forceTool: true },
+    });
+
+    expect(submitted).toBe(true);
+    expect(result.receipt.correctionAttempts).toBe(1);
+    expect(faux.state.callCount).toBe(3);
+  });
+
+  it("repairs an unsatisfied toolUse turn even when no guarded-tool execution error is emitted", async () => {
+    const faux = fauxProvider({ provider: "novax-unsatisfied-tool-use-fixture" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("submit_result", { status: "done" })),
+      fauxAssistantMessage("完成"),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    let submitted = false;
+    const adapter = new NovaxPiRuntimeAdapter({
+      model: faux.getModel(),
+      streamFn: (model, context, options) => models.streamSimple(model, context, options),
+    });
+
+    const result = await adapter.run({
+      systemPrompt: "Contract fixture only.",
+      userInput: "测试",
+      tools: [{
+        name: "submit_result",
+        label: "提交",
+        description: "Submit the result.",
+        parameters: Type.Object({ status: Type.Literal("done") }, { additionalProperties: false }),
+        execute: async () => {
+          submitted = true;
+          return { content: [{ type: "text", text: "accepted" }], details: { accepted: true } };
+        },
+      }],
+      completionGuard: { toolName: "submit_result", isSatisfied: () => submitted, forceTool: true },
+    });
+
+    expect(submitted).toBe(true);
     expect(result.receipt.correctionAttempts).toBe(1);
     expect(faux.state.callCount).toBe(3);
   });

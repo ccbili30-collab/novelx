@@ -173,7 +173,7 @@ export class NovaxPiRuntimeAdapter {
       while (
         input.completionGuard
         && !input.completionGuard.isSatisfied()
-        && !isTerminalProviderMessage(finalMessage)
+        && canAttemptStructuredCorrection(finalMessage)
         && correctionAttempts < STRUCTURED_SUBMISSION_CORRECTION.maxAttempts
       ) {
         correctionAttempts += 1;
@@ -199,7 +199,9 @@ export class NovaxPiRuntimeAdapter {
 
     if (admissionFailure) throw admissionFailure;
     if (!finalMessage) throw piRuntimeError("PROVIDER_PROTOCOL_FAILED", "模型服务没有返回最终消息。");
-    if (finalMessage.stopReason === "error") throw piRuntimeError("PROVIDER_RUNTIME_FAILED", "模型服务运行失败。");
+    if (finalMessage.stopReason === "error") {
+      throw piRuntimeError("PROVIDER_RUNTIME_FAILED", `模型服务运行失败：${safeProviderErrorDetail(finalMessage.errorMessage)}`);
+    }
     if (finalMessage.stopReason === "aborted") throw piRuntimeError("AGENT_RUN_CANCELLED", "任务已取消。");
     if (finalMessage.stopReason === "length") throw piRuntimeError("PROVIDER_OUTPUT_INCOMPLETE", "模型输出被截断。");
     if (finalMessage.stopReason === "toolUse" && !input.completionGuard?.isSatisfied()) {
@@ -311,6 +313,10 @@ function isTerminalProviderMessage(message: AssistantMessage | undefined): boole
     || message?.stopReason === "length";
 }
 
+function canAttemptStructuredCorrection(message: AssistantMessage | undefined): boolean {
+  return !isTerminalProviderMessage(message);
+}
+
 export function createOpenAiCompatiblePiAdapter(profileInput: unknown): NovaxPiRuntimeAdapter {
   const profile = modelProfileSchema.parse(profileInput);
   const model = createModel(profile);
@@ -357,4 +363,13 @@ function createModel(profile: ModelProfile): Model<"openai-completions"> {
 
 function piRuntimeError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
+}
+
+function safeProviderErrorDetail(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return "Provider 未提供可安全展示的错误详情。";
+  return value
+    .replace(/(Bearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/\b(sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/g, "$1-[REDACTED]")
+    .replace(/(api[_ -]?key\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .slice(0, 500);
 }

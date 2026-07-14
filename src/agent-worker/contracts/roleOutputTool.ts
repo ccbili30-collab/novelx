@@ -49,14 +49,19 @@ const stewardParameters = Type.Object({
   escalations: Type.Array(blockedReason, { maxItems: 20 }),
 }, { additionalProperties: false });
 
-const writerParameters = Type.Object({
-  status: Type.Union([Type.Literal("candidate"), Type.Literal("blocked")]),
-  candidateText: Type.Optional(Type.String({ minLength: 1, maxLength: 8_000 })),
-  evidenceIds: Type.Optional(Type.Array(identifier, { maxItems: 200 })),
-  gmResolutionId: Type.Optional(Type.Union([identifier, Type.Null()])),
-  authorityChanges: Type.Optional(Type.Array(Type.Never(), { maxItems: 0 })),
-  reasons: Type.Optional(Type.Array(blockedReason, { maxItems: 20 })),
-}, { additionalProperties: true });
+const writerParameters = Type.Union([
+  Type.Object({
+    status: Type.Literal("candidate"),
+    candidateText: Type.String({ minLength: 1, maxLength: 8_000 }),
+    evidenceIds: Type.Array(identifier, { minItems: 1, maxItems: 200 }),
+    gmResolutionId: Type.Union([identifier, Type.Null()]),
+    authorityChanges: Type.Array(Type.Never(), { maxItems: 0 }),
+  }, { additionalProperties: false }),
+  Type.Object({
+    status: Type.Literal("blocked"),
+    reasons: Type.Array(blockedReason, { minItems: 1, maxItems: 20 }),
+  }, { additionalProperties: false }),
+]);
 
 const checkerFinding = Type.Object({
   severity: Type.Union([Type.Literal("info"), Type.Literal("warning"), Type.Literal("major")]),
@@ -81,11 +86,20 @@ const checkerFinding = Type.Object({
   reason: Type.String({ minLength: 1, maxLength: 2_000 }),
 }, { additionalProperties: false });
 
-const checkerParameters = Type.Object({
-  status: Type.Union([Type.Literal("passed"), Type.Literal("findings"), Type.Literal("blocked")]),
-  findings: Type.Optional(Type.Array(checkerFinding, { maxItems: 200 })),
-  reasons: Type.Optional(Type.Array(blockedReason, { maxItems: 20 })),
-}, { additionalProperties: true });
+const checkerParameters = Type.Union([
+  Type.Object({
+    status: Type.Literal("passed"),
+    findings: Type.Array(Type.Never(), { maxItems: 0 }),
+  }, { additionalProperties: false }),
+  Type.Object({
+    status: Type.Literal("findings"),
+    findings: Type.Array(checkerFinding, { minItems: 1, maxItems: 200 }),
+  }, { additionalProperties: false }),
+  Type.Object({
+    status: Type.Literal("blocked"),
+    reasons: Type.Array(blockedReason, { minItems: 1, maxItems: 20 }),
+  }, { additionalProperties: false }),
+]);
 
 const parametersByRole: Record<PromptRole, TSchema> = {
   steward: stewardParameters,
