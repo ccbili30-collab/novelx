@@ -8,17 +8,21 @@ import {
   growthCycleBeginSchema,
   growthCycleSchema,
   growthCycleTerminalizeSchema,
+  growthEventAppendSchema,
   growthEventSchema,
   growthGoalCreateSchema,
   growthGoalSchema,
+  growthRetrievalReceiptCreateSchema,
   growthRetrievalReceiptSchema,
   growthRuleAppendSchema,
   growthRuleRevisionSchema,
   type GrowthCycle,
   type GrowthEvent,
+  type GrowthEventAppend,
   type GrowthGoal,
   type GrowthGoalCreate,
   type GrowthRetrievalReceipt,
+  type GrowthRetrievalReceiptCreate,
   type GrowthRuleRevision,
 } from "../../shared/growthContract";
 
@@ -44,9 +48,7 @@ export class GrowthRepository {
         this.workspace.db.exec("COMMIT");
         return goal;
       }
-      if (this.workspace.db.prepare("SELECT 1 FROM growth_goals WHERE id = ?").get(value.id)) {
-        throw growthError("GROWTH_GOAL_ID_CONFLICT");
-      }
+      if (this.workspace.db.prepare("SELECT 1 FROM growth_goals WHERE id = ?").get(value.id)) throw growthError("GROWTH_GOAL_ID_CONFLICT");
       const checkpointId = this.#getBranchHead(value.branchId);
       this.#assertScopesVisible(value.authorizedScopeResourceIds, checkpointId);
       this.#assertSeedVisible(value.seed, checkpointId);
@@ -77,11 +79,9 @@ export class GrowthRepository {
   getGoal(goalId: string): GrowthGoal | null {
     const row = this.workspace.db.prepare("SELECT * FROM growth_goals WHERE id = ?").get(goalId) as Row | undefined;
     if (!row) return null;
-    const scopes = this.workspace.db.prepare("SELECT resource_id FROM growth_goal_scopes WHERE goal_id = ? ORDER BY ordinal")
-      .all(goalId) as Array<{ resource_id: string }>;
     return growthGoalSchema.parse({
       id: readString(row, "id"), branchId: readString(row, "branch_id"), seed: readSeed(row),
-      authorizedScopeResourceIds: scopes.map((scope) => scope.resource_id), status: readString(row, "status"),
+      authorizedScopeResourceIds: this.#goalScopes(goalId), status: readString(row, "status"),
       currentRuleRevision: readNumber(row, "current_rule_revision"), currentCycleSequence: readNumber(row, "current_cycle_sequence"),
       createdAt: readString(row, "created_at"), updatedAt: readString(row, "updated_at"),
     });
@@ -92,13 +92,56 @@ export class GrowthRepository {
     return row ? mapCycle(row) : null;
   }
 
+  getReceipt(receiptId: string): GrowthRetrievalReceipt | null {
+    const row = this.workspace.db.prepare("SELECT * FROM growth_retrieval_receipts WHERE id = ?").get(receiptId) as Row | undefined;
+    if (!row) return null;
+    const scopes = this.workspace.db.prepare("SELECT resource_id FROM growth_retrieval_receipt_scopes WHERE receipt_id = ? ORDER BY ordinal")
+      .all(receiptId) as Array<{ resource_id: string }>;
+    const aliases = this.workspace.db.prepare("SELECT alias FROM growth_retrieval_receipt_aliases WHERE receipt_id = ? ORDER BY ordinal")
+      .all(receiptId) as Array<{ alias: string }>;
+    const links = (this.workspace.db.prepare("SELECT * FROM growth_retrieval_receipt_links WHERE receipt_id = ? ORDER BY rank")
+      .all(receiptId) as Row[]).map((link) => ({
+      rank: readNumber(link, "rank"), targetKind: readString(link, "target_kind"), targetId: readString(link, "target_id"),
+      targetVersionId: readNullableString(link, "target_version_id"), score: readNumber(link, "score"),
+      reasonCodes: parseJsonArray(readString(link, "reason_codes_json")), pathTargetIds: parseJsonArray(readString(link, "path_target_ids_json")),
+      stableLocator: readNullableString(link, "stable_locator"), stableVersionId: readNullableString(link, "stable_version_id"),
+      stableHash: readNullableString(link, "stable_hash"),
+    }));
+    return growthRetrievalReceiptSchema.parse({
+      id: readString(row, "id"), cycleId: readString(row, "cycle_id"), runId: readString(row, "run_id"),
+      toolInvocationId: readString(row, "tool_invocation_id"), branchId: readString(row, "branch_id"), checkpointId: readString(row, "checkpoint_id"),
+      lens: readString(row, "lens"), effectiveScopeResourceIds: scopes.map((scope) => scope.resource_id), query: readString(row, "query_text"),
+      aliases: aliases.map((alias) => alias.alias),
+      validTime: timeRange(row, "valid_time_from", "valid_time_to"), recordedTime: timeRange(row, "recorded_time_from", "recorded_time_to"),
+      maxHops: readNumber(row, "max_hops"), cpuBudgetMs: readNumber(row, "cpu_budget_ms"), expansionBudget: readNumber(row, "expansion_budget"),
+      resultBudget: readNumber(row, "result_budget"), tokenBudget: readNumber(row, "token_budget"), policyVersion: readString(row, "policy_version"),
+      queryHash: readString(row, "query_hash"), resultHash: readString(row, "result_hash"), hitCount: readNumber(row, "hit_count"),
+      conflictCount: readNumber(row, "conflict_count"), locatorCount: readNumber(row, "locator_count"),
+      coverage: { state: readString(row, "coverage_state"), searchedScopeCount: readNumber(row, "coverage_searched_scope_count"), omittedCount: readNumber(row, "coverage_omitted_count") },
+      truncated: readNumber(row, "truncated") === 1, createdAt: readString(row, "created_at"), links,
+    });
+  }
+
+  listEvents(goalId: string): GrowthEvent[] {
+    return (this.workspace.db.prepare("SELECT * FROM growth_events WHERE goal_id = ? ORDER BY sequence").all(goalId) as Row[]).map(mapEvent);
+  }
+
   appendRule(input: unknown): GrowthRuleRevision {
     const value = growthRuleAppendSchema.parse(input);
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const goal = this.#requiredGoal(value.goalId);
+      if (goal.currentRuleRevision !== value.expectedRevision) {
+        const replay = value.expectedRevision === goal.currentRuleRevision - 1
+          ? this.workspace.db.prepare("SELECT * FROM growth_goal_rule_revisions WHERE goal_id = ? AND revision = ?").get(value.goalId, goal.currentRuleRevision) as Row | undefined
+          : undefined;
+        if (replay && readString(replay, "rule_text") === value.ruleText && readNullableString(replay, "source_message_id") === value.sourceMessageId) {
+          this.workspace.db.exec("COMMIT");
+          return mapRuleRevision(replay);
+        }
+        throw growthError("GROWTH_RULE_REVISION_MISMATCH");
+      }
       if (goal.status !== "active") throw growthError("GROWTH_GOAL_NOT_ACTIVE");
-      if (goal.currentRuleRevision !== value.expectedRevision) throw growthError("GROWTH_RULE_REVISION_MISMATCH");
       if (this.#hasOpenCycle(value.goalId)) throw growthError("GROWTH_RULE_CHANGE_REQUIRES_CYCLE_BOUNDARY");
       const revision = value.expectedRevision + 1;
       const now = new Date().toISOString();
@@ -135,8 +178,7 @@ export class GrowthRepository {
       if (goal.status !== "active") throw growthError("GROWTH_GOAL_NOT_ACTIVE");
       if (goal.currentRuleRevision !== value.ruleRevision) throw growthError("GROWTH_RULE_REVISION_MISMATCH");
       if (this.#hasOpenCycle(goal.id)) throw growthError("GROWTH_OPEN_CYCLE_EXISTS");
-      const previous = this.workspace.db.prepare("SELECT * FROM growth_cycles WHERE goal_id = ? ORDER BY sequence DESC LIMIT 1")
-        .get(goal.id) as Row | undefined;
+      const previous = this.workspace.db.prepare("SELECT * FROM growth_cycles WHERE goal_id = ? ORDER BY sequence DESC LIMIT 1").get(goal.id) as Row | undefined;
       const expectedInput = previous ? readNullableString(previous, "output_checkpoint_id") : this.#getBranchHead(goal.branchId);
       if (!expectedInput || value.inputCheckpointId !== expectedInput || value.inputCheckpointId !== this.#getBranchHead(goal.branchId)) {
         throw growthError("GROWTH_CYCLE_INPUT_CHECKPOINT_MISMATCH");
@@ -150,8 +192,7 @@ export class GrowthRepository {
           run_id, receipt_id, change_set_id, output_checkpoint_id, status, failure_code, created_at, updated_at, terminal_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'planned', NULL, ?, ?, NULL)
       `).run(value.id, value.goalId, sequence, value.idempotencyKey, payloadHash, value.inputCheckpointId, value.ruleRevision, now, now);
-      this.workspace.db.prepare("UPDATE growth_goals SET current_cycle_sequence = ?, updated_at = ? WHERE id = ?")
-        .run(sequence, now, value.goalId);
+      this.workspace.db.prepare("UPDATE growth_goals SET current_cycle_sequence = ?, updated_at = ? WHERE id = ?").run(sequence, now, value.goalId);
       this.workspace.db.exec("COMMIT");
       return this.getCycle(value.id) ?? fail("GROWTH_DATA_INVALID");
     } catch (error) {
@@ -165,15 +206,21 @@ export class GrowthRepository {
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const cycle = this.#requiredCycle(value.cycleId);
-      if (cycle.status !== "planned" || cycle.runId) throw growthError("GROWTH_RUN_ALREADY_BOUND");
+      if (cycle.runId) {
+        if (cycle.runId === value.runId) {
+          this.workspace.db.exec("COMMIT");
+          return cycle;
+        }
+        throw growthError("GROWTH_RUN_ALREADY_BOUND");
+      }
+      if (cycle.status !== "planned") throw growthError("GROWTH_RUN_ALREADY_BOUND");
       const goal = this.#requiredGoal(cycle.goalId);
       const run = this.workspace.db.prepare("SELECT branch_id, base_checkpoint_id FROM agent_runs WHERE id = ?").get(value.runId) as Row | undefined;
       if (!run || readString(run, "branch_id") !== goal.branchId || readString(run, "base_checkpoint_id") !== cycle.inputCheckpointId) {
         throw growthError("GROWTH_RUN_REFERENCE_MISMATCH");
       }
       const now = new Date().toISOString();
-      this.workspace.db.prepare("UPDATE growth_cycles SET run_id = ?, status = 'running', updated_at = ? WHERE id = ?")
-        .run(value.runId, now, value.cycleId);
+      this.workspace.db.prepare("UPDATE growth_cycles SET run_id = ?, status = 'running', updated_at = ? WHERE id = ?").run(value.runId, now, value.cycleId);
       this.workspace.db.exec("COMMIT");
       return this.getCycle(value.cycleId) ?? fail("GROWTH_DATA_INVALID");
     } catch (error) {
@@ -183,9 +230,15 @@ export class GrowthRepository {
   }
 
   recordReceipt(input: unknown): GrowthRetrievalReceipt {
-    const value = growthRetrievalReceiptSchema.parse(input);
+    const value = growthRetrievalReceiptCreateSchema.parse(input);
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
+      const existing = this.getReceipt(value.id);
+      if (existing) {
+        if (canonicalAuditHash(receiptInputFromOutput(existing)) !== canonicalAuditHash(value)) throw growthError("GROWTH_RECEIPT_REPLAY_MISMATCH");
+        this.workspace.db.exec("COMMIT");
+        return existing;
+      }
       const cycle = this.#requiredCycle(value.cycleId);
       const goal = this.#requiredGoal(cycle.goalId);
       if (cycle.status !== "running" || !cycle.runId || cycle.receiptId) throw growthError("GROWTH_RECEIPT_BINDING_INVALID");
@@ -198,7 +251,7 @@ export class GrowthRepository {
       if (!tool || readString(tool, "run_id") !== value.runId || readString(tool, "tool_name") !== "retrieve_graph_evidence") {
         throw growthError("GROWTH_RECEIPT_TOOL_MISMATCH");
       }
-      if (this.workspace.db.prepare("SELECT 1 FROM growth_retrieval_receipts WHERE id = ?").get(value.id)) throw growthError("GROWTH_RECEIPT_ID_CONFLICT");
+      const receipt = receiptOutput(value, new Date().toISOString());
       this.workspace.db.prepare(`
         INSERT INTO growth_retrieval_receipts (
           id, cycle_id, run_id, tool_invocation_id, branch_id, checkpoint_id, lens, query_text,
@@ -207,27 +260,26 @@ export class GrowthRepository {
           conflict_count, locator_count, coverage_state, coverage_searched_scope_count, coverage_omitted_count,
           truncated, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, 'creator', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(value.id, value.cycleId, value.runId, value.toolInvocationId, value.branchId, value.checkpointId, value.query,
-        value.validTime?.from ?? null, value.validTime?.to ?? null, value.recordedTime?.from ?? null, value.recordedTime?.to ?? null,
-        value.maxHops, value.cpuBudgetMs, value.expansionBudget, value.resultBudget, value.tokenBudget, value.policyVersion,
-        value.queryHash, value.resultHash, value.hitCount, value.conflictCount, value.locatorCount, value.coverage.state,
-        value.coverage.searchedScopeCount, value.coverage.omittedCount, value.truncated ? 1 : 0, value.createdAt);
+      `).run(receipt.id, receipt.cycleId, receipt.runId, receipt.toolInvocationId, receipt.branchId, receipt.checkpointId, receipt.query,
+        receipt.validTime?.from ?? null, receipt.validTime?.to ?? null, receipt.recordedTime?.from ?? null, receipt.recordedTime?.to ?? null,
+        receipt.maxHops, receipt.cpuBudgetMs, receipt.expansionBudget, receipt.resultBudget, receipt.tokenBudget, receipt.policyVersion,
+        receipt.queryHash, receipt.resultHash, receipt.hitCount, receipt.conflictCount, receipt.locatorCount, receipt.coverage.state,
+        receipt.coverage.searchedScopeCount, receipt.coverage.omittedCount, receipt.truncated ? 1 : 0, receipt.createdAt);
       const insertScope = this.workspace.db.prepare("INSERT INTO growth_retrieval_receipt_scopes (receipt_id, resource_id, ordinal) VALUES (?, ?, ?)");
-      value.effectiveScopeResourceIds.forEach((resourceId, ordinal) => insertScope.run(value.id, resourceId, ordinal));
+      receipt.effectiveScopeResourceIds.forEach((resourceId, ordinal) => insertScope.run(receipt.id, resourceId, ordinal));
       const insertAlias = this.workspace.db.prepare("INSERT INTO growth_retrieval_receipt_aliases (receipt_id, alias, ordinal) VALUES (?, ?, ?)");
-      value.aliases.forEach((alias, ordinal) => insertAlias.run(value.id, alias, ordinal));
+      receipt.aliases.forEach((alias, ordinal) => insertAlias.run(receipt.id, alias, ordinal));
       const insertLink = this.workspace.db.prepare(`
         INSERT INTO growth_retrieval_receipt_links (
           receipt_id, rank, target_kind, target_id, target_version_id, score, reason_codes_json,
           path_target_ids_json, stable_locator, stable_version_id, stable_hash
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
-      value.links.forEach((link) => insertLink.run(value.id, link.rank, link.targetKind, link.targetId, link.targetVersionId,
+      receipt.links.forEach((link) => insertLink.run(receipt.id, link.rank, link.targetKind, link.targetId, link.targetVersionId,
         link.score, JSON.stringify(link.reasonCodes), JSON.stringify(link.pathTargetIds), link.stableLocator, link.stableVersionId, link.stableHash));
-      this.workspace.db.prepare("UPDATE growth_cycles SET receipt_id = ?, updated_at = ? WHERE id = ?")
-        .run(value.id, new Date().toISOString(), value.cycleId);
+      this.workspace.db.prepare("UPDATE growth_cycles SET receipt_id = ?, updated_at = ? WHERE id = ?").run(receipt.id, new Date().toISOString(), receipt.cycleId);
       this.workspace.db.exec("COMMIT");
-      return value;
+      return this.getReceipt(receipt.id) ?? fail("GROWTH_DATA_INVALID");
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
       throw error;
@@ -239,7 +291,14 @@ export class GrowthRepository {
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const cycle = this.#requiredCycle(value.cycleId);
-      if (cycle.status !== "running" || !cycle.runId || !cycle.receiptId || cycle.changeSetId) throw growthError("GROWTH_CHANGE_SET_BINDING_INVALID");
+      if (cycle.changeSetId) {
+        if (cycle.changeSetId === value.changeSetId) {
+          this.workspace.db.exec("COMMIT");
+          return cycle;
+        }
+        throw growthError("GROWTH_CHANGE_SET_BINDING_INVALID");
+      }
+      if (cycle.status !== "running" || !cycle.runId || !cycle.receiptId) throw growthError("GROWTH_CHANGE_SET_BINDING_INVALID");
       const changeSet = this.workspace.db.prepare(`
         SELECT branch_id, base_checkpoint_id, committed_checkpoint_id, status FROM change_sets WHERE id = ?
       `).get(value.changeSetId) as Row | undefined;
@@ -269,12 +328,10 @@ export class GrowthRepository {
       const cycle = this.#requiredCycle(value.cycleId);
       if (cycle.status !== "planned" && cycle.status !== "running") throw growthError("GROWTH_CYCLE_ALREADY_TERMINAL");
       const now = new Date().toISOString();
-      this.workspace.db.prepare(`
-        UPDATE growth_cycles SET status = ?, failure_code = ?, updated_at = ?, terminal_at = ? WHERE id = ?
-      `).run(value.status, value.failureCode, now, now, value.cycleId);
+      this.workspace.db.prepare("UPDATE growth_cycles SET status = ?, failure_code = ?, updated_at = ?, terminal_at = ? WHERE id = ?")
+        .run(value.status, value.failureCode, now, now, value.cycleId);
       const goalStatus = value.status === "cancelled" ? "cancelled" : value.status === "reconciliation_required" ? "reconciliation_required" : "blocked";
-      this.workspace.db.prepare("UPDATE growth_goals SET status = ?, updated_at = ? WHERE id = ?")
-        .run(goalStatus, now, cycle.goalId);
+      this.workspace.db.prepare("UPDATE growth_goals SET status = ?, updated_at = ? WHERE id = ?").run(goalStatus, now, cycle.goalId);
       this.workspace.db.exec("COMMIT");
       return this.getCycle(value.cycleId) ?? fail("GROWTH_DATA_INVALID");
     } catch (error) {
@@ -284,27 +341,37 @@ export class GrowthRepository {
   }
 
   appendEvent(input: unknown): GrowthEvent {
-    const value = growthEventSchema.parse(input);
+    const value = growthEventAppendSchema.parse(input);
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
+      const existingRow = this.workspace.db.prepare("SELECT * FROM growth_events WHERE goal_id = ? AND sequence = ?").get(value.goalId, value.sequence) as Row | undefined;
+      if (existingRow) {
+        const existing = mapEvent(existingRow);
+        if (canonicalAuditHash(eventInputFromOutput(existing)) !== canonicalAuditHash(value)) throw growthError("GROWTH_EVENT_REPLAY_MISMATCH");
+        this.workspace.db.exec("COMMIT");
+        return existing;
+      }
       const cycle = this.#requiredCycle(value.cycleId);
       if (cycle.goalId !== value.goalId || cycle.runId !== value.runId || cycle.status !== value.durableState) {
         throw growthError("GROWTH_EVENT_REFERENCE_MISMATCH");
       }
-      if (value.contentRef) this.#assertStableContentRef(value.contentRef.kind, value.contentRef.targetId, value.contentRef.targetVersionId);
-      const last = this.workspace.db.prepare("SELECT MAX(sequence) AS sequence FROM growth_events WHERE goal_id = ?")
-        .get(value.goalId) as { sequence: number | null };
+      const last = this.workspace.db.prepare("SELECT MAX(sequence) AS sequence FROM growth_events WHERE goal_id = ?").get(value.goalId) as { sequence: number | null };
       if (value.sequence !== (last.sequence ?? 0) + 1) throw growthError("GROWTH_EVENT_SEQUENCE_INVALID");
+      if (value.phase === "change_set_committed" && (value.targetId !== cycle.changeSetId || value.targetVersionId !== cycle.outputCheckpointId)) {
+        throw growthError("GROWTH_EVENT_CHANGE_SET_MISMATCH");
+      }
+      if (value.contentRef) this.#assertContentRefVisible(value.contentRef.kind, value.contentRef.targetId, value.contentRef.targetVersionId, cycle, this.#requiredGoal(value.goalId).branchId);
+      const event = growthEventSchema.parse({ ...value, createdAt: new Date().toISOString() });
       this.workspace.db.prepare(`
         INSERT INTO growth_events (
           goal_id, cycle_id, run_id, sequence, safe_summary, phase, target_kind, target_id, target_version_id,
           durable_state, content_ref_kind, content_ref_id, content_ref_version_id, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(value.goalId, value.cycleId, value.runId, value.sequence, value.safeSummary, value.phase, value.targetKind,
-        value.targetId, value.targetVersionId, value.durableState, value.contentRef?.kind ?? null, value.contentRef?.targetId ?? null,
-        value.contentRef?.targetVersionId ?? null, value.createdAt);
+      `).run(event.goalId, event.cycleId, event.runId, event.sequence, event.safeSummary, event.phase, event.targetKind,
+        event.targetId, event.targetVersionId, event.durableState, event.contentRef?.kind ?? null, event.contentRef?.targetId ?? null,
+        event.contentRef?.targetVersionId ?? null, event.createdAt);
       this.workspace.db.exec("COMMIT");
-      return value;
+      return event;
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
       throw error;
@@ -320,8 +387,7 @@ export class GrowthRepository {
   }
 
   #hasOpenCycle(goalId: string): boolean {
-    return Boolean(this.workspace.db.prepare("SELECT 1 FROM growth_cycles WHERE goal_id = ? AND status IN ('planned', 'running')")
-      .get(goalId));
+    return Boolean(this.workspace.db.prepare("SELECT 1 FROM growth_cycles WHERE goal_id = ? AND status IN ('planned', 'running')").get(goalId));
   }
 
   #goalScopes(goalId: string): string[] {
@@ -350,60 +416,142 @@ export class GrowthRepository {
     if (seed.kind === "text") return;
     if (seed.kind === "resource") {
       this.#assertScopesVisible([seed.resourceId], checkpointId);
-      if (seed.resourceVersionId && !this.workspace.db.prepare("SELECT 1 FROM resource_revisions WHERE id = ? AND resource_id = ?").get(seed.resourceVersionId, seed.resourceId)) {
-        throw growthError("GROWTH_SEED_REFERENCE_INVALID");
+      if (seed.resourceVersionId) this.#assertVersionVisible("resource_revisions", "resource_id", seed.resourceId, seed.resourceVersionId, checkpointId, "GROWTH_SEED_REFERENCE_INVALID");
+      return;
+    }
+    this.#assertVersionVisible("document_versions", "creative_document_id", seed.sourceDocumentId, seed.sourceVersionId, checkpointId, "GROWTH_SEED_REFERENCE_INVALID");
+  }
+
+  #assertContentRefVisible(kind: "resource" | "document" | "assertion" | "relation" | "change_set", targetId: string, targetVersionId: string, cycle: GrowthCycle, branchId: string): void {
+    const checkpointId = cycle.status === "committed" ? cycle.outputCheckpointId : cycle.inputCheckpointId;
+    if (!checkpointId) throw growthError("GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
+    this.#assertCheckpointBranch(checkpointId, branchId);
+    if (kind === "change_set") {
+      const changeSet = this.workspace.db.prepare("SELECT branch_id, committed_checkpoint_id, status FROM change_sets WHERE id = ?").get(targetId) as Row | undefined;
+      if (!changeSet || readString(changeSet, "status") !== "committed" || readString(changeSet, "branch_id") !== branchId || readNullableString(changeSet, "committed_checkpoint_id") !== targetVersionId || !this.#checkpointIsVisible(targetVersionId, checkpointId)) {
+        throw growthError("GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
       }
       return;
     }
-    if (!this.workspace.db.prepare("SELECT 1 FROM document_versions WHERE id = ? AND creative_document_id = ?")
-      .get(seed.sourceVersionId, seed.sourceDocumentId)) throw growthError("GROWTH_SEED_REFERENCE_INVALID");
+    const definition = kind === "resource"
+      ? ["resource_revisions", "resource_id"] as const
+      : kind === "document"
+        ? ["document_versions", "creative_document_id"] as const
+        : kind === "assertion"
+          ? ["assertion_versions", "assertion_id"] as const
+          : ["creative_relation_versions", "relation_id"] as const;
+    this.#assertVersionVisible(definition[0], definition[1], targetId, targetVersionId, checkpointId, "GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
   }
 
-  #assertStableContentRef(kind: string, targetId: string, targetVersionId: string): void {
-    const valid = kind === "resource"
-      ? this.workspace.db.prepare("SELECT 1 FROM resource_revisions WHERE resource_id = ? AND id = ?").get(targetId, targetVersionId)
-      : kind === "document"
-        ? this.workspace.db.prepare("SELECT 1 FROM document_versions WHERE creative_document_id = ? AND id = ?").get(targetId, targetVersionId)
-        : kind === "assertion"
-          ? this.workspace.db.prepare("SELECT 1 FROM assertion_versions WHERE assertion_id = ? AND id = ?").get(targetId, targetVersionId)
-          : kind === "relation"
-            ? this.workspace.db.prepare("SELECT 1 FROM creative_relation_versions WHERE relation_id = ? AND id = ?").get(targetId, targetVersionId)
-            : kind === "image"
-              ? this.workspace.db.prepare("SELECT 1 FROM image_assets WHERE id = ? AND job_id = ?").get(targetId, targetVersionId)
-              : this.workspace.db.prepare("SELECT 1 FROM change_sets WHERE id = ? AND committed_checkpoint_id = ? AND status = 'committed'").get(targetId, targetVersionId);
-    if (!valid) throw growthError("GROWTH_CONTENT_REFERENCE_NOT_STABLE");
+  #assertVersionVisible(table: "resource_revisions" | "document_versions" | "assertion_versions" | "creative_relation_versions", ownerColumn: "resource_id" | "creative_document_id" | "assertion_id" | "relation_id", targetId: string, versionId: string, checkpointId: string, code: string): void {
+    const valid = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id) AS (
+        SELECT ?
+        UNION ALL
+        SELECT checkpoints.parent_checkpoint_id FROM checkpoints JOIN ancestry ON checkpoints.id = ancestry.checkpoint_id
+        WHERE checkpoints.parent_checkpoint_id IS NOT NULL
+      )
+      SELECT 1 FROM ${table} versions JOIN ancestry ON ancestry.checkpoint_id = versions.created_checkpoint_id
+      WHERE versions.id = ? AND versions.${ownerColumn} = ?
+    `).get(checkpointId, versionId, targetId);
+    if (!valid) throw growthError(code);
   }
+
+  #checkpointIsVisible(candidateCheckpointId: string, checkpointId: string): boolean {
+    return Boolean(this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id) AS (
+        SELECT ?
+        UNION ALL
+        SELECT checkpoints.parent_checkpoint_id FROM checkpoints JOIN ancestry ON checkpoints.id = ancestry.checkpoint_id
+        WHERE checkpoints.parent_checkpoint_id IS NOT NULL
+      ) SELECT 1 FROM ancestry WHERE checkpoint_id = ?
+    `).get(checkpointId, candidateCheckpointId));
+  }
+}
+
+function receiptOutput(value: GrowthRetrievalReceiptCreate, createdAt: string): GrowthRetrievalReceipt {
+  const links = [...value.links].sort((left, right) => left.rank - right.rank);
+  const queryHash = canonicalAuditHash({
+    branchId: value.branchId, checkpointId: value.checkpointId, lens: value.lens, effectiveScopeResourceIds: value.effectiveScopeResourceIds,
+    query: value.query, aliases: value.aliases, validTime: value.validTime, recordedTime: value.recordedTime, maxHops: value.maxHops,
+    cpuBudgetMs: value.cpuBudgetMs, expansionBudget: value.expansionBudget, resultBudget: value.resultBudget, tokenBudget: value.tokenBudget,
+    policyVersion: value.policyVersion,
+  });
+  const resultHash = canonicalAuditHash({ coverage: value.coverage, truncated: value.truncated, links });
+  return growthRetrievalReceiptSchema.parse({
+    ...value, links, queryHash, resultHash, hitCount: links.length,
+    conflictCount: links.filter((link) => link.reasonCodes.includes("conflict")).length,
+    locatorCount: links.filter((link) => link.stableLocator !== null).length,
+    createdAt,
+  });
+}
+
+function receiptInputFromOutput(value: GrowthRetrievalReceipt): GrowthRetrievalReceiptCreate {
+  const { queryHash: _queryHash, resultHash: _resultHash, hitCount: _hitCount, conflictCount: _conflictCount, locatorCount: _locatorCount, createdAt: _createdAt, ...input } = value;
+  return growthRetrievalReceiptCreateSchema.parse(input);
+}
+
+function eventInputFromOutput(value: GrowthEvent): GrowthEventAppend {
+  const { createdAt: _createdAt, ...input } = value;
+  return growthEventAppendSchema.parse(input);
 }
 
 function mapCycle(row: Row): GrowthCycle {
   return growthCycleSchema.parse({
     id: readString(row, "id"), goalId: readString(row, "goal_id"), sequence: readNumber(row, "sequence"),
-    idempotencyKey: readString(row, "idempotency_key"), inputCheckpointId: readString(row, "input_checkpoint_id"),
-    ruleRevision: readNumber(row, "rule_revision"), runId: readNullableString(row, "run_id"), receiptId: readNullableString(row, "receipt_id"),
-    changeSetId: readNullableString(row, "change_set_id"), outputCheckpointId: readNullableString(row, "output_checkpoint_id"),
-    status: readString(row, "status"), failureCode: readNullableString(row, "failure_code"), createdAt: readString(row, "created_at"),
-    updatedAt: readString(row, "updated_at"), terminalAt: readNullableString(row, "terminal_at"),
+    idempotencyKey: readString(row, "idempotency_key"), inputCheckpointId: readString(row, "input_checkpoint_id"), ruleRevision: readNumber(row, "rule_revision"),
+    runId: readNullableString(row, "run_id"), receiptId: readNullableString(row, "receipt_id"), changeSetId: readNullableString(row, "change_set_id"),
+    outputCheckpointId: readNullableString(row, "output_checkpoint_id"), status: readString(row, "status"), failureCode: readNullableString(row, "failure_code"),
+    createdAt: readString(row, "created_at"), updatedAt: readString(row, "updated_at"), terminalAt: readNullableString(row, "terminal_at"),
+  });
+}
+
+function mapRuleRevision(row: Row): GrowthRuleRevision {
+  return growthRuleRevisionSchema.parse({
+    goalId: readString(row, "goal_id"), revision: readNumber(row, "revision"), ruleText: readString(row, "rule_text"),
+    sourceMessageId: readNullableString(row, "source_message_id"), createdAt: readString(row, "created_at"),
+  });
+}
+
+function mapEvent(row: Row): GrowthEvent {
+  const contentRefKind = readNullableString(row, "content_ref_kind");
+  return growthEventSchema.parse({
+    goalId: readString(row, "goal_id"), cycleId: readString(row, "cycle_id"), runId: readNullableString(row, "run_id"), sequence: readNumber(row, "sequence"),
+    safeSummary: readString(row, "safe_summary"), phase: readString(row, "phase"), targetKind: readString(row, "target_kind"),
+    targetId: readString(row, "target_id"), targetVersionId: readNullableString(row, "target_version_id"), durableState: readString(row, "durable_state"),
+    contentRef: contentRefKind === null ? null : { kind: contentRefKind, targetId: readString(row, "content_ref_id"), targetVersionId: readString(row, "content_ref_version_id") },
+    createdAt: readString(row, "created_at"),
   });
 }
 
 function readSeed(row: Row): GrowthGoal["seed"] {
   const kind = readString(row, "seed_kind");
   if (kind === "text") return { kind, text: readString(row, "seed_text") };
-  if (kind === "source_document") return {
-    kind, sourceDocumentId: readString(row, "seed_source_document_id"), sourceVersionId: readString(row, "seed_source_version_id"),
-  };
-  if (kind === "resource") return {
-    kind, resourceId: readString(row, "seed_resource_id"), resourceVersionId: readNullableString(row, "seed_resource_version_id"),
-  };
+  if (kind === "source_document") return { kind, sourceDocumentId: readString(row, "seed_source_document_id"), sourceVersionId: readString(row, "seed_source_version_id") };
+  if (kind === "resource") return { kind, resourceId: readString(row, "seed_resource_id"), resourceVersionId: readNullableString(row, "seed_resource_version_id") };
   throw growthError("GROWTH_DATA_INVALID");
 }
 
-function seedColumns(seed: GrowthGoalCreate["seed"]): {
-  kind: string; text: string | null; sourceDocumentId: string | null; sourceVersionId: string | null; resourceId: string | null; resourceVersionId: string | null;
-} {
+function seedColumns(seed: GrowthGoalCreate["seed"]): { kind: string; text: string | null; sourceDocumentId: string | null; sourceVersionId: string | null; resourceId: string | null; resourceVersionId: string | null } {
   if (seed.kind === "text") return { kind: seed.kind, text: seed.text, sourceDocumentId: null, sourceVersionId: null, resourceId: null, resourceVersionId: null };
   if (seed.kind === "source_document") return { kind: seed.kind, text: null, sourceDocumentId: seed.sourceDocumentId, sourceVersionId: seed.sourceVersionId, resourceId: null, resourceVersionId: null };
   return { kind: seed.kind, text: null, sourceDocumentId: null, sourceVersionId: null, resourceId: seed.resourceId, resourceVersionId: seed.resourceVersionId };
+}
+
+function timeRange(row: Row, fromKey: string, toKey: string): { from: string | null; to: string | null } | null {
+  const from = readNullableString(row, fromKey);
+  const to = readNullableString(row, toKey);
+  return from === null && to === null ? null : { from, to };
+}
+
+function parseJsonArray(value: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) throw new Error("invalid array");
+    return parsed;
+  } catch {
+    throw growthError("GROWTH_DATA_INVALID");
+  }
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {

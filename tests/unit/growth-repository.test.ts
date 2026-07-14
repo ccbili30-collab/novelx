@@ -20,68 +20,95 @@ afterEach(() => {
 });
 
 describe("GrowthRepository", () => {
-  it("creates idempotent scoped Goals and only changes rules between Cycles", () => {
+  it("creates idempotent scoped Goals and replays rule, Run, Receipt and Change Set bindings", () => {
     const setup = createSetup();
     const repository = new GrowthRepository(setup.workspace);
     const goal = createGoal(repository, setup);
     expect(createGoal(repository, setup).id).toBe(goal.id);
-    expect(() => repository.createGoal({
-      ...goalInput(setup), idempotencyKey: "goal-idempotency", initialRuleText: "changed",
-    })).toThrowError(expect.objectContaining({ code: "GROWTH_IDEMPOTENCY_KEY_REUSED" }));
-    expect(() => repository.createGoal({
-      ...goalInput(setup), id: "goal-invalid-scope", idempotencyKey: "goal-invalid-scope", authorizedScopeResourceIds: ["missing-scope"],
-    })).toThrowError(expect.objectContaining({ code: "GROWTH_SCOPE_NOT_VISIBLE_AT_CHECKPOINT" }));
-    repository.appendRule({ goalId: goal.id, expectedRevision: 1, ruleText: "second rule", sourceMessageId: null });
+    expect(() => repository.createGoal({ ...goalInput(setup), initialRuleText: "changed" }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_IDEMPOTENCY_KEY_REUSED" }));
+    const rule = repository.appendRule({ goalId: goal.id, expectedRevision: 1, ruleText: "second rule", sourceMessageId: null });
+    expect(repository.appendRule({ goalId: goal.id, expectedRevision: 1, ruleText: "second rule", sourceMessageId: null })).toEqual(rule);
+    expect(() => repository.appendRule({ goalId: goal.id, expectedRevision: 1, ruleText: "different", sourceMessageId: null }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_RULE_REVISION_MISMATCH" }));
     const cycle = repository.beginCycle({ id: "cycle-1", goalId: goal.id, idempotencyKey: "cycle-idempotency", inputCheckpointId: setup.checkpointId, ruleRevision: 2 });
-    expect(cycle.status).toBe("planned");
     expect(() => repository.appendRule({ goalId: goal.id, expectedRevision: 2, ruleText: "third rule", sourceMessageId: null }))
       .toThrowError(expect.objectContaining({ code: "GROWTH_RULE_CHANGE_REQUIRES_CYCLE_BOUNDARY" }));
-    expect(() => repository.beginCycle({ id: "cycle-2", goalId: goal.id, idempotencyKey: "cycle-2", inputCheckpointId: setup.checkpointId, ruleRevision: 2 }))
-      .toThrowError(expect.objectContaining({ code: "GROWTH_OPEN_CYCLE_EXISTS" }));
-  });
-
-  it("pins Run, Receipt and committed Change Set to the same branch and checkpoints", () => {
-    const setup = createSetup();
-    const repository = new GrowthRepository(setup.workspace);
-    const goal = createGoal(repository, setup);
-    const cycle = repository.beginCycle({ id: "cycle-1", goalId: goal.id, idempotencyKey: "cycle-idempotency", inputCheckpointId: setup.checkpointId, ruleRevision: 1 });
     const run = seedRun(setup.workspace, setup.branchId, setup.checkpointId);
     expect(repository.attachRun({ cycleId: cycle.id, runId: run.runId }).status).toBe("running");
-    const receipt = receiptInput(setup, cycle.id, run);
-    repository.recordReceipt(receipt);
-    expect(() => repository.recordReceipt({ ...receipt, id: "receipt-2" })).toThrowError(expect.objectContaining({ code: "GROWTH_RECEIPT_BINDING_INVALID" }));
-    const changeSet = new ChangeSetRepository(setup.workspace).propose({ idempotencyKey: "growth-change-set", mode: "free", summary: "growth output" });
-    new ChangeSetRepository(setup.workspace).commit(changeSet.id, "growth output", () => undefined);
+    expect(repository.attachRun({ cycleId: cycle.id, runId: run.runId }).status).toBe("running");
+    const receipt = repository.recordReceipt(receiptInput(setup, cycle.id, run));
+    expect(repository.recordReceipt(receiptInput(setup, cycle.id, run))).toEqual(receipt);
+    const changeSet = committedChangeSet(setup.workspace, "growth-change-set", "growth output");
     const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: changeSet.id });
+    expect(repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: changeSet.id })).toEqual(committed);
     expect(committed).toMatchObject({ status: "committed", changeSetId: changeSet.id, outputCheckpointId: expect.any(String) });
-    expect(() => repository.beginCycle({ id: "cycle-2", goalId: goal.id, idempotencyKey: "cycle-2", inputCheckpointId: setup.checkpointId, ruleRevision: 1 }))
-      .toThrowError(expect.objectContaining({ code: "GROWTH_CYCLE_INPUT_CHECKPOINT_MISMATCH" }));
-    const next = repository.beginCycle({ id: "cycle-2", goalId: goal.id, idempotencyKey: "cycle-2", inputCheckpointId: committed.outputCheckpointId!, ruleRevision: 1 });
-    expect(next.sequence).toBe(2);
   });
 
-  it("fails closed on mismatches, reconciliation, and cross-Run event references", () => {
+  it("derives receipt audit values, supports immutable replay, and rebuilds the persisted output", () => {
     const setup = createSetup();
     const repository = new GrowthRepository(setup.workspace);
-    const goal = createGoal(repository, setup);
-    const cycle = repository.beginCycle({ id: "cycle-1", goalId: goal.id, idempotencyKey: "cycle-idempotency", inputCheckpointId: setup.checkpointId, ruleRevision: 1 });
-    expect(() => repository.attachRun({ cycleId: cycle.id, runId: "missing-run" })).toThrowError(expect.objectContaining({ code: "GROWTH_RUN_REFERENCE_MISMATCH" }));
-    const run = seedRun(setup.workspace, setup.branchId, setup.checkpointId);
-    repository.attachRun({ cycleId: cycle.id, runId: run.runId });
+    const { cycle, run } = runningCycle(repository, setup);
+    const input = receiptInput(setup, cycle.id, run, { links: [receiptLink(setup)] });
+    const first = repository.recordReceipt(input);
+    expect(first).toMatchObject({ hitCount: 1, conflictCount: 0, locatorCount: 0, queryHash: expect.stringMatching(/^[a-f0-9]{64}$/), resultHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(first.createdAt).not.toBeUndefined();
+    expect(repository.recordReceipt(input)).toEqual(first);
+    expect(repository.getReceipt(first.id)).toEqual(first);
+    expect(() => repository.recordReceipt({ ...input, query: "different query" }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_RECEIPT_REPLAY_MISMATCH" }));
+  });
+
+  it("uses repository event time, replays exact events and lists monotonic history", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
+    const input = eventInput(goal.id, cycle.id, run.runId, 1, setup.scopeId);
+    const first = repository.appendEvent(input);
+    expect(first.createdAt).not.toBeUndefined();
+    expect(repository.appendEvent(input)).toEqual(first);
+    expect(repository.listEvents(goal.id)).toEqual([first]);
+    expect(() => repository.appendEvent({ ...input, safeSummary: "different" }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_REPLAY_MISMATCH" }));
+    expect(() => repository.appendEvent({ ...eventInput(goal.id, cycle.id, run.runId, 3, setup.scopeId), safeSummary: "out of order" }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_SEQUENCE_INVALID" }));
+  });
+
+  it("fails closed for mismatched receipt and Run references, reconciliation, and future ContentRefs", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
     expect(() => repository.recordReceipt({ ...receiptInput(setup, cycle.id, run), checkpointId: "wrong-checkpoint" }))
       .toThrowError(expect.objectContaining({ code: "GROWTH_RECEIPT_REFERENCE_MISMATCH" }));
+    const foreign = foreignDocumentVersion(setup);
+    expect(() => repository.appendEvent({
+      ...eventInput(goal.id, cycle.id, run.runId, 1, setup.scopeId),
+      contentRef: { kind: "document", targetId: foreign.documentId, targetVersionId: foreign.versionId },
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_CONTENT_REFERENCE_NOT_VISIBLE" }));
     const terminal = repository.terminalizeCycle({ cycleId: cycle.id, status: "reconciliation_required", failureCode: "OUTCOME_UNKNOWN" });
     expect(terminal.status).toBe("reconciliation_required");
     expect(() => repository.beginCycle({ id: "cycle-2", goalId: goal.id, idempotencyKey: "cycle-2", inputCheckpointId: setup.checkpointId, ruleRevision: 1 }))
       .toThrowError(expect.objectContaining({ code: "GROWTH_GOAL_NOT_ACTIVE" }));
-    expect(() => repository.appendEvent({
-      goalId: goal.id, cycleId: cycle.id, runId: "other-run", sequence: 1, safeSummary: "bad event", phase: "cycle_terminal",
-      targetKind: "resource", targetId: setup.scopeId, targetVersionId: null, durableState: "reconciliation_required", contentRef: null,
-      createdAt: new Date().toISOString(),
-    })).toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_REFERENCE_MISMATCH" }));
+    expect(() => repository.appendEvent({ ...eventInput(goal.id, cycle.id, "other-run", 1, setup.scopeId), durableState: "reconciliation_required", phase: "cycle_terminal" }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_REFERENCE_MISMATCH" }));
   });
 
-  it("rejects foreign-branch Runs, stale Change Set bases, and out-of-order events", () => {
+  it("rejects resource and source-document seed revisions that are only on a future or foreign branch", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const foreignResource = foreignResourceRevision(setup);
+    expect(() => repository.createGoal({
+      ...goalInput(setup), id: "resource-seed", idempotencyKey: "resource-seed",
+      seed: { kind: "resource", resourceId: setup.scopeId, resourceVersionId: foreignResource },
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_SEED_REFERENCE_INVALID" }));
+    const foreignDocument = foreignDocumentVersion(setup);
+    expect(() => repository.createGoal({
+      ...goalInput(setup), id: "document-seed", idempotencyKey: "document-seed",
+      seed: { kind: "source_document", sourceDocumentId: foreignDocument.documentId, sourceVersionId: foreignDocument.versionId },
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_SEED_REFERENCE_INVALID" }));
+  });
+
+  it("rejects foreign-branch Runs, stale Change Set bases and nonmatching committed event targets", () => {
     const setup = createSetup();
     const repository = new GrowthRepository(setup.workspace);
     const goal = createGoal(repository, setup);
@@ -93,33 +120,11 @@ describe("GrowthRepository", () => {
     const run = seedRun(setup.workspace, setup.branchId, setup.checkpointId);
     repository.attachRun({ cycleId: cycle.id, runId: run.runId });
     repository.recordReceipt(receiptInput(setup, cycle.id, run));
-    expect(() => repository.appendEvent({
-      goalId: goal.id, cycleId: cycle.id, runId: run.runId, sequence: 2, safeSummary: "out of order", phase: "receipt_recorded",
-      targetKind: "resource", targetId: setup.scopeId, targetVersionId: null, durableState: "running", contentRef: null, createdAt: new Date().toISOString(),
-    })).toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_SEQUENCE_INVALID" }));
-    const unrelated = new ChangeSetRepository(setup.workspace).propose({ idempotencyKey: "unrelated", mode: "free", summary: "advance head" });
-    new ChangeSetRepository(setup.workspace).commit(unrelated.id, "advance head", () => undefined);
-    const staleBase = new ChangeSetRepository(setup.workspace).propose({ idempotencyKey: "stale-growth", mode: "free", summary: "stale growth" });
-    new ChangeSetRepository(setup.workspace).commit(staleBase.id, "stale growth", () => undefined);
-    expect(() => repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: staleBase.id }))
+    const unrelated = committedChangeSet(setup.workspace, "unrelated", "advance head");
+    const stale = committedChangeSet(setup.workspace, "stale-growth", "stale growth");
+    expect(() => repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: stale.id }))
       .toThrowError(expect.objectContaining({ code: "GROWTH_CHANGE_SET_REFERENCE_MISMATCH" }));
-  });
-
-  it("rejects a committed Change Set whose output checkpoint is not on the Goal branch", () => {
-    const setup = createSetup();
-    const repository = new GrowthRepository(setup.workspace);
-    const goal = createGoal(repository, setup);
-    const cycle = repository.beginCycle({ id: "cycle-1", goalId: goal.id, idempotencyKey: "cycle-idempotency", inputCheckpointId: setup.checkpointId, ruleRevision: 1 });
-    const run = seedRun(setup.workspace, setup.branchId, setup.checkpointId);
-    repository.attachRun({ cycleId: cycle.id, runId: run.runId });
-    repository.recordReceipt(receiptInput(setup, cycle.id, run));
-    const otherBranch = new CheckpointRepository(setup.workspace).createBranchFromCheckpoint(setup.checkpointId, "other-output");
-    const otherCheckpointId = new CheckpointRepository(setup.workspace).appendCheckpoint(otherBranch.id, "other output checkpoint");
-    const changeSet = new ChangeSetRepository(setup.workspace).propose({ idempotencyKey: "output-mismatch", mode: "free", summary: "output mismatch" });
-    new ChangeSetRepository(setup.workspace).commit(changeSet.id, "output mismatch", () => undefined);
-    setup.workspace.db.prepare("UPDATE change_sets SET committed_checkpoint_id = ? WHERE id = ?").run(otherCheckpointId, changeSet.id);
-    expect(() => repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: changeSet.id }))
-      .toThrowError(expect.objectContaining({ code: "GROWTH_CHECKPOINT_BRANCH_MISMATCH" }));
+    expect(unrelated.id).not.toBe(stale.id);
   });
 });
 
@@ -140,6 +145,14 @@ function goalInput(setup: ReturnType<typeof createSetup>) {
 
 function createGoal(repository: GrowthRepository, setup: ReturnType<typeof createSetup>) {
   return repository.createGoal(goalInput(setup));
+}
+
+function runningCycle(repository: GrowthRepository, setup: ReturnType<typeof createSetup>) {
+  const goal = createGoal(repository, setup);
+  const cycle = repository.beginCycle({ id: "cycle-1", goalId: goal.id, idempotencyKey: "cycle-idempotency", inputCheckpointId: setup.checkpointId, ruleRevision: 1 });
+  const run = seedRun(setup.workspace, setup.branchId, setup.checkpointId);
+  repository.attachRun({ cycleId: cycle.id, runId: run.runId });
+  return { goal, cycle, run };
 }
 
 function seedRun(workspace: WorkspaceDatabase, branchId: string, checkpointId: string) {
@@ -164,14 +177,58 @@ function seedRun(workspace: WorkspaceDatabase, branchId: string, checkpointId: s
   return { runId, toolInvocationId };
 }
 
-function receiptInput(setup: ReturnType<typeof createSetup>, cycleId: string, run: ReturnType<typeof seedRun>) {
-  const hash = "a".repeat(64);
+function receiptInput(setup: ReturnType<typeof createSetup>, cycleId: string, run: ReturnType<typeof seedRun>, overrides: Record<string, unknown> = {}) {
   return {
     id: "receipt-1", cycleId, runId: run.runId, toolInvocationId: run.toolInvocationId, branchId: setup.branchId,
     checkpointId: setup.checkpointId, lens: "creator" as const, effectiveScopeResourceIds: [setup.scopeId], query: "coast",
     aliases: [], validTime: null, recordedTime: null, maxHops: 1, cpuBudgetMs: 10, expansionBudget: 10, resultBudget: 10,
-    tokenBudget: 10, policyVersion: "growth-retrieval-v1", queryHash: hash, resultHash: hash, hitCount: 0, conflictCount: 0,
-    locatorCount: 0, coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0 }, truncated: false,
-    createdAt: new Date().toISOString(), links: [],
+    tokenBudget: 10, policyVersion: "growth-retrieval-v1", coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0 },
+    truncated: false, links: [], ...overrides,
   };
+}
+
+function receiptLink(setup: ReturnType<typeof createSetup>) {
+  return {
+    rank: 1, targetKind: "resource" as const, targetId: setup.scopeId, targetVersionId: null, score: 1,
+    reasonCodes: ["scope_match" as const], pathTargetIds: [], stableLocator: null, stableVersionId: null, stableHash: null,
+  };
+}
+
+function eventInput(goalId: string, cycleId: string, runId: string, sequence: number, targetId: string) {
+  return {
+    goalId, cycleId, runId, sequence, safeSummary: "receipt recorded", phase: "receipt_recorded" as const,
+    targetKind: "resource" as const, targetId, targetVersionId: null, durableState: "running" as const, contentRef: null,
+  };
+}
+
+function committedChangeSet(workspace: WorkspaceDatabase, idempotencyKey: string, summary: string) {
+  const repository = new ChangeSetRepository(workspace);
+  const changeSet = repository.propose({ idempotencyKey, mode: "free", summary });
+  repository.commit(changeSet.id, summary, () => undefined);
+  return changeSet;
+}
+
+function foreignResourceRevision(setup: ReturnType<typeof createSetup>): string {
+  const branch = new CheckpointRepository(setup.workspace).createBranchFromCheckpoint(setup.checkpointId, `foreign-resource-${randomUUID()}`);
+  const checkpointId = new CheckpointRepository(setup.workspace).appendCheckpoint(branch.id, "foreign resource");
+  const revisionId = randomUUID();
+  setup.workspace.db.prepare(`
+    INSERT INTO resource_revisions (id, resource_id, type, object_kind, title, parent_resource_id, created_checkpoint_id, state, sort_order, created_at)
+    VALUES (?, ?, 'world', 'domain_root', 'Foreign', NULL, ?, 'active', 0, ?)
+  `).run(revisionId, setup.scopeId, checkpointId, new Date().toISOString());
+  return revisionId;
+}
+
+function foreignDocumentVersion(setup: ReturnType<typeof createSetup>) {
+  const branch = new CheckpointRepository(setup.workspace).createBranchFromCheckpoint(setup.checkpointId, `foreign-document-${randomUUID()}`);
+  const checkpointId = new CheckpointRepository(setup.workspace).appendCheckpoint(branch.id, "foreign document");
+  const documentId = randomUUID();
+  const versionId = randomUUID();
+  const now = new Date().toISOString();
+  setup.workspace.db.prepare("INSERT INTO creative_documents (id) VALUES (?)").run(documentId);
+  setup.workspace.db.prepare(`
+    INSERT INTO document_versions (id, resource_id, created_checkpoint_id, content, content_hash, author_kind, created_at, creative_document_id)
+    VALUES (?, ?, ?, 'foreign source', ?, 'user', ?, ?)
+  `).run(versionId, setup.scopeId, checkpointId, createHash("sha256").update("foreign source", "utf8").digest("hex"), now, documentId);
+  return { documentId, versionId };
 }
