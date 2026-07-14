@@ -18,7 +18,7 @@ describe("versioned Prompt registry", () => {
       { id: "novax.writer", role: "writer", version: "1.7.0", status: "active", rollbackTo: "1.6.0", hashLength: 64 },
       { id: "novax.checker", role: "checker", version: "1.8.0", status: "active", rollbackTo: "1.7.0", hashLength: 64 },
     ]);
-    expect(verifyPromptRegistry()).toEqual({ ok: true, verified: 30 });
+    expect(verifyPromptRegistry()).toEqual({ ok: true, verified: 32 });
     expect(promptManifest.filter((prompt) => prompt.id === "novax.steward").map(({ version, status }) => ({
       version,
       status,
@@ -37,7 +37,10 @@ describe("versioned Prompt registry", () => {
       { version: "1.11.0", status: "deprecated" },
       { version: "1.12.0", status: "active" },
     ]);
-    expect(loadCandidatePromptSet()).toEqual([]);
+    expect(loadCandidatePromptSet().map(({ role, version, status }) => ({ role, version, status }))).toEqual([
+      { role: "writer", version: "1.8.0", status: "candidate" },
+      { role: "checker", version: "1.9.0", status: "candidate" },
+    ]);
   });
 
   it("binds every active Prompt to the same real publication evidence", () => {

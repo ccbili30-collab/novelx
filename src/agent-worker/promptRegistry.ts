@@ -14,6 +14,8 @@ import stewardPromptV1_8FileToolsAddendum from "./prompts/steward/v1.8-file-tool
 import stewardPromptV1_9LongContextAddendum from "./prompts/steward/v1.9-long-context-addendum.md?raw";
 import stewardPromptV1_10ImageGenerationAddendum from "./prompts/steward/v1.10-image-generation-addendum.md?raw";
 import writerPrompt from "./prompts/writer/v1.md?raw";
+import writerPromptV1_8StructuredBoundaryAddendum from "./prompts/writer/v1.8-structured-boundary-addendum.md?raw";
+import checkerPromptV1_9WriterAuthorityAddendum from "./prompts/checker/v1.9-writer-authority-addendum.md?raw";
 
 const promptContent: Record<string, string> = {
   "novax.steward@1.0.0": stewardPrompt,
@@ -37,6 +39,7 @@ const promptContent: Record<string, string> = {
   "novax.writer@1.5.0": writerPrompt,
   "novax.writer@1.6.0": writerPrompt,
   "novax.writer@1.7.0": writerPrompt,
+  "novax.writer@1.8.0": `${writerPrompt}\n${writerPromptV1_8StructuredBoundaryAddendum}`,
   "novax.checker@1.0.0": checkerPrompt,
   "novax.checker@1.1.0": checkerPromptV1_1,
   "novax.checker@1.2.0": checkerPromptV1_1,
@@ -46,6 +49,7 @@ const promptContent: Record<string, string> = {
   "novax.checker@1.6.0": checkerPromptV1_1,
   "novax.checker@1.7.0": checkerPromptV1_1,
   "novax.checker@1.8.0": checkerPromptV1_1,
+  "novax.checker@1.9.0": `${checkerPromptV1_1}\n${checkerPromptV1_9WriterAuthorityAddendum}`,
 };
 
 export interface PublishedPrompt {
