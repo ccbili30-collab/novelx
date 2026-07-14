@@ -128,7 +128,34 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
       systemPrompt: "Contract fixture only.",
       userInput: "测试",
       tools: [],
-    })).rejects.toMatchObject({ code: "PROVIDER_RUNTIME_FAILED", message: "模型服务运行失败：apiKey=[REDACTED]" });
+    })).rejects.toMatchObject({ code: "PROVIDER_RUNTIME_FAILED", message: "模型服务运行失败：Provider 未提供可安全展示的错误详情。" });
+  });
+
+  it("maps known Provider errors to stable local categories without echoing sensitive text", async () => {
+    const cases = [
+      { errorMessage: "fetch failed: ECONNREFUSED token=secret-value", expected: "模型服务运行失败：网络连接失败。" },
+      { errorMessage: "request timed out password=super-secret", expected: "模型服务运行失败：请求超时。" },
+      { errorMessage: "Authorization: Basic dXNlcjpzZWNyZXQ= https://provider.invalid?secret=url-secret customKey=ABCDEFGH12345678", expected: "模型服务运行失败：Provider 未提供可安全展示的错误详情。" },
+    ];
+
+    for (const [index, scenario] of cases.entries()) {
+      const faux = fauxProvider({ provider: `novax-safe-error-${index}` });
+      faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: scenario.errorMessage })]);
+      const models = createModels();
+      models.setProvider(faux.provider);
+      const adapter = new NovaxPiRuntimeAdapter({
+        model: faux.getModel(),
+        streamFn: (model, context, options) => models.streamSimple(model, context, options),
+      });
+
+      const error = await adapter.run({ systemPrompt: "Contract fixture only.", userInput: "测试", tools: [] })
+        .then(() => undefined, (caught: unknown) => caught as Error);
+      expect(error).toMatchObject({ code: "PROVIDER_RUNTIME_FAILED", message: scenario.expected });
+      const message = (error as Error).message;
+      for (const secret of ["secret-value", "super-secret", "dXNlcjpzZWNyZXQ=", "provider.invalid", "url-secret", "ABCDEFGH12345678"]) {
+        expect(message).not.toContain(secret);
+      }
+    }
   });
 
   it("does not spend correction attempts after the Provider has already returned an error", async () => {
@@ -151,6 +178,30 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
       completionGuard: { toolName: "submit_result", isSatisfied: () => false, forceTool: true },
     })).rejects.toMatchObject({ code: "PROVIDER_RUNTIME_FAILED" });
     expect(faux.state.callCount).toBe(1);
+  });
+
+  it("does not spend correction attempts after aborted or length terminal messages", async () => {
+    for (const stopReason of ["aborted", "length"] as const) {
+      const faux = fauxProvider({ provider: `novax-terminal-${stopReason}-fixture` });
+      faux.setResponses([
+        fauxAssistantMessage("", { stopReason }),
+        fauxAssistantMessage(fauxToolCall("submit_result", { status: "done" })),
+      ]);
+      const models = createModels();
+      models.setProvider(faux.provider);
+      const adapter = new NovaxPiRuntimeAdapter({
+        model: faux.getModel(),
+        streamFn: (model, context, options) => models.streamSimple(model, context, options),
+      });
+
+      await expect(adapter.run({
+        systemPrompt: "Contract fixture only.",
+        userInput: "测试",
+        tools: [],
+        completionGuard: { toolName: "submit_result", isSatisfied: () => false, forceTool: true },
+      })).rejects.toMatchObject({ code: stopReason === "aborted" ? "AGENT_RUN_CANCELLED" : "PROVIDER_OUTPUT_INCOMPLETE" });
+      expect(faux.state.callCount).toBe(1);
+    }
   });
 
   it("uses one audited follow-up turn when the model omits the required result tool", async () => {

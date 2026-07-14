@@ -366,10 +366,13 @@ function piRuntimeError(code: string, message: string): Error & { code: string }
 }
 
 function safeProviderErrorDetail(value: unknown): string {
-  if (typeof value !== "string" || !value.trim()) return "Provider 未提供可安全展示的错误详情。";
-  return value
-    .replace(/(Bearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
-    .replace(/\b(sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/g, "$1-[REDACTED]")
-    .replace(/(api[_ -]?key\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]")
-    .slice(0, 500);
+  if (typeof value !== "string") return "Provider 未提供可安全展示的错误详情。";
+  const normalized = value.toLowerCase();
+
+  if (/(timeout|timed out|etimedout|deadline exceeded)/.test(normalized)) return "请求超时。";
+  if (/(rate limit|too many requests|\b429\b|quota|insufficient_quota)/.test(normalized)) return "速率或额度限制。";
+  if (/(authentication|unauthorized|forbidden|\b401\b|\b403\b|invalid api key)/.test(normalized)) return "身份验证或访问被拒。";
+  if (/(model.*(not found|unsupported|unavailable)|unknown model|unsupported model)/.test(normalized)) return "模型不可用。";
+  if (/(connection|network|fetch failed|econn|enotfound|eai_again|socket|dns)/.test(normalized)) return "网络连接失败。";
+  return "Provider 未提供可安全展示的错误详情。";
 }
