@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { RoleOutputToolCapture } from "./contracts/roleOutputTool";
 import { stewardOutputSchema, type StewardOutput } from "./contracts/roleOutputs";
 import {
+  isExplicitGreenfieldFreeCreateRequest,
   inspectProjectFilesResultSchema,
   listProjectDirectoryResultSchema,
   globProjectFilesResultSchema,
@@ -180,6 +181,7 @@ export function createStewardExecutionStateMachine(input: {
     };
   }
   const authorizedScopeResourceIds = new Set(input.authorizedScopeResourceIds);
+  const greenfieldCreateRequested = isExplicitGreenfieldFreeCreateRequest(input.mode, input.userInput);
   for (const resourceId of authorizedScopeResourceIds) allowedEvidenceIds.add(resourceId);
   let lastFinalRejectionCode: string | null = null;
 
@@ -425,7 +427,8 @@ export function createStewardExecutionStateMachine(input: {
         versionId: document.source.version.id,
         content: document.content,
       }] : []);
-      if (retrieval.data.assertions.length === 0 && retrieval.data.documents.length === 0) {
+      if (retrieval.data.assertions.length === 0 && retrieval.data.documents.length === 0
+        && !(greenfieldCreateRequested && plan?.objective === "change_set")) {
         blockReason = "missing_source";
         return;
       }
@@ -499,6 +502,9 @@ export function createStewardExecutionStateMachine(input: {
       if (!proposal.success || proposal.data.mode !== input.mode) throw stateError("STEWARD_TOOL_RESULT_INVALID");
       proposedChangeSet = proposal.data;
       allowedEvidenceIds.add(proposal.data.changeSetId);
+      if (proposal.data.status === "committed") {
+        for (const output of proposal.data.committedOutputs ?? []) allowedEvidenceIds.add(output.outputId);
+      }
       if (proposal.data.status === "failed" || proposal.data.status === "rejected" || proposal.data.gateStatus === "blocked") {
         blockReason = "tool_failed";
       }

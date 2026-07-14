@@ -12,7 +12,13 @@ import {
   generateImageResultSchema,
   type ProposeChangeSetArgs,
 } from "../shared/agentWorkerProtocol";
-import { ChangeSetService, type ChangeSetItem, type ChangeSetPolicyEvaluator } from "../domain/changeSet/changeSetService";
+import {
+  ChangeSetService,
+  isGreenfieldCreateOnlyCandidate,
+  parseGreenfieldDocumentOutputEvidence,
+  type ChangeSetItem,
+  type ChangeSetPolicyEvaluator,
+} from "../domain/changeSet/changeSetService";
 import { AgentAuditRepository } from "../domain/audit/agentAuditRepository";
 import { ContextPacketService } from "../domain/retrieval/contextPacketService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
@@ -24,6 +30,7 @@ import type { ImageProviderRuntimeProfile } from "../shared/imageProviderContrac
 import { ImageAssetRepository } from "../domain/asset/imageAssetRepository";
 import { ImageAssetStore } from "../domain/asset/imageAssetStore";
 import { ImageGenerationService } from "../domain/asset/imageGenerationService";
+import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeSetPolicy";
 
 interface WorkspaceAgentToolGatewayOptions {
   getImageProviderProfile?(): ImageProviderRuntimeProfile | null;
@@ -172,14 +179,30 @@ export function createWorkspaceAgentToolGateway(
         toolName: "propose_change_set",
       });
       const head = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
-      const changeSet = new ChangeSetService(workspace, policy).propose({
+      const items = mapProposedItems(args);
+      const referencesGreenfieldOutput = items.some((item) => item.kind === "assertion.put"
+        && item.payload.evidenceIds.some((evidenceId) => parseGreenfieldDocumentOutputEvidence(evidenceId) !== null));
+      if (context.greenfieldCreateRequested || referencesGreenfieldOutput) {
+        assertGreenfieldCreateOnly(workspace, items, context);
+      }
+      const service = new ChangeSetService(workspace, policy);
+      const changeSet = service.propose({
         idempotencyKey: `${context.runId}:${context.requestId}`,
         expectedHeadCheckpointId: head,
         mode: context.mode,
         summary: args.summary,
-        items: mapProposedItems(args),
-      }, { producerToolInvocationId: context.requestId });
+        items,
+      }, {
+        producerToolInvocationId: context.requestId,
+        greenfieldCreateAuthorized: context.greenfieldCreateRequested === true,
+      });
       assertAvailable(context.signal);
+      const committedOutputs = changeSet.status === "committed"
+        ? service.listOutputs(changeSet.id).map(({ itemId, kind, outputId }) => ({ itemId, kind, outputId }))
+        : [];
+      if (changeSet.status === "committed" && committedOutputs.length !== changeSet.items.length) {
+        throw gatewayError("CHANGE_SET_OUTPUTS_INCOMPLETE", "Committed Change Set outputs are incomplete.");
+      }
       return proposeChangeSetResultSchema.parse({
         changeSetId: changeSet.id,
         mode: changeSet.mode,
@@ -187,9 +210,26 @@ export function createWorkspaceAgentToolGateway(
         gateStatus: changeSet.gateStatus,
         blockedReason: changeSet.blockedReason,
         itemCount: changeSet.items.length,
+        committedOutputs,
       });
     },
   };
+}
+
+function assertGreenfieldCreateOnly(
+  workspace: WorkspaceDatabase,
+  items: ChangeSetItem[],
+  context: { mode: "free" | "assist"; greenfieldCreateRequested?: boolean },
+): void {
+  if (context.mode !== "free" || !context.greenfieldCreateRequested) {
+    throw gatewayError("GREENFIELD_CREATE_EXPLICIT_FREE_REQUIRED", "Greenfield creation requires an explicit Free request.");
+  }
+  if (!isGreenfieldWorkspaceEmpty(workspace)) {
+    throw gatewayError("GREENFIELD_WORKSPACE_NOT_EMPTY", "Greenfield creation is unavailable after formal content exists.");
+  }
+  if (!isGreenfieldCreateOnlyCandidate(items)) {
+    throw gatewayError("GREENFIELD_CREATE_ONLY_REQUIRED", "Greenfield Change Sets may only create new formal content.");
+  }
 }
 
 function mapProposedItems(

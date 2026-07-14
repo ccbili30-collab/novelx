@@ -10,6 +10,7 @@ import {
   agentWorkerToolRequestEnvelopeSchema,
   agentWorkerToolRequestSchema,
   agentWorkerToolResponseSchema,
+  isExplicitGreenfieldFreeCreateRequest,
   proposeChangeSetResultSchema,
   globProjectFilesResultSchema,
   inspectProjectFilesResultSchema,
@@ -64,6 +65,7 @@ export interface AgentToolInvocationContext {
   invocationId: string;
   requestId: string;
   mode: "free" | "assist";
+  greenfieldCreateRequested?: boolean;
   signal: AbortSignal;
 }
 
@@ -110,6 +112,7 @@ interface ActiveRun {
   emit(event: AgentRunEvent): void;
   gateway: AgentToolGateway | null;
   mode: "free" | "assist";
+  greenfieldCreateRequested: boolean;
   pendingTools: Map<string, PendingToolRequest>;
   audit: AgentAuditStore;
   providerProfile: ProviderRuntimeProfile | null;
@@ -190,6 +193,7 @@ export class AgentProcessSupervisor {
       return runId;
     }
     const providerConfigSha256 = providerProfile ? hashProviderConfig(providerProfile) : null;
+    const greenfieldCreateRequested = isExplicitGreenfieldFreeCreateRequest(request.mode, request.userInput);
     try {
       lease.audit.beginRun({
         runId,
@@ -210,6 +214,7 @@ export class AgentProcessSupervisor {
       emit,
       gateway: lease.gateway,
       mode: request.mode,
+      greenfieldCreateRequested,
       pendingTools: new Map(),
       audit: lease.audit,
       providerProfile,
@@ -409,6 +414,7 @@ export class AgentProcessSupervisor {
       invocationId: stewardInvocationId(runId),
       requestId: request.requestId,
       mode: run.mode,
+      greenfieldCreateRequested: run.greenfieldCreateRequested,
       signal: controller.signal,
     };
     const operation: Promise<unknown> = (async () => {

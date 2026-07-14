@@ -439,7 +439,30 @@ export const proposeChangeSetResultSchema = z.object({
   gateStatus: z.enum(["review_pending", "ready", "blocked"]),
   blockedReason: z.string().min(1).max(160).nullable(),
   itemCount: z.number().int().min(1).max(500),
-}).strict();
+  committedOutputs: z.array(z.object({
+    itemId: identifierSchema,
+    kind: z.enum([
+      "resource_revision", "document_version", "assertion_version",
+      "creative_document_revision", "creative_relation_revision", "constraint_profile_version",
+      "project_file_version",
+    ]),
+    outputId: identifierSchema,
+  }).strict()).max(500).optional(),
+}).strict().superRefine((result, context) => {
+  if (result.status !== "committed" && (result.committedOutputs?.length ?? 0) > 0) {
+    context.addIssue({ code: "custom", message: "Only committed Change Sets may return stable outputs." });
+  }
+});
+
+export function isExplicitGreenfieldFreeCreateRequest(mode: "free" | "assist", userInput: string): boolean {
+  if (mode !== "free") return false;
+  const normalized = userInput.replace(/\s+/g, "");
+  if (/(?:先)?(?:不要|别|暂不)(?:创建|生成|制作).{0,40}世界/.test(normalized)) return false;
+  const skipsDiscussion = /(?:不要|不用|无需|别)讨论/.test(normalized);
+  const selfCreates = /(?:自己|自行)(?:创建|生成|制作)(?:一套|一个)?/.test(normalized);
+  const targetsWorld = /世界(?:包|观)?/.test(normalized);
+  return skipsDiscussion && selfCreates && targetsWorld;
+}
 
 export const generateImageArgsSchema = z.object({
   title: z.string().trim().min(1).max(240),

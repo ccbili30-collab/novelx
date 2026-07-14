@@ -11,7 +11,28 @@ import type {
   ChangeSetPolicyAssessment,
   ChangeSetPolicyEvaluator,
 } from "./changeSetService";
+import {
+  isGreenfieldCreateOnlyCandidate,
+  parseGreenfieldDocumentOutputEvidence,
+} from "./changeSetService";
 import type { ChangeSetConflictRecord } from "./changeSetRepository";
+
+export function isGreenfieldWorkspaceEmpty(workspace: WorkspaceDatabase): boolean {
+  const row = workspace.db.prepare(`
+    SELECT (
+      EXISTS(SELECT 1 FROM resource_revisions WHERE object_kind <> 'domain_root')
+      OR EXISTS(SELECT 1 FROM assertion_versions)
+      OR EXISTS(SELECT 1 FROM creative_document_revisions)
+      OR EXISTS(SELECT 1 FROM creative_relation_versions)
+      OR EXISTS(SELECT 1 FROM constraint_profile_versions)
+      OR EXISTS(SELECT 1 FROM document_versions)
+      OR EXISTS(SELECT 1 FROM working_documents)
+      OR EXISTS(SELECT 1 FROM working_creative_documents)
+      OR EXISTS(SELECT 1 FROM working_constraint_profiles)
+    ) AS has_formal_content
+  `).get() as { has_formal_content: number | bigint } | undefined;
+  return !row || Number(row.has_formal_content) === 0;
+}
 
 export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
   readonly #assertions: AssertionRepository;
@@ -34,6 +55,16 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
     const resources = this.#resources.listCurrent();
     const resourceIds = new Set(resources.map((resource) => resource.id));
     const assertions = this.#assertions.listCurrent();
+    const creativeDocuments = this.#creativeDocuments.listCurrent();
+    const creativeRelations = this.#creativeRelations.listCurrent();
+    const constraintProfiles = this.#constraintProfiles.listCurrent();
+    const greenfieldCreateCandidate = candidate.mode === "free"
+      && candidate.greenfieldCreateAuthorized === true
+      && isGreenfieldWorkspaceEmpty(this.workspace)
+      && isGreenfieldCreateOnlyCandidate(candidate.items);
+    const greenfieldDocumentOutputItemIds = new Set(candidate.items
+      .filter((item) => item.kind === "document.put")
+      .map((item) => item.id));
     const evidenceIds = new Set(assertions.map((assertion) => assertion.versionId));
     const resourceCreateItems = new Map<string, string[]>();
     const documentCreateItems = new Map<string, string[]>();
@@ -61,10 +92,12 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
       evidenceIds,
       resourceCreateItems,
       resourceIds,
-      documentIds: new Set(this.#creativeDocuments.listCurrent().map((document) => document.id)),
+      documentIds: new Set(creativeDocuments.map((document) => document.id)),
       documentCreateItems,
-      relationIds: new Set(this.#creativeRelations.listCurrent().map((relation) => relation.id)),
-      profileIds: new Set(this.#constraintProfiles.listCurrent().map((profile) => profile.profileId)),
+      relationIds: new Set(creativeRelations.map((relation) => relation.id)),
+      profileIds: new Set(constraintProfiles.map((profile) => profile.profileId)),
+      greenfieldCreateCandidate,
+      greenfieldDocumentOutputItemIds,
     }));
   }
 
@@ -79,6 +112,8 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
       documentCreateItems: ReadonlyMap<string, string[]>;
       relationIds: ReadonlySet<string>;
       profileIds: ReadonlySet<string>;
+      greenfieldCreateCandidate: boolean;
+      greenfieldDocumentOutputItemIds: ReadonlySet<string>;
     },
   ): ChangeSetPolicyAssessment {
     switch (item.kind) {
@@ -89,6 +124,8 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
           current.evidenceIds,
           current.resourceIds,
           current.resourceCreateItems,
+          current.greenfieldCreateCandidate,
+          current.greenfieldDocumentOutputItemIds,
         );
       case "resource.put":
         return assessResource(item, current.resourceIds, current.resourceCreateItems);
@@ -228,6 +265,8 @@ function assessAssertion(
   activeEvidenceIds: ReadonlySet<string>,
   activeResourceIds: ReadonlySet<string>,
   resourceCreateItems: ReadonlyMap<string, string[]>,
+  greenfieldCreateCandidate: boolean,
+  greenfieldDocumentOutputItemIds: ReadonlySet<string>,
 ): ChangeSetPolicyAssessment {
   const conflicts: ChangeSetConflictRecord[] = [];
   const scopeCreateItems = resourceCreateItems.get(item.payload.scopeId) ?? [];
@@ -237,7 +276,13 @@ function assessAssertion(
   }
   if (item.payload.evidenceIds.length === 0) {
     conflicts.push({ severity: "major", code: "ASSERTION_EVIDENCE_REQUIRED" });
-  } else if (item.payload.evidenceIds.some((id) => !activeEvidenceIds.has(id))) {
+  } else if (item.payload.evidenceIds.some((id) => {
+    const documentItemId = parseGreenfieldDocumentOutputEvidence(id);
+    if (!documentItemId) return !activeEvidenceIds.has(id);
+    return !greenfieldCreateCandidate
+      || !greenfieldDocumentOutputItemIds.has(documentItemId)
+      || !item.dependsOn.includes(documentItemId);
+  })) {
     conflicts.push({ severity: "major", code: "ASSERTION_EVIDENCE_NOT_ACTIVE" });
   }
   if (item.payload.status !== "current") {

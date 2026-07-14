@@ -2,8 +2,41 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { describe, expect, it, vi } from "vitest";
 import { createRoleOutputTool } from "../../src/agent-worker/contracts/roleOutputTool";
 import { createStewardExecutionStateMachine } from "../../src/agent-worker/stewardExecutionStateMachine";
+import {
+  isExplicitGreenfieldFreeCreateRequest,
+  proposeChangeSetResultSchema,
+} from "../../src/shared/agentWorkerProtocol";
 
 describe("Steward tool handoff state machine", () => {
+  it("recognizes only conservative explicit Free Greenfield creation requests", () => {
+    expect(isExplicitGreenfieldFreeCreateRequest("free", "不要讨论，自己生成一套中世纪幻想世界包")).toBe(true);
+    expect(isExplicitGreenfieldFreeCreateRequest("free", "不要讨论，自行创建世界包")).toBe(true);
+    expect(isExplicitGreenfieldFreeCreateRequest("assist", "不要讨论，自行创建世界包")).toBe(false);
+    expect(isExplicitGreenfieldFreeCreateRequest("free", "先不要创建世界包，我们讨论一下")).toBe(false);
+    expect(isExplicitGreenfieldFreeCreateRequest("free", "我们讨论一个中世纪幻想世界")).toBe(false);
+  });
+
+  it("fails closed when an uncommitted Change Set response carries stable outputs", () => {
+    const base = {
+      changeSetId: "change-1",
+      mode: "free" as const,
+      status: "pending" as const,
+      gateStatus: "review_pending" as const,
+      blockedReason: null,
+      itemCount: 1,
+    };
+    const output = { itemId: "world-document", kind: "document_version" as const, outputId: "version-world-document" };
+
+    expect(proposeChangeSetResultSchema.safeParse({ ...base, committedOutputs: [output] }).success).toBe(false);
+    expect(proposeChangeSetResultSchema.safeParse({ ...base, committedOutputs: [] }).success).toBe(true);
+    expect(proposeChangeSetResultSchema.safeParse({
+      ...base,
+      status: "committed",
+      gateStatus: "ready",
+      committedOutputs: [output],
+    }).success).toBe(true);
+  });
+
   it("requires one structured plan before operational tools", async () => {
     const retrieve = successfulTool("retrieve_graph_evidence", retrievalResult([]));
     const machine = createMachine("free", [retrieve]);
@@ -91,6 +124,50 @@ describe("Steward tool handoff state machine", () => {
       escalations: [{ code: "missing_source", message: "检索没有返回来源。", evidenceIds: [] }],
     });
     expect(machine.snapshot().blockReason).toBe("missing_source");
+  });
+
+  it("allows an explicit Free Greenfield request to continue from an empty retrieval into one create-only Change Set", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", retrievalResult([]));
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "change-greenfield",
+      mode: "free",
+      status: "committed",
+      gateStatus: "ready",
+      blockedReason: null,
+      itemCount: 3,
+      committedOutputs: [
+        { itemId: "world-document", kind: "document_version", outputId: "version-world-document" },
+        { itemId: "world-assertion", kind: "assertion_version", outputId: "version-world-assertion" },
+        { itemId: "world-resource", kind: "resource_revision", outputId: "version-world-resource" },
+      ],
+    });
+    const machine = createStewardExecutionStateMachine({
+      mode: "free",
+      userInput: "不要讨论，自行创建世界包",
+      authorizedScopeResourceIds: ["world-root"],
+      operationalTools: [retrieve, propose],
+      resultCapture: createRoleOutputTool("steward"),
+    });
+    await tool(machine.tools, "submit_steward_plan").execute("plan-greenfield", {
+      objective: "change_set",
+      scopeResourceIds: ["world-root"],
+      steps: ["retrieve_graph_evidence", "propose_change_set"],
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve-greenfield", { scopeResourceIds: ["world-root"] });
+    await tool(machine.tools, "propose_change_set").execute("propose-greenfield", { summary: "创建雾港群岛", items: [{}] });
+    await tool(machine.tools, "submit_steward_result").execute("result-greenfield", {
+      status: "completed",
+      message: "已经创建世界包。",
+      evidenceIds: ["change-greenfield", "version-world-document", "version-world-assertion"],
+      toolOutcomes: [
+        { tool: "retrieve_graph_evidence", status: "succeeded" },
+        { tool: "propose_change_set", status: "succeeded" },
+      ],
+      changeSet: { state: "committed", changeSetId: "change-greenfield" },
+      escalations: [],
+    });
+
+    expect(machine.snapshot().blockReason).toBeNull();
   });
 
   it("inserts Checker before writes when retrieval contains structural conflicts", async () => {

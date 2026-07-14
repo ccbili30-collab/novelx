@@ -19,9 +19,88 @@ import {
   type ChangeSetConflictRecord,
   type ChangeSetItemDecision,
   type ChangeSetItemRecord,
+  type ChangeSetOutputRecord,
   type ChangeSetRecord,
   type ChangeSetRisk,
 } from "./changeSetRepository";
+
+const greenfieldDocumentOutputEvidencePrefix = "greenfield_document_output:";
+
+export function greenfieldDocumentOutputEvidence(itemId: string): string {
+  return `${greenfieldDocumentOutputEvidencePrefix}${itemId}`;
+}
+
+export function parseGreenfieldDocumentOutputEvidence(evidenceId: string): string | null {
+  if (!evidenceId.startsWith(greenfieldDocumentOutputEvidencePrefix)) return null;
+  const itemId = evidenceId.slice(greenfieldDocumentOutputEvidencePrefix.length).trim();
+  return itemId || null;
+}
+
+export function isGreenfieldCreateOnlyCandidate(items: readonly ChangeSetItem[]): boolean {
+  const resourceCreates = new Map<string, string>();
+  const creativeDocumentCreates = new Map<string, string>();
+  for (const item of items) {
+    switch (item.kind) {
+      case "resource.put":
+        if (!item.payload.create || item.payload.state !== "active" || item.payload.objectKind === "domain_root") return false;
+        resourceCreates.set(item.payload.resourceId, item.id);
+        break;
+      case "creative_document.put":
+        if (!item.payload.create || item.payload.state !== "active") return false;
+        creativeDocumentCreates.set(item.payload.documentId, item.id);
+        break;
+      case "creative_relation.put":
+      case "constraint_profile.put":
+        if (!item.payload.create || item.payload.state !== "active") return false;
+        break;
+      case "document.put":
+      case "assertion.put":
+        break;
+      case "project_file.put":
+      case "project_file.delete":
+        return false;
+    }
+  }
+  return items.every((item) => {
+    switch (item.kind) {
+      case "document.put": {
+        const targetItemId = item.payload.creativeDocumentId
+          ? creativeDocumentCreates.get(item.payload.creativeDocumentId)
+          : resourceCreates.get(item.payload.resourceId);
+        return Boolean(targetItemId && item.dependsOn.includes(targetItemId));
+      }
+      case "assertion.put": {
+        const scopeCreateId = resourceCreates.get(item.payload.scopeId);
+        return Boolean(scopeCreateId && item.dependsOn.includes(scopeCreateId))
+          && item.payload.evidenceIds.every((evidenceId) => {
+            const documentItemId = parseGreenfieldDocumentOutputEvidence(evidenceId);
+            return Boolean(documentItemId && item.dependsOn.includes(documentItemId)
+              && items.some((candidate) => candidate.id === documentItemId && candidate.kind === "document.put"));
+          });
+      }
+      case "creative_document.put": {
+        const resourceCreateId = resourceCreates.get(item.payload.resourceId);
+        return Boolean(resourceCreateId && item.dependsOn.includes(resourceCreateId));
+      }
+      case "creative_relation.put": {
+        const sourceCreateId = resourceCreates.get(item.payload.sourceResourceId);
+        const targetCreateId = resourceCreates.get(item.payload.targetResourceId);
+        return Boolean(sourceCreateId && targetCreateId
+          && item.dependsOn.includes(sourceCreateId) && item.dependsOn.includes(targetCreateId));
+      }
+      case "constraint_profile.put": {
+        if (!item.payload.scopeResourceId) return true;
+        const scopeCreateId = resourceCreates.get(item.payload.scopeResourceId);
+        return Boolean(scopeCreateId && item.dependsOn.includes(scopeCreateId));
+      }
+      case "resource.put":
+        return true;
+      case "project_file.put":
+      case "project_file.delete":
+        return false;
+    }
+  });
+}
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
@@ -186,6 +265,7 @@ export interface ChangeSetCandidate {
   mode: "free" | "assist";
   summary: string;
   items: ChangeSetItem[];
+  greenfieldCreateAuthorized?: boolean;
 }
 
 export interface ChangeSetPolicyAssessment {
@@ -274,9 +354,10 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
     switch (item.kind) {
       case "assertion.put": {
         const { evidenceIds, source: _proposalSource, ...assertion } = item.payload;
+        const resolvedEvidenceIds = evidenceIds.map((evidenceId) => this.#resolveAssertionEvidence(evidenceId, item, context));
         const sources = [
           { kind: "confirmed_change_set", ref: `${context.changeSetId}:${item.id}` },
-          ...evidenceIds.map((ref) => ({ kind: this.#isAcceptedImportCandidate(ref) ? "import_candidate" : "evidence_version", ref })),
+          ...resolvedEvidenceIds.map((ref) => ({ kind: this.#isAcceptedImportCandidate(ref) ? "import_candidate" : "evidence_version", ref })),
         ];
         const outputId = this.#assertions.putVersion({
           ...assertion,
@@ -385,6 +466,24 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
   #isAcceptedImportCandidate(id: string): boolean {
     return Boolean(this.workspace.db.prepare("SELECT 1 FROM decomposition_candidates WHERE id = ? AND status = 'accepted'").get(id));
   }
+
+  #resolveAssertionEvidence(
+    evidenceId: string,
+    item: Extract<ChangeSetItem, { kind: "assertion.put" }>,
+    context: { changeSetId: string; checkpointId: string },
+  ): string {
+    const documentItemId = parseGreenfieldDocumentOutputEvidence(evidenceId);
+    if (!documentItemId) return evidenceId;
+    if (!item.dependsOn.includes(documentItemId)) {
+      throw serviceError("GREENFIELD_OUTPUT_EVIDENCE_DEPENDENCY_REQUIRED", "Greenfield Assertion evidence must depend on its document output.");
+    }
+    const output = new ChangeSetRepository(this.workspace).listOutputs(context.changeSetId)
+      .find((candidate) => candidate.itemId === documentItemId && candidate.kind === "document_version");
+    if (!output) {
+      throw serviceError("GREENFIELD_OUTPUT_EVIDENCE_NOT_COMMITTED", "Greenfield Assertion evidence document output is unavailable.");
+    }
+    return output.outputId;
+  }
 }
 
 export class ChangeSetService {
@@ -400,7 +499,10 @@ export class ChangeSetService {
     this.#checkpoints = new CheckpointRepository(workspace);
   }
 
-  propose(input: unknown, trusted: { producerToolInvocationId: string } | null = null): ChangeSetRecord {
+  propose(
+    input: unknown,
+    trusted: { producerToolInvocationId: string; greenfieldCreateAuthorized?: boolean } | null = null,
+  ): ChangeSetRecord {
     const proposal = proposalSchema.parse(input);
     validateDependencyGraph(proposal.items);
     const payloadHash = hashProposal(proposal);
@@ -423,6 +525,7 @@ export class ChangeSetService {
       mode: proposal.mode,
       summary: proposal.summary,
       items: proposal.items,
+      greenfieldCreateAuthorized: trusted?.greenfieldCreateAuthorized === true,
     };
     const assessments = validateAssessments(candidate, this.policy.assess(candidate));
     const assessmentByItem = new Map(assessments.map((assessment) => [assessment.itemId, assessment]));
@@ -575,6 +678,12 @@ export class ChangeSetService {
 
   getRequired(changeSetId: string): ChangeSetRecord {
     return this.#repository.getRequired(changeSetId);
+  }
+
+  listOutputs(changeSetId: string): ChangeSetOutputRecord[] {
+    const changeSet = this.#repository.getRequired(changeSetId);
+    this.#assertBranch(changeSet);
+    return this.#repository.listOutputs(changeSetId);
   }
 
   #commitPrepared(changeSetId: string, expectedHead: string, label: string): ChangeSetRecord {

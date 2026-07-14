@@ -3,7 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { WorkspaceChangeSetPolicy } from "../../src/domain/changeSet/workspaceChangeSetPolicy";
-import type { ChangeSetCandidate } from "../../src/domain/changeSet/changeSetService";
+import {
+  greenfieldDocumentOutputEvidence,
+  type ChangeSetCandidate,
+} from "../../src/domain/changeSet/changeSetService";
 import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
@@ -105,6 +108,47 @@ describe("WorkspaceChangeSetPolicy", () => {
     ]);
   });
 
+  it("allows a blank Free create-only Change Set to source assertions from its dependent document output", () => {
+    const setup = createBlankWorkspace();
+    const worldRoot = new ResourceRepository(setup.workspace).listCurrent().find((resource) => resource.type === "world")!;
+    const items = greenfieldCandidateItems(worldRoot.id);
+
+    expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate(items, true))).toEqual([
+      { itemId: "create-world", risk: "low", conflicts: [] },
+      { itemId: "world-document", risk: "low", conflicts: [] },
+      { itemId: "world-assertion", risk: "low", conflicts: [] },
+    ]);
+  });
+
+  it("does not accept the Greenfield document-output exception without Main authorization", () => {
+    const setup = createBlankWorkspace();
+    const worldRoot = new ResourceRepository(setup.workspace).listCurrent().find((resource) => resource.type === "world")!;
+
+    expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate(greenfieldCandidateItems(worldRoot.id)))[2].conflicts)
+      .toContainEqual({ severity: "major", code: "ASSERTION_EVIDENCE_NOT_ACTIVE" });
+  });
+
+  it("does not accept the Greenfield document-output exception when a stable root document exists", () => {
+    const setup = createBlankWorkspace();
+    const worldRoot = new ResourceRepository(setup.workspace).listCurrent().find((resource) => resource.type === "world")!;
+    new DocumentRepository(setup.workspace).putVersion({
+      resourceId: worldRoot.id,
+      checkpointId: new CheckpointRepository(setup.workspace).getActiveBranch().headCheckpointId,
+      content: "已有稳定根文档。",
+      authorKind: "user",
+    });
+    expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate(greenfieldCandidateItems(worldRoot.id), true))[2].conflicts)
+      .toContainEqual({ severity: "major", code: "ASSERTION_EVIDENCE_NOT_ACTIVE" });
+  });
+
+  it("does not accept the Greenfield document-output exception when a root working document exists", () => {
+    const setup = createBlankWorkspace();
+    const worldRoot = new ResourceRepository(setup.workspace).listCurrent().find((resource) => resource.type === "world")!;
+    new DocumentRepository(setup.workspace).saveWorkingCopy({ resourceId: worldRoot.id, content: "已有根工作副本。" });
+    expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate(greenfieldCandidateItems(worldRoot.id), true))[2].conflicts)
+      .toContainEqual({ severity: "major", code: "ASSERTION_EVIDENCE_NOT_ACTIVE" });
+  });
+
   it("allows same-Change-Set resource hierarchy only through explicit dependencies", () => {
     const setup = createWorkspaceEvidence();
     const policy = new WorkspaceChangeSetPolicy(setup.workspace);
@@ -173,8 +217,64 @@ function createWorkspaceEvidence() {
   };
 }
 
-function candidate(items: ChangeSetCandidate["items"][number] | ChangeSetCandidate["items"]): ChangeSetCandidate {
-  return { mode: "free", summary: "测试策略", items: Array.isArray(items) ? items : [items] };
+function createBlankWorkspace() {
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-change-policy-greenfield-"));
+  const created = openWorkspace(root);
+  workspace = created;
+  return { workspace: created };
+}
+
+function candidate(
+  items: ChangeSetCandidate["items"][number] | ChangeSetCandidate["items"],
+  greenfieldCreateAuthorized = false,
+): ChangeSetCandidate {
+  return {
+    mode: "free",
+    summary: "测试策略",
+    items: Array.isArray(items) ? items : [items],
+    greenfieldCreateAuthorized,
+  };
+}
+
+function greenfieldCandidateItems(worldRootId: string): ChangeSetCandidate["items"] {
+  return [
+    {
+      id: "create-world",
+      dependsOn: [],
+      kind: "resource.put",
+      payload: {
+        resourceId: "world.greenfield",
+        create: true,
+        type: "world",
+        objectKind: "world",
+        title: "雾港群岛",
+        parentId: worldRootId,
+        state: "active",
+        sortOrder: 1,
+      },
+    },
+    {
+      id: "world-document",
+      dependsOn: ["create-world"],
+      kind: "document.put",
+      payload: { resourceId: "world.greenfield", content: "群岛受月潮影响。", authorKind: "agent" },
+    },
+    {
+      id: "world-assertion",
+      dependsOn: ["create-world", "world-document"],
+      kind: "assertion.put",
+      payload: {
+        assertionId: "assertion.greenfield.moon-tide",
+        scopeType: "world",
+        scopeId: "world.greenfield",
+        subject: "月潮",
+        predicate: "影响",
+        object: { target: "群岛航线" },
+        evidenceIds: [greenfieldDocumentOutputEvidence("world-document")],
+        status: "current",
+      },
+    },
+  ];
 }
 
 function assertionItem(

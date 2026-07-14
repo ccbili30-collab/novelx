@@ -3,7 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentAuditRepository } from "../../src/domain/audit/agentAuditRepository";
-import type { ChangeSetPolicyEvaluator } from "../../src/domain/changeSet/changeSetService";
+import {
+  ChangeSetService,
+  greenfieldDocumentOutputEvidence,
+  type ChangeSetPolicyEvaluator,
+} from "../../src/domain/changeSet/changeSetService";
+import { WorkspaceChangeSetPolicy } from "../../src/domain/changeSet/workspaceChangeSetPolicy";
+import { ChangeSetRepository } from "../../src/domain/changeSet/changeSetRepository";
+import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
+import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
+import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
 import { createWorkspaceAgentToolGateway } from "../../src/main/workspaceAgentToolGateway";
@@ -83,6 +92,162 @@ describe("Workspace Agent tool gateway", () => {
     });
   });
 
+  it("commits an explicit Free Greenfield package and returns only output versions recorded for that Change Set", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    seedProposeTool(workspace);
+    const gateway = createWorkspaceAgentToolGateway(workspace, new WorkspaceChangeSetPolicy(workspace), () => true);
+    const result = await gateway.proposeChangeSet({
+      summary: "创建雾港群岛世界包",
+      items: greenfieldWorldItems(worldRoot.id),
+    }, invocationContext("free", true));
+
+    expect(result).toMatchObject({ mode: "free", status: "committed", gateStatus: "ready", itemCount: 3 });
+    const committedOutputs = result.committedOutputs ?? [];
+    expect(committedOutputs).toHaveLength(3);
+    expect(committedOutputs).toEqual(new ChangeSetRepository(workspace).listOutputs(result.changeSetId)
+      .map(({ itemId, kind, outputId }) => ({ itemId, kind, outputId })));
+    const documentOutput = committedOutputs.find((output) => output.itemId === "world-document")!;
+    const assertion = new AssertionRepository(workspace).listCurrentInScopes(["world.greenfield"])[0]!;
+    expect(assertion.sources).toContainEqual({ kind: "evidence_version", ref: documentOutput.outputId });
+    expect(assertion.sources.some((source) => source.ref === greenfieldDocumentOutputEvidence("world-document"))).toBe(false);
+  });
+
+  it("rejects Greenfield requests after formal content exists and never creates a Change Set", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    const checkpointId = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+    new ResourceRepository(workspace).putRevision({
+      resourceId: "world.existing",
+      create: true,
+      checkpointId,
+      type: "world",
+      objectKind: "world",
+      title: "已有世界",
+      parentId: worldRoot.id,
+      state: "active",
+    });
+    seedProposeTool(workspace);
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true);
+
+    await expect(gateway.proposeChangeSet({
+      summary: "不应创建",
+      items: greenfieldWorldItems(worldRoot.id),
+    }, invocationContext("free", true))).rejects.toMatchObject({ code: "GREENFIELD_WORKSPACE_NOT_EMPTY" });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects Greenfield requests when the domain root has a stable document version", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    new DocumentRepository(workspace).putVersion({
+      resourceId: worldRoot.id,
+      checkpointId: new CheckpointRepository(workspace).getActiveBranch().headCheckpointId,
+      content: "已有稳定根文档。",
+      authorKind: "user",
+    });
+    seedProposeTool(workspace);
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true);
+
+    await expect(gateway.proposeChangeSet({
+      summary: "不应创建",
+      items: greenfieldWorldItems(worldRoot.id),
+    }, invocationContext("free", true))).rejects.toMatchObject({ code: "GREENFIELD_WORKSPACE_NOT_EMPTY" });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects Greenfield requests when the domain root has a working document", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    new DocumentRepository(workspace).saveWorkingCopy({ resourceId: worldRoot.id, content: "已有根工作副本。" });
+    seedProposeTool(workspace);
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true);
+
+    await expect(gateway.proposeChangeSet({
+      summary: "不应创建",
+      items: greenfieldWorldItems(worldRoot.id),
+    }, invocationContext("free", true))).rejects.toMatchObject({ code: "GREENFIELD_WORKSPACE_NOT_EMPTY" });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects Greenfield update and delete proposals before they can enter review", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    seedProposeTool(workspace);
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true);
+
+    await expect(gateway.proposeChangeSet({
+      summary: "不得更新",
+      items: [{
+        id: "delete-world",
+        dependsOn: [],
+        kind: "resource.put",
+        payload: {
+          resourceId: "world.greenfield",
+          create: false,
+          type: "world",
+          objectKind: "world",
+          title: "雾港群岛",
+          parentId: worldRoot.id,
+          state: "deleted",
+          sortOrder: 0,
+        },
+      }],
+    }, invocationContext("free", true)))
+      .rejects.toMatchObject({ code: "GREENFIELD_CREATE_ONLY_REQUIRED" });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toEqual({ count: 0 });
+  });
+
+  it("returns no stable output versions when a Free proposal is blocked", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    seedProposeTool(workspace);
+    const gateway = createWorkspaceAgentToolGateway(workspace, new WorkspaceChangeSetPolicy(workspace), () => true);
+    const result = await gateway.proposeChangeSet({
+      summary: "错误地重用根资源",
+      items: [{
+        id: "duplicate-root",
+        dependsOn: [],
+        kind: "resource.put",
+        payload: {
+          resourceId: worldRoot.id,
+          create: true,
+          type: "world",
+          objectKind: "world",
+          title: "重复根",
+          parentId: null,
+          state: "active",
+          sortOrder: 0,
+        },
+      }],
+    }, invocationContext("free", true));
+
+    expect(result).toMatchObject({ status: "pending", gateStatus: "blocked", committedOutputs: [] });
+    expect(new ChangeSetRepository(workspace).listOutputs(result.changeSetId)).toEqual([]);
+  });
+
+  it("persists no output version when Change Set application fails", () => {
+    const { workspace } = createWorkspace();
+    const branch = new CheckpointRepository(workspace).getActiveBranch();
+    const service = new ChangeSetService(workspace, testOnlyLowRiskPolicy, {
+      apply: () => {
+        throw new Error("forced apply failure");
+      },
+    });
+
+    expect(() => service.propose({
+      idempotencyKey: "greenfield-apply-failure",
+      expectedHeadCheckpointId: branch.headCheckpointId,
+      mode: "free",
+      summary: "失败提交",
+      items: [greenfieldWorldItems(new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!.id)[0]],
+    })).toThrow("forced apply failure");
+    const changeSet = workspace.db.prepare("SELECT id FROM change_sets WHERE idempotency_key = ?")
+      .get("greenfield-apply-failure") as { id: string };
+    expect(new ChangeSetRepository(workspace).getRequired(changeSet.id)).toMatchObject({ status: "failed" });
+    expect(new ChangeSetRepository(workspace).listOutputs(changeSet.id)).toEqual([]);
+  });
+
   it("fails closed if the workspace identity changes during a run", async () => {
     const { workspace } = createWorkspace();
     const world = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
@@ -146,14 +311,54 @@ const testOnlyLowRiskPolicy: ChangeSetPolicyEvaluator = {
   })),
 };
 
-function invocationContext(mode: "free" | "assist") {
+function invocationContext(mode: "free" | "assist", greenfieldCreateRequested = false) {
   return {
     runId: "run-test-only",
     invocationId: "run-test-only:steward",
     requestId: "11111111-1111-4111-8111-111111111111",
     mode,
+    greenfieldCreateRequested,
     signal: new AbortController().signal,
   };
+}
+
+function greenfieldWorldItems(worldRootId: string) {
+  return [{
+    id: "world-resource",
+    dependsOn: [],
+    kind: "resource.put" as const,
+    payload: {
+      resourceId: "world.greenfield",
+      create: true,
+      type: "world" as const,
+      objectKind: "world" as const,
+      title: "雾港群岛",
+      parentId: worldRootId,
+      state: "active" as const,
+      sortOrder: 1,
+    },
+  }, {
+    id: "world-document",
+    dependsOn: ["world-resource"],
+    kind: "document.put" as const,
+    payload: {
+      resourceId: "world.greenfield",
+      content: "雾港群岛的航路受月潮影响。",
+    },
+  }, {
+    id: "world-assertion",
+    dependsOn: ["world-resource", "world-document"],
+    kind: "assertion.put" as const,
+    payload: {
+      assertionId: "assertion.greenfield.moon-tide",
+      scopeType: "world",
+      scopeId: "world.greenfield",
+      subject: "月潮",
+      predicate: "影响",
+      object: { target: "航路" },
+      evidenceIds: [greenfieldDocumentOutputEvidence("world-document")],
+    },
+  }];
 }
 
 function seedProposeTool(workspace: WorkspaceDatabase): void {
