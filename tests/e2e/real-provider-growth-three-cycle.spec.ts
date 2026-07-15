@@ -51,6 +51,14 @@ test("runs one real gpt-5.4 Growth goal through three committed cycles and a lat
   if (!fs.existsSync(localState)) throw new Error("REAL_PROVIDER_LOCAL_STATE_MISSING");
   fs.copyFileSync(localState, path.join(userDataPath, "Local State"));
   initializeProject(userDataPath, workspacePath);
+  evidence.initialGreenfield = captureInitialGreenfieldEligibility(workspacePath);
+  if (!evidence.initialGreenfield.eligible) {
+    evidence.outcome = "blocked_before_provider_start";
+    evidence.failureCode = "INITIAL_GREENFIELD_INELIGIBLE";
+    evidence.leakScan = "not_run";
+    writeEvidence(evidenceDirectory, evidence);
+    throw new Error("INITIAL_GREENFIELD_INELIGIBLE");
+  }
 
   try {
     app = await launch(userDataPath, workspacePath);
@@ -138,6 +146,20 @@ interface SafeEvidence {
   preTermination?: SafePreTermination;
   termination?: SafeTermination;
   postTermination?: SafeSqliteEvidence;
+  initialGreenfield?: SafeInitialGreenfieldEligibility;
+}
+
+interface SafeInitialGreenfieldEligibility {
+  eligible: boolean;
+  nonRootResourceRevisions: number;
+  assertionVersions: number;
+  creativeDocumentRevisions: number;
+  creativeRelationVersions: number;
+  constraintProfileVersions: number;
+  documentVersions: number;
+  workingDocuments: number;
+  workingCreativeDocuments: number;
+  workingConstraintProfiles: number;
 }
 
 interface SafePreTermination {
@@ -193,6 +215,39 @@ function initializeProject(userDataPath: string, workspacePath: string): void {
     registry.selectProject(project.id);
   } finally {
     registry.close();
+  }
+}
+
+function captureInitialGreenfieldEligibility(workspacePath: string): SafeInitialGreenfieldEligibility {
+  const workspace = openWorkspace(workspacePath);
+  try {
+    const counts = workspace.db.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM resource_revisions WHERE object_kind <> 'domain_root') AS non_root_resource_revisions,
+        (SELECT COUNT(*) FROM assertion_versions) AS assertion_versions,
+        (SELECT COUNT(*) FROM creative_document_revisions) AS creative_document_revisions,
+        (SELECT COUNT(*) FROM creative_relation_versions) AS creative_relation_versions,
+        (SELECT COUNT(*) FROM constraint_profile_versions) AS constraint_profile_versions,
+        (SELECT COUNT(*) FROM document_versions) AS document_versions,
+        (SELECT COUNT(*) FROM working_documents) AS working_documents,
+        (SELECT COUNT(*) FROM working_creative_documents) AS working_creative_documents,
+        (SELECT COUNT(*) FROM working_constraint_profiles) AS working_constraint_profiles
+    `).get() as Record<string, number>;
+    const values = Object.values(counts).map(Number);
+    return {
+      eligible: values.every((value) => value === 0),
+      nonRootResourceRevisions: Number(counts.non_root_resource_revisions),
+      assertionVersions: Number(counts.assertion_versions),
+      creativeDocumentRevisions: Number(counts.creative_document_revisions),
+      creativeRelationVersions: Number(counts.creative_relation_versions),
+      constraintProfileVersions: Number(counts.constraint_profile_versions),
+      documentVersions: Number(counts.document_versions),
+      workingDocuments: Number(counts.working_documents),
+      workingCreativeDocuments: Number(counts.working_creative_documents),
+      workingConstraintProfiles: Number(counts.working_constraint_profiles),
+    };
+  } finally {
+    workspace.close();
   }
 }
 
