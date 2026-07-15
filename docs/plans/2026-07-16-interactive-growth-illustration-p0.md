@@ -224,18 +224,25 @@ const defaultVisualStyle = {
 - Modify: `src/main/growthCoordinator.ts`
 - Modify: `src/main/growthRunLifecycle.ts`
 - Modify: `src/agent-worker/stewardExecutionStateMachine.ts`
+- Modify: `src/agent-worker/tools/createAgentTools.ts`
 - Modify: `src/shared/ipcContract.ts`
 - Modify: `src/preload/desktopApi.ts`
 - Modify: `src/main/registerDesktopIpc.ts`
+- Modify: `src/renderer/src/features/agent/growthPresentation.ts`
+- Modify: `src/renderer/src/features/agent/RunActivityTimeline.tsx`
+- Modify: `src/renderer/src/features/agent/StewardRuntimePanel.tsx`
 - Test: `tests/unit/growth-contract.test.ts`
 - Test: `tests/unit/growth-repository.test.ts`
 - Test: `tests/unit/agent-worker-contract.test.ts`
+- Test: `tests/unit/agent-worker-tool-bridge.test.ts`
 - Test: `tests/unit/steward-execution-state-machine.test.ts`
 - Test: `tests/unit/growth-coordinator.test.ts`
 - Test: `tests/unit/growth-guidance-ipc.test.ts`
 - Test: `tests/unit/growth-run-bridge.test.ts`
 - Test: `tests/unit/graph-retrieval-service.test.ts`
 - Test: `tests/unit/ipc-contract.test.ts`
+- Test: `tests/unit/growth-presentation.test.ts`
+- Test: `tests/e2e/growth-presentation-ui.spec.ts`（仅 fixture/类型迁移；本任务不运行 Electron）
 - Test: `tests/unit/workspace-persistence.test.ts`
 
 **Frontier and scheduling rules:**
