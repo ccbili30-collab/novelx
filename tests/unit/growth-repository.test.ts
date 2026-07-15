@@ -59,6 +59,27 @@ describe("GrowthRepository", () => {
       .toThrowError(expect.objectContaining({ code: "GROWTH_RECEIPT_REPLAY_MISMATCH" }));
   });
 
+  it("verifies Receipt targets, budgets and stable locators at the pinned checkpoint", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { cycle, run } = runningCycle(repository, setup);
+    expect(() => repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [{ ...receiptLink(setup), targetId: "missing", targetVersionId: "missing-version" }] })))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_RECEIPT_LINK_NOT_VISIBLE" }));
+    const foreignResourceVersion = foreignResourceRevision(setup);
+    expect(() => repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [{ ...receiptLink(setup), targetVersionId: foreignResourceVersion }] })))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_RECEIPT_LINK_NOT_VISIBLE" }));
+    const foreignDocument = foreignDocumentVersion(setup);
+    expect(() => repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [{ ...receiptLink(setup), stableLocator: "foreign:1", stableVersionId: foreignDocument.versionId, stableHash: foreignDocument.contentHash }] })))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_RECEIPT_LOCATOR_INVALID" }));
+    const pinnedDocument = pinnedDocumentVersion(setup);
+    expect(() => repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [{ ...receiptLink(setup), targetKind: "document", targetId: "wrong-document", targetVersionId: pinnedDocument.versionId }] })))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_RECEIPT_LINK_NOT_VISIBLE" }));
+    expect(() => repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [{ ...receiptLink(setup), stableLocator: "line:1", stableVersionId: pinnedDocument.versionId, stableHash: "a".repeat(64) }] })))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_RECEIPT_LOCATOR_INVALID" }));
+    const valid = repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [{ ...receiptLink(setup), stableLocator: "line:1", stableVersionId: pinnedDocument.versionId, stableHash: pinnedDocument.contentHash }] }));
+    expect(valid.locatorCount).toBe(1);
+  });
+
   it("uses repository event time, replays exact events and lists monotonic history", () => {
     const setup = createSetup();
     const repository = new GrowthRepository(setup.workspace);
@@ -72,6 +93,24 @@ describe("GrowthRepository", () => {
       .toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_REPLAY_MISMATCH" }));
     expect(() => repository.appendEvent({ ...eventInput(goal.id, cycle.id, run.runId, 3, setup.scopeId), safeSummary: "out of order" }))
       .toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_SEQUENCE_INVALID" }));
+  });
+
+  it("verifies Event targets at the Cycle checkpoint and terminalizes idempotently", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
+    expect(() => repository.appendEvent(eventInput(goal.id, cycle.id, run.runId, 1, "missing-resource")))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_TARGET_NOT_VISIBLE" }));
+    expect(() => repository.appendEvent({ ...eventInput(goal.id, cycle.id, run.runId, 1, setup.scopeId), targetKind: "document", targetVersionId: null }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_TARGET_NOT_VISIBLE" }));
+    const foreignDocument = foreignDocumentVersion(setup);
+    expect(() => repository.appendEvent({ ...eventInput(goal.id, cycle.id, run.runId, 1, foreignDocument.documentId), targetKind: "document", targetVersionId: foreignDocument.versionId }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_EVENT_TARGET_NOT_VISIBLE" }));
+    expect(repository.appendEvent(eventInput(goal.id, cycle.id, run.runId, 1, setup.scopeId)).targetId).toBe(setup.scopeId);
+    const terminal = repository.terminalizeCycle({ cycleId: cycle.id, status: "failed", failureCode: "RETRY_LATER" });
+    expect(repository.terminalizeCycle({ cycleId: cycle.id, status: "failed", failureCode: "RETRY_LATER" })).toEqual(terminal);
+    expect(() => repository.terminalizeCycle({ cycleId: cycle.id, status: "failed", failureCode: "DIFFERENT" }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_CYCLE_ALREADY_TERMINAL" }));
   });
 
   it("fails closed for mismatched receipt and Run references, reconciliation, and future ContentRefs", () => {
@@ -133,7 +172,8 @@ function createSetup() {
   workspace = openWorkspace(root);
   const branch = new CheckpointRepository(workspace).getActiveBranch();
   const scopeId = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!.id;
-  return { workspace, branchId: branch.id, checkpointId: branch.headCheckpointId, scopeId };
+  const scopeVersionId = (workspace.db.prepare("SELECT id FROM resource_revisions WHERE resource_id = ? AND created_checkpoint_id = ?").get(scopeId, branch.headCheckpointId) as { id: string }).id;
+  return { workspace, branchId: branch.id, checkpointId: branch.headCheckpointId, scopeId, scopeVersionId };
 }
 
 function goalInput(setup: ReturnType<typeof createSetup>) {
@@ -189,7 +229,7 @@ function receiptInput(setup: ReturnType<typeof createSetup>, cycleId: string, ru
 
 function receiptLink(setup: ReturnType<typeof createSetup>) {
   return {
-    rank: 1, targetKind: "resource" as const, targetId: setup.scopeId, targetVersionId: null, score: 1,
+    rank: 1, targetKind: "resource" as const, targetId: setup.scopeId, targetVersionId: setup.scopeVersionId, score: 1,
     reasonCodes: ["scope_match" as const], pathTargetIds: [], stableLocator: null, stableVersionId: null, stableHash: null,
   };
 }
@@ -230,5 +270,19 @@ function foreignDocumentVersion(setup: ReturnType<typeof createSetup>) {
     INSERT INTO document_versions (id, resource_id, created_checkpoint_id, content, content_hash, author_kind, created_at, creative_document_id)
     VALUES (?, ?, ?, 'foreign source', ?, 'user', ?, ?)
   `).run(versionId, setup.scopeId, checkpointId, createHash("sha256").update("foreign source", "utf8").digest("hex"), now, documentId);
-  return { documentId, versionId };
+  return { documentId, versionId, contentHash: createHash("sha256").update("foreign source", "utf8").digest("hex") };
+}
+
+function pinnedDocumentVersion(setup: ReturnType<typeof createSetup>) {
+  const documentId = randomUUID();
+  const versionId = randomUUID();
+  const content = "pinned source";
+  const contentHash = createHash("sha256").update(content, "utf8").digest("hex");
+  const now = new Date().toISOString();
+  setup.workspace.db.prepare("INSERT INTO creative_documents (id) VALUES (?)").run(documentId);
+  setup.workspace.db.prepare(`
+    INSERT INTO document_versions (id, resource_id, created_checkpoint_id, content, content_hash, author_kind, created_at, creative_document_id)
+    VALUES (?, ?, ?, ?, ?, 'user', ?, ?)
+  `).run(versionId, setup.scopeId, setup.checkpointId, content, contentHash, now, documentId);
+  return { documentId, versionId, contentHash };
 }

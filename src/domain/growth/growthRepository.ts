@@ -251,6 +251,7 @@ export class GrowthRepository {
       if (!tool || readString(tool, "run_id") !== value.runId || readString(tool, "tool_name") !== "retrieve_graph_evidence") {
         throw growthError("GROWTH_RECEIPT_TOOL_MISMATCH");
       }
+      value.links.forEach((link) => this.#assertReceiptLinkVisible(link, value.checkpointId, value.branchId));
       const receipt = receiptOutput(value, new Date().toISOString());
       this.workspace.db.prepare(`
         INSERT INTO growth_retrieval_receipts (
@@ -326,7 +327,13 @@ export class GrowthRepository {
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const cycle = this.#requiredCycle(value.cycleId);
-      if (cycle.status !== "planned" && cycle.status !== "running") throw growthError("GROWTH_CYCLE_ALREADY_TERMINAL");
+      if (cycle.status !== "planned" && cycle.status !== "running") {
+        if (cycle.status === value.status && cycle.failureCode === value.failureCode) {
+          this.workspace.db.exec("COMMIT");
+          return cycle;
+        }
+        throw growthError("GROWTH_CYCLE_ALREADY_TERMINAL");
+      }
       const now = new Date().toISOString();
       this.workspace.db.prepare("UPDATE growth_cycles SET status = ?, failure_code = ?, updated_at = ?, terminal_at = ? WHERE id = ?")
         .run(value.status, value.failureCode, now, now, value.cycleId);
@@ -360,7 +367,9 @@ export class GrowthRepository {
       if (value.phase === "change_set_committed" && (value.targetId !== cycle.changeSetId || value.targetVersionId !== cycle.outputCheckpointId)) {
         throw growthError("GROWTH_EVENT_CHANGE_SET_MISMATCH");
       }
-      if (value.contentRef) this.#assertContentRefVisible(value.contentRef.kind, value.contentRef.targetId, value.contentRef.targetVersionId, cycle, this.#requiredGoal(value.goalId).branchId);
+      const goal = this.#requiredGoal(value.goalId);
+      this.#assertEventTargetVisible(value.targetKind, value.targetId, value.targetVersionId, value.phase, cycle, goal.branchId);
+      if (value.contentRef) this.#assertContentRefVisible(value.contentRef.kind, value.contentRef.targetId, value.contentRef.targetVersionId, cycle, goal.branchId);
       const event = growthEventSchema.parse({ ...value, createdAt: new Date().toISOString() });
       this.workspace.db.prepare(`
         INSERT INTO growth_events (
@@ -422,15 +431,66 @@ export class GrowthRepository {
     this.#assertVersionVisible("document_versions", "creative_document_id", seed.sourceDocumentId, seed.sourceVersionId, checkpointId, "GROWTH_SEED_REFERENCE_INVALID");
   }
 
+  #assertReceiptLinkVisible(link: GrowthRetrievalReceiptCreate["links"][number], checkpointId: string, branchId: string): void {
+    if (link.targetKind === "change_set") {
+      this.#assertChangeSetVisible(link.targetId, link.targetVersionId, checkpointId, branchId, "GROWTH_RECEIPT_LINK_NOT_VISIBLE");
+    } else {
+      const definition = link.targetKind === "resource"
+        ? ["resource_revisions", "resource_id"] as const
+        : link.targetKind === "document"
+          ? ["document_versions", "creative_document_id"] as const
+          : link.targetKind === "assertion"
+            ? ["assertion_versions", "assertion_id"] as const
+            : ["creative_relation_versions", "relation_id"] as const;
+      this.#assertVersionVisible(definition[0], definition[1], link.targetId, link.targetVersionId, checkpointId, "GROWTH_RECEIPT_LINK_NOT_VISIBLE");
+    }
+    if (link.stableLocator !== null) this.#assertStableLocator(link.stableVersionId!, link.stableHash!, checkpointId);
+  }
+
+  #assertStableLocator(versionId: string, contentHash: string, checkpointId: string): void {
+    const row = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id) AS (
+        SELECT ?
+        UNION ALL
+        SELECT checkpoints.parent_checkpoint_id FROM checkpoints JOIN ancestry ON checkpoints.id = ancestry.checkpoint_id
+        WHERE checkpoints.parent_checkpoint_id IS NOT NULL
+      )
+      SELECT document_versions.content_hash FROM document_versions JOIN ancestry ON ancestry.checkpoint_id = document_versions.created_checkpoint_id
+      WHERE document_versions.id = ?
+    `).get(checkpointId, versionId) as Row | undefined;
+    if (!row || readString(row, "content_hash") !== contentHash) throw growthError("GROWTH_RECEIPT_LOCATOR_INVALID");
+  }
+
+  #assertEventTargetVisible(kind: "resource" | "document" | "assertion" | "relation" | "change_set", targetId: string, targetVersionId: string | null, phase: string, cycle: GrowthCycle, branchId: string): void {
+    const checkpointId = cycle.status === "committed" ? cycle.outputCheckpointId : cycle.inputCheckpointId;
+    if (!checkpointId) throw growthError("GROWTH_EVENT_TARGET_NOT_VISIBLE");
+    this.#assertCheckpointBranch(checkpointId, branchId);
+    if (kind === "change_set") {
+      if (phase !== "change_set_committed" || targetVersionId === null) throw growthError("GROWTH_EVENT_TARGET_NOT_VISIBLE");
+      return;
+    }
+    if (kind === "resource" && targetVersionId === null) {
+      const visible = new ResourceRepository(this.workspace).listAtCheckpoint(checkpointId).some((resource) => resource.id === targetId);
+      if (!visible) throw growthError("GROWTH_EVENT_TARGET_NOT_VISIBLE");
+      return;
+    }
+    if (targetVersionId === null) throw growthError("GROWTH_EVENT_TARGET_NOT_VISIBLE");
+    const definition = kind === "resource"
+      ? ["resource_revisions", "resource_id"] as const
+      : kind === "document"
+        ? ["document_versions", "creative_document_id"] as const
+        : kind === "assertion"
+          ? ["assertion_versions", "assertion_id"] as const
+          : ["creative_relation_versions", "relation_id"] as const;
+    this.#assertVersionVisible(definition[0], definition[1], targetId, targetVersionId, checkpointId, "GROWTH_EVENT_TARGET_NOT_VISIBLE");
+  }
+
   #assertContentRefVisible(kind: "resource" | "document" | "assertion" | "relation" | "change_set", targetId: string, targetVersionId: string, cycle: GrowthCycle, branchId: string): void {
     const checkpointId = cycle.status === "committed" ? cycle.outputCheckpointId : cycle.inputCheckpointId;
     if (!checkpointId) throw growthError("GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
     this.#assertCheckpointBranch(checkpointId, branchId);
     if (kind === "change_set") {
-      const changeSet = this.workspace.db.prepare("SELECT branch_id, committed_checkpoint_id, status FROM change_sets WHERE id = ?").get(targetId) as Row | undefined;
-      if (!changeSet || readString(changeSet, "status") !== "committed" || readString(changeSet, "branch_id") !== branchId || readNullableString(changeSet, "committed_checkpoint_id") !== targetVersionId || !this.#checkpointIsVisible(targetVersionId, checkpointId)) {
-        throw growthError("GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
-      }
+      this.#assertChangeSetVisible(targetId, targetVersionId, checkpointId, branchId, "GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
       return;
     }
     const definition = kind === "resource"
@@ -441,6 +501,13 @@ export class GrowthRepository {
           ? ["assertion_versions", "assertion_id"] as const
           : ["creative_relation_versions", "relation_id"] as const;
     this.#assertVersionVisible(definition[0], definition[1], targetId, targetVersionId, checkpointId, "GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
+  }
+
+  #assertChangeSetVisible(changeSetId: string, checkpointId: string, pinnedCheckpointId: string, branchId: string, code: string): void {
+    const changeSet = this.workspace.db.prepare("SELECT branch_id, committed_checkpoint_id, status FROM change_sets WHERE id = ?").get(changeSetId) as Row | undefined;
+    if (!changeSet || readString(changeSet, "status") !== "committed" || readString(changeSet, "branch_id") !== branchId || readNullableString(changeSet, "committed_checkpoint_id") !== checkpointId || !this.#checkpointIsVisible(checkpointId, pinnedCheckpointId)) {
+      throw growthError(code);
+    }
   }
 
   #assertVersionVisible(table: "resource_revisions" | "document_versions" | "assertion_versions" | "creative_relation_versions", ownerColumn: "resource_id" | "creative_document_id" | "assertion_id" | "relation_id", targetId: string, versionId: string, checkpointId: string, code: string): void {

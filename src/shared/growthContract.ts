@@ -112,14 +112,14 @@ export const growthCycleTerminalizeSchema = z.object({
 export const growthReceiptLinkReasonCodeSchema = z.enum([
   "scope_match", "exact_subject", "exact_predicate", "alias", "graph_hop", "time_filter", "source_match", "conflict",
 ]);
-export const growthTargetKindSchema = z.enum(["document", "resource", "assertion", "relation", "image", "change_set"]);
+export const growthTargetKindSchema = z.enum(["document", "resource", "assertion", "relation", "change_set"]);
 export const growthContentRefKindSchema = z.enum(["document", "resource", "assertion", "relation", "change_set"]);
 
 export const growthRetrievalReceiptLinkSchema = z.object({
   rank: z.number().int().min(1).max(100_000),
   targetKind: growthTargetKindSchema,
   targetId: idSchema,
-  targetVersionId: idSchema.nullable(),
+  targetVersionId: idSchema,
   score: z.number().finite().min(0).max(1),
   reasonCodes: z.array(growthReceiptLinkReasonCodeSchema).min(1).max(12),
   pathTargetIds: z.array(idSchema).max(32),
@@ -172,7 +172,7 @@ const receiptInputShape = {
   links: z.array(growthRetrievalReceiptLinkSchema).max(100_000),
 };
 
-const refineReceiptInput = (value: { effectiveScopeResourceIds: string[]; aliases: string[]; coverage: z.infer<typeof growthCoverageSchema>; truncated: boolean; links: z.infer<typeof growthRetrievalReceiptLinkSchema>[] }, context: z.RefinementCtx): void => {
+const refineReceiptInput = (value: { effectiveScopeResourceIds: string[]; aliases: string[]; resultBudget: number; coverage: z.infer<typeof growthCoverageSchema>; truncated: boolean; links: z.infer<typeof growthRetrievalReceiptLinkSchema>[] }, context: z.RefinementCtx): void => {
   uniqueValues(value.effectiveScopeResourceIds, context, "effectiveScopeResourceIds");
   if (new Set(value.aliases.map((alias) => alias.toLocaleLowerCase("en-US"))).size !== value.aliases.length) {
     context.addIssue({ code: "custom", path: ["aliases"], message: "Aliases must be unique case-insensitively." });
@@ -185,6 +185,9 @@ const refineReceiptInput = (value: { effectiveScopeResourceIds: string[]; aliase
   }
   if (value.coverage.state === "complete" && (value.coverage.omittedCount > 0 || value.truncated)) {
     context.addIssue({ code: "custom", path: ["coverage"], message: "Complete coverage cannot be omitted or truncated." });
+  }
+  if (value.links.length > value.resultBudget) {
+    context.addIssue({ code: "custom", path: ["links"], message: "Links exceed the result budget." });
   }
 };
 

@@ -15,9 +15,9 @@
 - 共享合同使用严格 Zod；未知字段和 Player Lens（玩家视角）失败关闭。v1 Event 只持久化 Cycle 事件：cycle_planned、run_attached、receipt_recorded、change_set_committed、cycle_terminal。虽然 v23 数据库 CHECK 为兼容已接受更宽集合，所有写入均经更窄的 shared schema 与 Repository（仓储）约束。
 - Goal 只接受 text/source_document/resource 三类 seed（种子）。长小说只存文档/版本引用，不复制全文。resource/source_document 的指定版本必须在 Goal 固定 checkpoint 的递归祖先链可见，不能仅因全库存在而通过。
 - Receipt 创建输入不允许 hashes、派生 counts 或 createdAt。Repository 以 canonicalAuditHash 从有效查询参数生成 queryHash，并以 coverage、truncated、按 rank 排序的 links 生成 resultHash；hit/conflict/locator counts 与 createdAt 同样由仓储生成。Receipt id 是不可变重放键；相同规范化输入返回既存 Receipt，不同输入失败关闭。
-- Receipt links 的 rank 必须按数组连续 1..N；reason code/path target 去重；稳定 locator/version/hash 必须全有或全无。complete coverage 不可同时 omitted 或 truncated。
+- Receipt links 的 rank 必须按数组连续 1..N；reason code/path target 去重；稳定 locator/version/hash 必须全有或全无。每个 link 的 target/version、可选 locator 三元组都由 Repository 对 Receipt pinned checkpoint 的递归祖先链验证：资源、文档、断言、关系必须 owner/version 匹配；Change Set 必须已提交、同 branch 且 output checkpoint 可见；locator 必须指向真实 document version 与 content hash。complete coverage 不可同时 omitted 或 truncated。
 - Event append 输入不接受 createdAt；Repository 生成时间并以 (goalId, sequence) 实现精确重放。listEvents 供未来 UI 读取单调历史。Event 不保存通用 payload、Prompt、工具参数、原始日志、思维链或磁盘路径。
-- contentRef 只允许稳定的 document/resource/assertion/relation/change_set 版本，不允许 image 或 working copy。它必须属于 Goal branch，且在 running/planned/非提交终态的 input checkpoint，或 committed 的 output checkpoint 可见。change_set_committed 目标必须等于 Cycle 已绑定 Change Set/output checkpoint。
+- Event target 与 contentRef 只允许稳定的 document/resource/assertion/relation/change_set 版本，不允许 image 或 working copy。Repository 对 target 和 contentRef 都验证对应 Cycle checkpoint 的可见性；resource target 未指定版本时仍必须存在于该 checkpoint。change_set_committed 目标必须等于 Cycle 已绑定 Change Set/output checkpoint。
 - Creator/Player Lens 与权限仍由未来服务端接入层执行；本合同仅接受 creator，player 输入失败关闭。
 
 ## 迁移与恢复
