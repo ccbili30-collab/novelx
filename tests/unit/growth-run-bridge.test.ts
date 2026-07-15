@@ -123,7 +123,7 @@ describe("Growth Run bridge", () => {
     });
     worker.spawn();
     const start = worker.sent[0] as Record<string, unknown>;
-    expect(start).toMatchObject({ type: "run.start", runId, scopeResourceIds: [setup.scopeId] });
+    expect(start).toMatchObject({ type: "run.start", runId, scopeResourceIds: setup.authorizedScopeResourceIds });
     expect(JSON.stringify(start.growthBinding)).not.toContain("branchId");
     beginStewardInvocation(setup.workspace, runId);
 
@@ -467,21 +467,25 @@ function createSetup() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-growth-run-bridge-"));
   workspace = openWorkspace(root);
   const branch = new CheckpointRepository(workspace).getActiveBranch();
-  const scopeId = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!.id;
+  const roots = new ResourceRepository(workspace).listCurrent().filter((resource) => resource.objectKind === "domain_root");
+  const scopeId = roots.find((resource) => resource.type === "world")!.id;
+  const authorizedScopeResourceIds = roots.filter((resource) => ["world", "oc", "story"].includes(resource.type)).map((resource) => resource.id);
   const repository = new GrowthRepository(workspace);
   const goal = repository.createGoal({
     id: "growth-goal", idempotencyKey: "growth-goal-key", branchId: branch.id,
-    seed: { kind: "text", text: "从海岸传说开始" }, authorizedScopeResourceIds: [scopeId], initialRuleText: "保留来源", sourceMessageId: null,
+    seed: { kind: "text", text: "从海岸传说开始" }, authorizedScopeResourceIds, initialRuleText: "保留来源", sourceMessageId: null,
   });
   const cycle = repository.beginCycle({ id: "growth-cycle", goalId: goal.id, idempotencyKey: "growth-cycle-key", inputCheckpointId: branch.headCheckpointId, ruleRevision: goal.currentRuleRevision });
-  return { workspace, goalId: goal.id, cycleId: cycle.id, scopeId };
+  return { workspace, goalId: goal.id, cycleId: cycle.id, scopeId, authorizedScopeResourceIds };
 }
 
 function createSourceDocumentSetup() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-growth-source-seed-"));
   workspace = openWorkspace(root);
   const branch = new CheckpointRepository(workspace).getActiveBranch();
-  const scopeId = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!.id;
+  const roots = new ResourceRepository(workspace).listCurrent().filter((resource) => resource.objectKind === "domain_root");
+  const scopeId = roots.find((resource) => resource.type === "world")!.id;
+  const authorizedScopeResourceIds = roots.filter((resource) => ["world", "oc", "story"].includes(resource.type)).map((resource) => resource.id);
   new ResourceRepository(workspace).putRevision({
     resourceId: "source-world", create: true, checkpointId: branch.headCheckpointId,
     type: "world", objectKind: "world", title: "Source world", parentId: scopeId, state: "active", sortOrder: 0,
@@ -499,13 +503,13 @@ function createSourceDocumentSetup() {
   const goal = repository.createGoal({
     id: "source-goal", idempotencyKey: "source-goal-key", branchId: branch.id,
     seed: { kind: "source_document", sourceDocumentId: documentId, sourceVersionId },
-    authorizedScopeResourceIds: [scopeId], initialRuleText: "Keep sources.", sourceMessageId: null,
+    authorizedScopeResourceIds, initialRuleText: "Keep sources.", sourceMessageId: null,
   });
   const cycle = repository.beginCycle({
     id: "source-cycle", goalId: goal.id, idempotencyKey: "source-cycle-key",
     inputCheckpointId: branch.headCheckpointId, ruleRevision: goal.currentRuleRevision,
   });
-  return { workspace, goalId: goal.id, cycleId: cycle.id, scopeId };
+  return { workspace, goalId: goal.id, cycleId: cycle.id, scopeId, authorizedScopeResourceIds };
 }
 
 function createSupervisor(
@@ -520,8 +524,8 @@ function createSupervisor(
     acquireRuntimeLease: (): AgentRuntimeLease => ({
       gateway,
       audit: new AgentAuditRepository(setup.workspace),
-      authorizedScopeResourceIds: [setup.scopeId],
-      defaultScopeResourceIds: [setup.scopeId],
+      authorizedScopeResourceIds: setup.authorizedScopeResourceIds,
+      defaultScopeResourceIds: setup.authorizedScopeResourceIds,
       release: () => undefined,
     }),
     spawnWorker: spawnWorker ?? (() => worker),

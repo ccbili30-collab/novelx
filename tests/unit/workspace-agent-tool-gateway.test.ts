@@ -19,6 +19,7 @@ import { createWorkspaceAgentToolGateway } from "../../src/main/workspaceAgentTo
 import { ImageAssetRepository } from "../../src/domain/asset/imageAssetRepository";
 import { ImageAssetStore } from "../../src/domain/asset/imageAssetStore";
 import { ImageGenerationService } from "../../src/domain/asset/imageGenerationService";
+import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growthWorldFragment";
 
 const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
@@ -111,6 +112,61 @@ describe("Workspace Agent tool gateway", () => {
     const assertion = new AssertionRepository(workspace).listCurrentInScopes(["world.greenfield"])[0]!;
     expect(assertion.sources).toContainEqual({ kind: "evidence_version", ref: documentOutput.outputId });
     expect(assertion.sources.some((source) => source.ref === greenfieldDocumentOutputEvidence("world-document"))).toBe(false);
+  });
+
+  it("commits an ordering-independent compiled world Fragment through the real Free Greenfield gateway", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    seedProposeTool(workspace);
+    const initialCheckpoint = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+    const args = compileGrowthWorldFragment({
+      summary: "Create a source-bound world.",
+      world: { localId: "world", title: "Tide World" },
+      entities: [
+        { localId: "pier", kind: "location", title: "Pier", parentRef: "harbor" },
+        { localId: "harbor", kind: "location", title: "Harbor", parentRef: "world" },
+      ],
+      documents: [{ localId: "setting", ownerRef: "world", kind: "setting", title: "Setting", content: "The tide governs the harbor." }],
+      assertions: [{ localId: "tide", scopeRef: "world", subject: "tide", predicate: "governs", object: { target: "harbor" }, sourceDocumentRefs: ["setting"] }],
+      relations: [{ localId: "world-harbor", sourceRef: "world", targetRef: "harbor" }],
+    }, { cycleId: "cycle-compiled", worldRootResourceId: worldRoot.id });
+    const gateway = createWorkspaceAgentToolGateway(workspace, new WorkspaceChangeSetPolicy(workspace), () => true);
+    const result = await gateway.proposeChangeSet(args, invocationContext("free", true));
+    expect(result).toMatchObject({ mode: "free", status: "committed", gateStatus: "ready" });
+    const head = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+    expect(head).not.toBe(initialCheckpoint);
+    const outputs = new ChangeSetRepository(workspace).listOutputs(result.changeSetId);
+    expect(result.committedOutputs).toEqual(outputs.map(({ itemId, kind, outputId }) => ({ itemId, kind, outputId })));
+    expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get() as { count: number }).count)).toBe(1);
+    const resources = new ResourceRepository(workspace).listCurrent();
+    const world = resources.find((resource) => resource.title === "Tide World")!;
+    const harbor = resources.find((resource) => resource.title === "Harbor")!;
+    const pier = resources.find((resource) => resource.title === "Pier")!;
+    expect(harbor.parentId).toBe(world.id);
+    expect(pier.parentId).toBe(harbor.id);
+    const assertion = new AssertionRepository(workspace).listCurrentInScopes([world.id])[0]!;
+    const document = new DocumentRepository(workspace).getCurrentStable(world.id)!;
+    const documentOutput = outputs.find((output) => output.kind === "document_version")!;
+    expect(document).toBeDefined();
+    expect(assertion.sources).toContainEqual({ kind: "evidence_version", ref: documentOutput.outputId });
+    expect(assertion.sources.some((source) => source.ref.startsWith("greenfield_document_output:"))).toBe(false);
+    expect(outputs.some((output) => output.kind.startsWith("project_file"))).toBe(false);
+  });
+
+  it("rejects an invalid Fragment parent kind before Gateway submission leaves any durable state", () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    let code: string | null = null;
+    try { compileGrowthWorldFragment({
+      summary: "Invalid parent shape.", world: { localId: "world", title: "World" },
+      entities: [{ localId: "faction", kind: "faction", title: "Faction" }, { localId: "location", kind: "location", title: "Location", parentRef: "faction" }],
+      documents: [{ localId: "setting", ownerRef: "world", kind: "setting", title: "Setting", content: "Source." }],
+      assertions: [{ localId: "fact", scopeRef: "world", subject: "subject", predicate: "predicate", object: { value: "fact" }, sourceDocumentRefs: ["setting"] }], relations: [],
+    }, { cycleId: "cycle-invalid-parent", worldRootResourceId: worldRoot.id }); } catch (error) { code = (error as { code?: string }).code ?? null; }
+    expect(code).toBe("GROWTH_FRAGMENT_PARENT_KIND_INVALID");
+    expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get() as { count: number }).count)).toBe(0);
+    expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_set_outputs").get() as { count: number }).count)).toBe(0);
+    expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM resource_revisions WHERE object_kind <> 'domain_root'").get() as { count: number }).count)).toBe(0);
   });
 
   it("rejects Greenfield requests after formal content exists and never creates a Change Set", async () => {

@@ -22,6 +22,7 @@ export const growthRunBindingSchema = z.object({
   ruleRevision: z.number().int().min(1).max(1_000_000),
   authorizedScopeResourceIds: z.array(identifierSchema).min(1).max(100),
   seedResourceIds: z.array(identifierSchema).max(100),
+  domainRootResourceIds: z.object({ world: identifierSchema, oc: identifierSchema, story: identifierSchema }).strict(),
   greenfieldCreateAuthorized: z.boolean(),
 }).strict().superRefine((value, context) => {
   if (new Set(value.authorizedScopeResourceIds).size !== value.authorizedScopeResourceIds.length) {
@@ -29,6 +30,10 @@ export const growthRunBindingSchema = z.object({
   }
   if (new Set(value.seedResourceIds).size !== value.seedResourceIds.length) {
     context.addIssue({ code: "custom", path: ["seedResourceIds"], message: "Growth binding seeds must be unique." });
+  }
+  const roots = Object.values(value.domainRootResourceIds);
+  if (new Set(roots).size !== roots.length || roots.some((root) => !value.authorizedScopeResourceIds.includes(root))) {
+    context.addIssue({ code: "custom", path: ["domainRootResourceIds"], message: "Growth domain roots must be unique authorized scopes." });
   }
 });
 

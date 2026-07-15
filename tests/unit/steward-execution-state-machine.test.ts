@@ -70,7 +70,7 @@ describe("Steward tool handoff state machine", () => {
       authorizedScopeResourceIds: ["world-1"],
       growthBinding: {
         capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", phase: "world", inputCheckpointId: "checkpoint-1",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-1"], seedResourceIds: [], greenfieldCreateAuthorized: false,
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
       },
       operationalTools: [retrieve, propose],
       resultCapture: createRoleOutputTool("steward"),
@@ -78,7 +78,7 @@ describe("Steward tool handoff state machine", () => {
 
     expect(machine.tools.map((candidate) => candidate.name)).not.toContain("submit_steward_plan");
     expect(machine.snapshot().plan).toEqual({
-      objective: "change_set", scopeResourceIds: ["world-1"], steps: ["retrieve_graph_evidence", "propose_change_set"],
+      objective: "change_set", scopeResourceIds: ["world-1", "oc-root", "story-root"], steps: ["retrieve_graph_evidence", "propose_change_set"],
     });
     expect(machine.requiredNextTool()).toBe("retrieve_graph_evidence");
     await expect(tool(machine.tools, "retrieve_graph_evidence").execute("growth-legacy-retrieve", { scopeResourceIds: ["world-1"] }))
@@ -154,12 +154,12 @@ describe("Steward tool handoff state machine", () => {
         mode: "free", userInput: "由可信 Growth 阶段驱动", authorizedScopeResourceIds: ["world-1"],
         growthBinding: {
           capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: `cycle-${phase}`, phase, inputCheckpointId: "checkpoint",
-          ruleRevision: 1, authorizedScopeResourceIds: ["world-1"], seedResourceIds: [], greenfieldCreateAuthorized: false,
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
         },
         operationalTools: [retrieve, writer, propose], resultCapture: createRoleOutputTool("steward"),
       });
       expect(machine.snapshot().plan).toEqual({
-        objective: "change_set", scopeResourceIds: ["world-1"], steps: ["retrieve_graph_evidence", "writer", "propose_change_set"],
+        objective: "change_set", scopeResourceIds: ["world-1", "oc-root", "story-root"], steps: ["retrieve_graph_evidence", "writer", "propose_change_set"],
       });
       await expect(tool(machine.tools, "propose_change_set").execute("early", { summary: "blocked", items: [] }))
         .rejects.toMatchObject({ code: "STEWARD_STEP_OUT_OF_ORDER" });
@@ -216,7 +216,7 @@ describe("Steward tool handoff state machine", () => {
       authorizedScopeResourceIds: ["world-root"],
       growthBinding: {
         capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", phase: "world", inputCheckpointId: "checkpoint",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-root"], seedResourceIds: [], greenfieldCreateAuthorized,
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized,
       },
       operationalTools: [retrieve, propose], resultCapture: createRoleOutputTool("steward"),
     });
@@ -227,6 +227,11 @@ describe("Steward tool handoff state machine", () => {
     });
     expect(authorized.requiredNextTool()).toBe("propose_change_set");
     expect(authorized.snapshot().blockReason).toBeNull();
+    await expect(tool(authorized.tools, "submit_steward_result").execute("authorized-early-result", {
+      status: "blocked", message: "not yet", evidenceIds: [], toolOutcomes: [{ tool: "retrieve_graph_evidence", status: "succeeded" }],
+      changeSet: { state: "none", changeSetId: null }, escalations: [],
+    })).rejects.toMatchObject({ code: "STEWARD_STEP_REQUIRED" });
+    expect(authorized.requiredNextTool()).toBe("propose_change_set");
 
     const unauthorized = makeMachine(false);
     await tool(unauthorized.tools, "retrieve_graph_evidence").execute("unauthorized-retrieve", {
@@ -246,7 +251,7 @@ describe("Steward tool handoff state machine", () => {
     };
     const binding = {
       capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", phase: "world" as const, inputCheckpointId: "checkpoint",
-      ruleRevision: 1, authorizedScopeResourceIds: ["world-root"], seedResourceIds: [], greenfieldCreateAuthorized: true,
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: true,
     };
     const retrieve = successfulTool("retrieve_graph_evidence", emptyReceipt);
     let attempts = 0;

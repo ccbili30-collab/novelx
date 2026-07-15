@@ -72,6 +72,7 @@ export class GrowthRunLifecycle {
       ruleRevision: cycle.ruleRevision,
       authorizedScopeResourceIds: goal.authorizedScopeResourceIds,
       seedResourceIds: trustedSeedResourceIds(this.workspace, goal, cycle.inputCheckpointId),
+      domainRootResourceIds: trustedDomainRoots(this.workspace, cycle.inputCheckpointId, goal.authorizedScopeResourceIds),
       greenfieldCreateAuthorized: input.request.mode === "free"
         && cycle.sequence === 1
         && isGreenfieldWorkspaceEmpty(this.workspace),
@@ -412,6 +413,18 @@ function trustedSeedResourceIds(workspace: WorkspaceDatabase, goal: GrowthGoal, 
     throw growthRunError("GROWTH_BINDING_INVALID");
   }
   return [document.resourceId];
+}
+
+function trustedDomainRoots(workspace: WorkspaceDatabase, checkpointId: string, authorizedScopeResourceIds: string[]): { world: string; oc: string; story: string } {
+  const roots = new ResourceRepository(workspace).listAtCheckpoint(checkpointId).filter((resource) => resource.objectKind === "domain_root");
+  const select = (type: "world" | "oc" | "story"): string => {
+    const matches = roots.filter((resource) => resource.type === type && authorizedScopeResourceIds.includes(resource.id));
+    if (matches.length !== 1) throw growthRunError("GROWTH_BINDING_INVALID");
+    return matches[0]!.id;
+  };
+  const result = { world: select("world"), oc: select("oc"), story: select("story") };
+  if (new Set(Object.values(result)).size !== 3) throw growthRunError("GROWTH_BINDING_INVALID");
+  return result;
 }
 
 function uniqueStrings(values: string[]): string[] { return [...new Set(values)]; }

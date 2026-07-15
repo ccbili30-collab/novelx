@@ -1,5 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
+import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "../growth/growthWorldFragment";
 import {
   proposeChangeSetArgsSchema,
   proposeChangeSetResultSchema,
@@ -298,7 +299,9 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
           text: JSON.stringify({
             result,
             novaxInstruction: options.growthBinding
-              ? "This pinned Growth receipt is recorded. Do not repeat the retrieval. If evidence is sufficient, call propose_change_set."
+              ? options.growthBinding.phase === "world" && options.growthBinding.greenfieldCreateAuthorized
+                ? "The Growth Receipt is recorded. Empty evidence is expected for authorized Greenfield creation. Create from the locked seed and rules: the required next tool is propose_change_set with one high-level world Fragment. Do not block solely because retrieval is empty."
+                : "This pinned Growth receipt is recorded. Do not repeat the retrieval. If evidence is sufficient, call propose_change_set."
               : "Do not repeat the same retrieval. If the user requested a Change Set and evidence is sufficient, call propose_change_set. If the evidence conflicts or the user requested validation, call checker. Otherwise submit the final structured result.",
           }),
         }],
@@ -307,14 +310,23 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
     },
   };
 
-  const propose: AgentTool<typeof proposeParameters> = {
+  const worldFragment = options.growthBinding?.phase === "world" ? options.growthBinding : null;
+  const propose: AgentTool<typeof proposeParameters | typeof growthWorldFragmentParameters> = {
     name: "propose_change_set",
     label: "生成候选变更",
-    description: "Submit a candidate Change Set for Novax policy evaluation; this tool cannot approve or commit it.",
-    parameters: proposeParameters,
+    description: worldFragment
+      ? "Submit one high-level world Fragment: at least one world, one setting document, and one sourced Assertion; locations, factions, documents, facts, and related_to relations are open arrays. Do not supply low-level IDs, parents, dependencies, create/state fields, or project-file operations."
+      : "Submit a candidate Change Set for Novax policy evaluation; this tool cannot approve or commit it.",
+    parameters: worldFragment ? growthWorldFragmentParameters : proposeParameters,
     execute: async (_toolCallId, params, signal) => {
+      const args = worldFragment
+        ? compileGrowthWorldFragment(params, {
+          cycleId: worldFragment.cycleId,
+          worldRootResourceId: worldFragment.domainRootResourceIds.world,
+        })
+        : proposeChangeSetArgsSchema.parse(params);
       const result = proposeChangeSetResultSchema.parse(await executor.proposeChangeSet(
-        proposeChangeSetArgsSchema.parse(params),
+        args,
         signal,
       ));
       return {
