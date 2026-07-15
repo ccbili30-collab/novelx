@@ -44,12 +44,14 @@ export interface GrowthWorldMapDisplay {
 
 export interface GrowthVisualClimaxState {
   observedRunningGoalIds: string[];
+  inFlightGoalAssetKeys: string[];
   openedGoalAssetKeys: string[];
 }
 
 export interface GrowthVisualClimaxDecision {
   state: GrowthVisualClimaxState;
   artifact: GrowthImageArtifact | null;
+  key: string | null;
 }
 
 const terminalCoordinatorStates = new Set<CoordinatorStatus>(["completed", "blocked", "failed", "cancelled", "reconciliation_required"]);
@@ -118,7 +120,7 @@ export function advanceGrowthVisualClimax(
   presentation: GrowthPresentation | null,
   artifacts: readonly AgentArtifact[],
 ): GrowthVisualClimaxDecision {
-  if (!presentation) return { state: current, artifact: null };
+  if (!presentation) return { state: current, artifact: null, key: null };
   const observedRunningGoalIds = presentation.coordinatorStatus === "running" && !current.observedRunningGoalIds.includes(presentation.goalId)
     ? [...current.observedRunningGoalIds, presentation.goalId]
     : current.observedRunningGoalIds;
@@ -128,11 +130,28 @@ export function advanceGrowthVisualClimax(
     && observedRunningGoalIds.includes(presentation.goalId)
     && display.artifact?.status === "ready"
     && key !== null
+    && !current.inFlightGoalAssetKeys.includes(key)
     && !current.openedGoalAssetKeys.includes(key);
-  const openedGoalAssetKeys = canOpen ? [...current.openedGoalAssetKeys, key] : current.openedGoalAssetKeys;
+  const inFlightGoalAssetKeys = canOpen ? [...current.inFlightGoalAssetKeys, key] : current.inFlightGoalAssetKeys;
   return {
-    state: { observedRunningGoalIds, openedGoalAssetKeys },
+    state: { ...current, observedRunningGoalIds, inFlightGoalAssetKeys },
     artifact: canOpen ? display.artifact : null,
+    key: canOpen ? key : null,
+  };
+}
+
+export function settleGrowthVisualClimax(
+  current: GrowthVisualClimaxState,
+  key: string,
+  opened: boolean,
+): GrowthVisualClimaxState {
+  if (!current.inFlightGoalAssetKeys.includes(key)) return current;
+  return {
+    ...current,
+    inFlightGoalAssetKeys: current.inFlightGoalAssetKeys.filter((candidate) => candidate !== key),
+    openedGoalAssetKeys: opened && !current.openedGoalAssetKeys.includes(key)
+      ? [...current.openedGoalAssetKeys, key]
+      : current.openedGoalAssetKeys,
   };
 }
 

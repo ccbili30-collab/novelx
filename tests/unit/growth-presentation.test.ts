@@ -184,24 +184,53 @@ describe("growth presentation", () => {
     }
   });
 
-  it("opens a live observed Growth world map once after its coordinator completes", async () => {
-    const { advanceGrowthVisualClimax, createGrowthPresentation } = await presentation();
+  it("opens a live observed Growth world map once only after navigation succeeds", async () => {
+    const { advanceGrowthVisualClimax, createGrowthPresentation, settleGrowthVisualClimax } = await presentation();
     const map = worldMapArtifact("ready");
     const running = createGrowthPresentation(snapshot());
-    const observed = advanceGrowthVisualClimax({ observedRunningGoalIds: [], openedGoalAssetKeys: [] }, running, [map]);
+    const observed = advanceGrowthVisualClimax({
+      observedRunningGoalIds: [],
+      inFlightGoalAssetKeys: [],
+      openedGoalAssetKeys: [],
+    }, running, [map]);
     const completed = createGrowthPresentation(snapshot({ coordinatorStatus: "completed", goal: { id: goalId, status: "active", currentCycleSequence: 3 } }));
-    const opened = advanceGrowthVisualClimax(observed.state, completed, [map]);
-    const duplicate = advanceGrowthVisualClimax(opened.state, completed, [map]);
+    const candidate = advanceGrowthVisualClimax(observed.state, completed, [map]);
+    const duplicateInFlight = advanceGrowthVisualClimax(candidate.state, completed, [map]);
+    const openedState = settleGrowthVisualClimax(candidate.state, candidate.key!, true);
+    const duplicateOpened = advanceGrowthVisualClimax(openedState, completed, [map]);
 
     expect(observed.artifact).toBeNull();
-    expect(opened.artifact?.assetId).toBe("map-asset-1");
-    expect(duplicate.artifact).toBeNull();
+    expect(candidate.artifact?.assetId).toBe("map-asset-1");
+    expect(candidate.state.inFlightGoalAssetKeys).toEqual([`${goalId}:map-asset-1`]);
+    expect(candidate.state.openedGoalAssetKeys).toEqual([]);
+    expect(duplicateInFlight.artifact).toBeNull();
+    expect(openedState).toMatchObject({
+      inFlightGoalAssetKeys: [],
+      openedGoalAssetKeys: [`${goalId}:map-asset-1`],
+    });
+    expect(duplicateOpened.artifact).toBeNull();
+  });
+
+  it("releases failed navigation for a later authoritative retry and ignores stale completion after reset", async () => {
+    const { advanceGrowthVisualClimax, createGrowthPresentation, settleGrowthVisualClimax } = await presentation();
+    const map = worldMapArtifact("ready");
+    const initial = { observedRunningGoalIds: [], inFlightGoalAssetKeys: [], openedGoalAssetKeys: [] };
+    const observed = advanceGrowthVisualClimax(initial, createGrowthPresentation(snapshot()), [map]);
+    const completed = createGrowthPresentation(snapshot({ coordinatorStatus: "completed" }));
+    const first = advanceGrowthVisualClimax(observed.state, completed, [map]);
+    const released = settleGrowthVisualClimax(first.state, first.key!, false);
+    const retried = advanceGrowthVisualClimax(released, completed, [map]);
+
+    expect(released.inFlightGoalAssetKeys).toEqual([]);
+    expect(released.openedGoalAssetKeys).toEqual([]);
+    expect(retried.artifact?.assetId).toBe("map-asset-1");
+    expect(settleGrowthVisualClimax(initial, first.key!, true)).toBe(initial);
   });
 
   it("does not auto-open restored completed, blocked, failed, or unrelated Growth goals", async () => {
     const { advanceGrowthVisualClimax, createGrowthPresentation } = await presentation();
     const map = worldMapArtifact("ready");
-    const initial = { observedRunningGoalIds: [], openedGoalAssetKeys: [] };
+    const initial = { observedRunningGoalIds: [], inFlightGoalAssetKeys: [], openedGoalAssetKeys: [] };
     const restoredCompleted = createGrowthPresentation(snapshot({ coordinatorStatus: "completed", goal: { id: goalId, status: "active", currentCycleSequence: 3 } }));
     const observed = advanceGrowthVisualClimax(initial, createGrowthPresentation(snapshot()), [map]);
     const unrelatedCompleted = createGrowthPresentation(snapshot({

@@ -89,6 +89,8 @@ export function App() {
   const [renameResourceTarget, setRenameResourceTarget] = useState<WorkspaceSnapshot["resources"][number] | null>(null);
   const [deleteResourceTarget, setDeleteResourceTarget] = useState<WorkspaceSnapshot["resources"][number] | null>(null);
   const editorRef = useRef<EditorHostHandle | null>(null);
+  const workspaceRef = useRef<WorkspaceSnapshot | null>(workspace);
+  workspaceRef.current = workspace;
   const showcaseNavigationScope = useRef({ key: null as string | null, generation: 0 });
   const currentShowcaseScopeKey = activeProjectId && activeSessionId ? `${activeProjectId}:${activeSessionId}` : null;
   if (showcaseNavigationScope.current.key !== currentShowcaseScopeKey) {
@@ -379,31 +381,37 @@ export function App() {
     setMode("player");
   }
 
-  const openReadyImageShowcase = useCallback(async (artifact: Extract<AgentArtifact, { kind: "image" }>) => {
+  const openReadyImageShowcase = useCallback(async (artifact: Extract<AgentArtifact, { kind: "image" }>): Promise<boolean> => {
     const requestGeneration = showcaseNavigationScope.current.generation;
-    const currentWorkspace = await window.novaxDesktop.workspace.getCurrent() ?? workspace;
-    if (showcaseNavigationScope.current.generation !== requestGeneration) return;
-    if (!currentWorkspace) return;
-    const result = await window.novaxDesktop.workspace.listImageAssets();
-    if (showcaseNavigationScope.current.generation !== requestGeneration) return;
-    if (!result.ok) return;
-    const asset = result.assets.find((candidate) => candidate.assetId === artifact.assetId);
-    if (!asset) return;
-    const stories = currentWorkspace.resources.filter((resource) => resource.type === "story" && resource.objectKind === "story");
-    const candidates = stories.filter((story) => {
-      const relevantIds = collectShowcaseNavigationIds(story.id, currentWorkspace);
-      return asset.sourceResourceIds.some((resourceId) => relevantIds.has(resourceId));
-    });
-    const target = candidates.length === 1
-      ? candidates[0]
-      : candidates.length === 0 && stories.length === 1 ? stories[0] : null;
-    if (!target) return;
-    if (showcaseNavigationScope.current.generation !== requestGeneration) return;
-    setWorkspace(currentWorkspace);
-    setShowcaseStoryId(target.id);
-    setCommittedWorkspaceRefreshKey((value) => value + 1);
-    setMode("showcase");
-  }, [workspace]);
+    try {
+      const currentWorkspace = await window.novaxDesktop.workspace.getCurrent() ?? workspaceRef.current;
+      if (showcaseNavigationScope.current.generation !== requestGeneration || !currentWorkspace) return false;
+      const result = await window.novaxDesktop.workspace.listImageAssets();
+      if (showcaseNavigationScope.current.generation !== requestGeneration || !result.ok) return false;
+      const asset = result.assets.find((candidate) => candidate.assetId === artifact.assetId);
+      if (!asset) return false;
+      const stories = currentWorkspace.resources.filter((resource) => resource.type === "story" && resource.objectKind === "story");
+      const candidates = stories.filter((story) => {
+        const relevantIds = collectShowcaseNavigationIds(story.id, currentWorkspace);
+        return asset.sourceResourceIds.some((resourceId) => relevantIds.has(resourceId));
+      });
+      const target = candidates.length === 1
+        ? candidates[0]
+        : candidates.length === 0 && stories.length === 1 ? stories[0] : null;
+      if (!target || showcaseNavigationScope.current.generation !== requestGeneration) return false;
+      setWorkspace(currentWorkspace);
+      setShowcaseStoryId(target.id);
+      setCommittedWorkspaceRefreshKey((value) => value + 1);
+      setMode("showcase");
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const openReadyImageManually = useCallback(async (artifact: Extract<AgentArtifact, { kind: "image" }>): Promise<void> => {
+    await openReadyImageShowcase(artifact);
+  }, [openReadyImageShowcase]);
 
   async function openChangeSet(changeSetId: string) {
     await flushEditor();
@@ -708,7 +716,7 @@ export function App() {
               onOpenResource={openActivityResource}
               onOpenDocument={openShowcaseDocument}
               onOpenChangeSet={openChangeSet}
-              onOpenReadyImage={openReadyImageShowcase}
+              onOpenReadyImage={openReadyImageManually}
               onOpenGraph={openGrowthGraph}
               onViewAll={() => setMode("ide")}
               onCreateHandoff={() => setHandoffOpen(true)}

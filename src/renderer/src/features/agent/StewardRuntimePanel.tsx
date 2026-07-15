@@ -21,6 +21,7 @@ import {
   mergeGrowthArtifacts,
   mergeGrowthEvent,
   mergeGrowthSnapshot,
+  settleGrowthVisualClimax,
   type GrowthVisualClimaxState,
   type GrowthPresentation,
 } from "./growthPresentation";
@@ -37,7 +38,7 @@ interface StewardRuntimePanelProps {
   onOpenChangeSet(changeSetId: string): Promise<void>;
   onCommittedChangeSet(): Promise<void>;
   onOpenDocumentReference?(reference: Extract<AgentArtifact, { kind: "document_reference" }>): Promise<void> | void;
-  onReadyImage?(image: Extract<AgentArtifact, { kind: "image" }>): Promise<void> | void;
+  onReadyImage?(image: Extract<AgentArtifact, { kind: "image" }>): Promise<boolean> | boolean;
   onActivityChange(activity: { label: string; domains: string[] } | null): void;
   onGrowthPresentationChange(presentation: GrowthPresentation | null): void;
   onGrowthArtifactsChange(artifacts: AgentArtifact[]): void;
@@ -101,7 +102,25 @@ export function StewardRuntimePanel({
   const growthRef = useRef<GrowthPresentation | null>(null);
   const growthArtifactsRef = useRef<AgentArtifact[]>([]);
   const committedGrowthChangeSets = useRef(new Set<string>());
-  const growthVisualClimax = useRef<GrowthVisualClimaxState>({ observedRunningGoalIds: [], openedGoalAssetKeys: [] });
+  const growthVisualClimax = useRef<GrowthVisualClimaxState>({
+    observedRunningGoalIds: [],
+    inFlightGoalAssetKeys: [],
+    openedGoalAssetKeys: [],
+  });
+  const callbacks = useRef({
+    onActivityChange,
+    onCommittedChangeSet,
+    onGrowthArtifactsChange,
+    onGrowthPresentationChange,
+    onReadyImage,
+  });
+  callbacks.current = {
+    onActivityChange,
+    onCommittedChangeSet,
+    onGrowthArtifactsChange,
+    onGrowthPresentationChange,
+    onReadyImage,
+  };
 
   const growthStorageKey = projectId && session ? `novelx:growth-goal:${projectId}:${session.id}` : null;
   const growthRequestToken = useRef<GrowthRequestToken>({ generation: 0, scopeKey: null });
@@ -119,28 +138,46 @@ export function StewardRuntimePanel({
     if (next && growthRef.current && growthRef.current.goalId !== next.goalId) resetGrowthVisualState();
     growthRef.current = next;
     setGrowthPresentation(next);
-    onGrowthPresentationChange(next);
+    callbacks.current.onGrowthPresentationChange(next);
     maybeOpenGrowthVisualClimax(next, growthArtifactsRef.current);
   }
 
   function publishGrowthArtifacts(next: AgentArtifact[]) {
     growthArtifactsRef.current = next;
     setGrowthArtifacts(next);
-    onGrowthArtifactsChange(next);
+    callbacks.current.onGrowthArtifactsChange(next);
     maybeOpenGrowthVisualClimax(growthRef.current, next);
   }
 
   function resetGrowthVisualState() {
     growthArtifactsRef.current = [];
     setGrowthArtifacts([]);
-    onGrowthArtifactsChange([]);
-    growthVisualClimax.current = { observedRunningGoalIds: [], openedGoalAssetKeys: [] };
+    callbacks.current.onGrowthArtifactsChange([]);
+    growthVisualClimax.current = {
+      observedRunningGoalIds: [],
+      inFlightGoalAssetKeys: [],
+      openedGoalAssetKeys: [],
+    };
   }
 
   function maybeOpenGrowthVisualClimax(presentation: GrowthPresentation | null, artifacts: AgentArtifact[]) {
     const decision = advanceGrowthVisualClimax(growthVisualClimax.current, presentation, artifacts);
     growthVisualClimax.current = decision.state;
-    if (decision.artifact) void onReadyImage?.(decision.artifact);
+    if (!decision.artifact || !decision.key) return;
+    const callback = callbacks.current.onReadyImage;
+    if (!callback) {
+      growthVisualClimax.current = settleGrowthVisualClimax(growthVisualClimax.current, decision.key, false);
+      return;
+    }
+    const key = decision.key;
+    void Promise.resolve().then(() => callback(decision.artifact!)).then(
+      (opened) => {
+        growthVisualClimax.current = settleGrowthVisualClimax(growthVisualClimax.current, key, opened);
+      },
+      () => {
+        growthVisualClimax.current = settleGrowthVisualClimax(growthVisualClimax.current, key, false);
+      },
+    );
   }
 
   function clearStoredGrowth() {
@@ -169,13 +206,13 @@ export function StewardRuntimePanel({
         if (isGrowthRun && growth) publishGrowth(appendGrowthAgentEvent(growth, event));
         if (event.phase === "started") {
           setActivity(event.label);
-          onActivityChange({ label: event.label, domains: event.domains ?? [] });
+          callbacks.current.onActivityChange({ label: event.label, domains: event.domains ?? [] });
         } else if (event.phase === "failed") {
           setActivity(`${event.label}失败`);
-          onActivityChange({ label: `${event.label}失败`, domains: event.domains ?? [] });
+          callbacks.current.onActivityChange({ label: `${event.label}失败`, domains: event.domains ?? [] });
         } else {
           setActivity(null);
-          onActivityChange(null);
+          callbacks.current.onActivityChange(null);
         }
         return;
       }
@@ -183,7 +220,7 @@ export function StewardRuntimePanel({
       terminalRunIds.current.add(event.runId);
       setActiveRunId((current) => current === event.runId ? null : current);
       setActivity(null);
-      onActivityChange(null);
+      callbacks.current.onActivityChange(null);
       if (isGrowthRun) {
         addGrowthArtifacts(event.artifacts);
         return;
@@ -192,16 +229,16 @@ export function StewardRuntimePanel({
       if (event.type === "run.completed") {
         appendEntry({ kind: "assistant", text: event.message, outcome: event.outcome, artifacts: event.artifacts });
         for (const artifact of event.artifacts) {
-          if (artifact.kind === "image" && artifact.status === "ready") void onReadyImage?.(artifact);
+          if (artifact.kind === "image" && artifact.status === "ready") void callbacks.current.onReadyImage?.(artifact);
         }
         if (event.changeSetState === "committed" && event.artifacts.some((artifact) => (
           artifact.kind === "change_set" && artifact.state === "committed"
-        ))) void onCommittedChangeSet();
+        ))) void callbacks.current.onCommittedChangeSet();
       } else {
         appendEntry({ kind: "error", text: event.message, artifacts: event.artifacts });
       }
     });
-  }, [growthStorageKey, session?.id, onActivityChange, onCommittedChangeSet, onReadyImage]);
+  }, [growthStorageKey, session?.id]);
 
   useEffect(() => {
     if (!session) return;
@@ -218,11 +255,11 @@ export function StewardRuntimePanel({
       if (live.event.phase === "change_set_committed" && live.event.durableState === "committed"
         && !committedGrowthChangeSets.current.has(live.event.targetId)) {
         committedGrowthChangeSets.current.add(live.event.targetId);
-        void onCommittedChangeSet();
+        void callbacks.current.onCommittedChangeSet();
       }
       void restoreGrowth(current.goalId);
     });
-  }, [growthStorageKey, session?.id, onCommittedChangeSet, onReadyImage]);
+  }, [growthStorageKey, session?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -236,9 +273,9 @@ export function StewardRuntimePanel({
     resetGrowthVisualState();
     growthRef.current = null;
     setGrowthPresentation(null);
-    onGrowthPresentationChange(null);
+    callbacks.current.onGrowthPresentationChange(null);
     committedGrowthChangeSets.current.clear();
-    onActivityChange(null);
+    callbacks.current.onActivityChange(null);
     terminalRunIds.current.clear();
     if (session) {
       void window.novaxDesktop.session.messages({ sessionId: session.id }).then((result) => {
@@ -247,7 +284,7 @@ export function StewardRuntimePanel({
       });
     }
     return () => { cancelled = true; };
-  }, [projectId, session?.id, messageRefreshKey, onActivityChange, onGrowthPresentationChange, onGrowthArtifactsChange]);
+  }, [projectId, session?.id, messageRefreshKey]);
 
   useEffect(() => {
     if (!growthStorageKey || !projectId || !session) return;
