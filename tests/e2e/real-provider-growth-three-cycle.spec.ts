@@ -287,7 +287,7 @@ async function startGrowthAndWatch(
   agentEvents: AgentRunEvent[];
   elapsedMs: number;
   preTermination?: SafePreTermination;
-  termination?: "GROWTH_CYCLE_WATCHDOG_TIMEOUT" | "GROWTH_OVERALL_TIMEOUT";
+  termination?: "GROWTH_CYCLE_WATCHDOG_TIMEOUT" | "GROWTH_OVERALL_TIMEOUT" | "GROWTH_AGENT_TERMINAL_PROJECTION_TIMEOUT";
 }> {
   const bufferKey = `__novaxGrowthWatch_${randomUUID()}`;
   const started = await page.evaluate(async ({ receivedRequestId, receivedBufferKey }) => {
@@ -323,6 +323,7 @@ async function startGrowthAndWatch(
   const watched = await watchGrowthTerminal({
     overallTimeoutMs,
     cycleTimeoutMs,
+    terminalDeliveryTimeoutMs: 60_000,
     pollMs: 500,
     getSnapshot: () => page.evaluate(async ({ projectId, sessionId, goalId }) => {
       const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
@@ -333,6 +334,12 @@ async function startGrowthAndWatch(
       if (!buffer) throw new Error("GROWTH_EVENT_BUFFER_MISSING");
       return { growthEvents: [...buffer.growthEvents], agentEvents: [...buffer.agentEvents] };
     }, bufferKey),
+    terminalDeliverySatisfied: (snapshot, events) => {
+      const terminalRunIds = new Set(events.agentEvents
+        .filter((event) => event.type === "run.completed" || event.type === "run.failed")
+        .map((event) => event.runId));
+      return snapshot.cycles.every((cycle) => cycle.runId === null || terminalRunIds.has(cycle.runId));
+    },
     release: () => page.evaluate((receivedBufferKey) => {
       const state = globalThis as typeof globalThis & { [key: string]: unknown };
       const buffer = state[receivedBufferKey] as { releaseGrowth(): void; releaseAgent(): void } | undefined;
@@ -794,7 +801,7 @@ function safeRunAudit(workspace: ReturnType<typeof openWorkspace>, runId: string
 function safeFailureCode(error: unknown): string {
   if (!(error instanceof Error)) return "GROWTH_LIVE_ACCEPTANCE_FAILED";
   const allowlisted = new Set([
-    "GROWTH_CYCLE_WATCHDOG_TIMEOUT", "GROWTH_OVERALL_TIMEOUT", "GROWTH_GET_FAILED", "GROWTH_START_FAILED",
+    "GROWTH_CYCLE_WATCHDOG_TIMEOUT", "GROWTH_OVERALL_TIMEOUT", "GROWTH_AGENT_TERMINAL_PROJECTION_TIMEOUT", "GROWTH_GET_FAILED", "GROWTH_START_FAILED",
     "REAL_PROVIDER_LOCAL_STATE_MISSING", "REAL_PROVIDER_MODEL_ID_MISMATCH", "REAL_PROVIDER_CONFIG_UNAVAILABLE",
     "RESEARCH_RUN_TIMEOUT", "RESEARCH_TERMINAL_INVALID", "GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED",
   ]);

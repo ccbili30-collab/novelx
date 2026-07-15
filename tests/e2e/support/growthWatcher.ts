@@ -7,7 +7,7 @@ export interface GrowthWatchResult<TSnapshot extends GrowthWatchSnapshot, TEvent
   snapshot: TSnapshot;
   events: TEvents;
   elapsedMs: number;
-  termination: "GROWTH_CYCLE_WATCHDOG_TIMEOUT" | "GROWTH_OVERALL_TIMEOUT" | null;
+  termination: "GROWTH_CYCLE_WATCHDOG_TIMEOUT" | "GROWTH_OVERALL_TIMEOUT" | "GROWTH_AGENT_TERMINAL_PROJECTION_TIMEOUT" | null;
 }
 
 export async function watchGrowthTerminal<TSnapshot extends GrowthWatchSnapshot, TEvents>(input: {
@@ -16,6 +16,8 @@ export async function watchGrowthTerminal<TSnapshot extends GrowthWatchSnapshot,
   release(): Promise<void>;
   overallTimeoutMs: number;
   cycleTimeoutMs: number;
+  terminalDeliveryTimeoutMs?: number;
+  terminalDeliverySatisfied?(snapshot: TSnapshot, events: TEvents): boolean;
   pollMs?: number;
   now?(): number;
   sleep?(milliseconds: number): Promise<void>;
@@ -25,12 +27,25 @@ export async function watchGrowthTerminal<TSnapshot extends GrowthWatchSnapshot,
   const startedAt = now();
   let watchedCycleId: string | null = null;
   let watchedCycleAt: number | null = null;
+  let coordinatorTerminalAt: number | null = null;
   try {
     for (;;) {
       const snapshot = await input.getSnapshot();
       const events = await input.readEvents();
       const elapsedMs = now() - startedAt;
-      if (snapshot.coordinatorStatus !== "running") return { snapshot, events, elapsedMs, termination: null };
+      if (snapshot.coordinatorStatus !== "running") {
+        if (!input.terminalDeliverySatisfied || input.terminalDeliverySatisfied(snapshot, events)) {
+          return { snapshot, events, elapsedMs, termination: null };
+        }
+        coordinatorTerminalAt ??= now();
+        if (now() - coordinatorTerminalAt >= (input.terminalDeliveryTimeoutMs ?? 30_000)) {
+          const finalSnapshot = await input.getSnapshot();
+          const finalEvents = await input.readEvents();
+          return { snapshot: finalSnapshot, events: finalEvents, elapsedMs: now() - startedAt, termination: "GROWTH_AGENT_TERMINAL_PROJECTION_TIMEOUT" };
+        }
+        await sleep(input.pollMs ?? 500);
+        continue;
+      }
       const running = snapshot.cycles.find((cycle) => cycle.status === "running" && cycle.runId !== null);
       if (running?.id !== watchedCycleId) {
         watchedCycleId = running?.id ?? null;
