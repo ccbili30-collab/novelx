@@ -1,0 +1,346 @@
+{
+  "schemaVersion": 1,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [
+    {
+      "id": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:1",
+      "sequence": 1,
+      "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+      "status": "committed"
+    },
+    {
+      "id": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:2",
+      "sequence": 2,
+      "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+      "status": "blocked"
+    }
+  ],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "goalId": "growth-goal:5216addd-4b5a-4116-a012-6050becea988",
+  "preTermination": {
+    "elapsedMs": 114739,
+    "cycles": [
+      {
+        "id": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:1",
+        "sequence": 1,
+        "status": "committed",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e"
+      },
+      {
+        "id": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:2",
+        "sequence": 2,
+        "status": "blocked",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866"
+      }
+    ],
+    "growthEvents": [
+      {
+        "sequence": 1,
+        "cycleId": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:1",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 2,
+        "cycleId": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:1",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 3,
+        "cycleId": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:1",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 4,
+        "cycleId": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:1",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 5,
+        "cycleId": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:2",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 6,
+        "cycleId": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:2",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 7,
+        "cycleId": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:2",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 8,
+        "cycleId": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:2",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "phase": "cycle_terminal",
+        "durableState": "blocked"
+      }
+    ],
+    "agentEvents": [
+      {
+        "type": "run.started",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e"
+      },
+      {
+        "type": "run.activity",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866"
+      },
+      {
+        "type": "run.activity",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "activityLabel": "调用写手",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "outcome": "blocked",
+        "changeSetState": "none"
+      }
+    ]
+  },
+  "failureCode": "GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED",
+  "postTermination": {
+    "cycles": [
+      {
+        "id": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:1",
+        "sequence": 1,
+        "status": "committed",
+        "failureCode": null,
+        "runId": "d069517a-0b43-4d70-831b-610c309d1b9e",
+        "receiptId": "growth-receipt-4b455e8f-d54c-4a66-866f-9c6191cba969",
+        "changeSetId": "4f733301-240d-4a16-9d42-eabac3db41c5",
+        "inputCheckpointId": "d7a367eb-cae7-40eb-8af6-9c97e3f8a163",
+        "outputCheckpointId": "6fd1b770-6435-4b44-92b4-8a314084d8b5",
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "completed",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "id": "growth-goal:5216addd-4b5a-4116-a012-6050becea988:cycle:2",
+        "sequence": 2,
+        "status": "blocked",
+        "failureCode": "GROWTH_CHANGE_SET_NOT_COMMITTED",
+        "runId": "6e0bf785-c943-4aac-a1b0-3a9fbd868866",
+        "receiptId": "growth-receipt-1994ee9e-eca2-4920-b715-2e8ce9207628",
+        "changeSetId": null,
+        "inputCheckpointId": "6fd1b770-6435-4b44-92b4-8a314084d8b5",
+        "outputCheckpointId": null,
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "blocked",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "blocked",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "writer",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "counts": {
+      "resources": 5,
+      "documents": 1,
+      "assertions": 3,
+      "relations": 3
+    },
+    "changeSets": {
+      "total": 1,
+      "byStatus": [
+        {
+          "status": "committed",
+          "count": 1
+        }
+      ],
+      "outputCount": 13,
+      "checkpointCount": 2,
+      "checkpointDeltaFromInitial": 1
+    }
+  }
+}

@@ -1,0 +1,512 @@
+{
+  "schemaVersion": 1,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "goalId": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf",
+  "preTermination": {
+    "elapsedMs": 363346,
+    "cycles": [
+      {
+        "id": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:1",
+        "sequence": 1,
+        "status": "committed",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3"
+      },
+      {
+        "id": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:2",
+        "sequence": 2,
+        "status": "running",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef"
+      }
+    ],
+    "growthEvents": [
+      {
+        "sequence": 1,
+        "cycleId": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:1",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 2,
+        "cycleId": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:1",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 3,
+        "cycleId": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:1",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 4,
+        "cycleId": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:1",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 5,
+        "cycleId": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:2",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 6,
+        "cycleId": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:2",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 7,
+        "cycleId": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:2",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      }
+    ],
+    "agentEvents": [
+      {
+        "type": "run.started",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3"
+      },
+      {
+        "type": "run.activity",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "activityLabel": "调用写手",
+        "phase": "failed"
+      }
+    ]
+  },
+  "termination": {
+    "attemptedRunId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+    "cancelRequested": true,
+    "terminalObserved": true,
+    "snapshotStatus": "cancelled"
+  },
+  "postTermination": {
+    "cycles": [
+      {
+        "id": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:1",
+        "sequence": 1,
+        "status": "committed",
+        "failureCode": null,
+        "runId": "4b47028a-f505-44b9-8c1e-1fb78ecb86c3",
+        "receiptId": "growth-receipt-36d772d4-7a10-4822-86cb-76bf829a0e12",
+        "changeSetId": "1638a4f3-0b69-47e1-9b65-853eb562775a",
+        "inputCheckpointId": "6b37ccb8-508b-42de-af40-99fb1ddf83c8",
+        "outputCheckpointId": "3b2c27a8-12ee-4b40-b3ad-e36f4250bdaf",
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "completed",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "id": "growth-goal:8ce6503d-50a3-427c-9370-4b7d1649fbdf:cycle:2",
+        "sequence": 2,
+        "status": "cancelled",
+        "failureCode": "GROWTH_RUN_CANCELLED",
+        "runId": "c9b56cd1-3ccf-4db0-bc36-4c2340886bef",
+        "receiptId": "growth-receipt-c1af2622-cf1a-4a9e-813b-4645352f625d",
+        "changeSetId": null,
+        "inputCheckpointId": "3b2c27a8-12ee-4b40-b3ad-e36f4250bdaf",
+        "outputCheckpointId": null,
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "cancelled",
+              "errorCode": "AGENT_RUN_CANCELLED"
+            },
+            {
+              "entityType": "run",
+              "eventType": "cancelled",
+              "errorCode": "AGENT_RUN_CANCELLED"
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "counts": {
+      "resources": 4,
+      "documents": 3,
+      "assertions": 6,
+      "relations": 2
+    },
+    "changeSets": {
+      "total": 1,
+      "byStatus": [
+        {
+          "status": "committed",
+          "count": 1
+        }
+      ],
+      "outputCount": 18,
+      "checkpointCount": 2,
+      "checkpointDeltaFromInitial": 1
+    }
+  },
+  "failureCode": "GROWTH_CYCLE_WATCHDOG_TIMEOUT"
+}
