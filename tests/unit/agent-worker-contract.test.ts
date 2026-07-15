@@ -3,7 +3,7 @@ import { validateToolArguments } from "@earendil-works/pi-ai/compat";
 import { handleAgentWorkerCommand, projectPublicArtifacts } from "../../src/agent-worker/workerController";
 import { createRoleOutputTool } from "../../src/agent-worker/contracts/roleOutputTool";
 import type { PublishedPrompt } from "../../src/agent-worker/promptRegistry";
-import { growthRetrieveGraphEvidenceResultSchema, growthRunBindingSchema } from "../../src/shared/agentWorkerProtocol";
+import { agentWorkerToolResponseSchema, growthRetrieveGraphEvidenceResultSchema, growthRunBindingSchema } from "../../src/shared/agentWorkerProtocol";
 
 const auditRecorder = { record: async () => undefined };
 
@@ -12,11 +12,45 @@ describe("agent worker fail-closed contract", () => {
     const binding = {
       capabilityVersion: "hackathon-growth-persistence-v1", goalId: "goal-1", cycleId: "cycle-1",
       inputCheckpointId: "checkpoint-1", ruleRevision: 1, authorizedScopeResourceIds: ["world-root"],
-      seedResourceIds: ["seed-resource"],
+      phase: "world", seedResourceIds: ["seed-resource"], greenfieldCreateAuthorized: false,
     };
     expect(growthRunBindingSchema.parse(binding)).toEqual(binding);
     expect(growthRunBindingSchema.safeParse({ ...binding, seedResourceIds: ["seed-resource", "seed-resource"] }).success).toBe(false);
     expect(growthRunBindingSchema.safeParse({ ...binding, branchId: "forged" }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, greenfieldCreateAuthorized: "forged" }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, phase: "forged" }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse(({ ...binding, phase: undefined }) as unknown).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, rendererRequestedAuthority: true }).success).toBe(false);
+  });
+
+  it("keeps only allowlisted Change Set policy and domain errors in strict Worker failure responses", () => {
+    const response = {
+      type: "tool.response" as const,
+      runId: "run-1",
+      requestId: "11111111-1111-4111-8111-111111111111",
+      ok: false as const,
+      error: {
+        code: "GREENFIELD_CREATE_ONLY_REQUIRED" as const,
+        message: "Greenfield creation accepts create-only Change Sets.",
+      },
+    };
+    expect(agentWorkerToolResponseSchema.safeParse(response).success).toBe(true);
+    expect(agentWorkerToolResponseSchema.safeParse({
+      ...response,
+      error: {
+        code: "RESOURCE_PARENT_NOT_FOUND",
+        message: "The resource parent is unavailable.",
+      },
+    }).success).toBe(true);
+    expect(agentWorkerToolResponseSchema.safeParse({
+      ...response,
+      error: {
+        code: "CHANGE_SET_APPLY_FAILED",
+        message: "The Change Set could not be applied safely.",
+      },
+    }).success).toBe(true);
+    expect(agentWorkerToolResponseSchema.safeParse({ ...response, error: { ...response.error, code: "UNSAFE_TOKEN=secret" } }).success).toBe(false);
+    expect(agentWorkerToolResponseSchema.safeParse({ ...response, error: { ...response.error, raw: "token=secret" } }).success).toBe(false);
   });
 
   it("rejects unknown Growth evidence resource and relation enum leaves", () => {
@@ -399,6 +433,60 @@ describe("agent worker fail-closed contract", () => {
       message: "任务已完成。",
     }));
     expect(JSON.stringify(unsafeEmit.mock.calls)).not.toContain("workspace.db");
+  });
+
+  it("persists an allowlisted Provider protocol stage while keeping the worker event generic", async () => {
+    const emit = vi.fn();
+    const audit = { record: vi.fn(async () => undefined) };
+    const secret = "token=protocol-stage-secret https://provider.invalid/?key=hidden";
+    await handleAgentWorkerCommand({
+      command: providerCommand("run-protocol-stage"),
+      tools: [],
+      audit,
+      emit,
+    }, runtimeDependencies(async () => {
+      throw Object.assign(new Error(secret), {
+        code: "PROVIDER_PROTOCOL_FAILED",
+        providerProtocolStage: "PROVIDER_PROTOCOL_TOOL_FLOW_INCOMPLETE",
+      });
+    }));
+
+    expect(audit.record).toHaveBeenCalledWith("run-protocol-stage", expect.objectContaining({
+      type: "invocation.terminal",
+      eventType: "failed",
+      errorCode: "PROVIDER_PROTOCOL_TOOL_FLOW_INCOMPLETE",
+    }));
+    expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: "run.failed",
+      code: "PROVIDER_PROTOCOL_FAILED",
+    }));
+    expect(JSON.stringify(audit.record.mock.calls)).not.toContain(secret);
+    expect(JSON.stringify(emit.mock.calls)).not.toContain(secret);
+  });
+
+  it("does not persist an untrusted Provider protocol stage or its raw error", async () => {
+    const emit = vi.fn();
+    const audit = { record: vi.fn(async () => undefined) };
+    const secret = "password=untrusted-stage-secret";
+    await handleAgentWorkerCommand({
+      command: providerCommand("run-untrusted-stage"),
+      tools: [],
+      audit,
+      emit,
+    }, runtimeDependencies(async () => {
+      throw Object.assign(new Error(secret), {
+        code: "PROVIDER_PROTOCOL_FAILED",
+        providerProtocolStage: "PROVIDER_PROTOCOL_RAW_CUSTOM_KEY",
+      });
+    }));
+
+    expect(audit.record).toHaveBeenCalledWith("run-untrusted-stage", expect.objectContaining({
+      type: "invocation.terminal",
+      eventType: "failed",
+      errorCode: "PROVIDER_PROTOCOL_OTHER",
+    }));
+    expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({ code: "PROVIDER_PROTOCOL_FAILED" }));
+    expect(JSON.stringify(audit.record.mock.calls)).not.toContain(secret);
   });
 
   it("rejects a complete-looking Prompt set when any role is not active", async () => {

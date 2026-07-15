@@ -13,7 +13,7 @@ import { DocumentRepository } from "../../src/domain/workspace/documentRepositor
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
 import { AgentProcessSupervisor, type AgentRuntimeLease, type AgentWorkerProcess } from "../../src/main/agentProcessSupervisor";
-import { GrowthRunLifecycle, safeFailureCode } from "../../src/main/growthRunLifecycle";
+import { GrowthRunLifecycle, growthPhaseForCycleSequence, safeFailureCode } from "../../src/main/growthRunLifecycle";
 import { createWorkspaceAgentToolGateway } from "../../src/main/workspaceAgentToolGateway";
 
 class FakeWorker extends EventEmitter implements AgentWorkerProcess {
@@ -42,6 +42,45 @@ afterEach(() => {
 });
 
 describe("Growth Run bridge", () => {
+  it("authorizes Greenfield creation only for the first Free Cycle on an empty initialized workspace", async () => {
+    const empty = createSetup();
+    const emptyWorker = new FakeWorker();
+    const emptySupervisor = createSupervisor(empty, emptyWorker);
+    const emptyRun = new GrowthRunLifecycle(empty.workspace, emptySupervisor).start({
+      goalId: empty.goalId, cycleId: empty.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "普通 Growth 种子", mode: "free" }, emit: () => undefined,
+    });
+    emptyWorker.spawn();
+    expect((emptyWorker.sent[0] as { growthBinding: { phase: string } }).growthBinding.phase).toBe("world");
+    expect((emptyWorker.sent[0] as { growthBinding: { greenfieldCreateAuthorized: boolean } }).growthBinding.greenfieldCreateAuthorized).toBe(true);
+    emptySupervisor.cancel(emptyRun);
+    await vi.waitFor(() => expect(new GrowthRepository(empty.workspace).getCycle(empty.cycleId)?.status).toBe("cancelled"));
+
+    empty.workspace.close();
+    fs.rmSync(empty.workspace.rootPath, { recursive: true, force: true });
+    workspace = undefined;
+    root = undefined;
+
+    const nonempty = createSourceDocumentSetup();
+    const nonemptyWorker = new FakeWorker();
+    const nonemptySupervisor = createSupervisor(nonempty, nonemptyWorker);
+    const nonemptyRun = new GrowthRunLifecycle(nonempty.workspace, nonemptySupervisor).start({
+      goalId: nonempty.goalId, cycleId: nonempty.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "带来源种子", mode: "free" }, emit: () => undefined,
+    });
+    nonemptyWorker.spawn();
+    expect((nonemptyWorker.sent[0] as { growthBinding: { greenfieldCreateAuthorized: boolean } }).growthBinding.greenfieldCreateAuthorized).toBe(false);
+    nonemptySupervisor.cancel(nonemptyRun);
+    await vi.waitFor(() => expect(new GrowthRepository(nonempty.workspace).getCycle(nonempty.cycleId)?.status).toBe("cancelled"));
+  });
+
+  it("derives only the three trusted Growth phases from persisted Cycle sequence", () => {
+    expect(growthPhaseForCycleSequence(1)).toBe("world");
+    expect(growthPhaseForCycleSequence(2)).toBe("story");
+    expect(growthPhaseForCycleSequence(3)).toBe("oc");
+    expect(() => growthPhaseForCycleSequence(4)).toThrow(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
+  });
+
   it("pins a source-document seed to its owning resource without exposing source content", async () => {
     const setup = createSourceDocumentSetup();
     const worker = new FakeWorker();

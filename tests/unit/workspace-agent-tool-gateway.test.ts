@@ -194,7 +194,7 @@ describe("Workspace Agent tool gateway", () => {
         },
       }],
     }, invocationContext("free", true)))
-      .rejects.toMatchObject({ code: "GREENFIELD_CREATE_ONLY_REQUIRED" });
+      .rejects.toMatchObject({ code: "GREENFIELD_RESOURCE_CREATE_REQUIRED" });
     expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toEqual({ count: 0 });
   });
 
@@ -226,26 +226,62 @@ describe("Workspace Agent tool gateway", () => {
     expect(new ChangeSetRepository(workspace).listOutputs(result.changeSetId)).toEqual([]);
   });
 
-  it("persists no output version when Change Set application fails", () => {
+  it("records a failed Change Set without outputs or formal mutations when application fails", () => {
     const { workspace } = createWorkspace();
     const branch = new CheckpointRepository(workspace).getActiveBranch();
+    const formalBefore = new ResourceRepository(workspace).listCurrent()
+      .filter((resource) => resource.objectKind !== "domain_root").length;
     const service = new ChangeSetService(workspace, testOnlyLowRiskPolicy, {
       apply: () => {
-        throw new Error("forced apply failure");
+        throw new Error("token=secret forced apply failure");
       },
     });
 
-    expect(() => service.propose({
-      idempotencyKey: "greenfield-apply-failure",
-      expectedHeadCheckpointId: branch.headCheckpointId,
-      mode: "free",
-      summary: "失败提交",
-      items: [greenfieldWorldItems(new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!.id)[0]],
-    })).toThrow("forced apply failure");
+    let failure: unknown;
+    try {
+      service.propose({
+        idempotencyKey: "greenfield-apply-failure",
+        expectedHeadCheckpointId: branch.headCheckpointId,
+        mode: "free",
+        summary: "失败提交",
+        items: [greenfieldWorldItems(new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!.id)[0]],
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ code: "CHANGE_SET_APPLY_FAILED", message: "Change Set operation failed safely." });
     const changeSet = workspace.db.prepare("SELECT id FROM change_sets WHERE idempotency_key = ?")
       .get("greenfield-apply-failure") as { id: string };
     expect(new ChangeSetRepository(workspace).getRequired(changeSet.id)).toMatchObject({ status: "failed" });
     expect(new ChangeSetRepository(workspace).listOutputs(changeSet.id)).toEqual([]);
+    expect(new ResourceRepository(workspace).listCurrent()
+      .filter((resource) => resource.objectKind !== "domain_root")).toHaveLength(formalBefore);
+  });
+
+  it("preserves an allowlisted domain validation code after Change Set application begins", () => {
+    const { workspace } = createWorkspace();
+    const branch = new CheckpointRepository(workspace).getActiveBranch();
+    const service = new ChangeSetService(workspace, testOnlyLowRiskPolicy, {
+      apply: () => {
+        throw Object.assign(new Error("password=hidden https://provider.example/?key=private"), {
+          code: "RESOURCE_PARENT_NOT_FOUND",
+        });
+      },
+    });
+
+    let failure: unknown;
+    try {
+      service.propose({
+        idempotencyKey: "greenfield-domain-failure",
+        expectedHeadCheckpointId: branch.headCheckpointId,
+        mode: "free",
+        summary: "safe",
+        items: [greenfieldWorldItems(new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!.id)[0]],
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ code: "RESOURCE_PARENT_NOT_FOUND", message: "Change Set operation failed safely." });
   });
 
   it("fails closed if the workspace identity changes during a run", async () => {

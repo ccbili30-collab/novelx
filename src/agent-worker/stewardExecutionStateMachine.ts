@@ -40,6 +40,22 @@ const operationalToolNames = [
 type OperationalToolName = (typeof operationalToolNames)[number];
 type BlockReason = "missing_source" | "major_conflict" | "tool_failed";
 
+const greenfieldCorrectionCodes = new Set([
+  "GREENFIELD_RESOURCE_CREATE_REQUIRED",
+  "GREENFIELD_DOMAIN_ROOT_FORBIDDEN",
+  "GREENFIELD_CREATIVE_CREATE_REQUIRED",
+  "GREENFIELD_PROJECT_FILE_MUTATION_FORBIDDEN",
+  "GREENFIELD_DOCUMENT_TARGET_REQUIRED",
+  "GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED",
+  "GREENFIELD_ASSERTION_SCOPE_REQUIRED",
+  "GREENFIELD_ASSERTION_EVIDENCE_REQUIRED",
+  "GREENFIELD_CREATIVE_DOCUMENT_OWNER_REQUIRED",
+  "GREENFIELD_CREATIVE_DOCUMENT_DEPENDENCY_REQUIRED",
+  "GREENFIELD_RELATION_ENDPOINT_REQUIRED",
+  "GREENFIELD_RELATION_DEPENDENCY_REQUIRED",
+  "GREENFIELD_CONSTRAINT_SCOPE_REQUIRED",
+]);
+
 const planSchema = z.object({
   objective: z.enum(["discussion", "research", "inspect_files", "change_set", "draft", "check", "orchestrate"]),
   scopeResourceIds: z.array(z.string().trim().min(1).max(240)).max(100),
@@ -110,6 +126,28 @@ const planSchema = z.object({
 
 type StewardPlan = z.infer<typeof planSchema>;
 
+function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
+  return {
+    objective: "change_set",
+    scopeResourceIds: [...binding.authorizedScopeResourceIds],
+    steps: binding.phase === "world"
+      ? ["retrieve_graph_evidence", "propose_change_set"]
+      : ["retrieve_graph_evidence", "writer", "propose_change_set"],
+  };
+}
+
+function isGreenfieldProposalCorrection(
+  binding: GrowthRunBinding | undefined,
+  tool: OperationalToolName,
+  error: unknown,
+): boolean {
+  return binding?.phase === "world"
+    && binding.greenfieldCreateAuthorized
+    && tool === "propose_change_set"
+    && Boolean(error && typeof error === "object" && "code" in error
+      && typeof error.code === "string" && greenfieldCorrectionCodes.has(error.code));
+}
+
 interface ExecutionRecord {
   tool: OperationalToolName;
   status: "succeeded" | "failed";
@@ -159,7 +197,7 @@ export function createStewardExecutionStateMachine(input: {
   lastFinalRejectionCode(): string | null;
 } {
   assertOperationalToolSet(input.operationalTools);
-  let plan: StewardPlan | null = null;
+  let plan: StewardPlan | null = input.growthBinding ? trustedGrowthPlan(input.growthBinding) : null;
   let nextStepIndex = 0;
   let blockReason: BlockReason | null = null;
   const executions: ExecutionRecord[] = [];
@@ -175,13 +213,14 @@ export function createStewardExecutionStateMachine(input: {
   const allowedEvidenceIds = new Set<string>();
   let proposedChangeSet: z.infer<typeof proposeChangeSetResultSchema> | null = null;
   let growthReceiptRecorded = false;
+  let greenfieldProposalCorrectionAttempts = 0;
   const committedOutputIds = new Set<string>();
   const forbiddenExternalEchoTokens = extractExternalEchoTokens(input.userInput);
   const longReadMaxChars = Number.isSafeInteger(input.longReadMaxChars) && input.longReadMaxChars! > 0
     ? input.longReadMaxChars!
     : 4_000;
   const fileInspectionRequired = requiresProjectFileInspection(input.userInput);
-  if (fileInspectionRequired) {
+  if (fileInspectionRequired && !input.growthBinding) {
     plan = {
       objective: "inspect_files",
       scopeResourceIds: [],
@@ -253,6 +292,10 @@ export function createStewardExecutionStateMachine(input: {
         return appendRequiredNextTool(result, requiredNextTool());
       } catch (error) {
         executions.push({ tool: name, status: "failed", details: null });
+        if (isGreenfieldProposalCorrection(input.growthBinding, name, error)) {
+          greenfieldProposalCorrectionAttempts += 1;
+          if (greenfieldProposalCorrectionAttempts <= 2) throw error;
+        }
         blockReason = "tool_failed";
         throw error;
       }
@@ -293,7 +336,7 @@ export function createStewardExecutionStateMachine(input: {
   };
 
   return {
-    tools: [planTool, ...wrappedOperationalTools, finalTool],
+    tools: [...(input.growthBinding ? [] : [planTool]), ...wrappedOperationalTools, finalTool],
     resultCapture: {
       tool: finalTool,
       getSubmission: input.resultCapture.getSubmission,
@@ -455,7 +498,9 @@ export function createStewardExecutionStateMachine(input: {
         if (!retrieval.success || !retrieval.data.receiptRecorded) throw stateError("STEWARD_TOOL_RESULT_INVALID");
         growthReceiptRecorded = true;
         for (const evidence of retrieval.data.evidence) allowedEvidenceIds.add(evidence.evidenceId);
-        if (retrieval.data.evidence.length === 0) blockReason = "missing_source";
+        if (retrieval.data.evidence.length === 0 && !input.growthBinding.greenfieldCreateAuthorized) {
+          blockReason = "missing_source";
+        }
         return;
       }
       const retrieval = retrieveGraphEvidenceResultSchema.safeParse(details);

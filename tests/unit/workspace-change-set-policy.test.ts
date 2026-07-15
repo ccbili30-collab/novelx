@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { WorkspaceChangeSetPolicy } from "../../src/domain/changeSet/workspaceChangeSetPolicy";
 import {
+  classifyGreenfieldCreateOnlyCandidate,
   greenfieldDocumentOutputEvidence,
+  isGreenfieldCreateOnlyCandidate,
   type ChangeSetCandidate,
 } from "../../src/domain/changeSet/changeSetService";
 import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
@@ -118,6 +120,43 @@ describe("WorkspaceChangeSetPolicy", () => {
       { itemId: "world-document", risk: "low", conflicts: [] },
       { itemId: "world-assertion", risk: "low", conflicts: [] },
     ]);
+  });
+
+  it("classifies every Greenfield structural violation without changing the create-only truth value", () => {
+    const item = (kind: string, payload: Record<string, unknown>, dependsOn: string[] = []) => ({ id: `${kind}-${dependsOn.length}`, kind, payload, dependsOn });
+    const resource = (id = "resource", create = true, state = "active", objectKind = "world") =>
+      item("resource.put", { resourceId: id, create, state, objectKind });
+    const document = (dependsOn: string[], resourceId = "resource") => item("document.put", { resourceId }, dependsOn);
+    const assertion = (dependsOn: string[], evidenceIds: string[] = []) => item("assertion.put", { scopeId: "resource", evidenceIds }, dependsOn);
+    const creativeDocument = (dependsOn: string[], resourceId = "resource", create = true, state = "active") =>
+      item("creative_document.put", { documentId: "creative", resourceId, create, state }, dependsOn);
+    const relation = (dependsOn: string[], sourceResourceId = "source", targetResourceId = "target") =>
+      item("creative_relation.put", { sourceResourceId, targetResourceId, create: true, state: "active" }, dependsOn);
+    const constraint = (dependsOn: string[], scopeResourceId = "resource") =>
+      item("constraint_profile.put", { scopeResourceId, create: true, state: "active" }, dependsOn);
+    const cases: Array<[string, unknown[]]> = [
+      ["GREENFIELD_RESOURCE_CREATE_REQUIRED", [resource("resource", false)]],
+      ["GREENFIELD_DOMAIN_ROOT_FORBIDDEN", [resource("resource", true, "active", "domain_root")]],
+      ["GREENFIELD_CREATIVE_CREATE_REQUIRED", [creativeDocument([], "resource", false)]],
+      ["GREENFIELD_PROJECT_FILE_MUTATION_FORBIDDEN", [item("project_file.put", {})]],
+      ["GREENFIELD_DOCUMENT_TARGET_REQUIRED", [document([])]],
+      ["GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED", [resource(), document([])]],
+      ["GREENFIELD_ASSERTION_SCOPE_REQUIRED", [assertion([])]],
+      ["GREENFIELD_ASSERTION_EVIDENCE_REQUIRED", [resource(), document(["resource.put-0"]), assertion(["resource.put-0", "document.put-1"], ["bad-evidence"])]],
+      ["GREENFIELD_CREATIVE_DOCUMENT_OWNER_REQUIRED", [creativeDocument([])]],
+      ["GREENFIELD_CREATIVE_DOCUMENT_DEPENDENCY_REQUIRED", [resource(), creativeDocument([])]],
+      ["GREENFIELD_RELATION_ENDPOINT_REQUIRED", [relation([])]],
+      ["GREENFIELD_RELATION_DEPENDENCY_REQUIRED", [resource("source"), resource("target"), relation([])]],
+      ["GREENFIELD_CONSTRAINT_SCOPE_REQUIRED", [resource(), constraint([])]],
+    ];
+    for (const [expected, items] of cases) {
+      const candidate = items as unknown as ChangeSetCandidate["items"];
+      expect(classifyGreenfieldCreateOnlyCandidate(candidate)).toBe(expected);
+      expect(isGreenfieldCreateOnlyCandidate(candidate)).toBe(false);
+    }
+    const valid = greenfieldCandidateItems("world-root");
+    expect(classifyGreenfieldCreateOnlyCandidate(valid)).toBeNull();
+    expect(isGreenfieldCreateOnlyCandidate(valid)).toBe(true);
   });
 
   it("does not accept the Greenfield document-output exception without Main authorization", () => {

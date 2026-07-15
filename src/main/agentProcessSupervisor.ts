@@ -51,6 +51,7 @@ import {
   type RetrieveGraphEvidenceResult,
   type AgentRetrieveGraphEvidenceArgs,
   type GrowthRetrieveGraphEvidenceResult,
+  type GrowthRunBinding,
   type GenerateImageArgs,
   type GenerateImageResult,
 } from "../shared/agentWorkerProtocol";
@@ -105,7 +106,7 @@ export interface GrowthAgentToolGateway extends Omit<AgentToolGateway, "retrieve
 
 /** Internal Main-only binding hook. It is never populated from Renderer or model tool arguments. */
 export interface AgentRunInternalBinding {
-  readonly workerBinding: unknown;
+  readonly workerBinding: GrowthRunBinding;
   attach(input: {
     runId: string;
     gateway: AgentToolGateway;
@@ -221,7 +222,8 @@ export class AgentProcessSupervisor {
       return runId;
     }
     const providerConfigSha256 = providerProfile ? hashProviderConfig(providerProfile) : null;
-    const greenfieldCreateRequested = isExplicitGreenfieldFreeCreateRequest(request.mode, request.userInput);
+    const greenfieldCreateRequested = isExplicitGreenfieldFreeCreateRequest(request.mode, request.userInput)
+      || internalBinding?.workerBinding.greenfieldCreateAuthorized === true;
     try {
       lease.audit.beginRun({
         runId,
@@ -1135,4 +1137,49 @@ const TOOL_ERROR_MESSAGES = {
   GROWTH_RETRIEVAL_REQUIRED: "A recorded Growth retrieval is required before proposing changes.",
   GROWTH_RECONCILIATION_REQUIRED: "The Growth Change Set outcome requires reconciliation.",
   GROWTH_RUN_FAILED: "The Growth Cycle run failed before a committed Change Set.",
+  GREENFIELD_CREATE_EXPLICIT_FREE_REQUIRED: "Greenfield creation requires trusted Free authorization.",
+  GREENFIELD_WORKSPACE_NOT_EMPTY: "Greenfield creation requires an empty initialized workspace.",
+  GREENFIELD_CREATE_ONLY_REQUIRED: "Greenfield creation accepts create-only Change Sets.",
+  GREENFIELD_RESOURCE_CREATE_REQUIRED: "Create active formal resources only.",
+  GREENFIELD_DOMAIN_ROOT_FORBIDDEN: "Do not create or mutate a domain root.",
+  GREENFIELD_CREATIVE_CREATE_REQUIRED: "Create active creative records only.",
+  GREENFIELD_PROJECT_FILE_MUTATION_FORBIDDEN: "Do not mutate project files in this Greenfield Change Set.",
+  GREENFIELD_DOCUMENT_TARGET_REQUIRED: "Bind each document to a newly created formal target.",
+  GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED: "Add the required target dependency to each document.",
+  GREENFIELD_ASSERTION_SCOPE_REQUIRED: "Bind each Assertion to a newly created formal scope and dependency.",
+  GREENFIELD_ASSERTION_EVIDENCE_REQUIRED: "Bind each Assertion evidence reference to its document dependency.",
+  GREENFIELD_CREATIVE_DOCUMENT_OWNER_REQUIRED: "Bind each creative document to a newly created formal owner.",
+  GREENFIELD_CREATIVE_DOCUMENT_DEPENDENCY_REQUIRED: "Add the required owner dependency to each creative document.",
+  GREENFIELD_RELATION_ENDPOINT_REQUIRED: "Bind each relation to newly created formal endpoints.",
+  GREENFIELD_RELATION_DEPENDENCY_REQUIRED: "Add required endpoint dependencies to each relation.",
+  GREENFIELD_CONSTRAINT_SCOPE_REQUIRED: "Bind each scoped constraint to its newly created formal scope.",
+  CHANGE_SET_POLICY_REQUIRED: "A trusted Change Set policy is required.",
+  CHANGE_SET_POLICY_INVALID: "The Change Set policy result is invalid.",
+  CHANGE_SET_ITEM_DUPLICATE: "The Change Set contains duplicate items.",
+  CHANGE_SET_DEPENDENCY_DUPLICATE: "The Change Set contains duplicate dependencies.",
+  CHANGE_SET_DEPENDENCY_NOT_FOUND: "A Change Set dependency is unavailable.",
+  CHANGE_SET_DEPENDENCY_CYCLE: "The Change Set dependency graph contains a cycle.",
+  GREENFIELD_OUTPUT_EVIDENCE_DEPENDENCY_REQUIRED: "Greenfield Assertion evidence requires its document dependency.",
+  GREENFIELD_OUTPUT_EVIDENCE_NOT_COMMITTED: "Greenfield Assertion evidence is not a committed document output.",
+  CHANGE_SET_OUTPUTS_INCOMPLETE: "Committed Change Set outputs are incomplete.",
+  CHANGE_SET_EXPECTED_HEAD_MISMATCH: "The Change Set base checkpoint no longer matches.",
+  CHANGE_SET_PROVENANCE_MISMATCH: "The Change Set provenance does not match this Agent Run.",
+  IDEMPOTENCY_KEY_REUSED: "The Change Set idempotency key conflicts with a different request.",
+  RESOURCE_DOMAIN_KIND_MISMATCH: "The resource kind does not match its domain.",
+  RESOURCE_PARENT_REQUIRED: "The resource requires a valid formal parent.",
+  RESOURCE_PARENT_NOT_FOUND: "The resource parent is unavailable.",
+  RESOURCE_PARENT_KIND_INVALID: "The resource parent kind is invalid.",
+  RESOURCE_PARENT_DOMAIN_INVALID: "The resource parent belongs to another domain.",
+  RESOURCE_OWNERSHIP_CYCLE: "The resource ownership hierarchy contains a cycle.",
+  DOCUMENT_KIND_OWNER_INVALID: "The document kind is invalid for its owner.",
+  RELATION_SELF_REFERENCE: "A relation cannot target the same resource.",
+  RELATION_SOURCE_KIND_INVALID: "The relation source kind is invalid.",
+  RELATION_TARGET_KIND_INVALID: "The relation target kind is invalid.",
+  RELATION_ENDPOINT_KIND_INVALID: "The relation endpoints are invalid.",
+  ASSERTION_SOURCE_REQUIRED: "An Assertion requires a stable source.",
+  DOCUMENT_VERSION_NOT_FOUND: "The required document version is unavailable.",
+  CHANGE_SET_INPUT_INVALID: "The Change Set input is invalid.",
+  CHANGE_SET_POLICY_EXECUTION_FAILED: "The Change Set policy could not be evaluated safely.",
+  CHANGE_SET_PERSISTENCE_FAILED: "The Change Set could not be persisted safely.",
+  CHANGE_SET_APPLY_FAILED: "The Change Set could not be applied safely.",
 } as const;

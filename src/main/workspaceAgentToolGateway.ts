@@ -15,7 +15,7 @@ import {
 } from "../shared/agentWorkerProtocol";
 import {
   ChangeSetService,
-  isGreenfieldCreateOnlyCandidate,
+  classifyGreenfieldCreateOnlyCandidate,
   parseGreenfieldDocumentOutputEvidence,
   type ChangeSetItem,
   type ChangeSetPolicyEvaluator,
@@ -275,8 +275,9 @@ function assertGreenfieldCreateOnly(
   if (!isGreenfieldWorkspaceEmpty(workspace)) {
     throw gatewayError("GREENFIELD_WORKSPACE_NOT_EMPTY", "Greenfield creation is unavailable after formal content exists.");
   }
-  if (!isGreenfieldCreateOnlyCandidate(items)) {
-    throw gatewayError("GREENFIELD_CREATE_ONLY_REQUIRED", "Greenfield Change Sets may only create new formal content.");
+  const structuralViolation = classifyGreenfieldCreateOnlyCandidate(items);
+  if (structuralViolation !== null) {
+    throw gatewayError(structuralViolation, "Greenfield Change Sets may only create new formal content.");
   }
 }
 

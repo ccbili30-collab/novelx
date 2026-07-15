@@ -69,23 +69,18 @@ describe("Steward tool handoff state machine", () => {
       userInput: "基于当前证据继续发展设定",
       authorizedScopeResourceIds: ["world-1"],
       growthBinding: {
-        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", inputCheckpointId: "checkpoint-1",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-1"], seedResourceIds: [],
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", phase: "world", inputCheckpointId: "checkpoint-1",
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1"], seedResourceIds: [], greenfieldCreateAuthorized: false,
       },
       operationalTools: [retrieve, propose],
       resultCapture: createRoleOutputTool("steward"),
     });
 
-    await expect(tool(machine.tools, "submit_steward_plan").execute("growth-plan-bad", {
-      objective: "research", scopeResourceIds: ["world-1"], steps: ["retrieve_graph_evidence"],
-    })).rejects.toMatchObject({ code: "STEWARD_GROWTH_PLAN_INVALID" });
-    await expect(tool(machine.tools, "submit_steward_plan").execute("growth-plan-duplicate-propose", {
-      objective: "change_set", scopeResourceIds: ["world-1"],
-      steps: ["retrieve_graph_evidence", "propose_change_set", "propose_change_set"],
-    })).rejects.toMatchObject({ code: "STEWARD_PLAN_INVALID" });
-    await tool(machine.tools, "submit_steward_plan").execute("growth-plan", {
+    expect(machine.tools.map((candidate) => candidate.name)).not.toContain("submit_steward_plan");
+    expect(machine.snapshot().plan).toEqual({
       objective: "change_set", scopeResourceIds: ["world-1"], steps: ["retrieve_graph_evidence", "propose_change_set"],
     });
+    expect(machine.requiredNextTool()).toBe("retrieve_graph_evidence");
     await expect(tool(machine.tools, "retrieve_graph_evidence").execute("growth-legacy-retrieve", { scopeResourceIds: ["world-1"] }))
       .rejects.toMatchObject({ code: "STEWARD_GROWTH_RETRIEVAL_REQUIRED" });
     await expect(tool(machine.tools, "propose_change_set").execute("growth-early-propose", { summary: "补充", items: [{}] }))
@@ -147,6 +142,39 @@ describe("Steward tool handoff state machine", () => {
     });
   });
 
+  it("binds trusted story and OC Growth phases to retrieve, Writer, then one proposal", async () => {
+    for (const phase of ["story", "oc"] as const) {
+      const retrieve = successfulTool("retrieve_graph_evidence", growthRetrievalResult());
+      const writer = successfulTool("writer", { accepted: true });
+      const propose = successfulTool("propose_change_set", {
+        changeSetId: `growth-${phase}`, mode: "free", status: "committed", gateStatus: "ready", blockedReason: null, itemCount: 1,
+        committedOutputs: [{ itemId: `output-${phase}`, kind: "document_version", outputId: `version-${phase}` }],
+      });
+      const machine = createStewardExecutionStateMachine({
+        mode: "free", userInput: "由可信 Growth 阶段驱动", authorizedScopeResourceIds: ["world-1"],
+        growthBinding: {
+          capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: `cycle-${phase}`, phase, inputCheckpointId: "checkpoint",
+          ruleRevision: 1, authorizedScopeResourceIds: ["world-1"], seedResourceIds: [], greenfieldCreateAuthorized: false,
+        },
+        operationalTools: [retrieve, writer, propose], resultCapture: createRoleOutputTool("steward"),
+      });
+      expect(machine.snapshot().plan).toEqual({
+        objective: "change_set", scopeResourceIds: ["world-1"], steps: ["retrieve_graph_evidence", "writer", "propose_change_set"],
+      });
+      await expect(tool(machine.tools, "propose_change_set").execute("early", { summary: "blocked", items: [] }))
+        .rejects.toMatchObject({ code: "STEWARD_STEP_OUT_OF_ORDER" });
+      await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", {
+        variant: "growth_v1", query: "evidence", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+        expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+      });
+      await expect(tool(machine.tools, "propose_change_set").execute("writer-required", { summary: "blocked", items: [] }))
+        .rejects.toMatchObject({ code: "STEWARD_STEP_OUT_OF_ORDER" });
+      await tool(machine.tools, "writer").execute("writer", {});
+      await tool(machine.tools, "propose_change_set").execute("propose", { summary: "complete", items: [{}] });
+      expect(machine.snapshot().executions.map((entry) => entry.tool)).toEqual(["retrieve_graph_evidence", "writer", "propose_change_set"]);
+    }
+  });
+
   it("stops dependent steps when retrieval returns no sources", async () => {
     const retrieve = successfulTool("retrieve_graph_evidence", retrievalResult([]));
     const propose = successfulTool("propose_change_set", { changeSetId: "must-not-run" });
@@ -167,6 +195,118 @@ describe("Steward tool handoff state machine", () => {
       escalations: [{ code: "missing_source", message: "检索没有返回来源。", evidenceIds: [] }],
     });
     expect(machine.snapshot().blockReason).toBe("missing_source");
+  });
+
+  it("permits an empty recorded Growth Receipt only with Main-authorized Greenfield creation", async () => {
+    const emptyGrowthReceipt = {
+      variant: "growth_v1" as const,
+      receiptRecorded: true,
+      evidence: [],
+      coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
+      diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
+    };
+    const retrieve = successfulTool("retrieve_graph_evidence", emptyGrowthReceipt);
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "growth-change", mode: "free", status: "committed", gateStatus: "ready", blockedReason: null, itemCount: 1,
+      committedOutputs: [{ itemId: "world", kind: "resource_revision", outputId: "world-version" }],
+    });
+    const makeMachine = (greenfieldCreateAuthorized: boolean) => createStewardExecutionStateMachine({
+      mode: "free",
+      userInput: "从种子建立正式世界",
+      authorizedScopeResourceIds: ["world-root"],
+      growthBinding: {
+        capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", phase: "world", inputCheckpointId: "checkpoint",
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-root"], seedResourceIds: [], greenfieldCreateAuthorized,
+      },
+      operationalTools: [retrieve, propose], resultCapture: createRoleOutputTool("steward"),
+    });
+    const authorized = makeMachine(true);
+    await tool(authorized.tools, "retrieve_graph_evidence").execute("authorized-retrieve", {
+      variant: "growth_v1", query: "种子", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+      expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+    });
+    expect(authorized.requiredNextTool()).toBe("propose_change_set");
+    expect(authorized.snapshot().blockReason).toBeNull();
+
+    const unauthorized = makeMachine(false);
+    await tool(unauthorized.tools, "retrieve_graph_evidence").execute("unauthorized-retrieve", {
+      variant: "growth_v1", query: "种子", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+      expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+    });
+    await expect(tool(unauthorized.tools, "propose_change_set").execute("unauthorized-propose", { summary: "不得执行", items: [] }))
+      .rejects.toMatchObject({ code: "STEWARD_EXECUTION_BLOCKED" });
+    expect(unauthorized.snapshot().blockReason).toBe("missing_source");
+  });
+
+  it("allows two zero-side-effect world Greenfield structural corrections, then blocks a third", async () => {
+    const emptyReceipt = {
+      variant: "growth_v1" as const, receiptRecorded: true, evidence: [],
+      coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
+      diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
+    };
+    const binding = {
+      capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", phase: "world" as const, inputCheckpointId: "checkpoint",
+      ruleRevision: 1, authorizedScopeResourceIds: ["world-root"], seedResourceIds: [], greenfieldCreateAuthorized: true,
+    };
+    const retrieve = successfulTool("retrieve_graph_evidence", emptyReceipt);
+    let attempts = 0;
+    const propose = successfulTool("propose_change_set", greenfieldCommittedProposal());
+    propose.execute = async () => {
+      attempts += 1;
+      if (attempts === 1) throw Object.assign(new Error("safe"), { code: "GREENFIELD_RESOURCE_CREATE_REQUIRED" });
+      return { content: [{ type: "text", text: "ok" }], details: greenfieldCommittedProposal() };
+    };
+    const machine = createStewardExecutionStateMachine({
+      mode: "free", userInput: "Growth seed", authorizedScopeResourceIds: ["world-root"], growthBinding: binding,
+      operationalTools: [retrieve, propose], resultCapture: createRoleOutputTool("steward"),
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", {
+      variant: "growth_v1", query: "seed", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+      expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+    });
+    await expect(tool(machine.tools, "propose_change_set").execute("invalid", { summary: "retry", items: [] }))
+      .rejects.toMatchObject({ code: "GREENFIELD_RESOURCE_CREATE_REQUIRED" });
+    expect(machine.requiredNextTool()).toBe("propose_change_set");
+    await tool(machine.tools, "propose_change_set").execute("valid", { summary: "corrected", items: [{}] });
+    expect(attempts).toBe(2);
+    expect(machine.snapshot().executions.map((entry) => `${entry.tool}:${entry.status}`))
+      .toEqual(["retrieve_graph_evidence:succeeded", "propose_change_set:failed", "propose_change_set:succeeded"]);
+
+    const alwaysInvalid = successfulTool("propose_change_set", greenfieldCommittedProposal());
+    alwaysInvalid.execute = async () => { throw Object.assign(new Error("safe"), { code: "GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED" }); };
+    const blocked = createStewardExecutionStateMachine({
+      mode: "free", userInput: "Growth seed", authorizedScopeResourceIds: ["world-root"], growthBinding: binding,
+      operationalTools: [successfulTool("retrieve_graph_evidence", emptyReceipt), alwaysInvalid], resultCapture: createRoleOutputTool("steward"),
+    });
+    await tool(blocked.tools, "retrieve_graph_evidence").execute("retrieve", {
+      variant: "growth_v1", query: "seed", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+      expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+    });
+    for (const requestId of ["one", "two", "three"]) {
+      await expect(tool(blocked.tools, "propose_change_set").execute(requestId, { summary: "retry", items: [] }))
+        .rejects.toMatchObject({ code: "GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED" });
+    }
+    expect(blocked.requiredNextTool()).toBe("submit_steward_result");
+    expect(blocked.snapshot().executions.map((entry) => entry.status)).toEqual(["succeeded", "failed", "failed", "failed"]);
+
+    const policyFailure = successfulTool("propose_change_set", greenfieldCommittedProposal());
+    let policyAttempts = 0;
+    policyFailure.execute = async () => {
+      policyAttempts += 1;
+      throw Object.assign(new Error("safe"), { code: "CHANGE_SET_POLICY_INVALID" });
+    };
+    const nonRetry = createStewardExecutionStateMachine({
+      mode: "free", userInput: "Growth seed", authorizedScopeResourceIds: ["world-root"], growthBinding: binding,
+      operationalTools: [successfulTool("retrieve_graph_evidence", emptyReceipt), policyFailure], resultCapture: createRoleOutputTool("steward"),
+    });
+    await tool(nonRetry.tools, "retrieve_graph_evidence").execute("retrieve", {
+      variant: "growth_v1", query: "seed", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+      expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+    });
+    await expect(tool(nonRetry.tools, "propose_change_set").execute("policy", { summary: "no retry", items: [] }))
+      .rejects.toMatchObject({ code: "CHANGE_SET_POLICY_INVALID" });
+    expect(policyAttempts).toBe(1);
+    expect(nonRetry.requiredNextTool()).toBe("submit_steward_result");
   });
 
   it("allows an explicit Free Greenfield request to continue from an empty retrieval into one create-only Change Set", async () => {

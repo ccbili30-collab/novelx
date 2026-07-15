@@ -181,6 +181,72 @@ function runRequest() {
 }
 
 describe("Agent Process Supervisor internal tool gateway", () => {
+  it("preserves an allowlisted post-apply Change Set failure code without forwarding raw exception text", async () => {
+    const child = new FakeWorkerProcess();
+    const audit = createAuditStore();
+    const supervisor = new AgentProcessSupervisor("worker.js", {
+      acquireRuntimeLease: () => createLease(createGateway({
+        proposeChangeSet: async () => {
+          throw Object.assign(new Error("token=secret password=hidden https://provider.example/?key=private"), {
+            code: "RESOURCE_PARENT_NOT_FOUND",
+          });
+        },
+      }), audit),
+      spawnWorker: () => child,
+    });
+    const runId = supervisor.start(runRequest(), () => undefined);
+    child.spawn();
+    child.receive({
+      type: "tool.request", runId, requestId: "66666666-6666-4666-8666-666666666666", tool: "propose_change_set",
+      args: {
+        summary: "safe", items: [{
+          id: "world-item", dependsOn: [], kind: "resource.put",
+          payload: { resourceId: "world-1", create: true, type: "world", objectKind: "world", title: "safe", parentId: "root-1", state: "active", sortOrder: 0 },
+        }],
+      },
+    });
+    await vi.waitFor(() => expect(child.sent).toHaveLength(2));
+    const response = JSON.stringify(child.sent[1]);
+    expect(child.sent[1]).toMatchObject({ type: "tool.response", ok: false, error: { code: "RESOURCE_PARENT_NOT_FOUND" } });
+    expect(response).not.toContain("token=secret");
+    expect(response).not.toContain("password=hidden");
+    expect(response).not.toContain("provider.example");
+    expect(audit.appendToolTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "failed", errorCode: "RESOURCE_PARENT_NOT_FOUND",
+    }));
+  });
+
+  it("collapses unknown or sensitive Change Set failures to AGENT_TOOL_FAILED", async () => {
+    const child = new FakeWorkerProcess();
+    const audit = createAuditStore();
+    const supervisor = new AgentProcessSupervisor("worker.js", {
+      acquireRuntimeLease: () => createLease(createGateway({
+        proposeChangeSet: async () => {
+          throw Object.assign(new Error("custom_key=secret token=secret password=hidden https://provider.example/?key=private"), {
+            code: "UNSAFE_CHANGE_SET_INTERNAL",
+          });
+        },
+      }), audit),
+      spawnWorker: () => child,
+    });
+    const runId = supervisor.start(runRequest(), () => undefined);
+    child.spawn();
+    child.receive({
+      type: "tool.request", runId, requestId: "77777777-7777-4777-8777-777777777777", tool: "propose_change_set",
+      args: {
+        summary: "safe", items: [{
+          id: "world-item", dependsOn: [], kind: "resource.put",
+          payload: { resourceId: "world-1", create: true, type: "world", objectKind: "world", title: "safe", parentId: "root-1", state: "active", sortOrder: 0 },
+        }],
+      },
+    });
+    await vi.waitFor(() => expect(child.sent).toHaveLength(2));
+    const response = JSON.stringify(child.sent[1]);
+    expect(child.sent[1]).toMatchObject({ type: "tool.response", ok: false, error: { code: "AGENT_TOOL_FAILED" } });
+    for (const sensitive of ["custom_key=secret", "token=secret", "password=hidden", "provider.example"]) expect(response).not.toContain(sensitive);
+    expect(audit.appendToolTerminal).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "AGENT_TOOL_FAILED" }));
+  });
+
   it("injects capability only, never workspace details, and does not project tool payloads", async () => {
     const child = new FakeWorkerProcess();
     const events: unknown[] = [];

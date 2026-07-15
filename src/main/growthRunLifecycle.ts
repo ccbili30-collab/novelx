@@ -22,6 +22,7 @@ import { GraphRetrievalService } from "../domain/retrieval/graphRetrievalService
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import { DocumentRepository } from "../domain/workspace/documentRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
+import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeSetPolicy";
 import type { WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import {
   AgentProcessSupervisor,
@@ -66,10 +67,14 @@ export class GrowthRunLifecycle {
       capabilityVersion: growthCapabilityVersion,
       goalId: goal.id,
       cycleId: cycle.id,
+      phase: growthPhaseForCycleSequence(cycle.sequence),
       inputCheckpointId: cycle.inputCheckpointId,
       ruleRevision: cycle.ruleRevision,
       authorizedScopeResourceIds: goal.authorizedScopeResourceIds,
       seedResourceIds: trustedSeedResourceIds(this.workspace, goal, cycle.inputCheckpointId),
+      greenfieldCreateAuthorized: input.request.mode === "free"
+        && cycle.sequence === 1
+        && isGreenfieldWorkspaceEmpty(this.workspace),
     });
     const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent);
     return this.supervisor.start(
@@ -117,6 +122,13 @@ export class GrowthRunLifecycle {
     if (branch.id !== branchId) throw growthRunError("GROWTH_BINDING_INVALID");
     return branch.headCheckpointId;
   }
+}
+
+export function growthPhaseForCycleSequence(sequence: number): "world" | "story" | "oc" {
+  if (sequence === 1) return "world";
+  if (sequence === 2) return "story";
+  if (sequence === 3) return "oc";
+  throw growthRunError("GROWTH_BINDING_INVALID");
 }
 
 class BoundGrowthRun implements AgentRunInternalBinding {

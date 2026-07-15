@@ -36,70 +36,105 @@ export function parseGreenfieldDocumentOutputEvidence(evidenceId: string): strin
   return itemId || null;
 }
 
-export function isGreenfieldCreateOnlyCandidate(items: readonly ChangeSetItem[]): boolean {
+export const greenfieldCreateOnlyStructuralCodes = [
+  "GREENFIELD_RESOURCE_CREATE_REQUIRED",
+  "GREENFIELD_DOMAIN_ROOT_FORBIDDEN",
+  "GREENFIELD_CREATIVE_CREATE_REQUIRED",
+  "GREENFIELD_PROJECT_FILE_MUTATION_FORBIDDEN",
+  "GREENFIELD_DOCUMENT_TARGET_REQUIRED",
+  "GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED",
+  "GREENFIELD_ASSERTION_SCOPE_REQUIRED",
+  "GREENFIELD_ASSERTION_EVIDENCE_REQUIRED",
+  "GREENFIELD_CREATIVE_DOCUMENT_OWNER_REQUIRED",
+  "GREENFIELD_CREATIVE_DOCUMENT_DEPENDENCY_REQUIRED",
+  "GREENFIELD_RELATION_ENDPOINT_REQUIRED",
+  "GREENFIELD_RELATION_DEPENDENCY_REQUIRED",
+  "GREENFIELD_CONSTRAINT_SCOPE_REQUIRED",
+] as const;
+
+export type GreenfieldCreateOnlyStructuralCode = (typeof greenfieldCreateOnlyStructuralCodes)[number];
+
+export function classifyGreenfieldCreateOnlyCandidate(
+  items: readonly ChangeSetItem[],
+): GreenfieldCreateOnlyStructuralCode | null {
   const resourceCreates = new Map<string, string>();
   const creativeDocumentCreates = new Map<string, string>();
   for (const item of items) {
     switch (item.kind) {
       case "resource.put":
-        if (!item.payload.create || item.payload.state !== "active" || item.payload.objectKind === "domain_root") return false;
+        if (!item.payload.create || item.payload.state !== "active") return "GREENFIELD_RESOURCE_CREATE_REQUIRED";
+        if (item.payload.objectKind === "domain_root") return "GREENFIELD_DOMAIN_ROOT_FORBIDDEN";
         resourceCreates.set(item.payload.resourceId, item.id);
         break;
       case "creative_document.put":
-        if (!item.payload.create || item.payload.state !== "active") return false;
+        if (!item.payload.create || item.payload.state !== "active") return "GREENFIELD_CREATIVE_CREATE_REQUIRED";
         creativeDocumentCreates.set(item.payload.documentId, item.id);
         break;
       case "creative_relation.put":
       case "constraint_profile.put":
-        if (!item.payload.create || item.payload.state !== "active") return false;
+        if (!item.payload.create || item.payload.state !== "active") return "GREENFIELD_CREATIVE_CREATE_REQUIRED";
         break;
       case "document.put":
       case "assertion.put":
         break;
       case "project_file.put":
       case "project_file.delete":
-        return false;
+        return "GREENFIELD_PROJECT_FILE_MUTATION_FORBIDDEN";
     }
   }
-  return items.every((item) => {
+  for (const item of items) {
     switch (item.kind) {
       case "document.put": {
         const targetItemId = item.payload.creativeDocumentId
           ? creativeDocumentCreates.get(item.payload.creativeDocumentId)
           : resourceCreates.get(item.payload.resourceId);
-        return Boolean(targetItemId && item.dependsOn.includes(targetItemId));
+        if (!targetItemId) return "GREENFIELD_DOCUMENT_TARGET_REQUIRED";
+        if (!item.dependsOn.includes(targetItemId)) return "GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED";
+        break;
       }
       case "assertion.put": {
         const scopeCreateId = resourceCreates.get(item.payload.scopeId);
-        return Boolean(scopeCreateId && item.dependsOn.includes(scopeCreateId))
-          && item.payload.evidenceIds.every((evidenceId) => {
-            const documentItemId = parseGreenfieldDocumentOutputEvidence(evidenceId);
-            return Boolean(documentItemId && item.dependsOn.includes(documentItemId)
-              && items.some((candidate) => candidate.id === documentItemId && candidate.kind === "document.put"));
-          });
+        if (!scopeCreateId || !item.dependsOn.includes(scopeCreateId)) return "GREENFIELD_ASSERTION_SCOPE_REQUIRED";
+        if (item.payload.evidenceIds.some((evidenceId) => {
+          const documentItemId = parseGreenfieldDocumentOutputEvidence(evidenceId);
+          return !documentItemId || !item.dependsOn.includes(documentItemId)
+            || !items.some((candidate) => candidate.id === documentItemId && candidate.kind === "document.put");
+        })) return "GREENFIELD_ASSERTION_EVIDENCE_REQUIRED";
+        break;
       }
       case "creative_document.put": {
         const resourceCreateId = resourceCreates.get(item.payload.resourceId);
-        return Boolean(resourceCreateId && item.dependsOn.includes(resourceCreateId));
+        if (!resourceCreateId) return "GREENFIELD_CREATIVE_DOCUMENT_OWNER_REQUIRED";
+        if (!item.dependsOn.includes(resourceCreateId)) return "GREENFIELD_CREATIVE_DOCUMENT_DEPENDENCY_REQUIRED";
+        break;
       }
       case "creative_relation.put": {
         const sourceCreateId = resourceCreates.get(item.payload.sourceResourceId);
         const targetCreateId = resourceCreates.get(item.payload.targetResourceId);
-        return Boolean(sourceCreateId && targetCreateId
-          && item.dependsOn.includes(sourceCreateId) && item.dependsOn.includes(targetCreateId));
+        if (!sourceCreateId || !targetCreateId) return "GREENFIELD_RELATION_ENDPOINT_REQUIRED";
+        if (!item.dependsOn.includes(sourceCreateId) || !item.dependsOn.includes(targetCreateId)) {
+          return "GREENFIELD_RELATION_DEPENDENCY_REQUIRED";
+        }
+        break;
       }
       case "constraint_profile.put": {
-        if (!item.payload.scopeResourceId) return true;
+        if (!item.payload.scopeResourceId) break;
         const scopeCreateId = resourceCreates.get(item.payload.scopeResourceId);
-        return Boolean(scopeCreateId && item.dependsOn.includes(scopeCreateId));
+        if (!scopeCreateId || !item.dependsOn.includes(scopeCreateId)) return "GREENFIELD_CONSTRAINT_SCOPE_REQUIRED";
+        break;
       }
       case "resource.put":
-        return true;
+        break;
       case "project_file.put":
       case "project_file.delete":
-        return false;
+        return "GREENFIELD_PROJECT_FILE_MUTATION_FORBIDDEN";
     }
-  });
+  }
+  return null;
+}
+
+export function isGreenfieldCreateOnlyCandidate(items: readonly ChangeSetItem[]): boolean {
+  return classifyGreenfieldCreateOnlyCandidate(items) === null;
 }
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -503,8 +538,13 @@ export class ChangeSetService {
     input: unknown,
     trusted: { producerToolInvocationId: string; greenfieldCreateAuthorized?: boolean } | null = null,
   ): ChangeSetRecord {
-    const proposal = proposalSchema.parse(input);
-    validateDependencyGraph(proposal.items);
+    let proposal: z.infer<typeof proposalSchema>;
+    try {
+      proposal = proposalSchema.parse(input);
+      validateDependencyGraph(proposal.items);
+    } catch (error) {
+      throw safeChangeSetError(error, "CHANGE_SET_INPUT_INVALID");
+    }
     const payloadHash = hashProposal(proposal);
     const existing = this.#repository.findByIdempotencyKey(proposal.idempotencyKey);
     if (existing) {
@@ -527,7 +567,12 @@ export class ChangeSetService {
       items: proposal.items,
       greenfieldCreateAuthorized: trusted?.greenfieldCreateAuthorized === true,
     };
-    const assessments = validateAssessments(candidate, this.policy.assess(candidate));
+    let assessments: ChangeSetPolicyAssessment[];
+    try {
+      assessments = validateAssessments(candidate, this.policy.assess(candidate));
+    } catch (error) {
+      throw safeChangeSetError(error, "CHANGE_SET_POLICY_EXECUTION_FAILED");
+    }
     const assessmentByItem = new Map(assessments.map((assessment) => [assessment.itemId, assessment]));
     const hasMajorConflict = assessments.some((assessment) =>
       assessment.conflicts.some((conflict) => conflict.severity === "major"));
@@ -580,7 +625,7 @@ export class ChangeSetService {
       this.workspace.db.exec("COMMIT");
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
-      throw error;
+      throw safeChangeSetError(error, "CHANGE_SET_PERSISTENCE_FAILED");
     }
 
     if (proposal.mode === "free" && stored.gateStatus === "ready") {
@@ -722,8 +767,14 @@ export class ChangeSetService {
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
       if (this.applier instanceof WorkspaceChangeSetApplier) this.applier.rollbackFileMutations();
-      if (applyStarted) this.#recordApplyFailure(changeSetId);
-      throw error;
+      if (applyStarted) {
+        try {
+          this.#recordApplyFailure(changeSetId);
+        } catch (recordError) {
+          throw safeChangeSetError(recordError, "CHANGE_SET_PERSISTENCE_FAILED");
+        }
+      }
+      throw safeChangeSetError(error, "CHANGE_SET_APPLY_FAILED");
     }
   }
 
@@ -1030,4 +1081,42 @@ const RESOURCE_KIND_LABELS = {
 
 function serviceError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
+}
+
+const safeChangeSetErrorCodes = new Set([
+  "IDEMPOTENCY_KEY_REUSED",
+  "CHANGE_SET_POLICY_REQUIRED",
+  "CHANGE_SET_POLICY_INVALID",
+  "CHANGE_SET_ITEM_DUPLICATE",
+  "CHANGE_SET_DEPENDENCY_DUPLICATE",
+  "CHANGE_SET_DEPENDENCY_NOT_FOUND",
+  "CHANGE_SET_DEPENDENCY_CYCLE",
+  "CHANGE_SET_EXPECTED_HEAD_MISMATCH",
+  "CHANGE_SET_PROVENANCE_MISMATCH",
+  "GREENFIELD_OUTPUT_EVIDENCE_DEPENDENCY_REQUIRED",
+  "GREENFIELD_OUTPUT_EVIDENCE_NOT_COMMITTED",
+  "RESOURCE_DOMAIN_KIND_MISMATCH",
+  "RESOURCE_PARENT_REQUIRED",
+  "RESOURCE_PARENT_NOT_FOUND",
+  "RESOURCE_PARENT_KIND_INVALID",
+  "RESOURCE_PARENT_DOMAIN_INVALID",
+  "RESOURCE_OWNERSHIP_CYCLE",
+  "DOCUMENT_KIND_OWNER_INVALID",
+  "RELATION_SELF_REFERENCE",
+  "RELATION_SOURCE_KIND_INVALID",
+  "RELATION_TARGET_KIND_INVALID",
+  "RELATION_ENDPOINT_KIND_INVALID",
+  "ASSERTION_SOURCE_REQUIRED",
+  "DOCUMENT_VERSION_NOT_FOUND",
+  "CHANGE_SET_INPUT_INVALID",
+  "CHANGE_SET_POLICY_EXECUTION_FAILED",
+  "CHANGE_SET_PERSISTENCE_FAILED",
+  "CHANGE_SET_APPLY_FAILED",
+]);
+
+function safeChangeSetError(error: unknown, fallback: string): Error & { code: string } {
+  const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code
+    : null;
+  return serviceError(safeChangeSetErrorCodes.has(code ?? "") ? code! : fallback, "Change Set operation failed safely.");
 }
