@@ -1,5 +1,5 @@
 import { expect, test, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
@@ -82,7 +82,9 @@ test("runs one real gpt-5.4 Growth goal through three committed cycles and a lat
 
     providerStarted = true;
     evidence.providerStarted = true;
-    const first = await startGrowthAndWatch(page, randomUUID(), 900_000, 420_000);
+    const first = await startGrowthAndWatch(page, 900_000, 420_000, (visual) => {
+      evidence.visual = visual;
+    });
     evidence.goalId = first.goalId;
     evidence.preTermination = first.preTermination;
     if (first.termination) {
@@ -106,6 +108,7 @@ test("runs one real gpt-5.4 Growth goal through three committed cycles and a lat
     }));
     if (first.snapshot.coordinatorStatus !== "completed") throw new Error("GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED");
     assertPublicGrowth(first.snapshot, first.growthEvents, first.agentEvents);
+    evidence.visual = first.visual;
 
     await closeTestElectronApp(app);
     app = null;
@@ -127,6 +130,17 @@ test("runs one real gpt-5.4 Growth goal through three committed cycles and a lat
     evidence.leakScan = "passed";
     evidence.outcome = "completed";
   } catch (error) {
+    if (error instanceof AutoShowcaseDiagnosticError) {
+      evidence.goalId = error.safe.goalId;
+      evidence.cycles = error.safe.snapshot.cycles.map((cycle) => ({
+        id: cycle.id,
+        sequence: cycle.sequence,
+        runId: cycle.runId,
+        status: cycle.status,
+      }));
+      evidence.preTermination = safePreTermination(error.safe.snapshot, error.safe.growthEvents, error.safe.agentEvents, error.safe.elapsedMs);
+      evidence.visual = error.safe.visual;
+    }
     evidence.outcome = providerStarted ? "failed_after_provider_start" : "blocked_before_provider_start";
     evidence.failureCode = safeFailureCode(error);
     if (app) {
@@ -164,6 +178,57 @@ interface SafeEvidence {
   termination?: SafeTermination;
   postTermination?: SafeSqliteEvidence;
   initialGreenfield?: SafeInitialGreenfieldEligibility;
+  visual?: SafeVisualEvidence;
+}
+
+interface SafeVisualEvidence {
+  userMessageVisible: boolean;
+  timelineVisible: boolean;
+  maximumTimelineRows: number;
+  mapLifecycleSequenceObserved: boolean;
+  rightReadyWorldMapObserved: boolean;
+  autoShowcaseObserved: boolean;
+  autoShowcaseOpenCount: number;
+  finalTimelineStatus: "completed" | "blocked" | "failed" | "other" | null;
+  finalTimelineTerminalCategory: "completed" | "blocked" | "failed" | "other" | null;
+  rightWorldMapStatus: "queued" | "generating" | "ready" | "failed" | "reconciliation_required" | "other" | null;
+  manualActionPresent: boolean;
+  manualDomClickDispatched: boolean;
+  manualShowcaseObserved: boolean;
+  manualShowcaseOpenCount: number;
+  finalRouteAgent: boolean;
+  finalRouteShowcase: boolean;
+  route: "agent" | "showcase" | "other";
+  finalReadyMapEvidenced: boolean;
+  showcase?: {
+    readyWorldMapCount: number;
+    proseDocumentCount: number;
+    characterCardCount: number;
+    graphNodeCount: number;
+    failureBannerVisible: boolean;
+  };
+  screenshots: {
+    agentStage?: SafeScreenshotEvidence;
+    showcase?: SafeScreenshotEvidence;
+  };
+}
+
+interface SafeScreenshotEvidence {
+  relativePath: string;
+  sha256: string;
+}
+
+class AutoShowcaseDiagnosticError extends Error {
+  constructor(readonly safe: {
+    goalId: string;
+    snapshot: Awaited<ReturnType<DesktopApi["growth"]["get"]>>;
+    growthEvents: GrowthLiveEvent[];
+    agentEvents: AgentRunEvent[];
+    elapsedMs: number;
+    visual: SafeVisualEvidence;
+  }) {
+    super("AUTO_SHOWCASE_NOT_OBSERVED");
+  }
 }
 
 interface SafeInitialGreenfieldEligibility {
@@ -301,9 +366,9 @@ async function imageProviderStatus(page: Page): Promise<{ providerId: string | n
 
 async function startGrowthAndWatch(
   page: Page,
-  requestId: string,
   overallTimeoutMs: number,
   cycleTimeoutMs: number,
+  onVisualSnapshot?: (visual: SafeVisualEvidence) => void,
 ): Promise<{
   projectId: string;
   sessionId: string;
@@ -312,39 +377,129 @@ async function startGrowthAndWatch(
   growthEvents: GrowthLiveEvent[];
   agentEvents: AgentRunEvent[];
   elapsedMs: number;
+  visual: SafeVisualEvidence;
   preTermination?: SafePreTermination;
   termination?: "GROWTH_CYCLE_WATCHDOG_TIMEOUT" | "GROWTH_OVERALL_TIMEOUT" | "GROWTH_AGENT_TERMINAL_PROJECTION_TIMEOUT";
 }> {
   const bufferKey = `__novaxGrowthWatch_${randomUUID()}`;
-  const started = await page.evaluate(async ({ receivedRequestId, receivedBufferKey }) => {
+  const prepared = await page.evaluate(async ({ receivedBufferKey }) => {
     const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
     const project = (await desktop.project.list()).projects[0];
     if (!project) throw new Error("GROWTH_PROJECT_MISSING");
     const sessions = await desktop.session.list({ projectId: project.id });
-    const session = sessions.sessions[0] ?? await desktop.session.create({ projectId: project.id, title: "真实 Growth 验收" });
+    const session = sessions.sessions[0];
+    if (!session) throw new Error("GROWTH_UI_SESSION_MISSING");
     const growthEvents: GrowthLiveEvent[] = [];
     const agentEvents: AgentRunEvent[] = [];
     const releaseGrowth = desktop.growth.subscribe((event) => { if (event.sessionId === session.id) growthEvents.push(event); });
     const releaseAgent = desktop.agent.subscribe((event) => { if (event.sessionId === session.id) agentEvents.push(event); });
+    const visual = {
+      userMessageVisible: false,
+      timelineVisible: false,
+      maximumTimelineRows: 0,
+      mapLifecycleSequenceObserved: false,
+      rightReadyWorldMapObserved: false,
+      autoShowcaseObserved: false,
+      autoShowcaseOpenCount: 0,
+      finalTimelineStatus: null as SafeVisualEvidence["finalTimelineStatus"],
+      finalTimelineTerminalCategory: null as SafeVisualEvidence["finalTimelineTerminalCategory"],
+      rightWorldMapStatus: null as SafeVisualEvidence["rightWorldMapStatus"],
+      manualActionPresent: false,
+      manualDomClickDispatched: false,
+      manualShowcaseObserved: false,
+      manualShowcaseOpenCount: 0,
+      finalRouteAgent: false,
+      finalRouteShowcase: false,
+      route: "other" as "agent" | "showcase" | "other",
+      finalReadyMapEvidenced: false,
+      showcase: undefined as SafeVisualEvidence["showcase"] | undefined,
+      screenshots: {} as SafeVisualEvidence["screenshots"],
+      showcasePresent: false,
+      manualActionClicked: false,
+    };
+    const observeVisual = () => {
+      visual.userMessageVisible ||= document.querySelector(".steward-message--user") !== null;
+      const timeline = document.querySelector<HTMLElement>("[aria-label='生长活动时间线']");
+      if (timeline) {
+        visual.timelineVisible = true;
+        visual.maximumTimelineRows = Math.max(visual.maximumTimelineRows, timeline.querySelectorAll(".growth-timeline__row").length);
+        const timelineText = timeline.textContent ?? "";
+        const queued = timelineText.indexOf("世界地图排队中");
+        const generating = timelineText.indexOf("生成世界地图", queued + 1);
+        const ready = timelineText.indexOf("世界地图已生成", generating + 1);
+        visual.mapLifecycleSequenceObserved ||= queued >= 0 && generating > queued && ready > generating;
+        const status = timeline.getAttribute("data-status");
+        if (status === "completed" || status === "blocked" || status === "failed") visual.finalTimelineStatus = status;
+        else if (status && status !== "running") visual.finalTimelineStatus = "other";
+        const terminalLabel = timeline.querySelector("[role='status']")?.textContent ?? "";
+        if (terminalLabel.includes("完成")) visual.finalTimelineTerminalCategory = "completed";
+        else if (terminalLabel.includes("阻塞")) visual.finalTimelineTerminalCategory = "blocked";
+        else if (terminalLabel.includes("失败")) visual.finalTimelineTerminalCategory = "failed";
+        else if (terminalLabel.trim()) visual.finalTimelineTerminalCategory = "other";
+      }
+      const route = document.querySelector("main.workbench")?.getAttribute("data-mode");
+      visual.route = route === "agent" || route === "showcase" ? route : "other";
+      visual.finalRouteAgent = visual.route === "agent";
+      visual.finalRouteShowcase = visual.route === "showcase";
+      const readyMap = document.querySelector(".run-work-target-pane__world-map[data-status='ready']");
+      if (readyMap && visual.route === "agent") visual.rightReadyWorldMapObserved = true;
+      const map = document.querySelector(".run-work-target-pane__world-map");
+      const mapStatus = map?.getAttribute("data-status");
+      if (mapStatus === "queued" || mapStatus === "generating" || mapStatus === "ready" || mapStatus === "failed" || mapStatus === "reconciliation_required") visual.rightWorldMapStatus = mapStatus;
+      else if (mapStatus) visual.rightWorldMapStatus = "other";
+      visual.manualActionPresent = Boolean(readyMap?.querySelector("button"));
+      const showcasePresent = document.querySelector(".creative-showcase") !== null;
+      if (showcasePresent && !visual.showcasePresent && !visual.manualActionClicked) visual.autoShowcaseOpenCount += 1;
+      if (showcasePresent && !visual.showcasePresent && visual.manualActionClicked) visual.manualShowcaseOpenCount += 1;
+      visual.showcasePresent = showcasePresent;
+      visual.autoShowcaseObserved ||= showcasePresent && !visual.manualActionClicked;
+      visual.manualShowcaseObserved ||= showcasePresent && visual.manualActionClicked;
+    };
+    const observer = new MutationObserver(observeVisual);
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+    observeVisual();
     const state = globalThis as typeof globalThis & { [key: string]: unknown };
-    state[receivedBufferKey] = { growthEvents, agentEvents, releaseGrowth, releaseAgent };
-    try {
-      const response = await desktop.growth.start({
-        requestId: receivedRequestId,
-        projectId: project.id,
-        sessionId: session.id,
-        seed: { kind: "text", text: "一座港湾会在潮汐倒转时显出被遗忘的石阶，城民据此安排誓约、航行与继承。" },
-        initialRuleText: "所有正式事实必须建立在稳定来源上；不确定内容保持候选，不得把推测写成确认。",
-        strategy: "grow_world_story_oc_v1",
-      });
-      return { projectId: project.id, sessionId: session.id, goalId: response.goal.id };
-    } catch {
-      releaseGrowth();
-      releaseAgent();
-      delete state[receivedBufferKey];
-      throw new Error("GROWTH_START_FAILED");
-    }
-  }, { receivedRequestId: requestId, receivedBufferKey: bufferKey });
+    state[receivedBufferKey] = { growthEvents, agentEvents, releaseGrowth, releaseAgent, observer, observeVisual, visual, released: false };
+    return { projectId: project.id, sessionId: session.id };
+  }, { receivedBufferKey: bufferKey });
+
+  const seed = "一座港湾会在潮汐倒转时显出被遗忘的石阶，城民据此安排誓约、航行与继承。";
+  const composer = page.getByLabel("给大管家发送消息");
+  const growthMode = page.getByRole("radio", { name: "生长", exact: true });
+  try {
+    await expect(composer).toBeEnabled({ timeout: 8_000 });
+    await growthMode.click({ timeout: 8_000 });
+    await expect(growthMode).toHaveAttribute("aria-checked", "true");
+    await composer.fill(seed);
+    const send = page.getByTitle("发送");
+    await expect(send).toBeEnabled({ timeout: 8_000 });
+    await send.click({ timeout: 8_000 });
+    const submittedSeed = page.locator(".steward-message--user").filter({ hasText: seed });
+    await expect(submittedSeed).toHaveCount(1, { timeout: 8_000 });
+    await expect(submittedSeed).toBeVisible({ timeout: 8_000 });
+    await expect(page.getByRole("region", { name: "生长活动时间线" })).toBeVisible({ timeout: 8_000 });
+  } catch (cause) {
+    await disposeGrowthVisualBuffer(page, bufferKey);
+    throw cause;
+  }
+
+  await expect.poll(() => page.evaluate((receivedBufferKey) => {
+    const state = globalThis as typeof globalThis & { [key: string]: unknown };
+    const buffer = state[receivedBufferKey] as { growthEvents: GrowthLiveEvent[] } | undefined;
+    return buffer?.growthEvents[0]?.event.goalId ?? null;
+  }, bufferKey), { timeout: 30_000 }).not.toBeNull();
+  const goalId = await page.evaluate((receivedBufferKey) => {
+    const state = globalThis as typeof globalThis & { [key: string]: unknown };
+    const buffer = state[receivedBufferKey] as { growthEvents: GrowthLiveEvent[] } | undefined;
+    return buffer?.growthEvents[0]?.event.goalId ?? null;
+  }, bufferKey);
+  if (!goalId) {
+    await disposeGrowthVisualBuffer(page, bufferKey);
+    throw new Error("GROWTH_UI_GOAL_MISSING");
+  }
+  const started = { ...prepared, goalId };
+  let agentStageScreenshot: SafeScreenshotEvidence | undefined;
+  let latestVisual = await readGrowthVisual(page, bufferKey);
 
   const watched = await watchGrowthTerminal({
     overallTimeoutMs,
@@ -355,11 +510,20 @@ async function startGrowthAndWatch(
       const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
       return desktop.growth.get({ projectId, sessionId, goalId });
     }, started),
-    readEvents: () => page.evaluate((receivedBufferKey) => {
-      const buffer = (globalThis as typeof globalThis & { [key: string]: unknown })[receivedBufferKey] as { growthEvents: GrowthLiveEvent[]; agentEvents: AgentRunEvent[] } | undefined;
-      if (!buffer) throw new Error("GROWTH_EVENT_BUFFER_MISSING");
-      return { growthEvents: [...buffer.growthEvents], agentEvents: [...buffer.agentEvents] };
-    }, bufferKey),
+    readEvents: async () => {
+      const events = await page.evaluate((receivedBufferKey) => {
+        const state = globalThis as typeof globalThis & { [key: string]: unknown };
+        const buffer = state[receivedBufferKey] as { growthEvents: GrowthLiveEvent[]; agentEvents: AgentRunEvent[]; observeVisual(): void; visual: SafeVisualEvidence } | undefined;
+        if (!buffer) throw new Error("GROWTH_EVENT_BUFFER_MISSING");
+        buffer.observeVisual();
+        return { growthEvents: [...buffer.growthEvents], agentEvents: [...buffer.agentEvents], visual: buffer.visual };
+      }, bufferKey);
+      latestVisual = events.visual;
+      if (!agentStageScreenshot && events.visual.rightReadyWorldMapObserved && events.visual.route === "agent") {
+        agentStageScreenshot = await captureVisualScreenshot(page, "test-results/real-growth-live-agent-stage.png");
+      }
+      return events;
+    },
     terminalDeliverySatisfied: (snapshot, events) => {
       const terminalRunIds = new Set(events.agentEvents
         .filter((event) => event.type === "run.completed" || event.type === "run.failed")
@@ -368,119 +532,198 @@ async function startGrowthAndWatch(
     },
     release: () => page.evaluate((receivedBufferKey) => {
       const state = globalThis as typeof globalThis & { [key: string]: unknown };
-      const buffer = state[receivedBufferKey] as { releaseGrowth(): void; releaseAgent(): void } | undefined;
-      buffer?.releaseGrowth();
-      buffer?.releaseAgent();
-      delete state[receivedBufferKey];
+      const buffer = state[receivedBufferKey] as { releaseGrowth(): void; releaseAgent(): void; released: boolean } | undefined;
+      if (buffer && !buffer.released) {
+        buffer.releaseGrowth();
+        buffer.releaseAgent();
+        buffer.released = true;
+      }
     }, bufferKey),
   });
   const { growthEvents, agentEvents } = watched.events;
+  if (!watched.termination) {
+    const autoShowcaseObserved = await waitForShowcase(page, bufferKey, 30_000, (visual) => visual.autoShowcaseObserved && visual.route === "showcase");
+    latestVisual = await readGrowthVisual(page, bufferKey);
+    onVisualSnapshot?.(latestVisual);
+    if (!autoShowcaseObserved) {
+      if (latestVisual.manualActionPresent) {
+        try {
+          await dispatchManualShowcaseDomClick(page, bufferKey);
+          latestVisual = await readGrowthVisual(page, bufferKey);
+          onVisualSnapshot?.(latestVisual);
+        } catch {
+          latestVisual = { ...latestVisual, manualDomClickDispatched: false };
+          onVisualSnapshot?.(latestVisual);
+        }
+      }
+      await waitForShowcase(page, bufferKey, 30_000, (visual) => visual.manualShowcaseObserved && visual.route === "showcase");
+      latestVisual = await readGrowthVisual(page, bufferKey);
+      onVisualSnapshot?.(latestVisual);
+      await disposeGrowthVisualBuffer(page, bufferKey);
+      throw new AutoShowcaseDiagnosticError({
+        goalId: started.goalId,
+        snapshot: watched.snapshot,
+        growthEvents,
+        agentEvents,
+        elapsedMs: watched.elapsedMs,
+        visual: latestVisual,
+      });
+    }
+    expect(latestVisual.userMessageVisible).toBe(true);
+    expect(latestVisual.timelineVisible).toBe(true);
+    expect(latestVisual.maximumTimelineRows).toBeGreaterThanOrEqual(3);
+    expect(latestVisual.mapLifecycleSequenceObserved).toBe(true);
+    expect(latestVisual.rightReadyWorldMapObserved).toBe(true);
+    expect(latestVisual.rightWorldMapStatus).toBe("ready");
+    expect(latestVisual.autoShowcaseObserved).toBe(true);
+    expect(latestVisual.autoShowcaseOpenCount).toBe(1);
+    expect(latestVisual.manualDomClickDispatched).toBe(false);
+    expect(latestVisual.manualShowcaseObserved).toBe(false);
+    expect(latestVisual.manualShowcaseOpenCount).toBe(0);
+    expect(latestVisual.finalTimelineStatus).toBe("completed");
+    expect(latestVisual.finalTimelineTerminalCategory).toBe("completed");
+    expect(latestVisual.finalRouteShowcase).toBe(true);
+    latestVisual.showcase = await assertMountedGrowthShowcase(page);
+    latestVisual.finalReadyMapEvidenced = latestVisual.rightReadyWorldMapObserved && latestVisual.showcase.readyWorldMapCount === 1;
+    expect(latestVisual.finalReadyMapEvidenced).toBe(true);
+    latestVisual.screenshots = {
+      ...(agentStageScreenshot ? { agentStage: agentStageScreenshot } : {}),
+      showcase: await captureVisualScreenshot(page, "test-results/real-growth-live-showcase.png"),
+    };
+    onVisualSnapshot?.(latestVisual);
+  }
+  await disposeGrowthVisualBuffer(page, bufferKey);
   return {
     ...started,
     snapshot: watched.snapshot,
     growthEvents,
     agentEvents,
     elapsedMs: watched.elapsedMs,
+    visual: latestVisual,
     ...(watched.termination ? { termination: watched.termination, preTermination: safePreTermination(watched.snapshot, growthEvents, agentEvents, watched.elapsedMs) } : {}),
   };
 }
 
-async function startGrowthAndWatchLegacy(
+async function readGrowthVisual(page: Page, bufferKey: string): Promise<SafeVisualEvidence> {
+  return page.evaluate((receivedBufferKey) => {
+    const state = globalThis as typeof globalThis & { [key: string]: unknown };
+    const buffer = state[receivedBufferKey] as { observeVisual(): void; visual: SafeVisualEvidence } | undefined;
+    if (!buffer) throw new Error("GROWTH_VISUAL_BUFFER_MISSING");
+    buffer.observeVisual();
+    const visual = buffer.visual;
+    return {
+      userMessageVisible: visual.userMessageVisible,
+      timelineVisible: visual.timelineVisible,
+      maximumTimelineRows: visual.maximumTimelineRows,
+      mapLifecycleSequenceObserved: visual.mapLifecycleSequenceObserved,
+      rightReadyWorldMapObserved: visual.rightReadyWorldMapObserved,
+      autoShowcaseObserved: visual.autoShowcaseObserved,
+      autoShowcaseOpenCount: visual.autoShowcaseOpenCount,
+      finalTimelineStatus: visual.finalTimelineStatus,
+      finalTimelineTerminalCategory: visual.finalTimelineTerminalCategory,
+      rightWorldMapStatus: visual.rightWorldMapStatus,
+      manualActionPresent: visual.manualActionPresent,
+      manualDomClickDispatched: visual.manualDomClickDispatched,
+      manualShowcaseObserved: visual.manualShowcaseObserved,
+      manualShowcaseOpenCount: visual.manualShowcaseOpenCount,
+      finalRouteAgent: visual.finalRouteAgent,
+      finalRouteShowcase: visual.finalRouteShowcase,
+      route: visual.route,
+      finalReadyMapEvidenced: visual.finalReadyMapEvidenced,
+      ...(visual.showcase ? { showcase: visual.showcase } : {}),
+      screenshots: visual.screenshots,
+    };
+  }, bufferKey);
+}
+
+async function waitForShowcase(
   page: Page,
-  requestId: string,
-  overallTimeoutMs: number,
-  cycleTimeoutMs: number,
-): Promise<{
-  projectId: string;
-  sessionId: string;
-  goalId: string;
-  snapshot: Awaited<ReturnType<DesktopApi["growth"]["get"]>>;
-  growthEvents: GrowthLiveEvent[];
-  agentEvents: AgentRunEvent[];
-  elapsedMs: number;
-  preTermination?: SafePreTermination;
-  termination?: "GROWTH_CYCLE_WATCHDOG_TIMEOUT" | "GROWTH_OVERALL_TIMEOUT";
-}> {
-  return page.evaluate(async ({ requestId: receivedRequestId, overallTimeout: receivedOverallTimeout, cycleTimeout: receivedCycleTimeout }) => {
+  bufferKey: string,
+  timeoutMs: number,
+  predicate: (visual: SafeVisualEvidence) => boolean,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const visual = await readGrowthVisual(page, bufferKey);
+    if (predicate(visual)) return true;
+    await page.waitForTimeout(500);
+  }
+  return predicate(await readGrowthVisual(page, bufferKey));
+}
+
+async function dispatchManualShowcaseDomClick(page: Page, bufferKey: string): Promise<boolean> {
+  return page.evaluate((receivedBufferKey) => {
+    const state = globalThis as typeof globalThis & { [key: string]: unknown };
+    const buffer = state[receivedBufferKey] as { visual: { manualActionClicked: boolean; manualDomClickDispatched: boolean } } | undefined;
+    if (!buffer) throw new Error("GROWTH_VISUAL_BUFFER_MISSING");
+    const action = document.querySelector<HTMLElement>(".run-work-target-pane__world-map[data-status='ready'] button");
+    if (!action) return false;
+    buffer.visual.manualActionClicked = true;
+    try {
+      action.click();
+      buffer.visual.manualDomClickDispatched = true;
+      return true;
+    } catch {
+      buffer.visual.manualDomClickDispatched = false;
+      return false;
+    }
+  }, bufferKey);
+}
+
+async function disposeGrowthVisualBuffer(page: Page, bufferKey: string): Promise<void> {
+  await page.evaluate((receivedBufferKey) => {
+    const state = globalThis as typeof globalThis & { [key: string]: unknown };
+    const buffer = state[receivedBufferKey] as { releaseGrowth(): void; releaseAgent(): void; observer: MutationObserver; released: boolean } | undefined;
+    if (!buffer) return;
+    if (!buffer.released) {
+      buffer.releaseGrowth();
+      buffer.releaseAgent();
+      buffer.released = true;
+    }
+    buffer.observer.disconnect();
+    delete state[receivedBufferKey];
+  }, bufferKey);
+}
+
+async function captureVisualScreenshot(page: Page, relativePath: string): Promise<SafeScreenshotEvidence> {
+  const absolutePath = path.join(process.cwd(), relativePath);
+  fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+  await page.screenshot({ path: absolutePath, fullPage: true });
+  return {
+    relativePath: relativePath.replace(/\\/g, "/"),
+    sha256: createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex"),
+  };
+}
+
+async function assertMountedGrowthShowcase(page: Page): Promise<NonNullable<SafeVisualEvidence["showcase"]>> {
+  const showcase = page.locator(".creative-showcase");
+  await expect(showcase).toBeVisible({ timeout: 30_000 });
+  await expect(showcase.locator("section[aria-label='视觉资产'] img")).toBeVisible();
+  await expect(showcase.locator("section[aria-label='故事正文'] .showcase-story__prose")).toContainText(/\S/);
+  await expect.poll(() => showcase.locator(".showcase-character-card").count()).toBeGreaterThanOrEqual(2);
+  await expect(showcase.locator("details[aria-label='事件图谱预览']")).toBeVisible();
+  await expect(showcase.locator(".showcase-error")).toHaveCount(0);
+  const projection = await page.evaluate(async () => {
     const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
-    const project = (await desktop.project.list()).projects[0];
-    if (!project) throw new Error("GROWTH_PROJECT_MISSING");
-    const sessions = await desktop.session.list({ projectId: project.id });
-    const session = sessions.sessions[0] ?? await desktop.session.create({ projectId: project.id, title: "真实 Growth 验收" });
-    return new Promise<{
-      projectId: string;
-      sessionId: string;
-      goalId: string;
-      snapshot: Awaited<ReturnType<DesktopApi["growth"]["get"]>>;
-      growthEvents: GrowthLiveEvent[];
-      agentEvents: AgentRunEvent[];
-      elapsedMs: number;
-      preTermination?: SafePreTermination;
-      termination?: "GROWTH_CYCLE_WATCHDOG_TIMEOUT" | "GROWTH_OVERALL_TIMEOUT";
-    }>((resolve, reject) => {
-      const growthEvents: GrowthLiveEvent[] = [];
-      const agentEvents: AgentRunEvent[] = [];
-      const startedAt = Date.now();
-      let latestSnapshot: Awaited<ReturnType<DesktopApi["growth"]["get"]>> | null = null;
-      let watchedCycleId: string | null = null;
-      let watchedCycleAt: number | null = null;
-      const releaseGrowth = desktop.growth.subscribe((event) => {
-        if (event.sessionId === session.id) growthEvents.push(event);
-      });
-      const releaseAgent = desktop.agent.subscribe((event) => {
-        if (event.sessionId === session.id) agentEvents.push(event);
-      });
-      let goalId: string | null = null;
-      const finish = (result?: Awaited<ReturnType<DesktopApi["growth"]["get"]>>, error?: Error, termination?: "GROWTH_CYCLE_WATCHDOG_TIMEOUT" | "GROWTH_OVERALL_TIMEOUT") => {
-        globalThis.clearInterval(poll);
-        globalThis.clearInterval(watchdog);
-        releaseGrowth();
-        releaseAgent();
-        if (error) reject(error); else if (result && goalId) resolve({
-          projectId: project.id, sessionId: session.id, goalId, snapshot: result, growthEvents, agentEvents,
-          elapsedMs: Date.now() - startedAt,
-          ...(termination ? { termination, preTermination: safePreTermination(result, growthEvents, agentEvents, Date.now() - startedAt) } : {}),
-        });
-      };
-      const poll = globalThis.setInterval(() => {
-        if (!goalId) return;
-        void desktop.growth.get({ projectId: project.id, sessionId: session.id, goalId }).then((snapshot) => {
-          latestSnapshot = snapshot;
-          const running = snapshot.cycles.find((cycle) => cycle.status === "running" && cycle.runId !== null);
-          if (running?.id !== watchedCycleId) {
-            watchedCycleId = running?.id ?? null;
-            watchedCycleAt = running ? Date.now() : null;
-          }
-          if (snapshot.coordinatorStatus !== "running") finish(snapshot);
-        }).catch(() => finish(undefined, new Error("GROWTH_GET_FAILED")));
-      }, 750);
-      const watchdog = globalThis.setInterval(() => {
-        if (!goalId) return;
-        const now = Date.now();
-        const timeout = now - startedAt >= receivedOverallTimeout
-          ? "GROWTH_OVERALL_TIMEOUT"
-          : watchedCycleAt !== null && now - watchedCycleAt >= receivedCycleTimeout
-            ? "GROWTH_CYCLE_WATCHDOG_TIMEOUT"
-            : null;
-        if (!timeout) return;
-        void desktop.growth.get({ projectId: project.id, sessionId: session.id, goalId }).then((snapshot) => {
-          latestSnapshot = snapshot;
-          finish(snapshot, undefined, timeout);
-        }).catch(() => {
-          if (latestSnapshot) finish(latestSnapshot, undefined, timeout);
-          else finish(undefined, new Error("GROWTH_GET_FAILED"));
-        });
-      }, 500);
-      void desktop.growth.start({
-        requestId: receivedRequestId,
-        projectId: project.id,
-        sessionId: session.id,
-        seed: { kind: "text", text: "一座港湾会在潮汐倒转时显出被遗忘的石阶，城民据此安排誓约、航行与继承。" },
-        initialRuleText: "所有正式事实必须建立在稳定来源上；不确定内容保持候选，不得把推测写成确认。",
-        strategy: "grow_world_story_oc_v1",
-      }).then((started) => { goalId = started.goal.id; }).catch(() => finish(undefined, new Error("GROWTH_START_FAILED")));
-    });
-  }, { requestId, overallTimeout: overallTimeoutMs, cycleTimeout: cycleTimeoutMs });
+    const workspace = await desktop.workspace.getCurrent();
+    const story = workspace?.resources.find((resource) => resource.type === "story" && resource.objectKind === "story");
+    if (!story) throw new Error("SHOWCASE_STORY_PROJECTION_MISSING");
+    const result = await desktop.showcase.get({ storyResourceId: story.id });
+    if (!result.ok) throw new Error("SHOWCASE_PROJECTION_UNAVAILABLE");
+    return {
+      readyWorldMapCount: result.showcase.images.filter((image) => image.purpose === "world_map" && image.status === "ready").length,
+      proseDocumentCount: result.showcase.proseDocuments.length,
+      characterCardCount: result.showcase.characters.length,
+      graphNodeCount: result.showcase.graph.nodes.length,
+      failureBannerVisible: document.querySelector(".creative-showcase .showcase-error") !== null,
+    };
+  });
+  expect(projection.readyWorldMapCount).toBe(1);
+  expect(projection.proseDocumentCount).toBeGreaterThan(0);
+  expect(projection.characterCardCount).toBeGreaterThanOrEqual(2);
+  expect(projection.graphNodeCount).toBeGreaterThan(0);
+  expect(projection.failureBannerVisible).toBe(false);
+  return projection;
 }
 
 function safePreTermination(
@@ -910,7 +1153,7 @@ function safeFailureCode(error: unknown): string {
   const allowlisted = new Set([
     "GROWTH_CYCLE_WATCHDOG_TIMEOUT", "GROWTH_OVERALL_TIMEOUT", "GROWTH_AGENT_TERMINAL_PROJECTION_TIMEOUT", "GROWTH_GET_FAILED", "GROWTH_START_FAILED",
     "REAL_PROVIDER_LOCAL_STATE_MISSING", "REAL_PROVIDER_MODEL_ID_MISMATCH", "REAL_PROVIDER_CONFIG_UNAVAILABLE",
-    "RESEARCH_RUN_TIMEOUT", "RESEARCH_TERMINAL_INVALID", "GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED",
+    "RESEARCH_RUN_TIMEOUT", "RESEARCH_TERMINAL_INVALID", "GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED", "AUTO_SHOWCASE_NOT_OBSERVED",
   ]);
   if (allowlisted.has(error.message)) return error.message;
   if (/^RESEARCH_TERMINAL_[A-Z0-9_]+$/.test(error.message)) return "AGENT_RUN_FAILED";

@@ -1,0 +1,411 @@
+{
+  "schemaVersion": 1,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "imageProvider": {
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2"
+  },
+  "providerStarted": true,
+  "outcome": "completed",
+  "cycles": [
+    {
+      "id": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:1",
+      "sequence": 1,
+      "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+      "status": "committed"
+    },
+    {
+      "id": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:2",
+      "sequence": 2,
+      "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+      "status": "committed"
+    },
+    {
+      "id": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:3",
+      "sequence": 3,
+      "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+      "status": "committed"
+    }
+  ],
+  "research": {
+    "runId": "71c7746c-7212-4ff4-b44d-f4c0d7267173",
+    "retrieveSucceeded": true,
+    "noMutationTools": true
+  },
+  "counts": {
+    "resources": 10,
+    "documents": 6,
+    "assertions": 4,
+    "relations": 14
+  },
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "visual": {
+    "userMessageVisible": true,
+    "timelineVisible": true,
+    "maximumTimelineRows": 3,
+    "mapLifecycleSequenceObserved": true,
+    "rightReadyWorldMapObserved": true,
+    "autoShowcaseObserved": true,
+    "autoShowcaseOpenCount": 1,
+    "finalTimelineStatus": "completed",
+    "finalTimelineTerminalCategory": "completed",
+    "rightWorldMapStatus": "ready",
+    "manualActionPresent": false,
+    "manualDomClickDispatched": false,
+    "manualShowcaseObserved": false,
+    "manualShowcaseOpenCount": 0,
+    "finalRouteAgent": false,
+    "finalRouteShowcase": true,
+    "route": "showcase",
+    "finalReadyMapEvidenced": true,
+    "screenshots": {
+      "agentStage": {
+        "relativePath": "test-results/real-growth-live-agent-stage.png",
+        "sha256": "e713988f5a1411ff53e1c951b5e39777267a0d8df11f8e9bd4810f1ec7b8d400"
+      },
+      "showcase": {
+        "relativePath": "test-results/real-growth-live-showcase.png",
+        "sha256": "b6f0d7ed7c03a9000e559e662b934fbe428ac4793847b61c14739a1efa81bdcc"
+      }
+    },
+    "showcase": {
+      "readyWorldMapCount": 1,
+      "proseDocumentCount": 1,
+      "characterCardCount": 4,
+      "graphNodeCount": 8,
+      "failureBannerVisible": false
+    }
+  },
+  "goalId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277",
+  "preTermination": {
+    "elapsedMs": 487871,
+    "cycles": [
+      {
+        "id": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:1",
+        "sequence": 1,
+        "status": "committed",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7"
+      },
+      {
+        "id": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:2",
+        "sequence": 2,
+        "status": "committed",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31"
+      },
+      {
+        "id": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:3",
+        "sequence": 3,
+        "status": "committed",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe"
+      }
+    ],
+    "growthEvents": [
+      {
+        "sequence": 1,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:1",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 2,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:1",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 3,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:1",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 4,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:1",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 5,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:2",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 6,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:2",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 7,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:2",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 8,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:2",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 9,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:3",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 10,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:3",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 11,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:3",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 12,
+        "cycleId": "growth-goal:d9ba063d-88f3-4078-807a-6747f9595277:cycle:3",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      }
+    ],
+    "agentEvents": [
+      {
+        "type": "run.started",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "生成世界地图",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "世界地图排队中",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "生成世界地图",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "世界地图已生成",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "生成世界地图",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "整理最终结果",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "1e8f762e-8820-4fec-87f8-bea5d07090a7",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31"
+      },
+      {
+        "type": "run.activity",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "activityLabel": "调用写手",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "275fc7bd-3f23-4778-971f-ab7c48ac9b31",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe"
+      },
+      {
+        "type": "run.activity",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "f80f88d6-c456-470e-9edd-ed9187212dbe",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      }
+    ]
+  },
+  "worldMap": {
+    "jobId": "fb4ee589-a951-4525-b674-e186eafde18f",
+    "assetId": "cc223253-790c-4b7b-800d-7a9dd7eda0ea",
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2",
+    "sourceResourceCount": 1,
+    "sourceVersionCount": 2,
+    "mimeType": "image/png",
+    "width": 1536,
+    "height": 1024,
+    "byteLength": 3176342,
+    "sha256": "f3862392138fe418476bfe67e23b593db575cd56c5405bd39cefbb95e902a862"
+  }
+}
