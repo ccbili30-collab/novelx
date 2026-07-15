@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -97,6 +98,103 @@ describe("Growth Run bridge", () => {
     expect(JSON.stringify(command.growthBinding)).not.toContain(setup.workspace.rootPath);
     supervisor.cancel(runId);
     await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).getCycle(setup.cycleId)?.status).toBe("cancelled"));
+  });
+
+  it("anchors Cycle 2 retrieval to the prior committed world output even when the model supplies no seed", async () => {
+    const setup = createSetup();
+    const prior = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "prior-world");
+    const growth = new GrowthRepository(setup.workspace);
+    const cycle = growth.beginCycle({
+      id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key",
+      inputCheckpointId: prior.outputCheckpointId, ruleRevision: 1,
+    });
+    const worker = new FakeWorker();
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker));
+    const runId = lifecycle.start({
+      goalId: setup.goalId, cycleId: cycle.id,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "continue", mode: "free" }, emit: () => undefined,
+    });
+    worker.spawn();
+    expect((worker.sent[0] as { growthBinding: { phase: string; seedResourceIds: string[] } }).growthBinding)
+      .toMatchObject({ phase: "story", seedResourceIds: [] });
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "unmatched", 1);
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+    const response = worker.sent[1] as { ok: boolean; result: { evidence: Array<{ kind: string; resource?: { resourceId: string } }> } };
+    expect(response).toMatchObject({ ok: true });
+    expect(response.result.evidence).toContainEqual(expect.objectContaining({ kind: "resource", resource: expect.objectContaining({ resourceId: prior.resourceId }) }));
+    const receipt = growth.getReceipt(growth.getCycle(cycle.id)!.receiptId!);
+    expect(receipt?.links).toContainEqual(expect.objectContaining({ targetKind: "resource", targetId: prior.resourceId, reasonCodes: expect.arrayContaining(["alias"]) }));
+  });
+
+  it("anchors Cycle 3 retrieval only to the prior committed story output", async () => {
+    const setup = createSetup();
+    const world = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "prior-world");
+    const growth = new GrowthRepository(setup.workspace);
+    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: world.outputCheckpointId, ruleRevision: 1 });
+    const storyRootId = setup.authorizedScopeResourceIds.find((id) => new ResourceRepository(setup.workspace).listAtCheckpoint(world.outputCheckpointId).find((resource) => resource.id === id)?.type === "story")!;
+    const story = await commitPriorResourceCycle(setup, cycle2.id, "story", "story", storyRootId, "prior-story");
+    const cycle3 = growth.beginCycle({ id: "growth-cycle-3", goalId: setup.goalId, idempotencyKey: "growth-cycle-3-key", inputCheckpointId: story.outputCheckpointId, ruleRevision: 1 });
+    const worker = new FakeWorker();
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker));
+    const runId = lifecycle.start({ goalId: setup.goalId, cycleId: cycle3.id, request: { projectId: "project-1", sessionId: "session-1", userInput: "continue", mode: "free" }, emit: () => undefined });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "unmatched", 1);
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+    const response = worker.sent[1] as { ok: boolean; result: { evidence: Array<{ kind: string; resource?: { resourceId: string } }> } };
+    expect(response).toMatchObject({ ok: true });
+    expect(response.result.evidence).toContainEqual(expect.objectContaining({ kind: "resource", resource: expect.objectContaining({ resourceId: story.resourceId }) }));
+  });
+
+  it("fails closed for a missing prior Change Set output before a Worker starts", async () => {
+    const setup = createSetup();
+    const first = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "prior-world");
+    const growth = new GrowthRepository(setup.workspace);
+    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: first.outputCheckpointId, ruleRevision: 1 });
+    setup.workspace.db.prepare("DELETE FROM change_set_outputs WHERE change_set_id = ?").run(first.changeSetId);
+    const spawn = vi.fn(() => new FakeWorker());
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
+    expect(() => lifecycle.start({ goalId: setup.goalId, cycleId: cycle2.id, request: { projectId: "project-1", sessionId: "session-1", userInput: "continue", mode: "free" }, emit: () => undefined }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the prior Change Set has multiple candidate world outputs", async () => {
+    const setup = createSetup();
+    const first = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "prior-world");
+    const second = new ResourceRepository(setup.workspace).putRevisionWithReceipt({
+      resourceId: "prior-world-second", create: true, checkpointId: first.outputCheckpointId,
+      type: "world", objectKind: "world", title: "prior-world-second", parentId: setup.scopeId, state: "active", sortOrder: 1,
+    });
+    setup.workspace.db.prepare(`
+      INSERT INTO change_set_items (change_set_id, id, ordinal, kind, payload_json, risk, conflicts_json, decision)
+      VALUES (?, 'second-world-output', 1, 'resource.put', '{}', 'low', '[]', 'accepted')
+    `).run(first.changeSetId);
+    setup.workspace.db.prepare(`
+      INSERT INTO change_set_outputs (change_set_id, item_id, output_kind, output_id, output_sha256, created_at)
+      VALUES (?, 'second-world-output', 'resource_revision', ?, ?, ?)
+    `).run(first.changeSetId, second.revisionId, second.revisionSha256, new Date().toISOString());
+    const growth = new GrowthRepository(setup.workspace);
+    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: first.outputCheckpointId, ruleRevision: 1 });
+    const spawn = vi.fn(() => new FakeWorker());
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
+    expect(() => lifecycle.start({ goalId: setup.goalId, cycleId: cycle2.id, request: { projectId: "project-1", sessionId: "session-1", userInput: "continue", mode: "free" }, emit: () => undefined }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the Cycle input checkpoint is no longer the active pinned checkpoint", async () => {
+    const setup = createSetup();
+    const first = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "prior-world");
+    const growth = new GrowthRepository(setup.workspace);
+    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: first.outputCheckpointId, ruleRevision: 1 });
+    new CheckpointRepository(setup.workspace).appendCheckpoint(new CheckpointRepository(setup.workspace).getActiveBranch().id, "stale anchor test");
+    const spawn = vi.fn(() => new FakeWorker());
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
+    expect(() => lifecycle.start({ goalId: setup.goalId, cycleId: cycle2.id, request: { projectId: "project-1", sessionId: "session-1", userInput: "continue", mode: "free" }, emit: () => undefined }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it("maps terminal failures to stable allowlisted categories", () => {
@@ -567,12 +665,49 @@ function seedRelationEvidence(workspace: WorkspaceDatabase, worldRootId: string)
   return { sourceResourceId: "location.alpha", targetResourceId: "location.beta" };
 }
 
-function requestGrowthRetrieval(worker: FakeWorker, runId: string, requestId: string): void {
+function requestGrowthRetrieval(worker: FakeWorker, runId: string, requestId: string, query = "世界", resultBudget = 10): void {
   worker.receive({
     type: "tool.request", runId, requestId, tool: "retrieve_graph_evidence",
     args: {
-      variant: "growth_v1", query: "世界", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
-      expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+      variant: "growth_v1", query, aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+      expansionBudget: 20, resultBudget, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
     },
   });
+}
+
+async function commitPriorResourceCycle(
+  setup: ReturnType<typeof createSetup>,
+  cycleId: string,
+  type: "world" | "story",
+  objectKind: "world" | "story",
+  parentId: string,
+  resourceId: string,
+): Promise<{ changeSetId: string; outputCheckpointId: string; resourceId: string }> {
+  const worker = new FakeWorker();
+  const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker));
+  const runId = lifecycle.start({
+    goalId: setup.goalId, cycleId,
+    request: { projectId: "project-1", sessionId: `anchor-${cycleId}`, userInput: "anchor", mode: "free" }, emit: () => undefined,
+  });
+  worker.spawn();
+  beginStewardInvocation(setup.workspace, runId);
+  requestGrowthRetrieval(worker, runId, randomUUID());
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+  worker.receive({
+    type: "tool.request", runId, requestId: randomUUID(), tool: "propose_change_set",
+    args: {
+      summary: "anchor setup",
+      items: [{
+        id: "anchor-resource", dependsOn: [], kind: "resource.put",
+        payload: { resourceId, create: true, type, objectKind, title: resourceId, parentId, state: "active", sortOrder: 0 },
+      }],
+    },
+  });
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(3));
+  const response = worker.sent[2] as { ok: boolean; result?: { changeSetId?: string } };
+  if (!response.ok || !response.result?.changeSetId) throw new Error("anchor Change Set did not commit");
+  const committed = new GrowthRepository(setup.workspace).getCycle(cycleId);
+  if (!committed?.outputCheckpointId || !committed.changeSetId) throw new Error("anchor Cycle did not bind a committed Change Set");
+  worker.receive({ type: "run.completed", runId, outcome: "completed", message: "saved", changeSetState: "committed", artifacts: [] });
+  return { changeSetId: committed.changeSetId, outputCheckpointId: committed.outputCheckpointId, resourceId };
 }

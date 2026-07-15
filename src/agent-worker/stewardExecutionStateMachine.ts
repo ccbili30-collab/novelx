@@ -3,6 +3,8 @@ import { Type, type TSchema } from "typebox";
 import { z } from "zod";
 import type { RoleOutputToolCapture } from "./contracts/roleOutputTool";
 import { stewardOutputSchema, writerOutputSchema, type StewardOutput } from "./contracts/roleOutputs";
+import { compileGrowthOcFragment, growthOcFragmentParameters } from "./growth/growthOcFragment";
+import { compileGrowthStoryBrief, growthStoryBriefParameters, type TrustedStoryWorldEvidence } from "./growth/growthStoryBrief";
 import { compileGrowthStoryFragment, growthStoryFragmentParameters } from "./growth/growthStoryFragment";
 import {
   isExplicitGreenfieldFreeCreateRequest,
@@ -68,6 +70,13 @@ const storyCorrectionCodes = new Set([
   "GROWTH_STORY_FRAGMENT_DUPLICATE_LOCAL_ID",
   "GROWTH_STORY_FRAGMENT_WRITER_EVIDENCE_REQUIRED",
   "GROWTH_STORY_FRAGMENT_WORLD_EVIDENCE_INVALID",
+]);
+const ocCorrectionCodes = new Set([
+  "GROWTH_OC_FRAGMENT_INVALID",
+  "GROWTH_OC_FRAGMENT_DUPLICATE_LOCAL_ID",
+  "GROWTH_OC_FRAGMENT_REFERENCE_INVALID",
+  "GROWTH_OC_FRAGMENT_RELATION_INVALID",
+  "GROWTH_OC_FRAGMENT_STORY_INVALID",
 ]);
 
 const planSchema = z.object({
@@ -144,7 +153,7 @@ function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
   return {
     objective: "change_set",
     scopeResourceIds: [...binding.authorizedScopeResourceIds],
-    steps: binding.phase === "world"
+    steps: binding.phase === "world" || binding.phase === "oc"
       ? ["retrieve_graph_evidence", "propose_change_set"]
       : ["retrieve_graph_evidence", "writer", "propose_change_set"],
   };
@@ -159,6 +168,7 @@ function isGreenfieldProposalCorrection(
   return tool === "propose_change_set" && code !== null && (
     (binding?.phase === "world" && binding.greenfieldCreateAuthorized && greenfieldCorrectionCodes.has(code))
     || (binding?.phase === "story" && storyCorrectionCodes.has(code))
+    || (binding?.phase === "oc" && ocCorrectionCodes.has(code))
   );
 }
 
@@ -228,7 +238,9 @@ export function createStewardExecutionStateMachine(input: {
   let proposedChangeSet: z.infer<typeof proposeChangeSetResultSchema> | null = null;
   let growthReceiptRecorded = false;
   const growthWorldsByEvidenceId = new Map<string, string>();
-  let trustedStoryWorld: { evidenceId: string; resourceId: string } | null = null;
+  const growthStoriesByEvidenceId = new Map<string, string>();
+  let trustedStoryWorld: TrustedStoryWorldEvidence | null = null;
+  let trustedOcStory: { evidenceId: string; resourceId: string } | null = null;
   let writerCandidate: { text: string; evidenceIds: string[] } | null = null;
   let greenfieldProposalCorrectionAttempts = 0;
   const committedOutputIds = new Set<string>();
@@ -282,9 +294,15 @@ export function createStewardExecutionStateMachine(input: {
 
   const wrappedOperationalTools = input.operationalTools.map((original): AgentTool => ({
     ...original,
-    ...(input.growthBinding?.phase === "story" && original.name === "propose_change_set" ? {
+    ...(input.growthBinding?.phase === "story" && original.name === "writer" ? {
+      description: "Create a candidate formal story opening from a high-level Story Brief and the pinned formal-world evidence. Supply only the creative brief: premise, opening situation, central tension, point of view, tone, required/avoided elements, and target length. This is Creator authoring, not a player or GM turn. Do not supply source material, evidence IDs, GM resolutions, resource IDs, or authority fields.",
+      parameters: growthStoryBriefParameters,
+    } : input.growthBinding?.phase === "story" && original.name === "propose_change_set" ? {
       description: "Submit one high-level Story Fragment. Supply only story and prose creative metadata; the trusted unique world target comes from pinned retrieval, and prose content comes only from the preceding Writer result. Do not supply world evidence or resource IDs, low-level IDs, dependencies, create/state fields, relation kinds, or project-file operations.",
       parameters: growthStoryFragmentParameters,
+    } : input.growthBinding?.phase === "oc" && original.name === "propose_change_set" ? {
+      description: "Submit one high-level OC Fragment. Supply two to eight character titles and character-profile metadata/content, plus optional character-to-character relationships. The trusted story target comes from pinned retrieval. Do not supply story/resource/evidence IDs, parents, dependencies, create/state fields, relation or document kinds, or project-file operations.",
+      parameters: growthOcFragmentParameters,
     } : {}),
     execute: async (toolCallId, params, signal, onUpdate) => {
       const name = asOperationalToolName(original.name);
@@ -305,10 +323,8 @@ export function createStewardExecutionStateMachine(input: {
         : normalizeOperationalParams(name, params);
       requireCurrentStep(name, effectiveParams);
       try {
-        const writerParams = readObject(effectiveParams);
-        const writerEvidence = Array.isArray(writerParams?.evidenceIds) ? writerParams.evidenceIds.filter((value): value is string => typeof value === "string") : [];
-        const compiledParams = input.growthBinding?.phase === "story" && name === "writer" && trustedStoryWorld
-          ? { ...(writerParams ?? {}), evidenceIds: [...new Set([...writerEvidence, trustedStoryWorld.evidenceId])] }
+        const compiledParams = input.growthBinding?.phase === "story" && name === "writer"
+          ? compileGrowthStoryBrief(effectiveParams, trustedStoryWorld ?? { evidenceId: "", label: "", excerpt: null, resourceId: "" })
           : input.growthBinding?.phase === "story" && name === "propose_change_set"
           ? compileGrowthStoryFragment(effectiveParams, {
               cycleId: input.growthBinding.cycleId,
@@ -318,13 +334,23 @@ export function createStewardExecutionStateMachine(input: {
               worldEvidenceId: trustedStoryWorld?.evidenceId ?? "",
               worldResourceId: trustedStoryWorld?.resourceId ?? "",
             })
+          : input.growthBinding?.phase === "oc" && name === "propose_change_set"
+          ? compileGrowthOcFragment(effectiveParams, {
+              cycleId: input.growthBinding.cycleId,
+              ocRootResourceId: input.growthBinding.domainRootResourceIds.oc,
+              storyResourceId: trustedOcStory?.resourceId ?? "",
+            })
           : effectiveParams;
         const result = await original.execute(toolCallId, compiledParams, signal, onUpdate);
         const details = readToolDetails(result);
-        applySuccessfulResult(name, details, effectiveParams);
+        applySuccessfulResult(name, details, compiledParams);
         if (plan?.objective !== "inspect_files") nextStepIndex += 1;
         executions.push({ tool: name, status: "succeeded", details });
-        return appendRequiredNextTool(result, requiredNextTool());
+        const nextTool = requiredNextTool();
+        const instruction = name === "retrieve_graph_evidence" && input.growthBinding?.phase === "oc" && nextTool === "propose_change_set"
+          ? "The pinned Growth Receipt contains one trusted formal story. Create the required high-level OC Fragment now; do not repeat retrieval or supply low-level identifiers."
+          : undefined;
+        return appendRequiredNextTool(result, nextTool, instruction);
       } catch (error) {
         executions.push({ tool: name, status: "failed", details: null });
         if (isGreenfieldProposalCorrection(input.growthBinding, name, error)) {
@@ -484,12 +510,9 @@ export function createStewardExecutionStateMachine(input: {
     if (name === "propose_change_set" && input.growthBinding && !growthReceiptRecorded) {
       throw stateError("STEWARD_GROWTH_RECEIPT_REQUIRED");
     }
-    if (name === "writer" && input.growthBinding?.phase === "story") {
-      const writer = readObject(params);
-      const evidenceIds = Array.isArray(writer?.evidenceIds) ? writer.evidenceIds.filter((value): value is string => typeof value === "string") : [];
-      if (evidenceIds.some((id) => !allowedEvidenceIds.has(id)) || !trustedStoryWorld) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");
-    }
+    if (name === "writer" && input.growthBinding?.phase === "story" && !trustedStoryWorld) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");
     if (name === "propose_change_set" && input.growthBinding?.phase === "story" && !writerCandidate) throw stateError("STEWARD_STORY_WRITER_REQUIRED");
+    if (name === "propose_change_set" && input.growthBinding?.phase === "oc" && !trustedOcStory) throw stateError("STEWARD_OC_STORY_REQUIRED");
     if (name === "save_task_note") {
       const note = saveTaskNoteArgsSchema.safeParse(params);
       if (!note.success || !pendingReadRange || note.data.source.path !== pendingReadRange.path
@@ -541,11 +564,22 @@ export function createStewardExecutionStateMachine(input: {
         for (const evidence of retrieval.data.evidence) {
           allowedEvidenceIds.add(evidence.evidenceId);
           if (evidence.kind === "resource" && evidence.resource.type === "world" && evidence.resource.objectKind === "world") growthWorldsByEvidenceId.set(evidence.evidenceId, evidence.resource.resourceId);
+          if (evidence.kind === "resource" && evidence.resource.type === "story" && evidence.resource.objectKind === "story") growthStoriesByEvidenceId.set(evidence.evidenceId, evidence.resource.resourceId);
         }
         if (input.growthBinding.phase === "story") {
-          const worlds = [...growthWorldsByEvidenceId.entries()].map(([evidenceId, resourceId]) => ({ evidenceId, resourceId })).filter((world, index, all) => all.findIndex((candidate) => candidate.resourceId === world.resourceId) === index);
+          const worlds = retrieval.data.evidence
+            .filter((evidence): evidence is Extract<typeof evidence, { kind: "resource" }> => evidence.kind === "resource" && evidence.resource.type === "world" && evidence.resource.objectKind === "world")
+            .map((evidence) => ({ evidenceId: evidence.evidenceId, resourceId: evidence.resource.resourceId, label: evidence.label, excerpt: evidence.excerpt }))
+            .filter((world, index, all) => all.findIndex((candidate) => candidate.resourceId === world.resourceId) === index);
           if (worlds.length !== 1) { blockReason = "missing_source"; return; }
           trustedStoryWorld = worlds[0]!;
+        }
+        if (input.growthBinding.phase === "oc") {
+          const stories = [...growthStoriesByEvidenceId.entries()]
+            .map(([evidenceId, resourceId]) => ({ evidenceId, resourceId }))
+            .filter((story, index, all) => all.findIndex((candidate) => candidate.resourceId === story.resourceId) === index);
+          if (stories.length !== 1) { blockReason = "missing_source"; return; }
+          trustedOcStory = stories[0]!;
         }
         if (retrieval.data.evidence.length === 0 && !input.growthBinding.greenfieldCreateAuthorized) {
           blockReason = "missing_source";
@@ -602,7 +636,7 @@ export function createStewardExecutionStateMachine(input: {
       if (output.data.status !== "candidate") { blockReason = "tool_failed"; return; }
       const writerInput = readObject(params);
       const evidenceIds = Array.isArray(writerInput?.evidenceIds) ? writerInput.evidenceIds.filter((value): value is string => typeof value === "string") : [];
-      if (trustedStoryWorld && !evidenceIds.includes(trustedStoryWorld.evidenceId)) evidenceIds.push(trustedStoryWorld.evidenceId);
+      if (!trustedStoryWorld || !evidenceIds.includes(trustedStoryWorld.evidenceId)) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");
       writerCandidate = { text: output.data.candidateText, evidenceIds };
       return;
     }
@@ -897,7 +931,7 @@ function transitionResult(nextTool: string) {
   };
 }
 
-function appendRequiredNextTool(result: AgentToolResult<unknown>, requiredNextTool: string): AgentToolResult<unknown> {
+function appendRequiredNextTool(result: AgentToolResult<unknown>, requiredNextTool: string, instruction?: string): AgentToolResult<unknown> {
   if (!result || typeof result !== "object" || !("content" in result) || !Array.isArray(result.content)) return result;
   return {
     ...result,
@@ -909,7 +943,7 @@ function appendRequiredNextTool(result: AgentToolResult<unknown>, requiredNextTo
           novaxState: {
             transitionRequired: true,
             requiredNextTool,
-            instruction: "Do not stop or repeat a completed tool. Call requiredNextTool now.",
+            instruction: instruction ?? "Do not stop or repeat a completed tool. Call requiredNextTool now.",
           },
         }),
       },

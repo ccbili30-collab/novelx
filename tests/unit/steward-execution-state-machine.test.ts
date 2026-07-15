@@ -142,41 +142,109 @@ describe("Steward tool handoff state machine", () => {
     });
   });
 
-  it("binds trusted story and OC Growth phases to retrieve, Writer, then one proposal", async () => {
-    for (const phase of ["story", "oc"] as const) {
-      const retrieve = successfulTool("retrieve_graph_evidence", growthRetrievalResult());
-      const writer = successfulTool("writer", phase === "story"
-        ? { status: "candidate", candidateText: "Writer prose.", evidenceIds: ["version-growth-setting"], gmResolutionId: null, authorityChanges: [] }
-        : { accepted: true });
-      const propose = successfulTool("propose_change_set", {
-        changeSetId: `growth-${phase}`, mode: "free", status: "committed", gateStatus: "ready", blockedReason: null, itemCount: 1,
-        committedOutputs: [{ itemId: `output-${phase}`, kind: "document_version", outputId: `version-${phase}` }],
-      });
-      const machine = createStewardExecutionStateMachine({
-        mode: "free", userInput: "由可信 Growth 阶段驱动", authorizedScopeResourceIds: ["world-1"],
-        growthBinding: {
-          capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: `cycle-${phase}`, phase, inputCheckpointId: "checkpoint",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
-        },
-        operationalTools: [retrieve, writer, propose], resultCapture: createRoleOutputTool("steward"),
-      });
-      expect(machine.snapshot().plan).toEqual({
-        objective: "change_set", scopeResourceIds: ["world-1", "oc-root", "story-root"], steps: ["retrieve_graph_evidence", "writer", "propose_change_set"],
-      });
-      await expect(tool(machine.tools, "propose_change_set").execute("early", { summary: "blocked", items: [] }))
-        .rejects.toMatchObject({ code: "STEWARD_STEP_OUT_OF_ORDER" });
-      await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", {
-        variant: "growth_v1", query: "evidence", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
-        expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
-      });
-      await expect(tool(machine.tools, "propose_change_set").execute("writer-required", { summary: "blocked", items: [] }))
-        .rejects.toMatchObject({ code: "STEWARD_STEP_OUT_OF_ORDER" });
-      await tool(machine.tools, "writer").execute("writer", phase === "story" ? { evidenceIds: ["world-growth", "version-growth-setting"] } : {});
-      await tool(machine.tools, "propose_change_set").execute("propose", phase === "story"
-        ? { summary: "complete", story: { localId: "story", title: "Story" }, prose: { localId: "prose", title: "Prose" } }
-        : { summary: "complete", items: [{}] });
-      expect(machine.snapshot().executions.map((entry) => entry.tool)).toEqual(["retrieve_graph_evidence", "writer", "propose_change_set"]);
+  it("binds the trusted story Growth phase to retrieve, Writer, then one proposal", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", growthRetrievalResult());
+    const writer = successfulTool("writer", { status: "candidate", candidateText: "Writer prose.", evidenceIds: ["version-growth-setting"], gmResolutionId: null, authorityChanges: [] });
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "growth-story", mode: "free", status: "committed", gateStatus: "ready", blockedReason: null, itemCount: 1,
+      committedOutputs: [{ itemId: "output-story", kind: "document_version", outputId: "version-story" }],
+    });
+    const machine = createGrowthMachine("story", [retrieve, writer, propose]);
+    expect(machine.snapshot().plan).toEqual({
+      objective: "change_set", scopeResourceIds: ["world-1", "oc-root", "story-root"], steps: ["retrieve_graph_evidence", "writer", "propose_change_set"],
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    const writerTool = tool(machine.tools, "writer");
+    expect(JSON.stringify(writerTool.parameters)).not.toContain("evidenceIds");
+    expect(JSON.stringify(writerTool.parameters)).not.toContain("gmResolution");
+    await writerTool.execute("writer", storyBrief());
+    expect(writer.execute).toHaveBeenCalledWith("writer", expect.objectContaining({
+      evidenceIds: ["world-growth"], gmResolution: null, gmResolutionId: null,
+    }), undefined, undefined);
+    await tool(machine.tools, "propose_change_set").execute("propose", { summary: "complete", story: { localId: "story", title: "Story" }, prose: { localId: "prose", title: "Prose" } });
+    expect(machine.snapshot().executions.map((entry) => entry.tool)).toEqual(["retrieve_graph_evidence", "writer", "propose_change_set"]);
+    expect(JSON.stringify(machine.snapshot())).not.toContain("Writer prose.");
+  });
+
+  it("terminates a blocked story Writer without proposing a Change Set", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", growthRetrievalResult());
+    const writer = successfulTool("writer", { status: "blocked", reasons: [{ code: "authority_violation", message: "blocked", evidenceIds: ["world-growth"] }] });
+    const propose = successfulTool("propose_change_set", { changeSetId: "must-not-run" });
+    const machine = createGrowthMachine("story", [retrieve, writer, propose]);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await tool(machine.tools, "writer").execute("writer", storyBrief());
+    expect(machine.requiredNextTool()).toBe("submit_steward_result");
+    await expect(tool(machine.tools, "propose_change_set").execute("propose", { summary: "blocked" }))
+      .rejects.toMatchObject({ code: "STEWARD_EXECUTION_BLOCKED" });
+    expect(propose.execute).not.toHaveBeenCalled();
+  });
+
+  it("binds the trusted OC phase to retrieve then one compiled Fragment proposal without Writer", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", growthStoryRetrievalResult());
+    const writer = successfulTool("writer", { accepted: true });
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "growth-oc", mode: "free", status: "committed", gateStatus: "ready", blockedReason: null, itemCount: 8,
+      committedOutputs: [{ itemId: "output-oc", kind: "resource_revision", outputId: "version-oc" }],
+    });
+    const machine = createGrowthMachine("oc", [retrieve, writer, propose]);
+    expect(machine.snapshot().plan).toEqual({
+      objective: "change_set", scopeResourceIds: ["world-1", "oc-root", "story-root"], steps: ["retrieve_graph_evidence", "propose_change_set"],
+    });
+    const retrieval = await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    expect(machine.requiredNextTool()).toBe("propose_change_set");
+    expect(JSON.stringify(retrieval.content)).toContain("OC Fragment");
+    expect(tool(machine.tools, "propose_change_set").description).not.toContain("storyResourceId");
+    await expect(tool(machine.tools, "writer").execute("writer", {})).rejects.toMatchObject({ code: "STEWARD_STEP_OUT_OF_ORDER" });
+    const profile = "A focused OC profile with motives, history, loyalties, fears, and a role in the current story. ".repeat(2).trim();
+    await tool(machine.tools, "propose_change_set").execute("propose", {
+      summary: "complete", characters: [
+        { localId: "captain", title: "Captain", profile: { localId: "captain-profile", title: "Captain profile", content: profile } },
+        { localId: "navigator", title: "Navigator", profile: { localId: "navigator-profile", title: "Navigator profile", content: profile } },
+      ], relationships: [{ localId: "crew", sourceRef: "captain", targetRef: "navigator" }],
+    });
+    expect(propose.execute).toHaveBeenCalledTimes(1);
+    expect(machine.snapshot().executions.map((entry) => entry.tool)).toEqual(["retrieve_graph_evidence", "propose_change_set"]);
+    expect(JSON.stringify(machine.snapshot())).not.toContain(profile);
+  });
+
+  it("blocks OC Growth before proposal when pinned retrieval has zero or multiple formal stories", async () => {
+    for (const retrieval of [growthStoryRetrievalResult([]), growthStoryRetrievalResult(["story-a", "story-b"])]) {
+      const writer = successfulTool("writer", { accepted: true });
+      const propose = successfulTool("propose_change_set", { changeSetId: "must-not-run" });
+      const machine = createGrowthMachine("oc", [successfulTool("retrieve_graph_evidence", retrieval), writer, propose]);
+      await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+      expect(machine.requiredNextTool()).toBe("submit_steward_result");
+      await expect(tool(machine.tools, "propose_change_set").execute("blocked", {})).rejects.toMatchObject({ code: "STEWARD_EXECUTION_BLOCKED" });
+      expect(writer.execute).not.toHaveBeenCalled();
+      expect(propose.execute).not.toHaveBeenCalled();
     }
+  });
+
+  it("allows two OC Fragment corrections before blocking a third and never retries an executor failure", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", growthStoryRetrievalResult());
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "growth-oc", mode: "free", status: "committed", gateStatus: "ready", blockedReason: null, itemCount: 8,
+      committedOutputs: [{ itemId: "output-oc", kind: "resource_revision", outputId: "version-oc" }],
+    });
+    const machine = createGrowthMachine("oc", [retrieve, propose]);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    const invalid = { summary: "invalid", characters: [] };
+    for (const callId of ["one", "two"]) {
+      await expect(tool(machine.tools, "propose_change_set").execute(callId, invalid)).rejects.toMatchObject({ code: "GROWTH_OC_FRAGMENT_INVALID" });
+      expect(machine.requiredNextTool()).toBe("propose_change_set");
+    }
+    await expect(tool(machine.tools, "propose_change_set").execute("three", invalid)).rejects.toMatchObject({ code: "GROWTH_OC_FRAGMENT_INVALID" });
+    expect(machine.requiredNextTool()).toBe("submit_steward_result");
+    expect(propose.execute).not.toHaveBeenCalled();
+
+    const failingPropose = successfulTool("propose_change_set", { changeSetId: "unused" });
+    failingPropose.execute = vi.fn(async () => { throw Object.assign(new Error("safe"), { code: "CHANGE_SET_APPLY_FAILED" }); });
+    const terminal = createGrowthMachine("oc", [successfulTool("retrieve_graph_evidence", growthStoryRetrievalResult()), failingPropose]);
+    await tool(terminal.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    const profile = "A focused OC profile with motives, history, loyalties, fears, and a role in the current story. ".repeat(2).trim();
+    await expect(tool(terminal.tools, "propose_change_set").execute("propose", ocFragment(profile))).rejects.toMatchObject({ code: "CHANGE_SET_APPLY_FAILED" });
+    expect(failingPropose.execute).toHaveBeenCalledTimes(1);
+    expect(terminal.requiredNextTool()).toBe("submit_steward_result");
   });
 
   it("stops dependent steps when retrieval returns no sources", async () => {
@@ -783,5 +851,65 @@ function growthRetrievalResult() {
     }],
     coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
     diagnostics: { expandedEdges: 0, consumedContentChars: 12 },
+  };
+}
+
+function growthStoryRetrievalResult(storyIds = ["story-growth"]) {
+  return {
+    variant: "growth_v1" as const,
+    receiptRecorded: true,
+    evidence: storyIds.map((resourceId, index) => ({
+      evidenceId: `story-evidence-${index}`,
+      kind: "resource" as const,
+      label: "故事",
+      excerpt: null,
+      resource: { resourceId, type: "story" as const, objectKind: "story" as const },
+    })),
+    coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
+    diagnostics: { expandedEdges: 0, consumedContentChars: 12 },
+  };
+}
+
+function growthRetrieveArgs() {
+  return {
+    variant: "growth_v1" as const, query: "evidence", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+    expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+  };
+}
+
+function createGrowthMachine(phase: "world" | "story" | "oc", operationalTools: AgentTool[]) {
+  return createStewardExecutionStateMachine({
+    mode: "free",
+    userInput: "由可信 Growth 阶段驱动",
+    authorizedScopeResourceIds: ["world-1"],
+    growthBinding: {
+      capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: `cycle-${phase}`, phase, inputCheckpointId: "checkpoint",
+      ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [],
+      domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
+    },
+    operationalTools,
+    resultCapture: createRoleOutputTool("steward"),
+  });
+}
+
+function ocFragment(profile: string) {
+  return {
+    summary: "OCs", characters: [
+      { localId: "captain", title: "Captain", profile: { localId: "captain-profile", title: "Captain profile", content: profile } },
+      { localId: "navigator", title: "Navigator", profile: { localId: "navigator-profile", title: "Navigator profile", content: profile } },
+    ], relationships: [],
+  };
+}
+
+function storyBrief() {
+  return {
+    premise: "A coastal world faces a new fracture in the rule that once kept its tides predictable.",
+    openingSituation: "At dawn a courier reaches the harbour archive while the tide withdraws beyond the old sea wall.",
+    centralTension: "The opening reveals human pressure from the broken rule without adjudicating any player action.",
+    pointOfView: "close third person",
+    tone: "quietly ominous",
+    requiredElements: ["the world rule leaves a visible trace"],
+    avoid: ["victory or reward"],
+    targetLengthChars: 1200,
   };
 }

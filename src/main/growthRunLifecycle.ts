@@ -23,6 +23,7 @@ import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import { DocumentRepository } from "../domain/workspace/documentRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
 import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeSetPolicy";
+import { ChangeSetRepository } from "../domain/changeSet/changeSetRepository";
 import type { WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import {
   AgentProcessSupervisor,
@@ -63,11 +64,13 @@ export class GrowthRunLifecycle {
     if (cycle.inputCheckpointId !== this.#activeCheckpoint(goal.branchId) || cycle.ruleRevision !== goal.currentRuleRevision) {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
+    const phase = growthPhaseForCycleSequence(cycle.sequence);
+    const phaseAnchor = trustedPhaseAnchor(this.workspace, repository, goal, cycle, phase);
     const binding = growthRunBindingSchema.parse({
       capabilityVersion: growthCapabilityVersion,
       goalId: goal.id,
       cycleId: cycle.id,
-      phase: growthPhaseForCycleSequence(cycle.sequence),
+      phase,
       inputCheckpointId: cycle.inputCheckpointId,
       ruleRevision: cycle.ruleRevision,
       authorizedScopeResourceIds: goal.authorizedScopeResourceIds,
@@ -77,7 +80,7 @@ export class GrowthRunLifecycle {
         && cycle.sequence === 1
         && isGreenfieldWorkspaceEmpty(this.workspace),
     });
-    const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent);
+    const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent, phaseAnchor);
     return this.supervisor.start(
       { ...input.request, scopeResourceIds: binding.authorizedScopeResourceIds },
       input.emit,
@@ -143,6 +146,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     readonly workerBinding: GrowthRunBinding,
     readonly branchId: string,
     readonly onPersistedEvent: ((event: GrowthEvent) => void) | undefined,
+    readonly phaseAnchor: TrustedPhaseAnchor | null,
   ) {
     this.#repository = new GrowthRepository(workspace);
     this.#graph = new GraphRetrievalService(workspace);
@@ -205,7 +209,9 @@ class BoundGrowthRun implements AgentRunInternalBinding {
         lens: "creator",
         authorizedScopeResourceIds: this.workerBinding.authorizedScopeResourceIds,
         ...retrievalArgs,
-        seedResourceIds: uniqueStrings([...this.workerBinding.seedResourceIds, ...retrievalArgs.seedResourceIds]),
+        aliases: uniqueStrings([...retrievalArgs.aliases, ...(this.phaseAnchor ? [this.phaseAnchor.title] : [])]),
+        seedResourceIds: uniqueStrings([...this.workerBinding.seedResourceIds, ...retrievalArgs.seedResourceIds, ...(this.phaseAnchor ? [this.phaseAnchor.resourceId] : [])]),
+        requiredResourceIds: this.phaseAnchor ? [this.phaseAnchor.resourceId] : [],
         validTime: null,
         recordedTime: null,
       });
@@ -391,7 +397,7 @@ function mapGraphRetrievalFailure(error: unknown): "GROWTH_RETRIEVAL_INPUT_INVAL
   if (code === "GRAPH_RETRIEVAL_INPUT_INVALID" || code === "GRAPH_RETRIEVAL_BUDGET_INVALID" || code === "GRAPH_RETRIEVAL_SEED_NOT_VISIBLE" || code === "GRAPH_RETRIEVAL_SEED_OUTSIDE_SCOPE") {
     return "GROWTH_RETRIEVAL_INPUT_INVALID";
   }
-  if (code === "GRAPH_RETRIEVAL_CHECKPOINT_BRANCH_MISMATCH" || code === "GRAPH_RETRIEVAL_SCOPE_NOT_VISIBLE" || code === "GRAPH_RETRIEVAL_CREATOR_LENS_REQUIRED") {
+  if (code === "GRAPH_RETRIEVAL_CHECKPOINT_BRANCH_MISMATCH" || code === "GRAPH_RETRIEVAL_SCOPE_NOT_VISIBLE" || code === "GRAPH_RETRIEVAL_CREATOR_LENS_REQUIRED" || code === "GRAPH_RETRIEVAL_REQUIRED_RESOURCE_INVALID") {
     return "GROWTH_BINDING_INVALID";
   }
   return "GROWTH_RUN_FAILED";
@@ -401,6 +407,59 @@ function nextGrowthEventSequence(repository: GrowthRepository, goalId: string): 
   const events = repository.listEvents(goalId);
   const last = events.at(-1);
   return last ? last.sequence + 1 : 1;
+}
+
+interface TrustedPhaseAnchor {
+  resourceId: string;
+  title: string;
+}
+
+/**
+ * Later Growth Cycles are anchored only by the immediately preceding committed
+ * Change Set outputs at the next Cycle's pinned checkpoint. The model and the
+ * Worker neither choose nor receive this authority.
+ */
+function trustedPhaseAnchor(
+  workspace: WorkspaceDatabase,
+  repository: GrowthRepository,
+  goal: GrowthGoal,
+  cycle: GrowthCycle,
+  phase: "world" | "story" | "oc",
+): TrustedPhaseAnchor | null {
+  if (phase === "world") return null;
+  const prior = repository.listCycles(goal.id).find((candidate) => candidate.sequence === cycle.sequence - 1);
+  if (!prior || prior.status !== "committed" || !prior.changeSetId || !prior.outputCheckpointId
+    || prior.outputCheckpointId !== cycle.inputCheckpointId) {
+    throw growthRunError("GROWTH_BINDING_INVALID");
+  }
+  const expected = phase === "story"
+    ? { type: "world" as const, objectKind: "world" as const }
+    : { type: "story" as const, objectKind: "story" as const };
+  const resources = new ResourceRepository(workspace);
+  const matches = new ChangeSetRepository(workspace).listOutputs(prior.changeSetId)
+    .filter((output) => output.kind === "resource_revision")
+    .map((output) => resources.getVisibleByRevisionIdAtCheckpoint(output.outputId, cycle.inputCheckpointId))
+    .filter((resource): resource is NonNullable<typeof resource> => Boolean(resource))
+    .filter((resource) => resource.type === expected.type && resource.objectKind === expected.objectKind);
+  if (matches.length !== 1) throw growthRunError("GROWTH_BINDING_INVALID");
+  const anchor = matches[0]!;
+  if (!goal.authorizedScopeResourceIds.some((scopeId) => scopeId === anchor.id)
+    && !isDescendantOfAuthorizedScope(anchor.id, goal.authorizedScopeResourceIds, resources.listAtCheckpoint(cycle.inputCheckpointId))) {
+    throw growthRunError("GROWTH_BINDING_INVALID");
+  }
+  return { resourceId: anchor.id, title: anchor.title };
+}
+
+function isDescendantOfAuthorizedScope(resourceId: string, scopeIds: string[], resources: ReturnType<ResourceRepository["listAtCheckpoint"]>): boolean {
+  const byId = new Map(resources.map((resource) => [resource.id, resource]));
+  let current = byId.get(resourceId);
+  const visited = new Set<string>();
+  while (current && !visited.has(current.id)) {
+    if (scopeIds.includes(current.id)) return true;
+    visited.add(current.id);
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  return false;
 }
 
 function trustedSeedResourceIds(workspace: WorkspaceDatabase, goal: GrowthGoal, checkpointId: string): string[] {

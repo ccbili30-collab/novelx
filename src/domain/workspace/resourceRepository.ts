@@ -91,6 +91,32 @@ export class ResourceRepository {
     return rows.map(mapResource);
   }
 
+  /**
+   * Resolves a resource revision only when it is the current visible revision
+   * at the pinned checkpoint. This is intentionally read-only: callers use it
+   * to bind persisted Change Set outputs back to their formal resource.
+   */
+  getVisibleByRevisionIdAtCheckpoint(revisionId: string, checkpointId: string): ResourceRecord | null {
+    const row = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+        SELECT ?, 0
+        UNION ALL
+        SELECT c.parent_checkpoint_id, ancestry.depth + 1 FROM checkpoints c
+        JOIN ancestry ON c.id = ancestry.checkpoint_id
+        WHERE c.parent_checkpoint_id IS NOT NULL
+      ), ranked AS (
+        SELECT rr.*, ancestry.depth,
+          ROW_NUMBER() OVER (PARTITION BY rr.resource_id ORDER BY ancestry.depth ASC) AS revision_rank
+        FROM resource_revisions rr
+        JOIN ancestry ON ancestry.checkpoint_id = rr.created_checkpoint_id
+      )
+      SELECT resource_id AS id, type, object_kind, title, parent_resource_id AS parent_id
+      FROM ranked
+      WHERE revision_rank = 1 AND state = 'active' AND id = ?
+    `).get(checkpointId, revisionId);
+    return row ? mapResource(row) : null;
+  }
+
   listVisibleCurrent(branchId = this.#checkpoints.getActiveBranch().id): ResourceRecord[] {
     return this.listCurrent(branchId).filter((resource) => !this.#isPristineDomainRoot(resource, branchId));
   }

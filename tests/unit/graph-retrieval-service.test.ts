@@ -66,6 +66,36 @@ describe("GraphRetrievalService", () => {
     expect(pinned.hits).toHaveLength(0);
   });
 
+  it("retains a Main-required direct seed as an alias hit within the result budget", () => {
+    const setup = createSetup();
+    const result = new GraphRetrievalService(setup.workspace).retrieve(request(setup, {
+      query: "不存在的查询", aliases: ["潮汐世界"], seedResourceIds: [setup.worldId],
+      requiredResourceIds: [setup.worldId], maxHops: 0, resultBudget: 1,
+    }));
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]).toMatchObject({ targetKind: "resource", targetId: setup.worldId });
+    expect(result.hits[0]!.reasonCodes).toContain("alias");
+    expect(result.receipt.aliases).toContain("潮汐世界");
+    expect(result.receipt.links.map((link) => [link.rank, link.targetKind, link.targetId, link.targetVersionId]))
+      .toEqual(result.hits.map((hit) => [hit.rank, hit.targetKind, hit.targetId, hit.targetVersionId]));
+  });
+
+  it("rejects Main-required resources that are not seed-visible or do not fit the result budget", () => {
+    const setup = createSetup();
+    const service = new GraphRetrievalService(setup.workspace);
+    expect(() => service.retrieve(request(setup, { requiredResourceIds: [setup.worldId] })))
+      .toThrowError(expect.objectContaining({ code: "GRAPH_RETRIEVAL_REQUIRED_RESOURCE_INVALID" }));
+    expect(() => service.retrieve(request(setup, {
+      seedResourceIds: [setup.worldId, setup.storyId], requiredResourceIds: [setup.worldId, setup.storyId], resultBudget: 1,
+    }))).toThrowError(expect.objectContaining({ code: "GRAPH_RETRIEVAL_REQUIRED_RESOURCE_INVALID" }));
+    expect(() => service.retrieve(request(setup, {
+      authorizedScopeResourceIds: [setup.storyRootId], seedResourceIds: [setup.worldId], requiredResourceIds: [setup.worldId],
+    }))).toThrowError(expect.objectContaining({ code: "GRAPH_RETRIEVAL_SEED_OUTSIDE_SCOPE" }));
+    expect(() => service.retrieve(request(setup, {
+      query: "不存在的查询", aliases: [], seedResourceIds: [setup.worldId], requiredResourceIds: [setup.worldId], maxHops: 0, resultBudget: 1,
+    }))).toThrowError(expect.objectContaining({ code: "GRAPH_RETRIEVAL_REQUIRED_RESOURCE_INVALID" }));
+  });
+
   it("reports partial truncation for result, content and expansion budgets", () => {
     const setup = createSetup();
     const service = new GraphRetrievalService(setup.workspace);

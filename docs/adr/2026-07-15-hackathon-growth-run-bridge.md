@@ -17,6 +17,15 @@ Creator Lens, and authorized scope when it calls `GraphRetrievalService`.
 Main persists the resulting Receipt and safe Growth event before returning a
 sanitized evidence projection to the Worker.
 
+For cross-Cycle growth, Main derives the required phase anchor only from the
+prior committed Cycle's `resource_revision` output that remains visible at the
+next pinned checkpoint: Cycle 2 requires one formal world and Cycle 3 requires
+one formal story. `requiredResourceIds` is internal Main-derived retrieval
+authority, not a model or Renderer field. Main supplies the current safe title
+as an effective alias only when normal alias matching can truthfully match it;
+there is no fabricated alias fallback. Missing, multiple, stale, non-output, or
+non-visible anchors fail before the Worker runs.
+
 The existing `propose_change_set` contract and gateway are unchanged. The bound
 gateway rejects proposal before a recorded `growth_v1` Receipt. It calls the
 original proposal executor once; only a committed Free Change Set can be bound

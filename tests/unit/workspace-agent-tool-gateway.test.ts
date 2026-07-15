@@ -21,6 +21,7 @@ import { ImageAssetStore } from "../../src/domain/asset/imageAssetStore";
 import { ImageGenerationService } from "../../src/domain/asset/imageGenerationService";
 import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growthWorldFragment";
 import { compileGrowthStoryFragment } from "../../src/agent-worker/growth/growthStoryFragment";
+import { compileGrowthOcFragment } from "../../src/agent-worker/growth/growthOcFragment";
 
 const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
@@ -192,6 +193,63 @@ describe("Workspace Agent tool gateway", () => {
     const relation = workspace.db.prepare("SELECT source_resource_id, target_resource_id, kind FROM creative_relation_versions ORDER BY created_at DESC LIMIT 1").get() as { source_resource_id: string; target_resource_id: string; kind: string };
     expect(relation).toEqual({ source_resource_id: story.id, target_resource_id: world.id, kind: "uses_world" });
     expect(worldResult.changeSetId).not.toBe(result.changeSetId);
+  });
+
+  it("commits a compiled OC Fragment with profile documents, uses_oc, and requested related_to relations", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    seedProposeTool(workspace);
+    const gateway = createWorkspaceAgentToolGateway(workspace, new WorkspaceChangeSetPolicy(workspace), () => true);
+    const worldResult = await gateway.proposeChangeSet({ summary: "World", items: greenfieldWorldItems(worldRoot.id) }, invocationContext("free", true));
+    const world = new ResourceRepository(workspace).listCurrent().find((resource) => resource.objectKind === "world")!;
+    const storyRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "story" && resource.objectKind === "domain_root")!;
+    const storyArgs = compileGrowthStoryFragment({ summary: "Story", story: { localId: "story", title: "Story" }, prose: { localId: "prose", title: "Prose" } }, {
+      cycleId: "cycle-story", storyRootResourceId: storyRoot.id, writerCandidateText: "Writer prose exactly.", writerEvidenceIds: ["world-evidence"], worldEvidenceId: "world-evidence", worldResourceId: world.id,
+    });
+    seedTool(workspace, "propose_change_set", "22222222-2222-4222-8222-222222222222");
+    const storyResult = await gateway.proposeChangeSet(storyArgs, { ...invocationContext("free"), requestId: "22222222-2222-4222-8222-222222222222" });
+    const story = new ResourceRepository(workspace).listCurrent().find((resource) => resource.objectKind === "story" && resource.parentId === storyRoot.id)!;
+    const ocRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "oc" && resource.objectKind === "domain_root")!;
+    const profile = "A focused OC profile with motives, history, loyalties, fears, and a role in the current story. ".repeat(2).trim();
+    const args = compileGrowthOcFragment({
+      summary: "OCs", characters: [
+        { localId: "captain", title: "Captain", profile: { localId: "captain-profile", title: "Captain profile", content: profile } },
+        { localId: "navigator", title: "Navigator", profile: { localId: "navigator-profile", title: "Navigator profile", content: profile } },
+      ], relationships: [{ localId: "crew", sourceRef: "captain", targetRef: "navigator" }],
+    }, { cycleId: "cycle-oc", ocRootResourceId: ocRoot.id, storyResourceId: story.id });
+    const initialHead = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+    seedTool(workspace, "propose_change_set", "33333333-3333-4333-8333-333333333333");
+    const result = await gateway.proposeChangeSet(args, { ...invocationContext("free"), requestId: "33333333-3333-4333-8333-333333333333" });
+    expect(result).toMatchObject({ status: "committed", itemCount: 9 });
+    expect(new CheckpointRepository(workspace).getActiveBranch().headCheckpointId).not.toBe(initialHead);
+    const outputs = new ChangeSetRepository(workspace).listOutputs(result.changeSetId);
+    expect(result.committedOutputs).toEqual(outputs.map(({ itemId, kind, outputId }) => ({ itemId, kind, outputId })));
+    expect(outputs).toHaveLength(9);
+    const ocs = new ResourceRepository(workspace).listCurrent().filter((resource) => resource.objectKind === "oc" && resource.parentId === ocRoot.id);
+    expect(ocs).toHaveLength(2);
+    expect(ocs.map((oc) => new DocumentRepository(workspace).getCurrentStable(oc.id)?.content)).toEqual([profile, profile]);
+    const relations = workspace.db.prepare("SELECT source_resource_id, target_resource_id, kind FROM creative_relation_versions ORDER BY created_at, id").all() as Array<{ source_resource_id: string; target_resource_id: string; kind: string }>;
+    expect(relations.filter((relation) => relation.kind === "uses_oc")).toEqual(expect.arrayContaining(ocs.map((oc) => ({ source_resource_id: story.id, target_resource_id: oc.id, kind: "uses_oc" }))));
+    expect(relations).toContainEqual({ source_resource_id: ocs[0]!.id, target_resource_id: ocs[1]!.id, kind: "related_to" });
+    expect(worldResult.changeSetId).not.toBe(result.changeSetId);
+    expect(storyResult.changeSetId).not.toBe(result.changeSetId);
+    expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get() as { count: number }).count)).toBe(3);
+    expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM project_file_versions").get() as { count: number }).count)).toBe(0);
+  });
+
+  it("rejects an invalid OC Fragment before any Gateway Change Set side effect", () => {
+    const { workspace } = createWorkspace();
+    let code: string | null = null;
+    try {
+      compileGrowthOcFragment({ summary: "Invalid", characters: [
+        { localId: "one", title: "One", profile: { localId: "one-profile", title: "One profile", content: "short" } },
+        { localId: "two", title: "Two", profile: { localId: "two-profile", title: "Two profile", content: "short" } },
+      ] }, { cycleId: "cycle-oc", ocRootResourceId: "oc-root", storyResourceId: "story-formal" });
+    } catch (error) { code = (error as { code?: string }).code ?? null; }
+    expect(code).toBe("GROWTH_OC_FRAGMENT_INVALID");
+    expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get() as { count: number }).count)).toBe(0);
+    expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_set_outputs").get() as { count: number }).count)).toBe(0);
+    expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM resource_revisions WHERE object_kind <> 'domain_root'").get() as { count: number }).count)).toBe(0);
   });
 
   it("rejects Greenfield requests after formal content exists and never creates a Change Set", async () => {

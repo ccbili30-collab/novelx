@@ -58,6 +58,11 @@ export class GraphRetrievalService {
     }
     const effectiveIds = descendantsOf(value.authorizedScopeResourceIds, visibleResources);
     if (value.seedResourceIds.some((seedId) => !effectiveIds.has(seedId))) throw retrievalError("GRAPH_RETRIEVAL_SEED_OUTSIDE_SCOPE");
+    if (value.requiredResourceIds.length > value.resultBudget
+      || value.requiredResourceIds.some((resourceId) => !value.seedResourceIds.includes(resourceId))
+      || value.requiredResourceIds.some((resourceId) => !effectiveIds.has(resourceId))) {
+      throw retrievalError("GRAPH_RETRIEVAL_REQUIRED_RESOURCE_INVALID");
+    }
 
     const startedAt = this.#now();
     let truncated = false;
@@ -218,7 +223,14 @@ export class GraphRetrievalService {
       omittedCount += ranked.length;
       ranked.length = 0;
     }
-    let selected = ranked.slice(0, value.resultBudget);
+    const requiredRanked = ranked.filter((item) => item.candidate.targetKind === "resource" && value.requiredResourceIds.includes(item.candidate.targetId));
+    if (requiredRanked.length !== value.requiredResourceIds.length) throw retrievalError("GRAPH_RETRIEVAL_REQUIRED_RESOURCE_INVALID");
+    const selectedRequired = new Set(requiredRanked);
+    let selected = [...requiredRanked, ...ranked.filter((item) => !selectedRequired.has(item)).slice(0, value.resultBudget - requiredRanked.length)];
+    selected.sort((left, right) => right.score - left.score
+      || left.candidate.targetKind.localeCompare(right.candidate.targetKind)
+      || left.candidate.targetId.localeCompare(right.candidate.targetId)
+      || left.candidate.targetVersionId.localeCompare(right.candidate.targetVersionId));
     if (ranked.length > selected.length) { truncated = true; omittedCount += ranked.length - selected.length; }
     const hits: GraphRetrievalEvidenceHit[] = [];
     for (const [index, item] of selected.entries()) {
