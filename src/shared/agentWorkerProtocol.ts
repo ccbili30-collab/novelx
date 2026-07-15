@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { workspaceCreativeRelationSchema, workspaceResourceSchema } from "./ipcContract";
 import { providerRuntimeProfileSchema } from "./providerContract";
+import { growthCapabilityVersion } from "./growthContract";
 
 const identifierSchema = z.string().trim().min(1).max(240);
 const requestIdSchema = z.string().uuid();
@@ -10,6 +12,89 @@ const jsonObjectSchema = z.record(z.string().min(1).max(240), jsonValueSchema);
 export const retrieveGraphEvidenceArgsSchema = z.object({
   scopeResourceIds: z.array(identifierSchema).min(1).max(100),
 }).strict();
+
+export const growthRunBindingSchema = z.object({
+  capabilityVersion: z.literal(growthCapabilityVersion),
+  goalId: identifierSchema,
+  cycleId: identifierSchema,
+  inputCheckpointId: identifierSchema,
+  ruleRevision: z.number().int().min(1).max(1_000_000),
+  authorizedScopeResourceIds: z.array(identifierSchema).min(1).max(100),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.authorizedScopeResourceIds).size !== value.authorizedScopeResourceIds.length) {
+    context.addIssue({ code: "custom", path: ["authorizedScopeResourceIds"], message: "Growth binding scopes must be unique." });
+  }
+});
+
+export const growthRetrieveGraphEvidenceArgsSchema = z.object({
+  variant: z.literal("growth_v1"),
+  query: z.string().trim().min(1).max(12_000),
+  aliases: z.array(z.string().trim().min(1).max(240)).max(100).default([]),
+  seedResourceIds: z.array(identifierSchema).max(100).default([]),
+  maxHops: z.number().int().min(0).max(3),
+  cpuBudgetMs: z.number().int().min(1).max(60_000),
+  expansionBudget: z.number().int().min(1).max(100_000),
+  resultBudget: z.number().int().min(1).max(100_000),
+  tokenBudget: z.number().int().min(1).max(1_000_000),
+  contentBudgetChars: z.number().int().min(1).max(1_000_000),
+  policyVersion: z.string().trim().min(1).max(120),
+}).strict();
+
+const growthEvidenceBaseSchema = z.object({
+  evidenceId: identifierSchema,
+  label: z.string().trim().min(1).max(500),
+});
+
+const growthEvidenceHitSchema = z.discriminatedUnion("kind", [
+  growthEvidenceBaseSchema.extend({
+    kind: z.literal("resource"),
+    excerpt: z.string().max(8_000).nullable(),
+    resource: z.object({
+      resourceId: identifierSchema,
+      type: workspaceResourceSchema.shape.type,
+      objectKind: workspaceResourceSchema.shape.objectKind,
+    }).strict(),
+  }).strict(),
+  growthEvidenceBaseSchema.extend({
+    kind: z.literal("document"),
+    excerpt: z.string().max(8_000),
+  }).strict(),
+  growthEvidenceBaseSchema.extend({
+    kind: z.literal("assertion"),
+    subject: z.string().min(1).max(500),
+    predicate: z.string().min(1).max(240),
+    object: jsonObjectSchema,
+  }).strict(),
+  growthEvidenceBaseSchema.extend({
+    kind: z.literal("relation"),
+    relation: z.object({
+      kind: workspaceCreativeRelationSchema.shape.kind,
+      sourceResourceId: identifierSchema,
+      targetResourceId: identifierSchema,
+    }).strict(),
+  }).strict(),
+]);
+
+export const growthRetrieveGraphEvidenceResultSchema = z.object({
+  variant: z.literal("growth_v1"),
+  receiptRecorded: z.literal(true),
+  evidence: z.array(growthEvidenceHitSchema).max(100_000),
+  coverage: z.object({
+    state: z.enum(["complete", "partial", "unknown"]),
+    searchedScopeCount: z.number().int().min(0).max(100),
+    omittedCount: z.number().int().min(0).max(1_000_000),
+    truncated: z.boolean(),
+  }).strict(),
+  diagnostics: z.object({
+    expandedEdges: z.number().int().min(0).max(100_000),
+    consumedContentChars: z.number().int().min(0).max(1_000_000),
+  }).strict(),
+}).strict();
+
+export const agentRetrieveGraphEvidenceArgsSchema = z.union([
+  retrieveGraphEvidenceArgsSchema,
+  growthRetrieveGraphEvidenceArgsSchema,
+]);
 
 export const inspectProjectFilesArgsSchema = z.discriminatedUnion("mode", [
   z.object({
@@ -559,6 +644,7 @@ export const agentWorkerRunStartCommandSchema = z.object({
   }),
   toolsAvailable: z.boolean(),
   providerProfile: providerRuntimeProfileSchema.nullable(),
+  growthBinding: growthRunBindingSchema.optional(),
 }).strict();
 
 export const agentWorkerRunCancelCommandSchema = z.object({
@@ -572,7 +658,7 @@ export const agentWorkerToolRequestSchema = z.discriminatedUnion("tool", [
     runId: z.string().min(1).max(120),
     requestId: requestIdSchema,
     tool: z.literal("retrieve_graph_evidence"),
-    args: retrieveGraphEvidenceArgsSchema,
+    args: agentRetrieveGraphEvidenceArgsSchema,
   }).strict(),
   z.object({
     type: z.literal("tool.request"),
@@ -625,6 +711,12 @@ export const agentToolInternalErrorCodeSchema = z.enum([
   "WORLD_MAP_SOURCE_VERSION_INVALID",
   "IMAGE_GENERATION_RECONCILIATION_REQUIRED",
   "IMAGE_GENERATION_FAILED",
+  "GROWTH_BINDING_INVALID",
+  "GROWTH_RETRIEVAL_INPUT_INVALID",
+  "GROWTH_PERSISTENCE_FAILED",
+  "GROWTH_RETRIEVAL_REQUIRED",
+  "GROWTH_RECONCILIATION_REQUIRED",
+  "GROWTH_RUN_FAILED",
 ]);
 
 const agentWorkerToolSuccessResponseSchema = z.discriminatedUnion("tool", [
@@ -634,7 +726,7 @@ const agentWorkerToolSuccessResponseSchema = z.discriminatedUnion("tool", [
     requestId: requestIdSchema,
     ok: z.literal(true),
     tool: z.literal("retrieve_graph_evidence"),
-    result: retrieveGraphEvidenceResultSchema,
+    result: z.union([retrieveGraphEvidenceResultSchema, growthRetrieveGraphEvidenceResultSchema]),
   }).strict(),
   z.object({
     type: z.literal("tool.response"),
@@ -816,6 +908,10 @@ export const agentWorkerCommandSchema = z.union([
 
 export type RetrieveGraphEvidenceArgs = z.infer<typeof retrieveGraphEvidenceArgsSchema>;
 export type RetrieveGraphEvidenceResult = z.infer<typeof retrieveGraphEvidenceResultSchema>;
+export type GrowthRunBinding = z.infer<typeof growthRunBindingSchema>;
+export type GrowthRetrieveGraphEvidenceArgs = z.infer<typeof growthRetrieveGraphEvidenceArgsSchema>;
+export type GrowthRetrieveGraphEvidenceResult = z.infer<typeof growthRetrieveGraphEvidenceResultSchema>;
+export type AgentRetrieveGraphEvidenceArgs = z.infer<typeof agentRetrieveGraphEvidenceArgsSchema>;
 export type InspectProjectFilesArgs = z.infer<typeof inspectProjectFilesArgsSchema>;
 export type InspectProjectFilesResult = z.infer<typeof inspectProjectFilesResultSchema>;
 export type ListProjectDirectoryArgs = z.infer<typeof listProjectDirectoryArgsSchema>;

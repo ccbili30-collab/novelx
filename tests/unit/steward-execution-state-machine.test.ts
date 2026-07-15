@@ -6,6 +6,7 @@ import {
   isExplicitGreenfieldFreeCreateRequest,
   proposeChangeSetResultSchema,
 } from "../../src/shared/agentWorkerProtocol";
+import { growthCapabilityVersion } from "../../src/shared/growthContract";
 
 describe("Steward tool handoff state machine", () => {
   it("recognizes only conservative explicit Free Greenfield creation requests", () => {
@@ -55,6 +56,48 @@ describe("Steward tool handoff state machine", () => {
       scopeResourceIds: ["world-1"],
       steps: ["retrieve_graph_evidence"],
     })).rejects.toMatchObject({ code: "STEWARD_PLAN_ALREADY_SUBMITTED" });
+  });
+
+  it("requires the bound Growth receipt before a Change Set without changing ordinary plans", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", growthRetrievalResult());
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "growth-change-1", mode: "free", status: "committed", gateStatus: "ready", blockedReason: null, itemCount: 1,
+      committedOutputs: [{ itemId: "setting", kind: "document_version", outputId: "version-growth-setting" }],
+    });
+    const machine = createStewardExecutionStateMachine({
+      mode: "free",
+      userInput: "基于当前证据继续发展设定",
+      authorizedScopeResourceIds: ["world-1"],
+      growthBinding: {
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", inputCheckpointId: "checkpoint-1",
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1"],
+      },
+      operationalTools: [retrieve, propose],
+      resultCapture: createRoleOutputTool("steward"),
+    });
+
+    await expect(tool(machine.tools, "submit_steward_plan").execute("growth-plan-bad", {
+      objective: "research", scopeResourceIds: ["world-1"], steps: ["retrieve_graph_evidence"],
+    })).rejects.toMatchObject({ code: "STEWARD_GROWTH_PLAN_INVALID" });
+    await expect(tool(machine.tools, "submit_steward_plan").execute("growth-plan-duplicate-propose", {
+      objective: "change_set", scopeResourceIds: ["world-1"],
+      steps: ["retrieve_graph_evidence", "propose_change_set", "propose_change_set"],
+    })).rejects.toMatchObject({ code: "STEWARD_PLAN_INVALID" });
+    await tool(machine.tools, "submit_steward_plan").execute("growth-plan", {
+      objective: "change_set", scopeResourceIds: ["world-1"], steps: ["retrieve_graph_evidence", "propose_change_set"],
+    });
+    await expect(tool(machine.tools, "retrieve_graph_evidence").execute("growth-legacy-retrieve", { scopeResourceIds: ["world-1"] }))
+      .rejects.toMatchObject({ code: "STEWARD_GROWTH_RETRIEVAL_REQUIRED" });
+    await expect(tool(machine.tools, "propose_change_set").execute("growth-early-propose", { summary: "补充", items: [{}] }))
+      .rejects.toMatchObject({ code: "STEWARD_STEP_OUT_OF_ORDER" });
+
+    await tool(machine.tools, "retrieve_graph_evidence").execute("growth-retrieve", {
+      variant: "growth_v1", query: "世界设定", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+      expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+    });
+    await tool(machine.tools, "propose_change_set").execute("growth-propose", { summary: "补充", items: [{}] });
+    expect(machine.snapshot().executions.map((execution) => `${execution.tool}:${execution.status}`))
+      .toEqual(["retrieve_graph_evidence:succeeded", "propose_change_set:succeeded"]);
   });
 
   it("rejects skipped steps and binds final tool outcomes to the real trace", async () => {
@@ -575,5 +618,18 @@ function retrievalResult(assertions: ReturnType<typeof assertion>[]) {
         relevanceRanking: "not_applied",
       },
     },
+  };
+}
+
+function growthRetrievalResult() {
+  return {
+    variant: "growth_v1" as const,
+    receiptRecorded: true,
+    evidence: [{
+      evidenceId: "version-growth-setting", kind: "document" as const, label: "世界设定",
+      excerpt: "可追溯的设定依据。",
+    }],
+    coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
+    diagnostics: { expandedEdges: 0, consumedContentChars: 12 },
   };
 }

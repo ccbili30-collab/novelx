@@ -21,6 +21,8 @@ import {
   listTaskNotesResultSchema,
   retrieveGraphEvidenceArgsSchema,
   retrieveGraphEvidenceResultSchema,
+  growthRetrieveGraphEvidenceArgsSchema,
+  growthRetrieveGraphEvidenceResultSchema,
   generateImageArgsSchema,
   generateImageResultSchema,
   type ProposeChangeSetArgs,
@@ -43,6 +45,9 @@ import {
   type ListTaskNotesResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
+  type AgentRetrieveGraphEvidenceArgs,
+  type GrowthRetrieveGraphEvidenceResult,
+  type GrowthRunBinding,
   type GenerateImageArgs,
   type GenerateImageResult,
 } from "../../shared/agentWorkerProtocol";
@@ -53,6 +58,20 @@ const jsonObject = Type.Record(Type.String({ minLength: 1, maxLength: 240 }), Ty
 
 const retrieveParameters = Type.Object({
   scopeResourceIds: Type.Array(identifier, { minItems: 1, maxItems: 100 }),
+}, { additionalProperties: false });
+
+const growthRetrieveParameters = Type.Object({
+  variant: Type.Literal("growth_v1"),
+  query: Type.String({ minLength: 1, maxLength: 12_000 }),
+  aliases: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { maxItems: 100 })),
+  seedResourceIds: Type.Optional(Type.Array(identifier, { maxItems: 100 })),
+  maxHops: Type.Integer({ minimum: 0, maximum: 3 }),
+  cpuBudgetMs: Type.Integer({ minimum: 1, maximum: 60_000 }),
+  expansionBudget: Type.Integer({ minimum: 1, maximum: 100_000 }),
+  resultBudget: Type.Integer({ minimum: 1, maximum: 100_000 }),
+  tokenBudget: Type.Integer({ minimum: 1, maximum: 1_000_000 }),
+  contentBudgetChars: Type.Integer({ minimum: 1, maximum: 1_000_000 }),
+  policyVersion: Type.String({ minLength: 1, maxLength: 120 }),
 }, { additionalProperties: false });
 
 const inspectProjectFilesParameters = Type.Object({
@@ -245,7 +264,7 @@ const proposeParameters = Type.Object({
 }, { additionalProperties: false });
 
 export interface AgentToolExecutor {
-  retrieveGraphEvidence(args: RetrieveGraphEvidenceArgs, signal?: AbortSignal): Promise<RetrieveGraphEvidenceResult>;
+  retrieveGraphEvidence(args: AgentRetrieveGraphEvidenceArgs, signal?: AbortSignal): Promise<RetrieveGraphEvidenceResult | GrowthRetrieveGraphEvidenceResult>;
   inspectProjectFiles(args: InspectProjectFilesArgs, signal?: AbortSignal): Promise<InspectProjectFilesResult>;
   listProjectDirectory(args: ListProjectDirectoryArgs, signal?: AbortSignal): Promise<ListProjectDirectoryResult>;
   statProjectFile(args: StatProjectFileArgs, signal?: AbortSignal): Promise<StatProjectFileResult>;
@@ -258,23 +277,29 @@ export interface AgentToolExecutor {
   proposeChangeSet(args: ProposeChangeSetArgs, signal?: AbortSignal): Promise<ProposeChangeSetResult>;
 }
 
-export function createAgentTools(executor: AgentToolExecutor): AgentTool[] {
-  const retrieve: AgentTool<typeof retrieveParameters> = {
+export function createAgentTools(executor: AgentToolExecutor, options: { growthBinding?: GrowthRunBinding } = {}): AgentTool[] {
+  const retrieve: AgentTool<typeof retrieveParameters | typeof growthRetrieveParameters> = {
     name: "retrieve_graph_evidence",
     label: "检索项目事实",
-    description: "Retrieve sourced evidence from explicitly selected active project scopes.",
-    parameters: retrieveParameters,
+    description: options.growthBinding
+      ? "Retrieve authorized Growth evidence from the pinned Cycle checkpoint."
+      : "Retrieve sourced evidence from explicitly selected active project scopes.",
+    parameters: options.growthBinding ? growthRetrieveParameters : retrieveParameters,
     execute: async (_toolCallId, params, signal) => {
-      const result = retrieveGraphEvidenceResultSchema.parse(await executor.retrieveGraphEvidence(
-        retrieveGraphEvidenceArgsSchema.parse(params),
-        signal,
-      ));
+      const args = options.growthBinding
+        ? growthRetrieveGraphEvidenceArgsSchema.parse(params)
+        : retrieveGraphEvidenceArgsSchema.parse(params);
+      const result = options.growthBinding
+        ? growthRetrieveGraphEvidenceResultSchema.parse(await executor.retrieveGraphEvidence(args, signal))
+        : retrieveGraphEvidenceResultSchema.parse(await executor.retrieveGraphEvidence(args, signal));
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
             result,
-            novaxInstruction: "Do not repeat the same retrieval. If the user requested a Change Set and evidence is sufficient, call propose_change_set. If the evidence conflicts or the user requested validation, call checker. Otherwise submit the final structured result.",
+            novaxInstruction: options.growthBinding
+              ? "This pinned Growth receipt is recorded. Do not repeat the retrieval. If evidence is sufficient, call propose_change_set."
+              : "Do not repeat the same retrieval. If the user requested a Change Set and evidence is sufficient, call propose_change_set. If the evidence conflicts or the user requested validation, call checker. Otherwise submit the final structured result.",
           }),
         }],
         details: result,

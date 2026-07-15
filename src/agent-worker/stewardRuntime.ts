@@ -1,7 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { canonicalAuditHash } from "../domain/audit/canonicalAuditHash";
-import type { AgentWorkerAuditOperation } from "../shared/agentWorkerProtocol";
-import type { AgentCollaborationContext, AgentSessionHistory } from "../shared/agentWorkerProtocol";
+import type { AgentWorkerAuditOperation, AgentCollaborationContext, AgentSessionHistory, GrowthRunBinding } from "../shared/agentWorkerProtocol";
 import { createStewardStateCorrection, getAgentRuntimeProfile } from "../shared/agentRuntimeProfiles";
 import type { ProviderRuntimeProfile } from "../shared/providerContract";
 import type { RoleOutputToolCapture } from "./contracts/roleOutputTool";
@@ -32,6 +31,7 @@ export async function runStewardRuntime(input: {
   collaborationContext?: AgentCollaborationContext;
   mode: "free" | "assist";
   scopeResourceIds: string[];
+  growthBinding?: GrowthRunBinding;
   providerProfile: ProviderRuntimeProfile;
   prompt: PublishedPrompt;
   adapter: RuntimeAdapter;
@@ -72,6 +72,7 @@ export async function runStewardRuntime(input: {
       mode: input.mode,
       userInput: input.userInput,
       authorizedScopeResourceIds: input.scopeResourceIds,
+      growthBinding: input.growthBinding,
       operationalTools: input.tools,
       resultCapture: input.resultCapture,
       longReadMaxChars: resolveLongReadMaxChars(input.providerProfile.contextWindow),

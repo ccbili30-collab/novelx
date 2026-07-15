@@ -1,6 +1,8 @@
 import {
   agentWorkerRunCancelCommandSchema,
   agentWorkerRunStartCommandSchema,
+  type GrowthRetrieveGraphEvidenceArgs,
+  type RetrieveGraphEvidenceArgs,
 } from "../shared/agentWorkerProtocol";
 import { verifyPromptRegistry } from "./promptRegistry";
 import { playerWorkerTurnStartCommandSchema } from "../shared/playerWorkerProtocol";
@@ -71,12 +73,9 @@ process.on("message", (payload: unknown) => {
   activeRuns.set(command.runId, controller);
   const tools = command.toolsAvailable && process.send
     ? createAgentTools({
-        retrieveGraphEvidence: (args, signal) => toolBridge.invoke(
-          command.runId,
-          "retrieve_graph_evidence",
-          args,
-          signal,
-        ),
+        retrieveGraphEvidence: (args, signal) => command.growthBinding
+          ? toolBridge.invoke(command.runId, "retrieve_graph_evidence", args as GrowthRetrieveGraphEvidenceArgs, signal)
+          : toolBridge.invoke(command.runId, "retrieve_graph_evidence", args as RetrieveGraphEvidenceArgs, signal),
         inspectProjectFiles: (args, signal) => toolBridge.invoke(
           command.runId,
           "inspect_project_files",
@@ -97,7 +96,7 @@ process.on("message", (payload: unknown) => {
           args,
           signal,
         ),
-      })
+      }, { growthBinding: command.growthBinding })
     : null;
   void handleAgentWorkerCommand({
     command,

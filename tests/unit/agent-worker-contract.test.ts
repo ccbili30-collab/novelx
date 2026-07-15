@@ -3,10 +3,39 @@ import { validateToolArguments } from "@earendil-works/pi-ai/compat";
 import { handleAgentWorkerCommand, projectPublicArtifacts } from "../../src/agent-worker/workerController";
 import { createRoleOutputTool } from "../../src/agent-worker/contracts/roleOutputTool";
 import type { PublishedPrompt } from "../../src/agent-worker/promptRegistry";
+import { growthRetrieveGraphEvidenceResultSchema } from "../../src/shared/agentWorkerProtocol";
 
 const auditRecorder = { record: async () => undefined };
 
 describe("agent worker fail-closed contract", () => {
+  it("rejects unknown Growth evidence resource and relation enum leaves", () => {
+    const base = {
+      variant: "growth_v1" as const,
+      receiptRecorded: true as const,
+      coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
+      diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
+    };
+    const resource = {
+      evidenceId: "resource-version-1", kind: "resource" as const, label: "World", excerpt: null,
+      resource: { resourceId: "world-1", type: "world", objectKind: "world" },
+    };
+    const relation = {
+      evidenceId: "relation-1", kind: "relation" as const, label: "related_to",
+      relation: { kind: "related_to", sourceResourceId: "world-1", targetResourceId: "story-1" },
+    };
+
+    expect(growthRetrieveGraphEvidenceResultSchema.safeParse({ ...base, evidence: [resource, relation] }).success).toBe(true);
+    expect(growthRetrieveGraphEvidenceResultSchema.safeParse({
+      ...base, evidence: [{ ...resource, resource: { ...resource.resource, type: "unknown_resource_type" } }],
+    }).success).toBe(false);
+    expect(growthRetrieveGraphEvidenceResultSchema.safeParse({
+      ...base, evidence: [{ ...resource, resource: { ...resource.resource, objectKind: "unknown_object_kind" } }],
+    }).success).toBe(false);
+    expect(growthRetrieveGraphEvidenceResultSchema.safeParse({
+      ...base, evidence: [{ ...relation, relation: { ...relation.relation, kind: "unknown_relation_kind" } }],
+    }).success).toBe(false);
+  });
+
   it("exposes strict Writer and Checker branch schemas at the Provider tool boundary", () => {
     const steward = createRoleOutputTool("steward").tool.parameters as { type?: string; anyOf?: unknown };
     const writer = createRoleOutputTool("writer").tool.parameters as { anyOf?: unknown[] };

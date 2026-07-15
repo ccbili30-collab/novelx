@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentWorkerToolBridge } from "../../src/agent-worker/tools/agentWorkerToolBridge";
 import { createAgentTools } from "../../src/agent-worker/tools/createAgentTools";
-import type { AgentWorkerToolRequest } from "../../src/shared/agentWorkerProtocol";
+import type { AgentWorkerToolRequest, RetrieveGraphEvidenceArgs } from "../../src/shared/agentWorkerProtocol";
+import { growthCapabilityVersion } from "../../src/shared/growthContract";
 
 describe("Agent Worker tool bridge", () => {
   it("exposes the three audited project tools", () => {
@@ -10,7 +11,7 @@ describe("Agent Worker tool bridge", () => {
       retrieveGraphEvidence: (args, signal) => bridge.invoke(
         "run-1",
         "retrieve_graph_evidence",
-        args,
+        args as RetrieveGraphEvidenceArgs,
         signal,
       ),
       inspectProjectFiles: (args, signal) => bridge.invoke(
@@ -33,6 +34,11 @@ describe("Agent Worker tool bridge", () => {
         args,
         signal,
       ),
+    }, {
+      growthBinding: {
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", inputCheckpointId: "checkpoint-1",
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1"],
+      },
     });
 
     expect(tools.map((tool) => tool.name)).toEqual([
@@ -52,6 +58,10 @@ describe("Agent Worker tool bridge", () => {
       type: "object",
       additionalProperties: false,
     });
+    const growthRetrieveSchema = JSON.stringify(tools.find((tool) => tool.name === "retrieve_graph_evidence")?.parameters);
+    for (const forbiddenBindingField of ["goalId", "cycleId", "branchId", "checkpointId", "lens", "authorizedScopeResourceIds", "runId"]) {
+      expect(growthRetrieveSchema).not.toContain(forbiddenBindingField);
+    }
   });
 
   it("correlates responses by runId and requestId", async () => {

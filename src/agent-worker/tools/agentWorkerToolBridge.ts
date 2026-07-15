@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import {
   agentWorkerToolRequestSchema,
   agentWorkerToolResponseSchema,
@@ -12,6 +13,7 @@ import {
   statProjectFileResultSchema,
   proposeChangeSetResultSchema,
   retrieveGraphEvidenceResultSchema,
+  growthRetrieveGraphEvidenceResultSchema,
   generateImageResultSchema,
   type AgentToolName,
   type AgentWorkerToolRequest,
@@ -28,6 +30,8 @@ import {
   type ProposeChangeSetResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
+  type GrowthRetrieveGraphEvidenceArgs,
+  type GrowthRetrieveGraphEvidenceResult,
   type GenerateImageArgs,
   type GenerateImageResult,
 } from "../../shared/agentWorkerProtocol";
@@ -63,6 +67,12 @@ export class AgentWorkerToolBridge {
   ): Promise<RetrieveGraphEvidenceResult>;
   invoke(
     runId: string,
+    tool: "retrieve_graph_evidence",
+    args: GrowthRetrieveGraphEvidenceArgs,
+    signal?: AbortSignal,
+  ): Promise<GrowthRetrieveGraphEvidenceResult>;
+  invoke(
+    runId: string,
     tool: "inspect_project_files",
     args: InspectProjectFilesArgs,
     signal?: AbortSignal,
@@ -84,9 +94,9 @@ export class AgentWorkerToolBridge {
   invoke(
     runId: string,
     tool: AgentToolName,
-    args: RetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ListProjectDirectoryArgs | StatProjectFileArgs | GlobProjectFilesArgs | SearchProjectFilesArgs | ReadProjectFileArgs | SaveTaskNoteArgs | ListTaskNotesArgs | ProposeChangeSetArgs | GenerateImageArgs,
+    args: RetrieveGraphEvidenceArgs | GrowthRetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ListProjectDirectoryArgs | StatProjectFileArgs | GlobProjectFilesArgs | SearchProjectFilesArgs | ReadProjectFileArgs | SaveTaskNoteArgs | ListTaskNotesArgs | ProposeChangeSetArgs | GenerateImageArgs,
     signal?: AbortSignal,
-  ): Promise<RetrieveGraphEvidenceResult | InspectProjectFilesResult | ListProjectDirectoryResult | StatProjectFileResult | GlobProjectFilesResult | SearchProjectFilesResult | ReadProjectFileResult | SaveTaskNoteResult | ListTaskNotesResult | ProposeChangeSetResult | GenerateImageResult> {
+  ): Promise<RetrieveGraphEvidenceResult | GrowthRetrieveGraphEvidenceResult | InspectProjectFilesResult | ListProjectDirectoryResult | StatProjectFileResult | GlobProjectFilesResult | SearchProjectFilesResult | ReadProjectFileResult | SaveTaskNoteResult | ListTaskNotesResult | ProposeChangeSetResult | GenerateImageResult> {
     if (signal?.aborted) return Promise.reject(toolBridgeError("AGENT_RUN_CANCELLED", "Agent run was cancelled."));
     const request = agentWorkerToolRequestSchema.parse({
       type: "tool.request",
@@ -141,7 +151,7 @@ export class AgentWorkerToolBridge {
       this.#settle(response.requestId, undefined, toolBridgeError("AGENT_TOOL_PROTOCOL_FAILED", "Agent tool response name mismatch."));
       return true;
     }
-    const resultSchema = response.tool === "retrieve_graph_evidence" ? retrieveGraphEvidenceResultSchema
+    const resultSchema = response.tool === "retrieve_graph_evidence" ? z.union([retrieveGraphEvidenceResultSchema, growthRetrieveGraphEvidenceResultSchema])
       : response.tool === "inspect_project_files" ? inspectProjectFilesResultSchema
         : response.tool === "list_project_directory" ? listProjectDirectoryResultSchema
           : response.tool === "stat_project_file" ? statProjectFileResultSchema

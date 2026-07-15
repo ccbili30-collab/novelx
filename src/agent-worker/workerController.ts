@@ -78,6 +78,7 @@ export async function handleAgentWorkerCommand(
         ...(command.scopeResourceIds ?? []),
         ...(command.collaborationContext?.handoffs ?? []).flatMap((handoff) => handoff.scopeResourceIds),
       ])],
+      growthBinding: command.growthBinding,
       providerProfile,
       prompt: stewardPrompt,
       adapter,

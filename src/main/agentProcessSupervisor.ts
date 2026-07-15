@@ -1,5 +1,6 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { agentRunEventSchema, type AgentRunEvent, type AgentRunStartRequest } from "../shared/ipcContract";
 import {
   agentWorkerAuditRequestSchema,
@@ -17,6 +18,7 @@ import {
   listProjectDirectoryResultSchema,
   readProjectFileResultSchema,
   retrieveGraphEvidenceResultSchema,
+  growthRetrieveGraphEvidenceResultSchema,
   searchProjectFilesResultSchema,
   statProjectFileResultSchema,
   saveTaskNoteResultSchema,
@@ -47,6 +49,8 @@ import {
   type ListTaskNotesResult,
   type RetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceResult,
+  type AgentRetrieveGraphEvidenceArgs,
+  type GrowthRetrieveGraphEvidenceResult,
   type GenerateImageArgs,
   type GenerateImageResult,
 } from "../shared/agentWorkerProtocol";
@@ -92,6 +96,28 @@ export interface AgentToolGateway {
   ): Promise<ProposeChangeSetResult>;
 }
 
+export interface GrowthAgentToolGateway extends Omit<AgentToolGateway, "retrieveGraphEvidence"> {
+  retrieveGraphEvidence(
+    args: AgentRetrieveGraphEvidenceArgs,
+    context: AgentToolInvocationContext,
+  ): Promise<RetrieveGraphEvidenceResult | GrowthRetrieveGraphEvidenceResult>;
+}
+
+/** Internal Main-only binding hook. It is never populated from Renderer or model tool arguments. */
+export interface AgentRunInternalBinding {
+  readonly workerBinding: unknown;
+  attach(input: {
+    runId: string;
+    gateway: AgentToolGateway;
+    mode: "free" | "assist";
+    scopeResourceIds: string[];
+  }): GrowthAgentToolGateway;
+  terminalize(input: {
+    kind: "completed" | "failed" | "cancelled" | "interrupted";
+    errorCode: string | null;
+  }): void;
+}
+
 export interface AgentWorkerProcess {
   readonly killed: boolean;
   on(event: "message", listener: (payload: unknown) => void): this;
@@ -110,13 +136,14 @@ interface PendingToolRequest {
 interface ActiveRun {
   child: AgentWorkerProcess;
   emit(event: AgentRunEvent): void;
-  gateway: AgentToolGateway | null;
+  gateway: GrowthAgentToolGateway | null;
   mode: "free" | "assist";
   greenfieldCreateRequested: boolean;
   pendingTools: Map<string, PendingToolRequest>;
   audit: AgentAuditStore;
   providerProfile: ProviderRuntimeProfile | null;
   providerConfigSha256: string | null;
+  internalBinding: AgentRunInternalBinding | null;
   releaseLease(): void;
 }
 
@@ -178,6 +205,7 @@ export class AgentProcessSupervisor {
       completeness: { incomplete: false, omittedMessages: 0 },
     },
     collaborationContext: AgentCollaborationContext = { sharedMemories: [], handoffs: [] },
+    internalBinding: AgentRunInternalBinding | null = null,
   ): string {
     const runId = randomUUID();
     const providerProfile = this.#readProviderProfile();
@@ -208,17 +236,29 @@ export class AgentProcessSupervisor {
       queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }), artifacts: [] }));
       return runId;
     }
+    let gateway = lease.gateway as GrowthAgentToolGateway;
+    if (internalBinding) {
+      try {
+        gateway = internalBinding.attach({ runId, gateway: gateway as AgentToolGateway, mode: request.mode, scopeResourceIds });
+      } catch {
+        try { lease.audit.terminalizeOpenRun(runId, "failed", "GROWTH_BINDING_INVALID"); } catch { /* Preserve fail-closed startup. */ }
+        lease.release();
+        queueMicrotask(() => emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_RUN_FAILED" }), artifacts: [] }));
+        return runId;
+      }
+    }
     const child = this.#spawnWorker(this.#workerPath);
     const run: ActiveRun = {
       child,
       emit,
-      gateway: lease.gateway,
+      gateway,
       mode: request.mode,
       greenfieldCreateRequested,
       pendingTools: new Map(),
       audit: lease.audit,
       providerProfile,
       providerConfigSha256,
+      internalBinding,
       releaseLease: lease.release,
     };
     this.#runs.set(runId, run);
@@ -249,6 +289,7 @@ export class AgentProcessSupervisor {
         collaborationContext,
         toolsAvailable: true,
         providerProfile,
+        growthBinding: internalBinding?.workerBinding,
       });
       this.#sendWorkerMessage(runId, run, command, "startup");
     });
@@ -268,6 +309,10 @@ export class AgentProcessSupervisor {
   cancel(runId: string): void {
     const run = this.#runs.get(runId);
     if (!run) return;
+    if (!this.#terminalizeInternalBinding(run, "cancelled", "AGENT_RUN_CANCELLED")) {
+      this.#failAudit(runId);
+      return;
+    }
     try {
       run.audit.appendRunCancelRequested(runId);
       run.audit.terminalizeOpenRun(runId, "cancelled", "AGENT_RUN_CANCELLED");
@@ -313,6 +358,13 @@ export class AgentProcessSupervisor {
         return;
       }
       if (event.data.type === "run.failed" || event.data.type === "run.completed") {
+        const kind = event.data.type === "run.completed"
+          ? "completed"
+          : event.data.code === "AGENT_RUN_CANCELLED" ? "cancelled" : "failed";
+        if (!this.#terminalizeInternalBinding(run, kind, event.data.type === "run.failed" ? event.data.code : null)) {
+          this.#failAudit(runId);
+          return;
+        }
         try {
           if (event.data.type === "run.failed") {
             run.audit.terminalizeOpenRun(
@@ -436,28 +488,31 @@ export class AgentProcessSupervisor {
     void operation.then((result) => {
       if (!this.#takePending(run, request.requestId)) return;
       if (request.tool === "retrieve_graph_evidence") {
-        const parsed = retrieveGraphEvidenceResultSchema.safeParse(result);
+        const parsed = z.union([retrieveGraphEvidenceResultSchema, growthRetrieveGraphEvidenceResultSchema]).safeParse(result);
         if (!parsed.success) {
           if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
           this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
           return;
         }
         try {
-          run.audit.linkTargets({
-            toolInvocationId: request.requestId,
-            links: [
-              ...parsed.data.assertions.map((assertion) => ({
-                kind: "assertion_evidence" as const,
-                targetId: assertion.versionId,
-                targetSha256: null,
-              })),
-              ...parsed.data.documents.map((document) => ({
-                kind: "document_evidence" as const,
-                targetId: document.source.version.id,
-                targetSha256: document.source.version.contentHash,
-              })),
-            ],
-          });
+          if (!("variant" in parsed.data && parsed.data.variant === "growth_v1")) {
+            const legacyResult = parsed.data as z.infer<typeof retrieveGraphEvidenceResultSchema>;
+            run.audit.linkTargets({
+              toolInvocationId: request.requestId,
+              links: [
+                ...legacyResult.assertions.map((assertion) => ({
+                  kind: "assertion_evidence" as const,
+                  targetId: assertion.versionId,
+                  targetSha256: null,
+                })),
+                ...legacyResult.documents.map((document) => ({
+                  kind: "document_evidence" as const,
+                  targetId: document.source.version.id,
+                  targetSha256: document.source.version.contentHash,
+                })),
+              ],
+            });
+          }
           run.audit.appendToolTerminal({
             runId,
             invocationId: stewardInvocationId(runId),
@@ -483,7 +538,9 @@ export class AgentProcessSupervisor {
           runId,
           label: "检索项目事实",
           phase: "completed",
-          domains: uniqueDomains(["graph", ...parsed.data.scopes.map((scope) => scope.type)]),
+          domains: "variant" in parsed.data && parsed.data.variant === "growth_v1"
+            ? ["graph"]
+            : uniqueDomains(["graph", ...(parsed.data as z.infer<typeof retrieveGraphEvidenceResultSchema>).scopes.map((scope) => scope.type)]),
         });
         return;
       }
@@ -706,6 +763,10 @@ export class AgentProcessSupervisor {
         // Diagnostics cannot replace the fail-closed runtime path.
       }
     }
+    if (!this.#terminalizeInternalBinding(run, "interrupted", "AGENT_WORKER_INTERRUPTED")) {
+      this.#failAudit(runId);
+      return;
+    }
     try {
       run.audit.terminalizeOpenRun(runId, "interrupted", "AGENT_WORKER_INTERRUPTED");
     } catch {
@@ -887,8 +948,23 @@ export class AgentProcessSupervisor {
   #failAudit(runId: string): void {
     const run = this.#runs.get(runId);
     if (!run) return;
+    this.#terminalizeInternalBinding(run, "interrupted", "AGENT_AUDIT_REQUIRED");
     run.emit({ type: "run.failed", runId, ...toPublicError({ code: "AGENT_AUDIT_REQUIRED" }), artifacts: [] });
     this.#finish(runId);
+  }
+
+  #terminalizeInternalBinding(
+    run: ActiveRun,
+    kind: "completed" | "failed" | "cancelled" | "interrupted",
+    errorCode: string | null,
+  ): boolean {
+    if (!run.internalBinding) return true;
+    try {
+      run.internalBinding.terminalize({ kind, errorCode });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -1053,4 +1129,10 @@ const TOOL_ERROR_MESSAGES = {
   WORLD_MAP_SOURCE_VERSION_INVALID: "World map sources must be current stable versions bound to the supplied resources.",
   IMAGE_GENERATION_RECONCILIATION_REQUIRED: "The image request outcome requires manual reconciliation.",
   IMAGE_GENERATION_FAILED: "Image generation failed without a committed asset.",
+  GROWTH_BINDING_INVALID: "The Growth Cycle binding is invalid.",
+  GROWTH_RETRIEVAL_INPUT_INVALID: "Growth retrieval input or budgets are invalid.",
+  GROWTH_PERSISTENCE_FAILED: "Growth retrieval evidence could not be persisted.",
+  GROWTH_RETRIEVAL_REQUIRED: "A recorded Growth retrieval is required before proposing changes.",
+  GROWTH_RECONCILIATION_REQUIRED: "The Growth Change Set outcome requires reconciliation.",
+  GROWTH_RUN_FAILED: "The Growth Cycle run failed before a committed Change Set.",
 } as const;

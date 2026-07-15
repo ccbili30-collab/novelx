@@ -4,6 +4,7 @@ import {
   inspectProjectFilesResultSchema,
   listProjectDirectoryResultSchema,
   readProjectFileResultSchema,
+  retrieveGraphEvidenceArgsSchema,
   retrieveGraphEvidenceResultSchema,
   searchProjectFilesResultSchema,
   statProjectFileResultSchema,
@@ -52,7 +53,7 @@ export function createWorkspaceAgentToolGateway(
   return {
     retrieveGraphEvidence: async (args, context) => {
       assertAvailable(context.signal);
-      const packet = new ContextPacketService(workspace).build(args);
+      const packet = new ContextPacketService(workspace).build(retrieveGraphEvidenceArgsSchema.parse(args));
       assertAvailable(context.signal);
       return retrieveGraphEvidenceResultSchema.parse(packet);
     },

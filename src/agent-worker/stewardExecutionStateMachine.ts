@@ -14,8 +14,11 @@ import {
   listTaskNotesResultSchema,
   proposeChangeSetResultSchema,
   retrieveGraphEvidenceResultSchema,
+  growthRetrieveGraphEvidenceArgsSchema,
+  growthRetrieveGraphEvidenceResultSchema,
   generateImageArgsSchema,
   generateImageResultSchema,
+  type GrowthRunBinding,
 } from "../shared/agentWorkerProtocol";
 
 const operationalToolNames = [
@@ -143,6 +146,7 @@ export function createStewardExecutionStateMachine(input: {
   mode: "free" | "assist";
   userInput: string;
   authorizedScopeResourceIds: string[];
+  growthBinding?: GrowthRunBinding;
   operationalTools: AgentTool[];
   resultCapture: RoleOutputToolCapture;
   longReadMaxChars?: number;
@@ -170,6 +174,7 @@ export function createStewardExecutionStateMachine(input: {
   let nextTaskNoteOffset = 0;
   const allowedEvidenceIds = new Set<string>();
   let proposedChangeSet: z.infer<typeof proposeChangeSetResultSchema> | null = null;
+  let growthReceiptRecorded = false;
   const committedOutputIds = new Set<string>();
   const forbiddenExternalEchoTokens = extractExternalEchoTokens(input.userInput);
   const longReadMaxChars = Number.isSafeInteger(input.longReadMaxChars) && input.longReadMaxChars! > 0
@@ -199,6 +204,16 @@ export function createStewardExecutionStateMachine(input: {
       if (!parsed.success) throw stateError("STEWARD_PLAN_INVALID");
       if (parsed.data.scopeResourceIds.some((resourceId) => !authorizedScopeResourceIds.has(resourceId))) {
         throw stateError("STEWARD_PLAN_SCOPE_MISMATCH");
+      }
+      if (input.growthBinding && (
+        parsed.data.objective !== "change_set"
+        || !sameStrings(parsed.data.scopeResourceIds, input.growthBinding.authorizedScopeResourceIds)
+        || !parsed.data.steps.includes("retrieve_graph_evidence")
+        || !parsed.data.steps.includes("propose_change_set")
+        || parsed.data.steps.filter((step) => step === "propose_change_set").length !== 1
+        || parsed.data.steps.indexOf("retrieve_graph_evidence") > parsed.data.steps.indexOf("propose_change_set")
+      )) {
+        throw stateError("STEWARD_GROWTH_PLAN_INVALID");
       }
       if (parsed.data.objective === "change_set" && parsed.data.steps.includes("generate_image")
         && (!greenfieldCreateRequested || !isGreenfieldWorldMapPlan(parsed.data))) {
@@ -381,8 +396,15 @@ export function createStewardExecutionStateMachine(input: {
       }
     } else if (activePlan.steps[nextStepIndex] !== name) throw stateError("STEWARD_STEP_OUT_OF_ORDER");
     if (name === "retrieve_graph_evidence") {
-      const scopes = readScopeResourceIds(params);
-      if (!sameStrings(scopes, activePlan.scopeResourceIds)) throw stateError("STEWARD_PLAN_SCOPE_MISMATCH");
+      if (input.growthBinding) {
+        if (!growthRetrieveGraphEvidenceArgsSchema.safeParse(params).success) throw stateError("STEWARD_GROWTH_RETRIEVAL_REQUIRED");
+      } else {
+        const scopes = readScopeResourceIds(params);
+        if (!sameStrings(scopes, activePlan.scopeResourceIds)) throw stateError("STEWARD_PLAN_SCOPE_MISMATCH");
+      }
+    }
+    if (name === "propose_change_set" && input.growthBinding && !growthReceiptRecorded) {
+      throw stateError("STEWARD_GROWTH_RECEIPT_REQUIRED");
     }
     if (name === "save_task_note") {
       const note = saveTaskNoteArgsSchema.safeParse(params);
@@ -428,6 +450,14 @@ export function createStewardExecutionStateMachine(input: {
       return;
     }
     if (name === "retrieve_graph_evidence") {
+      if (input.growthBinding) {
+        const retrieval = growthRetrieveGraphEvidenceResultSchema.safeParse(details);
+        if (!retrieval.success || !retrieval.data.receiptRecorded) throw stateError("STEWARD_TOOL_RESULT_INVALID");
+        growthReceiptRecorded = true;
+        for (const evidence of retrieval.data.evidence) allowedEvidenceIds.add(evidence.evidenceId);
+        if (retrieval.data.evidence.length === 0) blockReason = "missing_source";
+        return;
+      }
       const retrieval = retrieveGraphEvidenceResultSchema.safeParse(details);
       if (!retrieval.success) throw stateError("STEWARD_TOOL_RESULT_INVALID");
       for (const assertion of retrieval.data.assertions) {
