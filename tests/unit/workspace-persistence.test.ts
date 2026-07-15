@@ -8,6 +8,7 @@ import { ChangeSetRepository } from "../../src/domain/changeSet/changeSetReposit
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
+import { GrowthRepository } from "../../src/domain/growth/growthRepository";
 
 const opened: WorkspaceDatabase[] = [];
 const roots: string[] = [];
@@ -18,14 +19,14 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates schema 23 creative, audit, import, image, and Growth persistence storage", () => {
+  it("creates schema 24 creative, audit, import, image, and interactive Growth persistence storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 23 });
+      .toEqual({ version: 24 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
@@ -65,6 +66,23 @@ describe("local workspace persistence", () => {
       "growth_retrieval_receipts",
       "growth_retrieval_receipt_links",
       "growth_events",
+      "growth_cycle_intents",
+      "growth_cycle_intent_focuses",
+      "growth_cycle_intent_frontier",
+      "growth_inquiry_batches",
+      "growth_inquiries",
+      "growth_inquiry_evidence_links",
+      "growth_closure_profiles",
+      "growth_closure_profile_revisions",
+      "growth_closure_facets",
+      "growth_closure_assessments",
+      "growth_closure_reviews",
+      "growth_closure_review_findings",
+      "growth_illustration_requests",
+      "growth_illustration_request_batches",
+      "growth_illustration_items",
+      "growth_illustration_item_sources",
+      "growth_illustration_text_snapshots",
     ]));
     expect(listIndexes(workspace)).toEqual(expect.arrayContaining([
       "creative_documents_resource_idx",
@@ -77,6 +95,12 @@ describe("local workspace persistence", () => {
       "image_generation_jobs_status_idx",
       "image_assets_sha256_idx",
       "growth_cycles_goal_status_idx",
+      "growth_cycles_one_open_goal_idx",
+      "growth_cycles_id_rule_idx",
+      "growth_inquiries_one_selected_idx",
+      "growth_closure_reviews_revision_idx",
+      "growth_illustration_requests_goal_status_idx",
+      "growth_illustration_items_request_status_idx",
       "growth_events_cycle_idx",
     ]));
     expect(workspace.db.prepare("SELECT id, kind, sealed_at FROM creative_commits").all()).toMatchObject([
@@ -84,8 +108,8 @@ describe("local workspace persistence", () => {
     ]);
   });
 
-  it("migrates a v22 database additively without rewriting stable domain or image rows", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-22-growth-"));
+  it("migrates a v23 database additively without rewriting Growth, domain, relation, Change Set, document, assertion or image rows", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-23-growth-"));
     roots.push(root);
     let workspace = openWorkspace(root);
     opened.push(workspace);
@@ -94,15 +118,27 @@ describe("local workspace persistence", () => {
     const documents = new DocumentRepository(workspace);
     const assertions = new AssertionRepository(workspace);
     const changes = new ChangeSetRepository(workspace);
-    const changeSet = changes.propose({ idempotencyKey: "v22-growth-preserve", mode: "free", summary: "v22 preservation" });
-    changes.commit(changeSet.id, "v22 preservation", () => undefined);
+    const changeSet = changes.propose({ idempotencyKey: "v23-growth-preserve", mode: "free", summary: "v23 preservation" });
+    changes.commit(changeSet.id, "v23 preservation", () => undefined);
     const checkpointId = checkpoints.getActiveBranch().headCheckpointId;
     const world = resources.listCurrent().find((resource) => resource.type === "world")!;
-    documents.putVersion({ resourceId: world.id, checkpointId, content: "stable v22 document", authorKind: "user" });
+    const oc = resources.listCurrent().find((resource) => resource.type === "oc")!;
+    documents.putVersion({ resourceId: world.id, checkpointId, content: "stable v23 document", authorKind: "user" });
+    const documentBefore = workspace.db.prepare(`
+      SELECT id, content_hash FROM document_versions WHERE resource_id = ? AND created_checkpoint_id = ?
+    `).get(world.id, checkpointId);
     assertions.putVersion({
-      assertionId: "v22.assertion", checkpointId, scopeType: "world", scopeId: world.id, subject: "v22", predicate: "keeps",
+      assertionId: "v23.assertion", checkpointId, scopeType: "world", scopeId: world.id, subject: "v23", predicate: "keeps",
       object: { text: "stable assertion" }, status: "current", source: { kind: "confirmed_change_set", ref: changeSet.id },
     });
+    const relationId = "relation-v23";
+    const relationVersionId = "relation-version-v23";
+    workspace.db.prepare("INSERT INTO creative_relations (id) VALUES (?)").run(relationId);
+    workspace.db.prepare(`
+      INSERT INTO creative_relation_versions (
+        id, relation_id, source_resource_id, target_resource_id, kind, created_checkpoint_id, state, created_at
+      ) VALUES (?, ?, ?, ?, 'related_to', ?, 'active', ?)
+    `).run(relationVersionId, relationId, world.id, oc.id, checkpointId, new Date().toISOString());
     const hash = "a".repeat(64);
     const now = new Date().toISOString();
     workspace.db.prepare(`
@@ -110,39 +146,77 @@ describe("local workspace persistence", () => {
         id, idempotency_key, request_sha256, provider_id, model_id, title, purpose, prompt, prompt_sha256, size, quality,
         background, source_resource_ids_json, source_version_ids_json, status, request_sent_at, provider_response_id_sha256,
         error_code, error_message, created_at, updated_at
-      ) VALUES ('job-v22', 'job-v22-key', ?, 'provider', 'model', 'map', 'world_map', 'prompt', ?, '1024x1024', 'auto',
+        ) VALUES ('job-v23', 'job-v23-key', ?, 'provider', 'model', 'map', 'world_map', 'prompt', ?, '1024x1024', 'auto',
         'auto', '[]', '[]', 'succeeded', NULL, NULL, NULL, NULL, ?, ?)
     `).run(hash, hash, now, now);
     workspace.db.prepare(`
       INSERT INTO image_assets (id, job_id, mime_type, width, height, byte_length, sha256, relative_path, status, created_at, updated_at)
-      VALUES ('asset-v22', 'job-v22', 'image/png', 1, 1, 4, ?, 'images/asset-v22.png', 'ready', ?, ?)
+      VALUES ('asset-v23', 'job-v23', 'image/png', 1, 1, 4, ?, 'images/asset-v23.png', 'ready', ?, ?)
     `).run(hash, now, now);
+    const branchId = checkpoints.getActiveBranch().id;
+    workspace.db.prepare(`
+      INSERT INTO growth_goals (
+        id, idempotency_key, payload_hash, branch_id, seed_kind, seed_text, seed_source_document_id,
+        seed_source_version_id, seed_resource_id, seed_resource_version_id, status, current_rule_revision,
+        current_cycle_sequence, created_at, updated_at
+      ) VALUES ('goal-v23', 'goal-v23-key', ?, ?, 'text', 'legacy growth', NULL, NULL, NULL, NULL, 'active', 1, 1, ?, ?)
+    `).run(hash, branchId, now, now);
+    workspace.db.prepare("INSERT INTO growth_goal_scopes (goal_id, resource_id, ordinal) VALUES ('goal-v23', ?, 0)").run(world.id);
+    workspace.db.prepare(`
+      INSERT INTO growth_goal_rule_revisions (goal_id, revision, rule_text, source_message_id, created_at)
+      VALUES ('goal-v23', 1, 'legacy rule', NULL, ?)
+    `).run(now);
+    workspace.db.prepare(`
+      INSERT INTO growth_cycles (
+        id, goal_id, sequence, idempotency_key, payload_hash, input_checkpoint_id, rule_revision,
+        run_id, receipt_id, change_set_id, output_checkpoint_id, status, failure_code, created_at, updated_at, terminal_at
+      ) VALUES ('cycle-v23', 'goal-v23', 1, 'cycle-v23-key', ?, ?, 1, NULL, NULL, NULL, NULL, 'planned', NULL, ?, ?, NULL)
+    `).run(hash, checkpointId, now, now);
     workspace.db.exec(`
-      DROP TABLE growth_events;
-      DROP TABLE growth_retrieval_receipt_links;
-      DROP TABLE growth_retrieval_receipt_aliases;
-      DROP TABLE growth_retrieval_receipt_scopes;
-      DROP TABLE growth_retrieval_receipts;
-      DROP TABLE growth_cycles;
-      DROP TABLE growth_goal_rule_revisions;
-      DROP TABLE growth_goal_scopes;
-      DROP TABLE growth_goals;
-      UPDATE schema_meta SET version = 22 WHERE singleton = 1;
+      DROP TABLE growth_illustration_item_sources;
+      DROP TABLE growth_illustration_items;
+      DROP TABLE growth_illustration_request_batches;
+      DROP TABLE growth_illustration_requests;
+      DROP TABLE growth_illustration_text_snapshots;
+      DROP TABLE growth_closure_review_findings;
+      DROP TABLE growth_closure_reviews;
+      DROP TABLE growth_closure_assessments;
+      DROP TABLE growth_closure_facets;
+      DROP TABLE growth_closure_profile_revisions;
+      DROP TABLE growth_closure_profiles;
+      DROP TABLE growth_inquiry_evidence_links;
+      DROP TABLE growth_inquiries;
+      DROP TABLE growth_inquiry_batches;
+      DROP TABLE growth_cycle_intent_frontier;
+      DROP TABLE growth_cycle_intent_focuses;
+      DROP TABLE growth_cycle_intents;
+      DROP INDEX growth_cycles_id_rule_idx;
+      DROP INDEX growth_cycles_one_open_goal_idx;
+      UPDATE schema_meta SET version = 23 WHERE singleton = 1;
     `);
     workspace.close();
     opened.splice(opened.indexOf(workspace), 1);
     workspace = openWorkspace(root);
     opened.push(workspace);
 
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 23 });
-    expect(workspace.db.prepare("SELECT purpose, request_sha256 FROM image_generation_jobs WHERE id = 'job-v22'").get())
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 24 });
+    expect(workspace.db.prepare("SELECT purpose, request_sha256 FROM image_generation_jobs WHERE id = 'job-v23'").get())
       .toEqual({ purpose: "world_map", request_sha256: hash });
-    expect(workspace.db.prepare("SELECT sha256 FROM image_assets WHERE id = 'asset-v22'").get()).toEqual({ sha256: hash });
+    expect(workspace.db.prepare("SELECT sha256 FROM image_assets WHERE id = 'asset-v23'").get()).toEqual({ sha256: hash });
     expect(new ChangeSetRepository(workspace).get(changeSet.id)?.status).toBe("committed");
-    expect(new DocumentRepository(workspace).getCurrentStable(world.id)?.content).toBe("stable v22 document");
+    expect(new DocumentRepository(workspace).getCurrentStable(world.id)?.content).toBe("stable v23 document");
+    expect(workspace.db.prepare(`
+      SELECT id, content_hash FROM document_versions WHERE resource_id = ? AND created_checkpoint_id = ?
+    `).get(world.id, checkpointId)).toEqual(documentBefore);
     expect(new AssertionRepository(workspace).listCurrent()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ assertionId: "v22.assertion" }),
+      expect.objectContaining({ assertionId: "v23.assertion" }),
     ]));
+    expect(workspace.db.prepare("SELECT id FROM creative_relation_versions WHERE id = ?").get(relationVersionId)).toEqual({ id: relationVersionId });
+    expect(workspace.db.prepare("SELECT payload_hash FROM growth_goals WHERE id = 'goal-v23'").get()).toEqual({ payload_hash: hash });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_cycle_intents").get()).toEqual({ count: 0 });
+    expect(new GrowthRepository(workspace).getCycleIntent("cycle-v23")).toMatchObject({
+      focusKinds: ["world"], resumeFrontier: ["story", "oc"], provenance: "legacy_v23_projection",
+    });
   });
 
   it("keeps logical domain roots internal until they contain user content or are renamed", () => {

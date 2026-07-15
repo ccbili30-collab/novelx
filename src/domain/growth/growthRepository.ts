@@ -1,4 +1,5 @@
 import type { SQLOutputValue } from "node:sqlite";
+import { createHash } from "node:crypto";
 import { canonicalAuditHash } from "../audit/canonicalAuditHash";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 import { ResourceRepository } from "../workspace/resourceRepository";
@@ -6,21 +7,50 @@ import {
   growthCycleAttachChangeSetSchema,
   growthCycleAttachRunSchema,
   growthCycleBeginSchema,
+  growthCycleIntentSchema,
   growthCycleSchema,
   growthCycleTerminalizeSchema,
   growthEventAppendSchema,
   growthEventSchema,
   growthGoalCreateSchema,
   growthGoalSchema,
+  growthInquiryBatchSchema,
+  growthInquiryBatchSealSchema,
+  growthClosureAssessmentAppendSchema,
+  growthClosureAssessmentSchema,
+  growthClosureProfileCreateSchema,
+  growthClosureProfileSchema,
+  growthClosureRevisionAppendSchema,
+  growthClosureRevisionSchema,
+  growthClosureReviewSchema,
+  growthClosureReviewSealSchema,
+  growthClosureStateSchema,
+  growthIllustrationBatchSchema,
+  growthIllustrationBatchSealSchema,
+  growthIllustrationImageJobBindSchema,
+  growthIllustrationItemSchema,
+  growthIllustrationMarkStaleSchema,
+  growthIllustrationRequestCreateSchema,
+  growthIllustrationRequestSchema,
   growthRetrievalReceiptCreateSchema,
   growthRetrievalReceiptSchema,
   growthRuleAppendSchema,
   growthRuleRevisionSchema,
   type GrowthCycle,
+  type GrowthCycleIntent,
   type GrowthEvent,
   type GrowthEventAppend,
   type GrowthGoal,
   type GrowthGoalCreate,
+  type GrowthInquiryBatch,
+  type GrowthClosureAssessment,
+  type GrowthClosureProfile,
+  type GrowthClosureRevision,
+  type GrowthClosureReview,
+  type GrowthClosureState,
+  type GrowthIllustrationBatch,
+  type GrowthIllustrationItem,
+  type GrowthIllustrationRequest,
   type GrowthRetrievalReceipt,
   type GrowthRetrievalReceiptCreate,
   type GrowthRuleRevision,
@@ -124,6 +154,25 @@ export class GrowthRepository {
       .map(mapCycle);
   }
 
+  getCycleIntent(cycleId: string): GrowthCycleIntent {
+    const cycle = this.#requiredCycle(cycleId);
+    const row = this.workspace.db.prepare("SELECT kind FROM growth_cycle_intents WHERE cycle_id = ?").get(cycleId) as Row | undefined;
+    if (!row) return legacyCycleIntent(cycle);
+    const focusKinds = (this.workspace.db.prepare(`
+      SELECT focus_kind FROM growth_cycle_intent_focuses WHERE cycle_id = ? ORDER BY ordinal
+    `).all(cycleId) as Array<{ focus_kind: string }>).map((entry) => entry.focus_kind);
+    const resumeFrontier = (this.workspace.db.prepare(`
+      SELECT frontier_kind FROM growth_cycle_intent_frontier WHERE cycle_id = ? ORDER BY ordinal
+    `).all(cycleId) as Array<{ frontier_kind: string }>).map((entry) => entry.frontier_kind);
+    return growthCycleIntentSchema.parse({
+      cycleId, kind: readString(row, "kind"), focusKinds, resumeFrontier, provenance: "persisted_v24",
+    });
+  }
+
+  listCycleIntents(goalId: string): GrowthCycleIntent[] {
+    return this.listCycles(goalId).map((cycle) => this.getCycleIntent(cycle.id));
+  }
+
   getReceipt(receiptId: string): GrowthRetrievalReceipt | null {
     const row = this.workspace.db.prepare("SELECT * FROM growth_retrieval_receipts WHERE id = ?").get(receiptId) as Row | undefined;
     if (!row) return null;
@@ -156,6 +205,652 @@ export class GrowthRepository {
 
   listEvents(goalId: string): GrowthEvent[] {
     return (this.workspace.db.prepare("SELECT * FROM growth_events WHERE goal_id = ? ORDER BY sequence").all(goalId) as Row[]).map(mapEvent);
+  }
+
+  getInquiryBatch(batchId: string): GrowthInquiryBatch | null {
+    const row = this.workspace.db.prepare("SELECT * FROM growth_inquiry_batches WHERE id = ?").get(batchId) as Row | undefined;
+    if (!row) return null;
+    const questions = (this.workspace.db.prepare(`
+      SELECT * FROM growth_inquiries WHERE batch_id = ? ORDER BY ordinal
+    `).all(batchId) as Row[]).map((question) => {
+      const evidenceLinks = (this.workspace.db.prepare(`
+        SELECT receipt_id, rank FROM growth_inquiry_evidence_links
+        WHERE batch_id = ? AND inquiry_id = ? ORDER BY ordinal
+      `).all(batchId, readString(question, "id")) as Array<{ receipt_id: string; rank: number }>).map((link) => ({
+        receiptId: link.receipt_id, rank: link.rank,
+      }));
+      return {
+        id: readString(question, "id"), question: readString(question, "question"), evidenceState: readString(question, "evidence_state"),
+        safeSummary: readString(question, "safe_summary"), priority: readNumber(question, "priority"),
+        fingerprint: readString(question, "fingerprint"), selected: readNumber(question, "selected") === 1, evidenceLinks,
+      };
+    });
+    return growthInquiryBatchSchema.parse({
+      id: readString(row, "id"), cycleId: readString(row, "cycle_id"), receiptId: readString(row, "receipt_id"),
+      checkpointId: readString(row, "checkpoint_id"), ruleRevision: readNumber(row, "rule_revision"),
+      idempotencyKey: readString(row, "idempotency_key"), payloadHash: readString(row, "payload_hash"),
+      status: readString(row, "status"), creatorChoiceBlocked: readNumber(row, "creator_choice_blocked") === 1,
+      selectedInquiryId: readNullableString(row, "selected_inquiry_id"), questions, sealedAt: readString(row, "sealed_at"),
+    });
+  }
+
+  sealInquiryBatch(input: unknown): GrowthInquiryBatch {
+    const value = growthInquiryBatchSealSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare("SELECT id, payload_hash FROM growth_inquiry_batches WHERE idempotency_key = ?")
+        .get(value.idempotencyKey) as { id: string; payload_hash: string } | undefined;
+      if (replay) {
+        if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_INQUIRY_REPLAY_MISMATCH");
+        const existing = this.getInquiryBatch(replay.id);
+        if (!existing) throw growthError("GROWTH_DATA_INVALID");
+        this.workspace.db.exec("COMMIT");
+        return existing;
+      }
+      if (this.workspace.db.prepare("SELECT 1 FROM growth_inquiry_batches WHERE id = ?").get(value.id)) {
+        throw growthError("GROWTH_INQUIRY_BATCH_ID_CONFLICT");
+      }
+      const cycle = this.#requiredCycle(value.cycleId);
+      if (!cycle.receiptId) throw growthError("GROWTH_INQUIRY_RECEIPT_REQUIRED");
+      if (value.creatorChoiceBlocked ? cycle.status !== "blocked" : cycle.status !== "running") {
+        throw growthError("GROWTH_INQUIRY_CYCLE_STATE_INVALID");
+      }
+      const receipt = this.getReceipt(cycle.receiptId);
+      if (!receipt || receipt.cycleId !== cycle.id || receipt.checkpointId !== cycle.inputCheckpointId) {
+        throw growthError("GROWTH_INQUIRY_RECEIPT_MISMATCH");
+      }
+      for (const question of value.questions) {
+        if (["known", "conflicted"].includes(question.evidenceState) && question.evidenceLinks.length === 0) {
+          throw growthError("GROWTH_INQUIRY_EVIDENCE_REQUIRED");
+        }
+        if (question.evidenceLinks.some((link) => link.receiptId !== receipt.id)) {
+          throw growthError("GROWTH_INQUIRY_EVIDENCE_RECEIPT_MISMATCH");
+        }
+      }
+      const sealedAt = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_inquiry_batches (
+          id, cycle_id, receipt_id, checkpoint_id, rule_revision, idempotency_key, payload_hash, status,
+          question_count, creator_choice_blocked, selected_inquiry_id, sealed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'sealed', ?, ?, ?, ?)
+      `).run(value.id, cycle.id, receipt.id, cycle.inputCheckpointId, cycle.ruleRevision, value.idempotencyKey,
+        payloadHash, value.questions.length, value.creatorChoiceBlocked ? 1 : 0, value.selectedInquiryId, sealedAt);
+      const insertQuestion = this.workspace.db.prepare(`
+        INSERT INTO growth_inquiries (
+          id, batch_id, question, evidence_state, safe_summary, priority, fingerprint, selected, ordinal
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const insertEvidence = this.workspace.db.prepare(`
+        INSERT INTO growth_inquiry_evidence_links (batch_id, inquiry_id, receipt_id, rank, ordinal)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      value.questions.forEach((question, ordinal) => {
+        insertQuestion.run(question.id, value.id, question.question, question.evidenceState, question.safeSummary,
+          question.priority, question.fingerprint, question.id === value.selectedInquiryId ? 1 : 0, ordinal);
+        question.evidenceLinks.forEach((link, evidenceOrdinal) => {
+          insertEvidence.run(value.id, question.id, link.receiptId, link.rank, evidenceOrdinal);
+        });
+      });
+      this.workspace.db.exec("COMMIT");
+      return this.getInquiryBatch(value.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getClosureProfile(profileId: string): GrowthClosureProfile | null {
+    const row = this.workspace.db.prepare("SELECT * FROM growth_closure_profiles WHERE id = ?").get(profileId) as Row | undefined;
+    return row ? mapClosureProfile(row) : null;
+  }
+
+  getClosureRevision(profileId: string, revision: number): GrowthClosureRevision | null {
+    const row = this.workspace.db.prepare(`
+      SELECT * FROM growth_closure_profile_revisions WHERE profile_id = ? AND revision = ?
+    `).get(profileId, revision) as Row | undefined;
+    if (!row) return null;
+    const facets = (this.workspace.db.prepare(`
+      SELECT facet_id, facet_kind, required FROM growth_closure_facets
+      WHERE profile_id = ? AND revision = ? ORDER BY ordinal
+    `).all(profileId, revision) as Array<{ facet_id: string; facet_kind: string; required: number }>).map((facet) => ({
+      id: facet.facet_id, kind: facet.facet_kind, required: facet.required === 1,
+    }));
+    return growthClosureRevisionSchema.parse({
+      profileId, revision: readNumber(row, "revision"), epoch: readNumber(row, "epoch"),
+      checkpointId: readString(row, "checkpoint_id"), ruleRevision: readNumber(row, "rule_revision"),
+      facets, createdAt: readString(row, "created_at"),
+    });
+  }
+
+  createClosureProfile(input: unknown): GrowthClosureProfile {
+    const value = growthClosureProfileCreateSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare("SELECT id, payload_hash FROM growth_closure_profiles WHERE idempotency_key = ?")
+        .get(value.idempotencyKey) as { id: string; payload_hash: string } | undefined;
+      if (replay) {
+        if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_CLOSURE_PROFILE_REPLAY_MISMATCH");
+        const profile = this.getClosureProfile(replay.id);
+        if (!profile) throw growthError("GROWTH_DATA_INVALID");
+        this.workspace.db.exec("COMMIT");
+        return profile;
+      }
+      if (this.workspace.db.prepare("SELECT 1 FROM growth_closure_profiles WHERE id = ?").get(value.id)) {
+        throw growthError("GROWTH_CLOSURE_PROFILE_ID_CONFLICT");
+      }
+      this.#assertClosureRevisionAuthority(value.goalId, value.checkpointId, value.ruleRevision);
+      if (value.profileKind === "oc_saga") this.#assertOcSubject(value.subjectResourceId!, value.checkpointId);
+      const now = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_closure_profiles (
+          id, idempotency_key, payload_hash, goal_id, profile_kind, subject_resource_id,
+          current_revision, current_epoch, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
+      `).run(value.id, value.idempotencyKey, payloadHash, value.goalId, value.profileKind, value.subjectResourceId, now, now);
+      this.workspace.db.prepare(`
+        INSERT INTO growth_closure_profile_revisions (
+          profile_id, revision, epoch, checkpoint_id, rule_revision, idempotency_key, payload_hash, created_at
+        ) VALUES (?, 1, 1, ?, ?, ?, ?, ?)
+      `).run(value.id, value.checkpointId, value.ruleRevision,
+        canonicalAuditHash({ profileId: value.id, revision: 1, idempotencyKey: value.idempotencyKey }),
+        canonicalAuditHash({ checkpointId: value.checkpointId, ruleRevision: value.ruleRevision, facets: value.facets }), now);
+      this.#insertClosureFacets(value.id, 1, value.facets);
+      this.workspace.db.exec("COMMIT");
+      return this.getClosureProfile(value.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  appendClosureRevision(input: unknown): GrowthClosureRevision {
+    const value = growthClosureRevisionAppendSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare(`
+        SELECT profile_id, revision, payload_hash FROM growth_closure_profile_revisions WHERE idempotency_key = ?
+      `).get(value.idempotencyKey) as { profile_id: string; revision: number; payload_hash: string } | undefined;
+      if (replay) {
+        if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_CLOSURE_REVISION_REPLAY_MISMATCH");
+        const revision = this.getClosureRevision(replay.profile_id, replay.revision);
+        if (!revision) throw growthError("GROWTH_DATA_INVALID");
+        this.workspace.db.exec("COMMIT");
+        return revision;
+      }
+      const profile = this.getClosureProfile(value.profileId);
+      if (!profile) throw growthError("GROWTH_CLOSURE_PROFILE_NOT_FOUND");
+      if (profile.currentRevision !== value.expectedRevision) throw growthError("GROWTH_CLOSURE_REVISION_MISMATCH");
+      this.#assertClosureRevisionAuthority(profile.goalId, value.checkpointId, value.ruleRevision);
+      if (profile.profileKind === "oc_saga") this.#assertOcSubject(profile.subjectResourceId!, value.checkpointId);
+      const revision = profile.currentRevision + 1;
+      const epoch = profile.currentEpoch + 1;
+      const now = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_closure_profile_revisions (
+          profile_id, revision, epoch, checkpoint_id, rule_revision, idempotency_key, payload_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(profile.id, revision, epoch, value.checkpointId, value.ruleRevision, value.idempotencyKey, payloadHash, now);
+      this.#insertClosureFacets(profile.id, revision, value.facets);
+      this.workspace.db.prepare(`
+        UPDATE growth_closure_profiles SET current_revision = ?, current_epoch = ?, updated_at = ? WHERE id = ?
+      `).run(revision, epoch, now, profile.id);
+      this.workspace.db.exec("COMMIT");
+      return this.getClosureRevision(profile.id, revision) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getClosureAssessment(assessmentId: string): GrowthClosureAssessment | null {
+    const row = this.workspace.db.prepare("SELECT * FROM growth_closure_assessments WHERE id = ?").get(assessmentId) as Row | undefined;
+    return row ? mapClosureAssessment(row) : null;
+  }
+
+  appendClosureAssessment(input: unknown): GrowthClosureAssessment {
+    const value = growthClosureAssessmentAppendSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare("SELECT id, payload_hash FROM growth_closure_assessments WHERE idempotency_key = ?")
+        .get(value.idempotencyKey) as { id: string; payload_hash: string } | undefined;
+      if (replay) {
+        if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_CLOSURE_ASSESSMENT_REPLAY_MISMATCH");
+        const assessment = this.getClosureAssessment(replay.id);
+        if (!assessment) throw growthError("GROWTH_DATA_INVALID");
+        this.workspace.db.exec("COMMIT");
+        return assessment;
+      }
+      if (this.workspace.db.prepare("SELECT 1 FROM growth_closure_assessments WHERE id = ?").get(value.id)) {
+        throw growthError("GROWTH_CLOSURE_ASSESSMENT_ID_CONFLICT");
+      }
+      const profile = this.getClosureProfile(value.profileId);
+      const revision = this.getClosureRevision(value.profileId, value.revision);
+      if (!profile || !revision) throw growthError("GROWTH_CLOSURE_REVISION_NOT_FOUND");
+      const cycle = this.#requiredCycle(value.cycleId);
+      const receipt = this.getReceipt(value.receiptId);
+      if (cycle.goalId !== profile.goalId || cycle.status !== "running" || !cycle.runId
+        || cycle.inputCheckpointId !== value.checkpointId || cycle.ruleRevision !== value.ruleRevision
+        || cycle.receiptId !== value.receiptId || !receipt || receipt.cycleId !== cycle.id
+        || receipt.runId !== cycle.runId || receipt.checkpointId !== cycle.inputCheckpointId
+        || receipt.checkpointId !== revision.checkpointId || receipt.checkpointId !== value.checkpointId
+        || revision.ruleRevision !== value.ruleRevision) {
+        throw growthError("GROWTH_CLOSURE_ASSESSMENT_REFERENCE_MISMATCH");
+      }
+      const invocation = this.workspace.db.prepare(`
+        SELECT invocations.role, invocations.run_id, events.run_id AS event_run_id,
+          events.event_type, events.output_sha256, events.error_code
+        FROM agent_invocations invocations
+        JOIN agent_audit_events events ON events.invocation_id = invocations.id
+        WHERE invocations.id = ? AND events.entity_type = 'invocation' AND events.terminal = 1
+      `).get(value.agentInvocationId) as Row | undefined;
+      if (!invocation || readString(invocation, "role") !== value.role || readString(invocation, "run_id") !== cycle.runId
+        || readString(invocation, "event_run_id") !== cycle.runId || readString(invocation, "event_type") !== "completed"
+        || readNullableString(invocation, "error_code") !== null || readNullableString(invocation, "output_sha256") !== value.outputSha256) {
+        throw growthError("GROWTH_CLOSURE_INVOCATION_MISMATCH");
+      }
+      const now = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_closure_assessments (
+          id, profile_id, revision, role, decision, cycle_id, checkpoint_id, rule_revision, receipt_id,
+          agent_invocation_id, output_sha256, idempotency_key, payload_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(value.id, value.profileId, value.revision, value.role, value.decision, value.cycleId, value.checkpointId,
+        value.ruleRevision, value.receiptId, value.agentInvocationId, value.outputSha256, value.idempotencyKey, payloadHash, now);
+      this.workspace.db.exec("COMMIT");
+      return this.getClosureAssessment(value.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getClosureReview(reviewId: string): GrowthClosureReview | null {
+    const row = this.workspace.db.prepare("SELECT * FROM growth_closure_reviews WHERE id = ?").get(reviewId) as Row | undefined;
+    if (!row) return null;
+    const findings = (this.workspace.db.prepare(`
+      SELECT * FROM growth_closure_review_findings WHERE review_id = ? ORDER BY ordinal
+    `).all(reviewId) as Row[]).map((finding) => ({
+      facetId: readString(finding, "facet_id"), state: readString(finding, "state"),
+      safeSummary: readString(finding, "safe_summary"),
+      evidence: { receiptId: readString(finding, "receipt_id"), rank: readNumber(finding, "rank") },
+    }));
+    return growthClosureReviewSchema.parse({
+      id: readString(row, "id"), profileId: readString(row, "profile_id"), revision: readNumber(row, "revision"),
+      stewardAssessmentId: readString(row, "steward_assessment_id"), checkerAssessmentId: readString(row, "checker_assessment_id"),
+      idempotencyKey: readString(row, "idempotency_key"), findings, checkerDecision: readString(row, "checker_decision"),
+      payloadHash: readString(row, "payload_hash"), createdAt: readString(row, "created_at"),
+    });
+  }
+
+  sealClosureReview(input: unknown): GrowthClosureReview {
+    const value = growthClosureReviewSealSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare("SELECT id, payload_hash FROM growth_closure_reviews WHERE idempotency_key = ?")
+        .get(value.idempotencyKey) as { id: string; payload_hash: string } | undefined;
+      if (replay) {
+        if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_CLOSURE_REVIEW_REPLAY_MISMATCH");
+        const review = this.getClosureReview(replay.id);
+        if (!review) throw growthError("GROWTH_DATA_INVALID");
+        this.workspace.db.exec("COMMIT");
+        return review;
+      }
+      if (this.workspace.db.prepare("SELECT 1 FROM growth_closure_reviews WHERE id = ?").get(value.id)) {
+        throw growthError("GROWTH_CLOSURE_REVIEW_ID_CONFLICT");
+      }
+      const revision = this.getClosureRevision(value.profileId, value.revision);
+      const steward = this.getClosureAssessment(value.stewardAssessmentId);
+      const checker = this.getClosureAssessment(value.checkerAssessmentId);
+      if (!revision || !steward || !checker || steward.role !== "steward" || checker.role !== "checker"
+        || steward.profileId !== value.profileId || checker.profileId !== value.profileId
+        || steward.revision !== value.revision || checker.revision !== value.revision
+        || steward.decision !== "ready_for_checker" || steward.agentInvocationId === checker.agentInvocationId
+        || steward.cycleId !== checker.cycleId || steward.checkpointId !== checker.checkpointId
+        || steward.ruleRevision !== checker.ruleRevision || steward.receiptId !== checker.receiptId) {
+        throw growthError("GROWTH_CLOSURE_REVIEW_ASSESSMENT_MISMATCH");
+      }
+      const facetById = new Map(revision.facets.map((facet) => [facet.id, facet]));
+      if (value.findings.some((finding) => !facetById.has(finding.facetId) || finding.evidence.receiptId !== steward.receiptId)) {
+        throw growthError("GROWTH_CLOSURE_FINDING_REFERENCE_MISMATCH");
+      }
+      const requiredContent = revision.facets.filter((facet) => facet.kind === "content" && facet.required);
+      const satisfied = new Set(value.findings.filter((finding) => finding.state === "satisfied").map((finding) => finding.facetId));
+      const hasUnresolved = value.findings.some((finding) => ["missing", "conflicted", "blocked"].includes(finding.state));
+      if (checker.decision === "accepted" && (hasUnresolved || requiredContent.some((facet) => !satisfied.has(facet.id)))) {
+        throw growthError("GROWTH_CLOSURE_ACCEPTANCE_INCOMPLETE");
+      }
+      if (checker.decision === "repairs_required" && !value.findings.some((finding) => ["missing", "conflicted"].includes(finding.state))) {
+        throw growthError("GROWTH_CLOSURE_REPAIR_FINDING_REQUIRED");
+      }
+      if (checker.decision === "blocked" && !value.findings.some((finding) => finding.state === "blocked")) {
+        throw growthError("GROWTH_CLOSURE_BLOCK_FINDING_REQUIRED");
+      }
+      const accepted = this.workspace.db.prepare(`
+        SELECT 1 FROM growth_closure_reviews WHERE profile_id = ? AND revision = ? AND checker_decision = 'accepted'
+      `).get(value.profileId, value.revision);
+      if (accepted) throw growthError("GROWTH_CLOSURE_ALREADY_ACCEPTED");
+      const now = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_closure_reviews (
+          id, profile_id, revision, steward_assessment_id, checker_assessment_id, checker_decision,
+          idempotency_key, payload_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(value.id, value.profileId, value.revision, value.stewardAssessmentId, value.checkerAssessmentId,
+        checker.decision, value.idempotencyKey, payloadHash, now);
+      const insertFinding = this.workspace.db.prepare(`
+        INSERT INTO growth_closure_review_findings (
+          review_id, profile_id, revision, facet_id, state, safe_summary, receipt_id, rank, ordinal
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      value.findings.forEach((finding, ordinal) => insertFinding.run(value.id, value.profileId, value.revision,
+        finding.facetId, finding.state, finding.safeSummary, finding.evidence.receiptId, finding.evidence.rank, ordinal));
+      this.workspace.db.exec("COMMIT");
+      return this.getClosureReview(value.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getClosureState(profileId: string): GrowthClosureState {
+    const profile = this.getClosureProfile(profileId);
+    if (!profile) throw growthError("GROWTH_CLOSURE_PROFILE_NOT_FOUND");
+    const revision = this.getClosureRevision(profile.id, profile.currentRevision);
+    if (!revision) throw growthError("GROWTH_DATA_INVALID");
+    const reviewRow = this.workspace.db.prepare(`
+      SELECT id, checker_decision, steward_assessment_id FROM growth_closure_reviews
+      WHERE profile_id = ? AND revision = ? ORDER BY created_at DESC, id DESC LIMIT 1
+    `).get(profile.id, revision.revision) as Row | undefined;
+    const review = reviewRow ? this.getClosureReview(readString(reviewRow, "id")) : null;
+    const contentFacets = revision.facets.filter((facet) => facet.kind === "content" && facet.required);
+    const satisfied = review?.findings.filter((finding) => finding.state === "satisfied").map((finding) => finding.facetId) ?? [];
+    const satisfiedSet = new Set(satisfied);
+    const missing = contentFacets.filter((facet) => !satisfiedSet.has(facet.id)).map((facet) => facet.id);
+    const contentState = review?.checkerDecision === "accepted" ? "closed"
+      : review?.checkerDecision === "blocked" ? "blocked" : "growing";
+    const visualRows = this.workspace.db.prepare(`
+      SELECT items.status FROM growth_illustration_items items
+      JOIN growth_illustration_requests requests ON requests.id = items.request_id
+      WHERE requests.closure_profile_id = ? AND requests.closure_revision = ?
+        AND items.required_for_visual_closure = 1
+    `).all(profile.id, revision.revision) as Array<{ status: string }>;
+    const visualStatuses = visualRows.map((row) => row.status);
+    const visualState = visualStatuses.length === 0 || visualStatuses.some((status) => ["planned", "cancelled", "stale"].includes(status))
+      ? "planning"
+      : visualStatuses.some((status) => ["failed", "reconciliation_required"].includes(status))
+        ? "blocked"
+        : visualStatuses.some((status) => ["queued", "running"].includes(status))
+          ? "generating" : "ready";
+    const progress = reviewRow ? this.workspace.db.prepare(`
+      SELECT cycles.sequence FROM growth_closure_assessments assessments
+      JOIN growth_cycles cycles ON cycles.id = assessments.cycle_id
+      WHERE assessments.id = ?
+    `).get(readString(reviewRow, "steward_assessment_id")) as { sequence: number } | undefined : undefined;
+    return growthClosureStateSchema.parse({
+      profileId: profile.id, goalId: profile.goalId, profileKind: profile.profileKind,
+      subjectResourceId: profile.subjectResourceId, revision: revision.revision, epoch: revision.epoch,
+      contentState, visualState, satisfiedFacetIds: satisfied, missingFacetIds: missing,
+      lastProgressCycleSequence: progress?.sequence ?? 0,
+    });
+  }
+
+  getIllustrationRequest(requestId: string): GrowthIllustrationRequest | null {
+    const row = this.workspace.db.prepare("SELECT * FROM growth_illustration_requests WHERE id = ?").get(requestId) as Row | undefined;
+    if (!row) return null;
+    const counts = this.workspace.db.prepare(`
+      SELECT COUNT(*) AS item_count, COALESCE(SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END), 0) AS ready_count
+      FROM growth_illustration_items WHERE request_id = ?
+    `).get(requestId) as { item_count: number; ready_count: number };
+    return growthIllustrationRequestSchema.parse({
+      id: readString(row, "id"), goalId: readString(row, "goal_id"), cycleId: readString(row, "cycle_id"),
+      ruleRevision: readNumber(row, "rule_revision"), coverageMode: readString(row, "coverage_mode"),
+      closureProfileId: readNullableString(row, "closure_profile_id"), closureRevision: readNullableNumber(row, "closure_revision"),
+      status: readString(row, "status"), itemCount: counts.item_count, readyCount: counts.ready_count,
+      createdAt: readString(row, "created_at"), updatedAt: readString(row, "updated_at"),
+    });
+  }
+
+  getIllustrationItem(itemId: string): GrowthIllustrationItem | null {
+    const row = this.workspace.db.prepare("SELECT * FROM growth_illustration_items WHERE id = ?").get(itemId) as Row | undefined;
+    if (!row) return null;
+    const sources = (this.workspace.db.prepare(`
+      SELECT * FROM growth_illustration_item_sources WHERE item_id = ? ORDER BY ordinal
+    `).all(itemId) as Row[]).map(readIllustrationSource);
+    return growthIllustrationItemSchema.parse({
+      id: readString(row, "id"), requestId: readString(row, "request_id"), batchId: readString(row, "batch_id"),
+      ruleRevision: readNumber(row, "rule_revision"), purpose: readString(row, "purpose"), title: readString(row, "title"),
+      variantKey: readString(row, "variant_key"), compiledPromptSha256: readString(row, "compiled_prompt_sha256"),
+      requiredForVisualClosure: readNumber(row, "required_for_visual_closure") === 1,
+      anchor: readIllustrationAnchor(row), sources, anchorHash: readString(row, "anchor_hash"),
+      sourceVersionSetHash: readString(row, "source_version_set_hash"), status: readString(row, "status"),
+      imageJobId: readNullableString(row, "image_job_id"), createdAt: readString(row, "created_at"), updatedAt: readString(row, "updated_at"),
+    });
+  }
+
+  getIllustrationBatch(batchId: string): GrowthIllustrationBatch | null {
+    const row = this.workspace.db.prepare("SELECT * FROM growth_illustration_request_batches WHERE id = ?").get(batchId) as Row | undefined;
+    if (!row) return null;
+    const items = (this.workspace.db.prepare(`
+      SELECT id FROM growth_illustration_items WHERE batch_id = ? ORDER BY rowid
+    `).all(batchId) as Array<{ id: string }>).map((item) => this.getIllustrationItem(item.id) ?? fail("GROWTH_DATA_INVALID"));
+    return growthIllustrationBatchSchema.parse({
+      id: readString(row, "id"), requestId: readString(row, "request_id"), sequence: readNumber(row, "sequence"),
+      cursor: readNullableString(row, "cursor"), nextCursor: readNullableString(row, "next_cursor"),
+      idempotencyKey: readString(row, "idempotency_key"), payloadHash: readString(row, "payload_hash"),
+      itemCount: readNumber(row, "item_count"), status: readString(row, "status"), items,
+      sealedAt: readString(row, "sealed_at"),
+    });
+  }
+
+  createIllustrationRequest(input: unknown): GrowthIllustrationRequest {
+    const value = growthIllustrationRequestCreateSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare("SELECT id, payload_hash FROM growth_illustration_requests WHERE idempotency_key = ?")
+        .get(value.idempotencyKey) as { id: string; payload_hash: string } | undefined;
+      if (replay) {
+        if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_ILLUSTRATION_REQUEST_REPLAY_MISMATCH");
+        const request = this.getIllustrationRequest(replay.id);
+        if (!request) throw growthError("GROWTH_DATA_INVALID");
+        this.workspace.db.exec("COMMIT");
+        return request;
+      }
+      if (this.workspace.db.prepare("SELECT 1 FROM growth_illustration_requests WHERE id = ?").get(value.id)) {
+        throw growthError("GROWTH_ILLUSTRATION_REQUEST_ID_CONFLICT");
+      }
+      const cycle = this.#requiredCycle(value.cycleId);
+      if (cycle.goalId !== value.goalId || cycle.ruleRevision !== value.ruleRevision) {
+        throw growthError("GROWTH_ILLUSTRATION_REQUEST_REFERENCE_MISMATCH");
+      }
+      if (value.closureProfileId !== null) {
+        const profile = this.getClosureProfile(value.closureProfileId);
+        const revision = this.getClosureRevision(value.closureProfileId, value.closureRevision!);
+        if (!profile || !revision || profile.goalId !== value.goalId) throw growthError("GROWTH_ILLUSTRATION_CLOSURE_MISMATCH");
+      }
+      const now = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_illustration_requests (
+          id, idempotency_key, payload_hash, goal_id, cycle_id, rule_revision, coverage_mode,
+          closure_profile_id, closure_revision, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
+      `).run(value.id, value.idempotencyKey, payloadHash, value.goalId, value.cycleId, value.ruleRevision,
+        value.coverageMode, value.closureProfileId, value.closureRevision, now, now);
+      this.workspace.db.exec("COMMIT");
+      return this.getIllustrationRequest(value.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  sealIllustrationBatch(input: unknown): GrowthIllustrationBatch {
+    const value = growthIllustrationBatchSealSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare(`
+        SELECT id, payload_hash FROM growth_illustration_request_batches WHERE idempotency_key = ?
+      `).get(value.idempotencyKey) as { id: string; payload_hash: string } | undefined;
+      if (replay) {
+        if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_ILLUSTRATION_BATCH_REPLAY_MISMATCH");
+        const batch = this.getIllustrationBatch(replay.id);
+        if (!batch) throw growthError("GROWTH_DATA_INVALID");
+        this.workspace.db.exec("COMMIT");
+        return batch;
+      }
+      if (this.workspace.db.prepare("SELECT 1 FROM growth_illustration_request_batches WHERE id = ?").get(value.id)) {
+        throw growthError("GROWTH_ILLUSTRATION_BATCH_ID_CONFLICT");
+      }
+      const request = this.getIllustrationRequest(value.requestId);
+      if (!request) throw growthError("GROWTH_ILLUSTRATION_REQUEST_NOT_FOUND");
+      const expected = this.workspace.db.prepare(`
+        SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM growth_illustration_request_batches WHERE request_id = ?
+      `).get(request.id) as { sequence: number };
+      if (value.sequence !== expected.sequence) throw growthError("GROWTH_ILLUSTRATION_BATCH_SEQUENCE_INVALID");
+      const cycle = this.#requiredCycle(request.cycleId);
+      const pinnedCheckpointId = cycle.outputCheckpointId ?? cycle.inputCheckpointId;
+      const snapshots = new Map(value.snapshots.map((snapshot) => [snapshot.id, snapshot]));
+      for (const snapshot of value.snapshots) {
+        if (sha256(snapshot.text) !== snapshot.textSha256) throw growthError("GROWTH_ILLUSTRATION_SNAPSHOT_HASH_MISMATCH");
+        const existing = this.workspace.db.prepare(`
+          SELECT goal_id, kind, snapshot_text, text_sha256 FROM growth_illustration_text_snapshots WHERE id = ?
+        `).get(snapshot.id) as Row | undefined;
+        if (existing && (readString(existing, "goal_id") !== request.goalId || readString(existing, "kind") !== snapshot.kind
+          || readString(existing, "snapshot_text") !== snapshot.text || readString(existing, "text_sha256") !== snapshot.textSha256)) {
+          throw growthError("GROWTH_ILLUSTRATION_SNAPSHOT_IMMUTABLE");
+        }
+      }
+      const preparedItems = value.items.map((item) => {
+        this.#assertIllustrationAnchor(item.anchor, request.goalId, pinnedCheckpointId, snapshots);
+        item.sources.forEach((source) => this.#assertIllustrationSource(source, pinnedCheckpointId));
+        return {
+          item,
+          anchorHash: canonicalAuditHash(item.anchor),
+          sourceVersionSetHash: canonicalAuditHash(normalizeIllustrationSourceSet(item.sources)),
+        };
+      });
+      const now = new Date().toISOString();
+      for (const snapshot of value.snapshots) {
+        this.workspace.db.prepare(`
+          INSERT OR IGNORE INTO growth_illustration_text_snapshots (id, goal_id, kind, snapshot_text, text_sha256, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(snapshot.id, request.goalId, snapshot.kind, snapshot.text, snapshot.textSha256, now);
+      }
+      this.workspace.db.prepare(`
+        INSERT INTO growth_illustration_request_batches (
+          id, request_id, sequence, cursor, next_cursor, item_count, idempotency_key, payload_hash, status, sealed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)
+      `).run(value.id, request.id, value.sequence, value.cursor, value.nextCursor, value.items.length,
+        value.idempotencyKey, payloadHash, now);
+      const insertItem = this.workspace.db.prepare(`
+        INSERT INTO growth_illustration_items (
+          id, request_id, batch_id, rule_revision, purpose, title, variant_key, compiled_prompt_sha256,
+          required_for_visual_closure, anchor_kind, anchor_resource_id, anchor_resource_version_id,
+          anchor_document_id, anchor_document_version_id, start_code_point, end_code_point, source_snapshot_id,
+          text_sha256, anchor_hash, source_version_set_hash, image_job_id, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'planned', ?, ?)
+      `);
+      const insertSource = this.workspace.db.prepare(`
+        INSERT INTO growth_illustration_item_sources (
+          item_id, ordinal, source_kind, resource_id, resource_version_id, document_id, document_version_id, content_sha256
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const prepared of preparedItems) {
+        const anchor = illustrationAnchorColumns(prepared.item.anchor);
+        insertItem.run(prepared.item.id, request.id, value.id, request.ruleRevision, prepared.item.purpose, prepared.item.title,
+          prepared.item.variantKey, prepared.item.compiledPromptSha256, prepared.item.requiredForVisualClosure ? 1 : 0,
+          anchor.kind, anchor.resourceId, anchor.resourceVersionId, anchor.documentId, anchor.documentVersionId,
+          anchor.startCodePoint, anchor.endCodePoint, anchor.sourceSnapshotId, anchor.textSha256,
+          prepared.anchorHash, prepared.sourceVersionSetHash, now, now);
+        prepared.item.sources.forEach((source, ordinal) => {
+          const columns = illustrationSourceColumns(source);
+          insertSource.run(prepared.item.id, ordinal, columns.kind, columns.resourceId, columns.resourceVersionId,
+            columns.documentId, columns.documentVersionId, columns.contentSha256);
+        });
+      }
+      this.#syncIllustrationAggregates(request.id, now);
+      this.workspace.db.exec("COMMIT");
+      return this.getIllustrationBatch(value.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  bindIllustrationImageJob(input: unknown): GrowthIllustrationItem {
+    const value = growthIllustrationImageJobBindSchema.parse(input);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const item = this.getIllustrationItem(value.itemId);
+      if (!item) throw growthError("GROWTH_ILLUSTRATION_ITEM_NOT_FOUND");
+      if (item.imageJobId && item.imageJobId !== value.imageJobId) throw growthError("GROWTH_ILLUSTRATION_JOB_ALREADY_BOUND");
+      const job = this.workspace.db.prepare(`
+        SELECT purpose, prompt_sha256, source_resource_ids_json, source_version_ids_json
+        FROM image_generation_jobs WHERE id = ?
+      `).get(value.imageJobId) as Row | undefined;
+      if (!job) throw growthError("GROWTH_ILLUSTRATION_JOB_NOT_FOUND");
+      if (readString(job, "prompt_sha256") !== item.compiledPromptSha256) {
+        throw growthError("GROWTH_ILLUSTRATION_JOB_PROMPT_MISMATCH");
+      }
+      if (readString(job, "purpose") !== item.purpose) {
+        throw growthError("GROWTH_ILLUSTRATION_JOB_PURPOSE_MISMATCH");
+      }
+      const expectedSources = this.#illustrationImageJobSources(item.sources);
+      const jobResourceIds = parseNormalizedImageJobSourceIds(job.source_resource_ids_json);
+      const jobVersionIds = parseNormalizedImageJobSourceIds(job.source_version_ids_json);
+      if (!sameStrings(jobResourceIds, expectedSources.resourceIds)
+        || !sameStrings(jobVersionIds, expectedSources.versionIds)) {
+        throw growthError("GROWTH_ILLUSTRATION_JOB_SOURCE_MISMATCH");
+      }
+      if (!item.imageJobId) {
+        this.workspace.db.prepare("UPDATE growth_illustration_items SET image_job_id = ?, updated_at = ? WHERE id = ?")
+          .run(value.imageJobId, new Date().toISOString(), item.id);
+      }
+      const refreshed = this.#refreshIllustrationItemFromJob(item.id);
+      this.workspace.db.exec("COMMIT");
+      return refreshed;
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  refreshIllustrationItemFromJob(itemId: string): GrowthIllustrationItem {
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const item = this.#refreshIllustrationItemFromJob(itemId);
+      this.workspace.db.exec("COMMIT");
+      return item;
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  markIllustrationItemStale(input: unknown): GrowthIllustrationItem {
+    const value = growthIllustrationMarkStaleSchema.parse(input);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const item = this.getIllustrationItem(value.itemId);
+      if (!item) throw growthError("GROWTH_ILLUSTRATION_ITEM_NOT_FOUND");
+      if (item.anchorHash !== value.expectedAnchorHash) throw growthError("GROWTH_ILLUSTRATION_STALE_CAS_MISMATCH");
+      if (item.status !== "stale") {
+        const now = new Date().toISOString();
+        this.workspace.db.prepare("UPDATE growth_illustration_items SET status = 'stale', updated_at = ? WHERE id = ?").run(now, item.id);
+        this.#syncIllustrationAggregates(item.requestId, now);
+      }
+      this.workspace.db.exec("COMMIT");
+      return this.getIllustrationItem(item.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   appendRule(input: unknown): GrowthRuleRevision {
@@ -230,6 +925,7 @@ export class GrowthRepository {
       }
       this.#assertCheckpointBranch(value.inputCheckpointId, goal.branchId);
       const sequence = goal.currentCycleSequence + 1;
+      const intent = value.intent ?? legacyIntentForSequence(sequence);
       const now = new Date().toISOString();
       this.workspace.db.prepare(`
         INSERT INTO growth_cycles (
@@ -237,6 +933,16 @@ export class GrowthRepository {
           run_id, receipt_id, change_set_id, output_checkpoint_id, status, failure_code, created_at, updated_at, terminal_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'planned', NULL, ?, ?, NULL)
       `).run(value.id, value.goalId, sequence, value.idempotencyKey, payloadHash, value.inputCheckpointId, value.ruleRevision, now, now);
+      this.workspace.db.prepare("INSERT INTO growth_cycle_intents (cycle_id, kind, created_at) VALUES (?, ?, ?)")
+        .run(value.id, intent.kind, now);
+      const insertFocus = this.workspace.db.prepare(`
+        INSERT INTO growth_cycle_intent_focuses (cycle_id, ordinal, focus_kind) VALUES (?, ?, ?)
+      `);
+      intent.focusKinds.forEach((focusKind, ordinal) => insertFocus.run(value.id, ordinal, focusKind));
+      const insertFrontier = this.workspace.db.prepare(`
+        INSERT INTO growth_cycle_intent_frontier (cycle_id, ordinal, frontier_kind) VALUES (?, ?, ?)
+      `);
+      intent.resumeFrontier.forEach((frontierKind, ordinal) => insertFrontier.run(value.id, ordinal, frontierKind));
       this.workspace.db.prepare("UPDATE growth_goals SET current_cycle_sequence = ?, updated_at = ? WHERE id = ?").run(sequence, now, value.goalId);
       this.workspace.db.exec("COMMIT");
       return this.getCycle(value.id) ?? fail("GROWTH_DATA_INVALID");
@@ -432,6 +1138,145 @@ export class GrowthRepository {
     }
   }
 
+  #assertClosureRevisionAuthority(goalId: string, checkpointId: string, ruleRevision: number): void {
+    const goal = this.#requiredGoal(goalId);
+    this.#assertCheckpointBranch(checkpointId, goal.branchId);
+    this.getRuleRevision(goal.id, ruleRevision);
+  }
+
+  #assertOcSubject(resourceId: string, checkpointId: string): void {
+    const subject = new ResourceRepository(this.workspace).listAtCheckpoint(checkpointId)
+      .find((resource) => resource.id === resourceId);
+    if (!subject || subject.type !== "oc") throw growthError("GROWTH_CLOSURE_OC_SUBJECT_INVALID");
+  }
+
+  #insertClosureFacets(
+    profileId: string,
+    revision: number,
+    facets: ReadonlyArray<{ id: string; kind: "content" | "visual"; required: boolean }>,
+  ): void {
+    const insert = this.workspace.db.prepare(`
+      INSERT INTO growth_closure_facets (profile_id, revision, facet_id, facet_kind, required, ordinal)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    facets.forEach((facet, ordinal) => insert.run(profileId, revision, facet.id, facet.kind, facet.required ? 1 : 0, ordinal));
+  }
+
+  #assertIllustrationAnchor(
+    anchor: GrowthIllustrationItem["anchor"],
+    goalId: string,
+    checkpointId: string,
+    pendingSnapshots: Map<string, { id: string; kind: "working_text_snapshot" | "conversation_text_snapshot"; text: string; textSha256: string }>,
+  ): void {
+    if (anchor.kind === "resource") {
+      this.#assertVersionVisible("resource_revisions", "resource_id", anchor.resourceId, anchor.resourceVersionId,
+        checkpointId, "GROWTH_ILLUSTRATION_ANCHOR_NOT_VISIBLE");
+      return;
+    }
+    if (anchor.kind === "stable_text_span") {
+      this.#assertVersionVisible("document_versions", "creative_document_id", anchor.documentId, anchor.documentVersionId,
+        checkpointId, "GROWTH_ILLUSTRATION_ANCHOR_NOT_VISIBLE");
+      const row = this.workspace.db.prepare("SELECT content FROM document_versions WHERE id = ?").get(anchor.documentVersionId) as Row | undefined;
+      if (!row) throw growthError("GROWTH_ILLUSTRATION_ANCHOR_NOT_VISIBLE");
+      const codePoints = [...readString(row, "content")];
+      if (anchor.endCodePoint > codePoints.length
+        || sha256(codePoints.slice(anchor.startCodePoint, anchor.endCodePoint).join("")) !== anchor.textSha256) {
+        throw growthError("GROWTH_ILLUSTRATION_TEXT_SPAN_MISMATCH");
+      }
+      return;
+    }
+    const pending = pendingSnapshots.get(anchor.sourceSnapshotId);
+    if (pending) {
+      if (pending.kind !== anchor.kind || pending.textSha256 !== anchor.textSha256) {
+        throw growthError("GROWTH_ILLUSTRATION_SNAPSHOT_MISMATCH");
+      }
+      return;
+    }
+    const persisted = this.workspace.db.prepare(`
+      SELECT goal_id, kind, text_sha256 FROM growth_illustration_text_snapshots WHERE id = ?
+    `).get(anchor.sourceSnapshotId) as Row | undefined;
+    if (!persisted || readString(persisted, "goal_id") !== goalId || readString(persisted, "kind") !== anchor.kind
+      || readString(persisted, "text_sha256") !== anchor.textSha256) {
+      throw growthError("GROWTH_ILLUSTRATION_SNAPSHOT_MISMATCH");
+    }
+  }
+
+  #assertIllustrationSource(source: GrowthIllustrationItem["sources"][number], checkpointId: string): void {
+    if (source.kind === "resource") {
+      this.#assertVersionVisible("resource_revisions", "resource_id", source.resourceId, source.resourceVersionId,
+        checkpointId, "GROWTH_ILLUSTRATION_SOURCE_NOT_VISIBLE");
+      return;
+    }
+    this.#assertVersionVisible("document_versions", "creative_document_id", source.documentId, source.documentVersionId,
+      checkpointId, "GROWTH_ILLUSTRATION_SOURCE_NOT_VISIBLE");
+    const row = this.workspace.db.prepare("SELECT content_hash FROM document_versions WHERE id = ?").get(source.documentVersionId) as Row | undefined;
+    if (!row || readString(row, "content_hash") !== source.contentSha256) {
+      throw growthError("GROWTH_ILLUSTRATION_SOURCE_HASH_MISMATCH");
+    }
+  }
+
+  #illustrationImageJobSources(sources: GrowthIllustrationItem["sources"]): { resourceIds: string[]; versionIds: string[] } {
+    const resourceIds: string[] = [];
+    const versionIds: string[] = [];
+    for (const source of sources) {
+      versionIds.push(source.kind === "resource" ? source.resourceVersionId : source.documentVersionId);
+      if (source.kind === "resource") {
+        const revision = this.workspace.db.prepare("SELECT resource_id FROM resource_revisions WHERE id = ?")
+          .get(source.resourceVersionId) as Row | undefined;
+        if (!revision || readString(revision, "resource_id") !== source.resourceId) {
+          throw growthError("GROWTH_ILLUSTRATION_SOURCE_NOT_VISIBLE");
+        }
+        resourceIds.push(source.resourceId);
+      } else {
+        const version = this.workspace.db.prepare(`
+          SELECT resource_id FROM document_versions WHERE id = ? AND creative_document_id = ?
+        `).get(source.documentVersionId, source.documentId) as Row | undefined;
+        if (!version) throw growthError("GROWTH_ILLUSTRATION_SOURCE_NOT_VISIBLE");
+        resourceIds.push(readString(version, "resource_id"));
+      }
+    }
+    return { resourceIds: normalizeStableIds(resourceIds), versionIds: normalizeStableIds(versionIds) };
+  }
+
+  #refreshIllustrationItemFromJob(itemId: string): GrowthIllustrationItem {
+    const item = this.getIllustrationItem(itemId);
+    if (!item) throw growthError("GROWTH_ILLUSTRATION_ITEM_NOT_FOUND");
+    if (!item.imageJobId) throw growthError("GROWTH_ILLUSTRATION_JOB_NOT_BOUND");
+    if (item.status === "stale") return item;
+    const job = this.workspace.db.prepare("SELECT status FROM image_generation_jobs WHERE id = ?").get(item.imageJobId) as Row | undefined;
+    if (!job) throw growthError("GROWTH_ILLUSTRATION_JOB_NOT_FOUND");
+    const jobStatus = readString(job, "status");
+    let status: GrowthIllustrationItem["status"];
+    if (jobStatus === "queued") status = "queued";
+    else if (jobStatus === "running") status = "running";
+    else if (jobStatus === "failed") status = "failed";
+    else if (jobStatus === "reconciliation_required") status = "reconciliation_required";
+    else {
+      const asset = this.workspace.db.prepare("SELECT status FROM image_assets WHERE job_id = ?").get(item.imageJobId) as Row | undefined;
+      status = !asset ? "reconciliation_required" : readString(asset, "status") === "ready" ? "ready" : "stale";
+    }
+    const now = new Date().toISOString();
+    this.workspace.db.prepare("UPDATE growth_illustration_items SET status = ?, updated_at = ? WHERE id = ?").run(status, now, item.id);
+    this.#syncIllustrationAggregates(item.requestId, now);
+    return this.getIllustrationItem(item.id) ?? fail("GROWTH_DATA_INVALID");
+  }
+
+  #syncIllustrationAggregates(requestId: string, now: string): void {
+    const batches = this.workspace.db.prepare(`
+      SELECT id FROM growth_illustration_request_batches WHERE request_id = ?
+    `).all(requestId) as Array<{ id: string }>;
+    for (const batch of batches) {
+      const statuses = (this.workspace.db.prepare("SELECT status FROM growth_illustration_items WHERE batch_id = ?")
+        .all(batch.id) as Array<{ status: string }>).map((row) => row.status);
+      this.workspace.db.prepare("UPDATE growth_illustration_request_batches SET status = ? WHERE id = ?")
+        .run(deriveIllustrationAggregateStatus(statuses), batch.id);
+    }
+    const statuses = (this.workspace.db.prepare("SELECT status FROM growth_illustration_items WHERE request_id = ?")
+      .all(requestId) as Array<{ status: string }>).map((row) => row.status);
+    this.workspace.db.prepare("UPDATE growth_illustration_requests SET status = ?, updated_at = ? WHERE id = ?")
+      .run(deriveIllustrationAggregateStatus(statuses), now, requestId);
+  }
+
   #requiredGoal(goalId: string): GrowthGoal {
     return this.getGoal(goalId) ?? fail("GROWTH_GOAL_NOT_FOUND");
   }
@@ -581,6 +1426,150 @@ export class GrowthRepository {
   }
 }
 
+const legacyCycleIntentMapping: Record<number, { focusKinds: Array<"world" | "story" | "oc">; resumeFrontier: Array<"world" | "story" | "oc"> }> = {
+  1: { focusKinds: ["world"], resumeFrontier: ["story", "oc"] },
+  2: { focusKinds: ["story"], resumeFrontier: ["oc"] },
+  3: { focusKinds: ["oc"], resumeFrontier: [] },
+};
+
+function legacyIntentForSequence(sequence: number): { kind: "expand"; focusKinds: Array<"world" | "story" | "oc">; resumeFrontier: Array<"world" | "story" | "oc"> } {
+  const intent = legacyCycleIntentMapping[sequence];
+  if (!intent) throw growthError("GROWTH_CYCLE_INTENT_REQUIRED");
+  return { kind: "expand", ...intent };
+}
+
+function legacyCycleIntent(cycle: GrowthCycle): GrowthCycleIntent {
+  const intent = legacyCycleIntentMapping[cycle.sequence];
+  if (!intent) throw growthError("GROWTH_LEGACY_INTENT_UNMAPPABLE");
+  return growthCycleIntentSchema.parse({
+    cycleId: cycle.id, kind: "expand", ...intent, provenance: "legacy_v23_projection",
+  });
+}
+
+function mapClosureProfile(row: Row): GrowthClosureProfile {
+  return growthClosureProfileSchema.parse({
+    id: readString(row, "id"), goalId: readString(row, "goal_id"), profileKind: readString(row, "profile_kind"),
+    subjectResourceId: readNullableString(row, "subject_resource_id"), currentRevision: readNumber(row, "current_revision"),
+    currentEpoch: readNumber(row, "current_epoch"), createdAt: readString(row, "created_at"), updatedAt: readString(row, "updated_at"),
+  });
+}
+
+function mapClosureAssessment(row: Row): GrowthClosureAssessment {
+  return growthClosureAssessmentSchema.parse({
+    id: readString(row, "id"), profileId: readString(row, "profile_id"), revision: readNumber(row, "revision"),
+    role: readString(row, "role"), decision: readString(row, "decision"), cycleId: readString(row, "cycle_id"),
+    checkpointId: readString(row, "checkpoint_id"), ruleRevision: readNumber(row, "rule_revision"),
+    receiptId: readString(row, "receipt_id"), agentInvocationId: readString(row, "agent_invocation_id"),
+    outputSha256: readString(row, "output_sha256"), idempotencyKey: readString(row, "idempotency_key"),
+    payloadHash: readString(row, "payload_hash"), createdAt: readString(row, "created_at"),
+  });
+}
+
+function readIllustrationAnchor(row: Row): GrowthIllustrationItem["anchor"] {
+  const kind = readString(row, "anchor_kind");
+  if (kind === "resource") return {
+    kind, resourceId: readString(row, "anchor_resource_id"), resourceVersionId: readString(row, "anchor_resource_version_id"),
+  };
+  if (kind === "stable_text_span") return {
+    kind, documentId: readString(row, "anchor_document_id"), documentVersionId: readString(row, "anchor_document_version_id"),
+    startCodePoint: readNumber(row, "start_code_point"), endCodePoint: readNumber(row, "end_code_point"),
+    textSha256: readString(row, "text_sha256"),
+  };
+  if (kind === "working_text_snapshot" || kind === "conversation_text_snapshot") return {
+    kind, sourceSnapshotId: readString(row, "source_snapshot_id"), textSha256: readString(row, "text_sha256"),
+  };
+  throw growthError("GROWTH_DATA_INVALID");
+}
+
+function readIllustrationSource(row: Row): GrowthIllustrationItem["sources"][number] {
+  const kind = readString(row, "source_kind");
+  if (kind === "resource") return {
+    kind, resourceId: readString(row, "resource_id"), resourceVersionId: readString(row, "resource_version_id"),
+  };
+  if (kind === "document") return {
+    kind, documentId: readString(row, "document_id"), documentVersionId: readString(row, "document_version_id"),
+    contentSha256: readString(row, "content_sha256"),
+  };
+  throw growthError("GROWTH_DATA_INVALID");
+}
+
+function illustrationAnchorColumns(anchor: GrowthIllustrationItem["anchor"]): {
+  kind: string; resourceId: string | null; resourceVersionId: string | null; documentId: string | null;
+  documentVersionId: string | null; startCodePoint: number | null; endCodePoint: number | null;
+  sourceSnapshotId: string | null; textSha256: string | null;
+} {
+  if (anchor.kind === "resource") return {
+    kind: anchor.kind, resourceId: anchor.resourceId, resourceVersionId: anchor.resourceVersionId,
+    documentId: null, documentVersionId: null, startCodePoint: null, endCodePoint: null, sourceSnapshotId: null, textSha256: null,
+  };
+  if (anchor.kind === "stable_text_span") return {
+    kind: anchor.kind, resourceId: null, resourceVersionId: null, documentId: anchor.documentId,
+    documentVersionId: anchor.documentVersionId, startCodePoint: anchor.startCodePoint, endCodePoint: anchor.endCodePoint,
+    sourceSnapshotId: null, textSha256: anchor.textSha256,
+  };
+  return {
+    kind: anchor.kind, resourceId: null, resourceVersionId: null, documentId: null, documentVersionId: null,
+    startCodePoint: null, endCodePoint: null, sourceSnapshotId: anchor.sourceSnapshotId, textSha256: anchor.textSha256,
+  };
+}
+
+function illustrationSourceColumns(source: GrowthIllustrationItem["sources"][number]): {
+  kind: string; resourceId: string | null; resourceVersionId: string | null; documentId: string | null;
+  documentVersionId: string | null; contentSha256: string | null;
+} {
+  return source.kind === "resource"
+    ? { kind: source.kind, resourceId: source.resourceId, resourceVersionId: source.resourceVersionId, documentId: null, documentVersionId: null, contentSha256: null }
+    : { kind: source.kind, resourceId: null, resourceVersionId: null, documentId: source.documentId, documentVersionId: source.documentVersionId, contentSha256: source.contentSha256 };
+}
+
+function normalizeIllustrationSourceSet(sources: GrowthIllustrationItem["sources"]): GrowthIllustrationItem["sources"] {
+  return [...sources].sort((left, right) => compareStrings(illustrationSourceIdentity(left), illustrationSourceIdentity(right)));
+}
+
+function illustrationSourceIdentity(source: GrowthIllustrationItem["sources"][number]): string {
+  return source.kind === "resource"
+    ? `resource\u0000${source.resourceId}\u0000${source.resourceVersionId}`
+    : `document\u0000${source.documentId}\u0000${source.documentVersionId}`;
+}
+
+function parseNormalizedImageJobSourceIds(value: unknown): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(value));
+  } catch {
+    throw growthError("GROWTH_ILLUSTRATION_JOB_SOURCE_MALFORMED");
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0
+    || parsed.some((entry) => typeof entry !== "string" || entry.length === 0 || entry.trim() !== entry)
+    || new Set(parsed).size !== parsed.length) {
+    throw growthError("GROWTH_ILLUSTRATION_JOB_SOURCE_MALFORMED");
+  }
+  return normalizeStableIds(parsed as string[]);
+}
+
+function normalizeStableIds(values: readonly string[]): string[] {
+  return [...new Set(values)].sort(compareStrings);
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function deriveIllustrationAggregateStatus(statuses: readonly string[]): "planned" | "running" | "completed" | "failed" | "cancelled" | "stale" | "reconciliation_required" {
+  if (statuses.length === 0) return "planned";
+  if (statuses.includes("reconciliation_required")) return "reconciliation_required";
+  if (statuses.includes("stale")) return "stale";
+  if (statuses.some((status) => ["queued", "running"].includes(status))) return "running";
+  if (statuses.includes("failed")) return "failed";
+  if (statuses.every((status) => status === "ready")) return "completed";
+  if (statuses.every((status) => status === "cancelled")) return "cancelled";
+  return "planned";
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 function receiptOutput(value: GrowthRetrievalReceiptCreate, createdAt: string): GrowthRetrievalReceipt {
   const links = [...value.links].sort((left, right) => left.rank - right.rank);
   const queryHash = canonicalAuditHash({
@@ -685,6 +1674,13 @@ function readNullableString(row: Row, key: string): string | null {
 
 function readNumber(row: Row, key: string): number {
   const value = row[key];
+  if (typeof value !== "number") throw growthError("GROWTH_DATA_INVALID");
+  return value;
+}
+
+function readNullableNumber(row: Row, key: string): number | null {
+  const value = row[key];
+  if (value === null) return null;
   if (typeof value !== "number") throw growthError("GROWTH_DATA_INVALID");
   return value;
 }

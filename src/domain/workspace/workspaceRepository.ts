@@ -232,7 +232,11 @@ function migrate(db: DatabaseSync): void {
     migrateGrowthPersistenceSchema(db);
     schema = { version: 23 };
   }
-  if (schema.version !== 23) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 23) {
+    migrateInteractiveGrowthSchema(db);
+    schema = { version: 24 };
+  }
+  if (schema.version !== 24) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -567,6 +571,284 @@ function migrateGrowthPersistenceSchema(db: DatabaseSync): void {
       );
       CREATE INDEX growth_events_cycle_idx ON growth_events(cycle_id, sequence);
       UPDATE schema_meta SET version = 23 WHERE singleton = 1;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateInteractiveGrowthSchema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE UNIQUE INDEX growth_cycles_one_open_goal_idx
+        ON growth_cycles(goal_id) WHERE status IN ('planned', 'running');
+      CREATE UNIQUE INDEX growth_cycles_id_rule_idx ON growth_cycles(id, rule_revision);
+
+      CREATE TABLE growth_cycle_intents (
+        cycle_id TEXT PRIMARY KEY REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('expand', 'revision')),
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE growth_cycle_intent_focuses (
+        cycle_id TEXT NOT NULL REFERENCES growth_cycle_intents(cycle_id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 2),
+        focus_kind TEXT NOT NULL CHECK (focus_kind IN ('world', 'story', 'oc')),
+        PRIMARY KEY (cycle_id, ordinal),
+        UNIQUE (cycle_id, focus_kind)
+      );
+      CREATE TABLE growth_cycle_intent_frontier (
+        cycle_id TEXT NOT NULL REFERENCES growth_cycle_intents(cycle_id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 2),
+        frontier_kind TEXT NOT NULL CHECK (frontier_kind IN ('world', 'story', 'oc')),
+        PRIMARY KEY (cycle_id, ordinal),
+        UNIQUE (cycle_id, frontier_kind)
+      );
+
+      CREATE TABLE growth_inquiry_batches (
+        id TEXT PRIMARY KEY,
+        cycle_id TEXT NOT NULL UNIQUE REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        receipt_id TEXT NOT NULL REFERENCES growth_retrieval_receipts(id),
+        checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        rule_revision INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        status TEXT NOT NULL CHECK (status = 'sealed'),
+        question_count INTEGER NOT NULL CHECK (question_count BETWEEN 3 AND 7),
+        creator_choice_blocked INTEGER NOT NULL CHECK (creator_choice_blocked IN (0, 1)),
+        selected_inquiry_id TEXT,
+        sealed_at TEXT NOT NULL,
+        UNIQUE (id, receipt_id),
+        FOREIGN KEY (cycle_id, rule_revision) REFERENCES growth_cycles(id, rule_revision),
+        FOREIGN KEY (id, selected_inquiry_id) REFERENCES growth_inquiries(batch_id, id) DEFERRABLE INITIALLY DEFERRED,
+        CHECK (
+          (creator_choice_blocked = 1 AND selected_inquiry_id IS NULL)
+          OR (creator_choice_blocked = 0 AND selected_inquiry_id IS NOT NULL)
+        )
+      );
+      CREATE TABLE growth_inquiries (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL REFERENCES growth_inquiry_batches(id) ON DELETE CASCADE,
+        question TEXT NOT NULL,
+        evidence_state TEXT NOT NULL CHECK (evidence_state IN ('known', 'conflicted', 'unknown')),
+        safe_summary TEXT NOT NULL,
+        priority REAL NOT NULL CHECK (priority >= 0),
+        fingerprint TEXT NOT NULL CHECK (length(fingerprint) = 64),
+        selected INTEGER NOT NULL CHECK (selected IN (0, 1)),
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 6),
+        UNIQUE (batch_id, id),
+        UNIQUE (batch_id, fingerprint),
+        UNIQUE (batch_id, ordinal)
+      );
+      CREATE UNIQUE INDEX growth_inquiries_one_selected_idx
+        ON growth_inquiries(batch_id) WHERE selected = 1;
+      CREATE TABLE growth_inquiry_evidence_links (
+        batch_id TEXT NOT NULL,
+        inquiry_id TEXT NOT NULL,
+        receipt_id TEXT NOT NULL,
+        rank INTEGER NOT NULL CHECK (rank >= 1),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (batch_id, inquiry_id, receipt_id, rank),
+        UNIQUE (batch_id, inquiry_id, ordinal),
+        FOREIGN KEY (batch_id, inquiry_id) REFERENCES growth_inquiries(batch_id, id) ON DELETE CASCADE,
+        FOREIGN KEY (batch_id, receipt_id) REFERENCES growth_inquiry_batches(id, receipt_id) ON DELETE CASCADE,
+        FOREIGN KEY (receipt_id, rank) REFERENCES growth_retrieval_receipt_links(receipt_id, rank)
+      );
+
+      CREATE TABLE growth_closure_profiles (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        profile_kind TEXT NOT NULL CHECK (profile_kind IN ('world_birth', 'oc_saga', 'story_universe', 'mixed_birth')),
+        subject_resource_id TEXT REFERENCES resources(id),
+        current_revision INTEGER NOT NULL CHECK (current_revision >= 1),
+        current_epoch INTEGER NOT NULL CHECK (current_epoch >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (profile_kind <> 'oc_saga' OR subject_resource_id IS NOT NULL)
+      );
+      CREATE TABLE growth_closure_profile_revisions (
+        profile_id TEXT NOT NULL REFERENCES growth_closure_profiles(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        epoch INTEGER NOT NULL CHECK (epoch >= 1),
+        checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (profile_id, revision),
+        UNIQUE (profile_id, epoch)
+      );
+      CREATE TABLE growth_closure_facets (
+        profile_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        facet_id TEXT NOT NULL,
+        facet_kind TEXT NOT NULL CHECK (facet_kind IN ('content', 'visual')),
+        required INTEGER NOT NULL CHECK (required IN (0, 1)),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (profile_id, revision, facet_id),
+        UNIQUE (profile_id, revision, ordinal),
+        FOREIGN KEY (profile_id, revision) REFERENCES growth_closure_profile_revisions(profile_id, revision) ON DELETE CASCADE
+      );
+      CREATE TABLE growth_closure_assessments (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('steward', 'checker')),
+        decision TEXT NOT NULL,
+        cycle_id TEXT NOT NULL REFERENCES growth_cycles(id),
+        checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+        receipt_id TEXT NOT NULL REFERENCES growth_retrieval_receipts(id),
+        agent_invocation_id TEXT NOT NULL UNIQUE REFERENCES agent_invocations(id),
+        output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (profile_id, revision) REFERENCES growth_closure_profile_revisions(profile_id, revision),
+        CHECK (
+          (role = 'steward' AND decision IN ('continue_growing', 'ready_for_checker'))
+          OR (role = 'checker' AND decision IN ('accepted', 'repairs_required', 'blocked'))
+        )
+      );
+      CREATE TABLE growth_closure_reviews (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        steward_assessment_id TEXT NOT NULL REFERENCES growth_closure_assessments(id),
+        checker_assessment_id TEXT NOT NULL REFERENCES growth_closure_assessments(id),
+        checker_decision TEXT NOT NULL CHECK (checker_decision IN ('accepted', 'repairs_required', 'blocked')),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (profile_id, revision) REFERENCES growth_closure_profile_revisions(profile_id, revision),
+        CHECK (steward_assessment_id <> checker_assessment_id)
+      );
+      CREATE INDEX growth_closure_reviews_revision_idx
+        ON growth_closure_reviews(profile_id, revision, created_at, id);
+      CREATE TABLE growth_closure_review_findings (
+        review_id TEXT NOT NULL REFERENCES growth_closure_reviews(id) ON DELETE CASCADE,
+        profile_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        facet_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('satisfied', 'missing', 'conflicted', 'blocked')),
+        safe_summary TEXT NOT NULL,
+        receipt_id TEXT NOT NULL,
+        rank INTEGER NOT NULL CHECK (rank >= 1),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (review_id, facet_id, receipt_id, rank),
+        UNIQUE (review_id, ordinal),
+        FOREIGN KEY (profile_id, revision, facet_id) REFERENCES growth_closure_facets(profile_id, revision, facet_id),
+        FOREIGN KEY (receipt_id, rank) REFERENCES growth_retrieval_receipt_links(receipt_id, rank)
+      );
+
+      CREATE TABLE growth_illustration_text_snapshots (
+        id TEXT PRIMARY KEY,
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('working_text_snapshot', 'conversation_text_snapshot')),
+        snapshot_text TEXT NOT NULL,
+        text_sha256 TEXT NOT NULL CHECK (length(text_sha256) = 64),
+        created_at TEXT NOT NULL,
+        UNIQUE (id, kind, text_sha256)
+      );
+      CREATE TABLE growth_illustration_requests (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        cycle_id TEXT NOT NULL REFERENCES growth_cycles(id),
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+        coverage_mode TEXT NOT NULL CHECK (coverage_mode IN ('default', 'all_visible_nodes', 'custom')),
+        closure_profile_id TEXT,
+        closure_revision INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('planned', 'running', 'completed', 'failed', 'cancelled', 'stale', 'reconciliation_required')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (closure_profile_id, closure_revision) REFERENCES growth_closure_profile_revisions(profile_id, revision),
+        CHECK ((closure_profile_id IS NULL AND closure_revision IS NULL) OR (closure_profile_id IS NOT NULL AND closure_revision IS NOT NULL))
+      );
+      CREATE INDEX growth_illustration_requests_goal_status_idx
+        ON growth_illustration_requests(goal_id, status, created_at, id);
+      CREATE TABLE growth_illustration_request_batches (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL REFERENCES growth_illustration_requests(id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        cursor TEXT,
+        next_cursor TEXT,
+        item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 20),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        status TEXT NOT NULL CHECK (status IN ('planned', 'running', 'completed', 'failed', 'cancelled', 'stale', 'reconciliation_required')),
+        sealed_at TEXT NOT NULL,
+        UNIQUE (request_id, sequence)
+      );
+      CREATE TABLE growth_illustration_items (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL REFERENCES growth_illustration_requests(id) ON DELETE CASCADE,
+        batch_id TEXT NOT NULL REFERENCES growth_illustration_request_batches(id) ON DELETE CASCADE,
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+        purpose TEXT NOT NULL,
+        title TEXT NOT NULL,
+        variant_key TEXT NOT NULL,
+        compiled_prompt_sha256 TEXT NOT NULL CHECK (length(compiled_prompt_sha256) = 64),
+        required_for_visual_closure INTEGER NOT NULL CHECK (required_for_visual_closure IN (0, 1)),
+        anchor_kind TEXT NOT NULL CHECK (anchor_kind IN ('resource', 'stable_text_span', 'working_text_snapshot', 'conversation_text_snapshot')),
+        anchor_resource_id TEXT,
+        anchor_resource_version_id TEXT,
+        anchor_document_id TEXT,
+        anchor_document_version_id TEXT,
+        start_code_point INTEGER,
+        end_code_point INTEGER,
+        source_snapshot_id TEXT,
+        text_sha256 TEXT,
+        anchor_hash TEXT NOT NULL CHECK (length(anchor_hash) = 64),
+        source_version_set_hash TEXT NOT NULL CHECK (length(source_version_set_hash) = 64),
+        image_job_id TEXT UNIQUE REFERENCES image_generation_jobs(id),
+        status TEXT NOT NULL CHECK (status IN ('planned', 'queued', 'running', 'ready', 'failed', 'cancelled', 'stale', 'reconciliation_required')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (request_id, anchor_hash, source_version_set_hash, variant_key),
+        FOREIGN KEY (source_snapshot_id, anchor_kind, text_sha256)
+          REFERENCES growth_illustration_text_snapshots(id, kind, text_sha256),
+        CHECK (
+          (anchor_kind = 'resource' AND anchor_resource_id IS NOT NULL AND anchor_resource_version_id IS NOT NULL
+            AND anchor_document_id IS NULL AND anchor_document_version_id IS NULL AND start_code_point IS NULL
+            AND end_code_point IS NULL AND source_snapshot_id IS NULL AND text_sha256 IS NULL)
+          OR
+          (anchor_kind = 'stable_text_span' AND anchor_resource_id IS NULL AND anchor_resource_version_id IS NULL
+            AND anchor_document_id IS NOT NULL AND anchor_document_version_id IS NOT NULL AND start_code_point IS NOT NULL
+            AND end_code_point IS NOT NULL AND end_code_point > start_code_point AND source_snapshot_id IS NULL AND text_sha256 IS NOT NULL)
+          OR
+          (anchor_kind IN ('working_text_snapshot', 'conversation_text_snapshot') AND anchor_resource_id IS NULL
+            AND anchor_resource_version_id IS NULL AND anchor_document_id IS NULL AND anchor_document_version_id IS NULL
+            AND start_code_point IS NULL AND end_code_point IS NULL AND source_snapshot_id IS NOT NULL AND text_sha256 IS NOT NULL)
+        )
+      );
+      CREATE INDEX growth_illustration_items_request_status_idx
+        ON growth_illustration_items(request_id, status, batch_id, id);
+      CREATE TABLE growth_illustration_item_sources (
+        item_id TEXT NOT NULL REFERENCES growth_illustration_items(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('resource', 'document')),
+        resource_id TEXT,
+        resource_version_id TEXT,
+        document_id TEXT,
+        document_version_id TEXT,
+        content_sha256 TEXT,
+        PRIMARY KEY (item_id, ordinal),
+        CHECK (
+          (source_kind = 'resource' AND resource_id IS NOT NULL AND resource_version_id IS NOT NULL
+            AND document_id IS NULL AND document_version_id IS NULL AND content_sha256 IS NULL)
+          OR
+          (source_kind = 'document' AND resource_id IS NULL AND resource_version_id IS NULL
+            AND document_id IS NOT NULL AND document_version_id IS NOT NULL AND content_sha256 IS NOT NULL)
+        )
+      );
+
+      UPDATE schema_meta SET version = 24 WHERE singleton = 1;
     `);
     db.exec("COMMIT");
   } catch (error) {

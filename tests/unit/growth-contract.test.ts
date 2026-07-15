@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   growthContractVersion,
+  growthClosureProfileCreateSchema,
+  growthCycleBeginSchema,
   growthCycleSchema,
   growthEventAppendSchema,
   growthEventSchema,
   growthRetrievalReceiptCreateSchema,
   growthRetrievalReceiptSchema,
+  growthInquiryBatchSealSchema,
+  growthIllustrationAnchorSchema,
+  growthIllustrationBatchSealSchema,
 } from "../../src/shared/growthContract";
 
 const now = "2026-07-15T00:00:00.000Z";
@@ -59,6 +64,61 @@ describe("growth persistence contract", () => {
     expect(growthEventAppendSchema.safeParse({ ...baseEventAppend(), targetKind: "image" }).success).toBe(false);
     expect(growthEventAppendSchema.safeParse({ ...baseEventAppend(), contentRef: { kind: "image", targetId: "image-1", targetVersionId: "job-1" } }).success).toBe(false);
     expect(growthEventSchema.safeParse({ ...baseEventAppend(), createdAt: now }).success).toBe(true);
+  });
+
+  it("accepts ordered unique v24 Cycle intent without breaking the existing v23 caller shape", () => {
+    const input = {
+      id: "cycle-1", goalId: "goal-1", idempotencyKey: "cycle-key", inputCheckpointId: "checkpoint-1", ruleRevision: 2,
+      intent: { kind: "revision" as const, focusKinds: ["oc" as const, "world" as const], resumeFrontier: ["story" as const] },
+    };
+    expect(growthCycleBeginSchema.safeParse(input).success).toBe(true);
+    const { intent: _intent, ...legacyInput } = input;
+    expect(growthCycleBeginSchema.safeParse(legacyInput).success).toBe(true);
+    expect(growthCycleBeginSchema.safeParse({ ...input, intent: { ...input.intent, focusKinds: ["oc", "oc"] } }).success).toBe(false);
+    expect(growthCycleBeginSchema.safeParse({ ...input, intent: { ...input.intent, ruleRevision: 2 } }).success).toBe(false);
+  });
+
+  it("bounds inquiry batches to 3-7 questions and enforces one selection unless creator choice blocks", () => {
+    const questions = Array.from({ length: 3 }, (_, index) => ({
+      id: `question-${index}`, question: `Question ${index}?`, evidenceState: "unknown" as const,
+      safeSummary: `Summary ${index}`, priority: 3 - index, fingerprint: String(index).repeat(64), evidenceLinks: [],
+    }));
+    const batch = {
+      id: "inquiry-1", cycleId: "cycle-1", idempotencyKey: "inquiry-key", creatorChoiceBlocked: false,
+      selectedInquiryId: questions[0].id, questions,
+    };
+    expect(growthInquiryBatchSealSchema.safeParse(batch).success).toBe(true);
+    expect(growthInquiryBatchSealSchema.safeParse({ ...batch, questions: questions.slice(0, 2) }).success).toBe(false);
+    expect(growthInquiryBatchSealSchema.safeParse({ ...batch, selectedInquiryId: null }).success).toBe(false);
+    expect(growthInquiryBatchSealSchema.safeParse({ ...batch, creatorChoiceBlocked: true, selectedInquiryId: null }).success).toBe(true);
+  });
+
+  it("requires an OC subject and strict versioned illustration anchor unions", () => {
+    expect(growthClosureProfileCreateSchema.safeParse({
+      id: "profile-1", idempotencyKey: "profile-key", goalId: "goal-1", profileKind: "oc_saga", subjectResourceId: null,
+      checkpointId: "checkpoint-1", ruleRevision: 1, facets: [{ id: "origin", kind: "content", required: true }],
+    }).success).toBe(false);
+    expect(growthIllustrationAnchorSchema.safeParse({ kind: "resource", resourceId: "oc-1", resourceVersionId: "oc-v1" }).success).toBe(true);
+    expect(growthIllustrationAnchorSchema.safeParse({ kind: "resource", resourceId: "oc-1" }).success).toBe(false);
+    expect(growthIllustrationAnchorSchema.safeParse({
+      kind: "stable_text_span", documentId: "doc-1", documentVersionId: "doc-v1", startCodePoint: 2,
+      endCodePoint: 2, textSha256: "a".repeat(64),
+    }).success).toBe(false);
+  });
+
+  it("keeps illustration quantity unlimited across bounded batches", () => {
+    const item = (index: number) => ({
+      id: `item-${index}`, purpose: "scene", title: `Scene ${index}`, variantKey: `variant-${index}`,
+      compiledPromptSha256: "a".repeat(64), requiredForVisualClosure: true,
+      anchor: { kind: "resource" as const, resourceId: `resource-${index}`, resourceVersionId: `version-${index}` },
+      sources: [{ kind: "resource" as const, resourceId: `resource-${index}`, resourceVersionId: `version-${index}` }],
+    });
+    const batch = {
+      id: "batch-1", requestId: "request-1", sequence: 1, cursor: null, nextCursor: "20", idempotencyKey: "batch-key",
+      snapshots: [], items: Array.from({ length: 20 }, (_, index) => item(index)),
+    };
+    expect(growthIllustrationBatchSealSchema.safeParse(batch).success).toBe(true);
+    expect(growthIllustrationBatchSealSchema.safeParse({ ...batch, items: [...batch.items, item(20)] }).success).toBe(false);
   });
 });
 

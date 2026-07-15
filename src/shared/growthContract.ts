@@ -100,6 +100,14 @@ export const growthCycleSchema = z.object({
 export const growthCycleBeginSchema = z.object({
   id: idSchema, goalId: idSchema, idempotencyKey: idSchema, inputCheckpointId: idSchema,
   ruleRevision: z.number().int().min(1).max(1_000_000),
+  intent: z.object({
+    kind: z.enum(["expand", "revision"]),
+    focusKinds: z.array(z.enum(["world", "story", "oc"])).min(1).max(3),
+    resumeFrontier: z.array(z.enum(["world", "story", "oc"])).max(3),
+  }).strict().superRefine((value, context) => {
+    uniqueValues(value.focusKinds, context, "focusKinds");
+    uniqueValues(value.resumeFrontier, context, "resumeFrontier");
+  }).optional(),
 }).strict();
 export const growthCycleAttachRunSchema = z.object({ cycleId: idSchema, runId: idSchema }).strict();
 export const growthCycleAttachChangeSetSchema = z.object({ cycleId: idSchema, changeSetId: idSchema }).strict();
@@ -249,12 +257,324 @@ const refineEvent = (value: { durableState: string; phase: string; targetKind: s
 export const growthEventAppendSchema = z.object(eventInputShape).strict().superRefine(refineEvent);
 export const growthEventSchema = z.object({ ...eventInputShape, createdAt: timestampSchema }).strict().superRefine(refineEvent);
 
+export const growthCycleIntentSchema = z.object({
+  cycleId: idSchema,
+  kind: z.enum(["expand", "revision"]),
+  focusKinds: z.array(z.enum(["world", "story", "oc"])).min(1).max(3),
+  resumeFrontier: z.array(z.enum(["world", "story", "oc"])).max(3),
+  provenance: z.enum(["persisted_v24", "legacy_v23_projection"]),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.focusKinds, context, "focusKinds");
+  uniqueValues(value.resumeFrontier, context, "resumeFrontier");
+});
+
+export const growthInquiryEvidenceLinkSchema = z.object({
+  receiptId: idSchema,
+  rank: z.number().int().min(1).max(100_000),
+}).strict();
+
+export const growthInquiryQuestionCreateSchema = z.object({
+  id: idSchema,
+  question: z.string().trim().min(1).max(2_000),
+  evidenceState: z.enum(["known", "conflicted", "unknown"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  priority: z.number().finite().min(0).max(1_000_000),
+  fingerprint: sha256Schema,
+  evidenceLinks: z.array(growthInquiryEvidenceLinkSchema).max(100),
+}).strict().superRefine((value, context) => {
+  const identities = value.evidenceLinks.map((link) => `${link.receiptId}:${link.rank}`);
+  uniqueValues(identities, context, "evidenceLinks");
+});
+
+export const growthInquiryBatchSealSchema = z.object({
+  id: idSchema,
+  cycleId: idSchema,
+  idempotencyKey: idSchema,
+  creatorChoiceBlocked: z.boolean(),
+  selectedInquiryId: idSchema.nullable(),
+  questions: z.array(growthInquiryQuestionCreateSchema).min(3).max(7),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.questions.map((question) => question.id), context, "questions");
+  uniqueValues(value.questions.map((question) => question.fingerprint), context, "questions");
+  const selectedExists = value.selectedInquiryId !== null
+    && value.questions.some((question) => question.id === value.selectedInquiryId);
+  if (value.creatorChoiceBlocked && value.selectedInquiryId !== null) {
+    context.addIssue({ code: "custom", path: ["selectedInquiryId"], message: "A creator-choice-blocked batch cannot select an inquiry." });
+  }
+  if (!value.creatorChoiceBlocked && !selectedExists) {
+    context.addIssue({ code: "custom", path: ["selectedInquiryId"], message: "A sealed inquiry batch requires exactly one selected inquiry." });
+  }
+});
+
+export const growthInquirySchema = growthInquiryQuestionCreateSchema.extend({ selected: z.boolean() }).strict();
+export const growthInquiryBatchSchema = z.object({
+  id: idSchema,
+  cycleId: idSchema,
+  receiptId: idSchema,
+  checkpointId: idSchema,
+  ruleRevision: z.number().int().min(1).max(1_000_000),
+  idempotencyKey: idSchema,
+  payloadHash: sha256Schema,
+  status: z.literal("sealed"),
+  creatorChoiceBlocked: z.boolean(),
+  selectedInquiryId: idSchema.nullable(),
+  questions: z.array(growthInquirySchema).min(3).max(7),
+  sealedAt: timestampSchema,
+}).strict().superRefine((value, context) => {
+  const selected = value.questions.filter((question) => question.selected);
+  if (value.creatorChoiceBlocked ? selected.length !== 0 : selected.length !== 1) {
+    context.addIssue({ code: "custom", message: "Persisted inquiry selection is inconsistent." });
+  }
+  if (!value.creatorChoiceBlocked && selected[0]?.id !== value.selectedInquiryId) {
+    context.addIssue({ code: "custom", message: "Selected inquiry identity is inconsistent." });
+  }
+});
+
+export const growthClosureProfileKindSchema = z.enum(["world_birth", "oc_saga", "story_universe", "mixed_birth"]);
+export const growthClosureFacetCreateSchema = z.object({
+  id: idSchema,
+  kind: z.enum(["content", "visual"]),
+  required: z.boolean(),
+}).strict();
+
+export const growthClosureProfileCreateSchema = z.object({
+  id: idSchema,
+  idempotencyKey: idSchema,
+  goalId: idSchema,
+  profileKind: growthClosureProfileKindSchema,
+  subjectResourceId: idSchema.nullable(),
+  checkpointId: idSchema,
+  ruleRevision: z.number().int().min(1).max(1_000_000),
+  facets: z.array(growthClosureFacetCreateSchema).min(1).max(100),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.facets.map((facet) => facet.id), context, "facets");
+  if (value.profileKind === "oc_saga" && value.subjectResourceId === null) {
+    context.addIssue({ code: "custom", path: ["subjectResourceId"], message: "OC saga closure requires an OC subject." });
+  }
+});
+
+export const growthClosureRevisionAppendSchema = z.object({
+  profileId: idSchema,
+  expectedRevision: z.number().int().min(1).max(1_000_000),
+  idempotencyKey: idSchema,
+  checkpointId: idSchema,
+  ruleRevision: z.number().int().min(1).max(1_000_000),
+  facets: z.array(growthClosureFacetCreateSchema).min(1).max(100),
+}).strict().superRefine((value, context) => uniqueValues(value.facets.map((facet) => facet.id), context, "facets"));
+
+export const growthClosureProfileSchema = z.object({
+  id: idSchema,
+  goalId: idSchema,
+  profileKind: growthClosureProfileKindSchema,
+  subjectResourceId: idSchema.nullable(),
+  currentRevision: z.number().int().min(1).max(1_000_000),
+  currentEpoch: z.number().int().min(1).max(1_000_000),
+  createdAt: timestampSchema,
+  updatedAt: timestampSchema,
+}).strict();
+
+export const growthClosureRevisionSchema = z.object({
+  profileId: idSchema,
+  revision: z.number().int().min(1).max(1_000_000),
+  epoch: z.number().int().min(1).max(1_000_000),
+  checkpointId: idSchema,
+  ruleRevision: z.number().int().min(1).max(1_000_000),
+  facets: z.array(growthClosureFacetCreateSchema).min(1).max(100),
+  createdAt: timestampSchema,
+}).strict();
+
+const closureAssessmentCommonShape = {
+  id: idSchema,
+  profileId: idSchema,
+  revision: z.number().int().min(1).max(1_000_000),
+  cycleId: idSchema,
+  checkpointId: idSchema,
+  ruleRevision: z.number().int().min(1).max(1_000_000),
+  receiptId: idSchema,
+  agentInvocationId: idSchema,
+  outputSha256: sha256Schema,
+  idempotencyKey: idSchema,
+};
+export const growthClosureAssessmentAppendSchema = z.discriminatedUnion("role", [
+  z.object({ ...closureAssessmentCommonShape, role: z.literal("steward"), decision: z.enum(["continue_growing", "ready_for_checker"]) }).strict(),
+  z.object({ ...closureAssessmentCommonShape, role: z.literal("checker"), decision: z.enum(["accepted", "repairs_required", "blocked"]) }).strict(),
+]);
+export const growthClosureAssessmentSchema = z.discriminatedUnion("role", [
+  z.object({ ...closureAssessmentCommonShape, role: z.literal("steward"), decision: z.enum(["continue_growing", "ready_for_checker"]), payloadHash: sha256Schema, createdAt: timestampSchema }).strict(),
+  z.object({ ...closureAssessmentCommonShape, role: z.literal("checker"), decision: z.enum(["accepted", "repairs_required", "blocked"]), payloadHash: sha256Schema, createdAt: timestampSchema }).strict(),
+]);
+
+export const growthClosureReviewFindingSchema = z.object({
+  facetId: idSchema,
+  state: z.enum(["satisfied", "missing", "conflicted", "blocked"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  evidence: growthInquiryEvidenceLinkSchema,
+}).strict();
+export const growthClosureReviewSealSchema = z.object({
+  id: idSchema,
+  profileId: idSchema,
+  revision: z.number().int().min(1).max(1_000_000),
+  stewardAssessmentId: idSchema,
+  checkerAssessmentId: idSchema,
+  idempotencyKey: idSchema,
+  findings: z.array(growthClosureReviewFindingSchema).min(1).max(100),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.findings.map((finding) => `${finding.facetId}:${finding.evidence.receiptId}:${finding.evidence.rank}`), context, "findings");
+});
+export const growthClosureReviewSchema = growthClosureReviewSealSchema.extend({
+  checkerDecision: z.enum(["accepted", "repairs_required", "blocked"]),
+  payloadHash: sha256Schema,
+  createdAt: timestampSchema,
+}).strict();
+
+export const growthClosureStateSchema = z.object({
+  profileId: idSchema,
+  goalId: idSchema,
+  profileKind: growthClosureProfileKindSchema,
+  subjectResourceId: idSchema.nullable(),
+  revision: z.number().int().min(1).max(1_000_000),
+  epoch: z.number().int().min(1).max(1_000_000),
+  contentState: z.enum(["growing", "closed", "blocked"]),
+  visualState: z.enum(["planning", "generating", "ready", "blocked"]),
+  satisfiedFacetIds: z.array(idSchema).max(100),
+  missingFacetIds: z.array(idSchema).max(100),
+  lastProgressCycleSequence: z.number().int().min(0).max(1_000_000),
+}).strict();
+
+export const growthIllustrationAnchorSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("resource"), resourceId: idSchema, resourceVersionId: idSchema }).strict(),
+  z.object({
+    kind: z.literal("stable_text_span"), documentId: idSchema, documentVersionId: idSchema,
+    startCodePoint: z.number().int().min(0).max(100_000_000), endCodePoint: z.number().int().min(1).max(100_000_000),
+    textSha256: sha256Schema,
+  }).strict().superRefine((value, context) => {
+    if (value.endCodePoint <= value.startCodePoint) context.addIssue({ code: "custom", path: ["endCodePoint"], message: "Text span must be non-empty." });
+  }),
+  z.object({ kind: z.literal("working_text_snapshot"), sourceSnapshotId: idSchema, textSha256: sha256Schema }).strict(),
+  z.object({ kind: z.literal("conversation_text_snapshot"), sourceSnapshotId: idSchema, textSha256: sha256Schema }).strict(),
+]);
+
+export const growthIllustrationTextSnapshotCreateSchema = z.object({
+  id: idSchema,
+  kind: z.enum(["working_text_snapshot", "conversation_text_snapshot"]),
+  text: z.string().min(1).max(1_000_000),
+  textSha256: sha256Schema,
+}).strict();
+
+export const growthIllustrationSourceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("resource"), resourceId: idSchema, resourceVersionId: idSchema }).strict(),
+  z.object({ kind: z.literal("document"), documentId: idSchema, documentVersionId: idSchema, contentSha256: sha256Schema }).strict(),
+]);
+
+export const growthIllustrationItemCreateSchema = z.object({
+  id: idSchema,
+  purpose: z.string().trim().min(1).max(120),
+  title: z.string().trim().min(1).max(240),
+  variantKey: idSchema,
+  compiledPromptSha256: sha256Schema,
+  requiredForVisualClosure: z.boolean(),
+  anchor: growthIllustrationAnchorSchema,
+  sources: z.array(growthIllustrationSourceSchema).min(1).max(100),
+}).strict().superRefine((value, context) => {
+  const identities = value.sources.map((source) => source.kind === "resource"
+    ? `resource:${source.resourceId}:${source.resourceVersionId}`
+    : `document:${source.documentId}:${source.documentVersionId}`);
+  uniqueValues(identities, context, "sources");
+});
+
+export const growthIllustrationRequestCreateSchema = z.object({
+  id: idSchema,
+  goalId: idSchema,
+  cycleId: idSchema,
+  ruleRevision: z.number().int().min(1).max(1_000_000),
+  coverageMode: z.enum(["default", "all_visible_nodes", "custom"]),
+  closureProfileId: idSchema.nullable(),
+  closureRevision: z.number().int().min(1).max(1_000_000).nullable(),
+  idempotencyKey: idSchema,
+}).strict().superRefine((value, context) => {
+  if ((value.closureProfileId === null) !== (value.closureRevision === null)) {
+    context.addIssue({ code: "custom", message: "Closure profile and revision must be both present or both absent." });
+  }
+});
+
+export const growthIllustrationBatchSealSchema = z.object({
+  id: idSchema,
+  requestId: idSchema,
+  sequence: z.number().int().min(1).max(1_000_000),
+  cursor: z.string().trim().min(1).max(2_000).nullable(),
+  nextCursor: z.string().trim().min(1).max(2_000).nullable(),
+  idempotencyKey: idSchema,
+  snapshots: z.array(growthIllustrationTextSnapshotCreateSchema).max(20),
+  items: z.array(growthIllustrationItemCreateSchema).min(1).max(20),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.snapshots.map((snapshot) => snapshot.id), context, "snapshots");
+  uniqueValues(value.items.map((item) => item.id), context, "items");
+});
+
+export const growthIllustrationStatusSchema = z.enum([
+  "planned", "queued", "running", "ready", "failed", "cancelled", "stale", "reconciliation_required",
+]);
+export const growthIllustrationItemSchema = growthIllustrationItemCreateSchema.extend({
+  requestId: idSchema,
+  batchId: idSchema,
+  ruleRevision: z.number().int().min(1).max(1_000_000),
+  anchorHash: sha256Schema,
+  sourceVersionSetHash: sha256Schema,
+  status: growthIllustrationStatusSchema,
+  imageJobId: idSchema.nullable(),
+  createdAt: timestampSchema,
+  updatedAt: timestampSchema,
+}).strict();
+export const growthIllustrationRequestSchema = z.object({
+  id: idSchema,
+  goalId: idSchema,
+  cycleId: idSchema,
+  ruleRevision: z.number().int().min(1).max(1_000_000),
+  coverageMode: z.enum(["default", "all_visible_nodes", "custom"]),
+  closureProfileId: idSchema.nullable(),
+  closureRevision: z.number().int().min(1).max(1_000_000).nullable(),
+  status: z.enum(["planned", "running", "completed", "failed", "cancelled", "stale", "reconciliation_required"]),
+  itemCount: z.number().int().min(0),
+  readyCount: z.number().int().min(0),
+  createdAt: timestampSchema,
+  updatedAt: timestampSchema,
+}).strict().superRefine((value, context) => {
+  if ((value.closureProfileId === null) !== (value.closureRevision === null)) {
+    context.addIssue({ code: "custom", message: "Closure profile and revision must be both present or both absent." });
+  }
+});
+export const growthIllustrationBatchSchema = z.object({
+  id: idSchema,
+  requestId: idSchema,
+  sequence: z.number().int().min(1).max(1_000_000),
+  cursor: z.string().nullable(),
+  nextCursor: z.string().nullable(),
+  idempotencyKey: idSchema,
+  payloadHash: sha256Schema,
+  itemCount: z.number().int().min(1).max(20),
+  status: z.enum(["planned", "running", "completed", "failed", "cancelled", "stale", "reconciliation_required"]),
+  items: z.array(growthIllustrationItemSchema).min(1).max(20),
+  sealedAt: timestampSchema,
+}).strict();
+export const growthIllustrationImageJobBindSchema = z.object({ itemId: idSchema, imageJobId: idSchema }).strict();
+export const growthIllustrationMarkStaleSchema = z.object({ itemId: idSchema, expectedAnchorHash: sha256Schema }).strict();
+
 export type GrowthGoal = z.infer<typeof growthGoalSchema>;
 export type GrowthGoalCreate = z.infer<typeof growthGoalCreateSchema>;
 export type GrowthRuleRevision = z.infer<typeof growthRuleRevisionSchema>;
 export type GrowthCycle = z.infer<typeof growthCycleSchema>;
+export type GrowthCycleIntent = z.infer<typeof growthCycleIntentSchema>;
 export type GrowthRetrievalReceiptCreate = z.infer<typeof growthRetrievalReceiptCreateSchema>;
 export type GrowthRetrievalReceipt = z.infer<typeof growthRetrievalReceiptSchema>;
 export type GrowthRetrievalReceiptLink = z.infer<typeof growthRetrievalReceiptLinkSchema>;
 export type GrowthEventAppend = z.infer<typeof growthEventAppendSchema>;
 export type GrowthEvent = z.infer<typeof growthEventSchema>;
+export type GrowthInquiryBatch = z.infer<typeof growthInquiryBatchSchema>;
+export type GrowthClosureProfile = z.infer<typeof growthClosureProfileSchema>;
+export type GrowthClosureRevision = z.infer<typeof growthClosureRevisionSchema>;
+export type GrowthClosureAssessment = z.infer<typeof growthClosureAssessmentSchema>;
+export type GrowthClosureReview = z.infer<typeof growthClosureReviewSchema>;
+export type GrowthClosureState = z.infer<typeof growthClosureStateSchema>;
+export type GrowthIllustrationRequest = z.infer<typeof growthIllustrationRequestSchema>;
+export type GrowthIllustrationBatch = z.infer<typeof growthIllustrationBatchSchema>;
+export type GrowthIllustrationItem = z.infer<typeof growthIllustrationItemSchema>;
