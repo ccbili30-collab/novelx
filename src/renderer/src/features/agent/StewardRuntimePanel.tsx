@@ -15,10 +15,13 @@ import { AgentMessageContent } from "./AgentMessageContent";
 import { RunActivityTimeline } from "./RunActivityTimeline";
 import {
   appendGrowthAgentEvent,
+  advanceGrowthVisualClimax,
   createGrowthPresentation,
   isGrowthBoundRun,
+  mergeGrowthArtifacts,
   mergeGrowthEvent,
   mergeGrowthSnapshot,
+  type GrowthVisualClimaxState,
   type GrowthPresentation,
 } from "./growthPresentation";
 import "./agentMessage.css";
@@ -37,6 +40,7 @@ interface StewardRuntimePanelProps {
   onReadyImage?(image: Extract<AgentArtifact, { kind: "image" }>): Promise<void> | void;
   onActivityChange(activity: { label: string; domains: string[] } | null): void;
   onGrowthPresentationChange(presentation: GrowthPresentation | null): void;
+  onGrowthArtifactsChange(artifacts: AgentArtifact[]): void;
 }
 
 interface FeedEntry {
@@ -80,6 +84,7 @@ export function StewardRuntimePanel({
   onReadyImage,
   onActivityChange,
   onGrowthPresentationChange,
+  onGrowthArtifactsChange,
 }: StewardRuntimePanelProps) {
   const [mode, setMode] = useState<"assist" | "free" | "growth">("assist");
   const [draft, setDraft] = useState("");
@@ -94,7 +99,9 @@ export function StewardRuntimePanel({
   const nextEntryId = useRef(1);
   const terminalRunIds = useRef(new Set<string>());
   const growthRef = useRef<GrowthPresentation | null>(null);
+  const growthArtifactsRef = useRef<AgentArtifact[]>([]);
   const committedGrowthChangeSets = useRef(new Set<string>());
+  const growthVisualClimax = useRef<GrowthVisualClimaxState>({ observedRunningGoalIds: [], openedGoalAssetKeys: [] });
 
   const growthStorageKey = projectId && session ? `novelx:growth-goal:${projectId}:${session.id}` : null;
   const growthRequestToken = useRef<GrowthRequestToken>({ generation: 0, scopeKey: null });
@@ -109,30 +116,51 @@ export function StewardRuntimePanel({
   }
 
   function publishGrowth(next: GrowthPresentation | null) {
+    if (next && growthRef.current && growthRef.current.goalId !== next.goalId) resetGrowthVisualState();
     growthRef.current = next;
     setGrowthPresentation(next);
     onGrowthPresentationChange(next);
+    maybeOpenGrowthVisualClimax(next, growthArtifactsRef.current);
+  }
+
+  function publishGrowthArtifacts(next: AgentArtifact[]) {
+    growthArtifactsRef.current = next;
+    setGrowthArtifacts(next);
+    onGrowthArtifactsChange(next);
+    maybeOpenGrowthVisualClimax(growthRef.current, next);
+  }
+
+  function resetGrowthVisualState() {
+    growthArtifactsRef.current = [];
+    setGrowthArtifacts([]);
+    onGrowthArtifactsChange([]);
+    growthVisualClimax.current = { observedRunningGoalIds: [], openedGoalAssetKeys: [] };
+  }
+
+  function maybeOpenGrowthVisualClimax(presentation: GrowthPresentation | null, artifacts: AgentArtifact[]) {
+    const decision = advanceGrowthVisualClimax(growthVisualClimax.current, presentation, artifacts);
+    growthVisualClimax.current = decision.state;
+    if (decision.artifact) void onReadyImage?.(decision.artifact);
   }
 
   function clearStoredGrowth() {
     if (growthStorageKey) window.localStorage.removeItem(growthStorageKey);
-    setGrowthArtifacts([]);
+    resetGrowthVisualState();
     publishGrowth(null);
   }
 
   function addGrowthArtifacts(artifacts: AgentArtifact[]) {
     if (artifacts.length === 0) return;
-    setGrowthArtifacts((current) => {
-      const seen = new Set(current.map((artifact) => JSON.stringify(artifact)));
-      return [...current, ...artifacts.filter((artifact) => !seen.has(JSON.stringify(artifact)))];
-    });
+    publishGrowthArtifacts(mergeGrowthArtifacts(growthArtifactsRef.current, artifacts));
   }
 
   useEffect(() => {
+    const subscriptionScopeKey = growthStorageKey;
     return window.novaxDesktop.agent.subscribe((event) => {
       if (!session || event.sessionId !== session.id) return;
       const growth = growthRef.current;
       const isGrowthRun = isGrowthBoundRun(growth, event.runId);
+      if (isGrowthRun && growthRequestToken.current.scopeKey !== subscriptionScopeKey) return;
       if (event.type === "run.started") {
         if (!terminalRunIds.current.has(event.runId)) setActiveRunId(event.runId);
         return;
@@ -173,7 +201,7 @@ export function StewardRuntimePanel({
         appendEntry({ kind: "error", text: event.message, artifacts: event.artifacts });
       }
     });
-  }, [session?.id, onActivityChange, onCommittedChangeSet, onReadyImage]);
+  }, [growthStorageKey, session?.id, onActivityChange, onCommittedChangeSet, onReadyImage]);
 
   useEffect(() => {
     if (!session) return;
@@ -194,7 +222,7 @@ export function StewardRuntimePanel({
       }
       void restoreGrowth(current.goalId);
     });
-  }, [growthStorageKey, session?.id, onCommittedChangeSet]);
+  }, [growthStorageKey, session?.id, onCommittedChangeSet, onReadyImage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -205,7 +233,7 @@ export function StewardRuntimePanel({
     setActivity(null);
     setCopiedEntryId(null);
     setActionNotice(null);
-    setGrowthArtifacts([]);
+    resetGrowthVisualState();
     growthRef.current = null;
     setGrowthPresentation(null);
     onGrowthPresentationChange(null);
@@ -219,7 +247,7 @@ export function StewardRuntimePanel({
       });
     }
     return () => { cancelled = true; };
-  }, [projectId, session?.id, messageRefreshKey, onActivityChange, onGrowthPresentationChange]);
+  }, [projectId, session?.id, messageRefreshKey, onActivityChange, onGrowthPresentationChange, onGrowthArtifactsChange]);
 
   useEffect(() => {
     if (!growthStorageKey || !projectId || !session) return;
@@ -276,7 +304,7 @@ export function StewardRuntimePanel({
         if (!isCurrentGrowthRequest(growthRequestToken.current, request)) return;
         if (startStorageKey) window.localStorage.setItem(startStorageKey, snapshot.goal.id);
         committedGrowthChangeSets.current.clear();
-        setGrowthArtifacts([]);
+        resetGrowthVisualState();
         publishGrowth(createGrowthPresentation(snapshot));
         const runId = snapshot.cycles.find((cycle) => cycle.status === "running")?.runId ?? null;
         setActiveRunId(runId);

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowRightLeft, BookOpenText, Brain, CheckCircle2, ChevronRight, CircleUserRound, Clock3, Image, LoaderCircle, Map, Network } from "lucide-react";
-import type { CollaborationListResult, HandoffSummary, SessionSummary, WorkspaceSnapshot } from "../../../../shared/ipcContract";
+import type { AgentArtifact, CollaborationListResult, HandoffSummary, SessionSummary, WorkspaceSnapshot } from "../../../../shared/ipcContract";
 import type { GrowthPresentation } from "../agent/growthPresentation";
 import { ProjectFilesPanel } from "./ProjectFilesPanel";
 import { RunWorkTargetPane } from "./RunWorkTargetPane";
@@ -20,11 +20,13 @@ interface ProjectActivityPanelProps {
   session: SessionSummary | null;
   activity: { label: string; domains: string[] } | null;
   growthPresentation: GrowthPresentation | null;
+  growthArtifacts: AgentArtifact[];
   collaboration: CollaborationListResult;
   refreshKey: number;
   onOpenResource(resourceId: string): Promise<void>;
   onOpenDocument(documentId: string, resourceId: string): Promise<void>;
   onOpenChangeSet(changeSetId: string): Promise<void>;
+  onOpenReadyImage(image: Extract<AgentArtifact, { kind: "image" }>): Promise<void> | void;
   onOpenGraph(): Promise<void>;
   onViewAll(): void;
   onCreateHandoff(): void;
@@ -64,11 +66,13 @@ export function ProjectActivityPanel(props: ProjectActivityPanelProps) {
         <summary><ChevronRight size={14} /><span>当前创作</span></summary>
         <RunWorkTargetPane
           presentation={props.growthPresentation}
+          artifacts={props.growthArtifacts}
           workspace={props.workspace}
           onOpenResource={props.onOpenResource}
           onOpenDocument={props.onOpenDocument}
           onOpenChangeSet={props.onOpenChangeSet}
           onOpenGraph={props.onOpenGraph}
+          onOpenReadyImage={props.onOpenReadyImage}
         />
       </details>
       <details className="right-panel-section" open={open.files} onToggle={(event) => setSection("files", event.currentTarget.open)}>

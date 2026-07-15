@@ -51,6 +51,9 @@ test("starts explicit Growth mode once and visibly fails closed without a Provid
     await expect.poll(async () => timeline.getAttribute("data-status"), { timeout: 15_000 }).toMatch(/^(blocked|failed)$/);
     await expect(timeline).not.toContainText("本次生长已完成");
     await expect(page.locator("body")).not.toContainText("thinking");
+    await expect(page.locator(".run-work-target-pane__world-map")).toHaveCount(0);
+    await expect(page.locator("main.workbench")).toHaveClass(/workbench--agent/);
+    await expect(page.locator(".creative-showcase")).toHaveCount(0);
     await page.screenshot({ path: "test-results/novax-growth-presentation-fail-closed-1440x900.png", fullPage: true });
   } finally {
     if (app) await app.close();

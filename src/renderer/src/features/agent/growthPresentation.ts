@@ -1,8 +1,9 @@
-import type { AgentRunEvent, GrowthStartResponse } from "../../../../shared/ipcContract";
+import type { AgentArtifact, AgentRunEvent, GrowthStartResponse } from "../../../../shared/ipcContract";
 
 type GrowthEvent = GrowthStartResponse["events"][number];
 type GrowthCycle = GrowthStartResponse["cycles"][number];
 type CoordinatorStatus = GrowthStartResponse["coordinatorStatus"];
+export type GrowthImageArtifact = Extract<AgentArtifact, { kind: "image" }>;
 
 export interface GrowthAgentActivity {
   runId: string;
@@ -33,6 +34,22 @@ export interface GrowthPresentation {
   current: GrowthTimelineRow | null;
   running: boolean;
   terminalLabel: string | null;
+}
+
+export interface GrowthWorldMapDisplay {
+  artifact: GrowthImageArtifact | null;
+  canPreview: boolean;
+  canOpenShowcase: boolean;
+}
+
+export interface GrowthVisualClimaxState {
+  observedRunningGoalIds: string[];
+  openedGoalAssetKeys: string[];
+}
+
+export interface GrowthVisualClimaxDecision {
+  state: GrowthVisualClimaxState;
+  artifact: GrowthImageArtifact | null;
 }
 
 const terminalCoordinatorStates = new Set<CoordinatorStatus>(["completed", "blocked", "failed", "cancelled", "reconciliation_required"]);
@@ -75,6 +92,48 @@ export function appendGrowthAgentEvent(current: GrowthPresentation, event: Agent
   const activity: GrowthAgentActivity = { runId: event.runId, label: event.label, phase: event.phase, domains: event.domains ?? [] };
   if (current.agentActivities.some((item) => activityKey(item) === activityKey(activity))) return current;
   return derive({ ...current, agentActivities: [...current.agentActivities, activity] });
+}
+
+export function mergeGrowthArtifacts(current: readonly AgentArtifact[], incoming: readonly AgentArtifact[]): AgentArtifact[] {
+  const merged = [...current];
+  for (const artifact of incoming) {
+    const key = artifactKey(artifact);
+    const index = merged.findIndex((candidate) => artifactKey(candidate) === key);
+    if (index >= 0) merged.splice(index, 1);
+    merged.push(artifact);
+  }
+  return merged;
+}
+
+export function getGrowthWorldMapDisplay(artifacts: readonly AgentArtifact[]): GrowthWorldMapDisplay {
+  const artifact = [...artifacts].reverse().find((candidate): candidate is GrowthImageArtifact => (
+    candidate.kind === "image" && candidate.purpose === "world_map"
+  )) ?? null;
+  const canPreview = artifact?.status === "ready" && artifact.thumbnailUrl !== null;
+  return { artifact, canPreview, canOpenShowcase: canPreview };
+}
+
+export function advanceGrowthVisualClimax(
+  current: GrowthVisualClimaxState,
+  presentation: GrowthPresentation | null,
+  artifacts: readonly AgentArtifact[],
+): GrowthVisualClimaxDecision {
+  if (!presentation) return { state: current, artifact: null };
+  const observedRunningGoalIds = presentation.coordinatorStatus === "running" && !current.observedRunningGoalIds.includes(presentation.goalId)
+    ? [...current.observedRunningGoalIds, presentation.goalId]
+    : current.observedRunningGoalIds;
+  const display = getGrowthWorldMapDisplay(artifacts);
+  const key = display.artifact ? `${presentation.goalId}:${display.artifact.assetId}` : null;
+  const canOpen = presentation.coordinatorStatus === "completed"
+    && observedRunningGoalIds.includes(presentation.goalId)
+    && display.artifact?.status === "ready"
+    && key !== null
+    && !current.openedGoalAssetKeys.includes(key);
+  const openedGoalAssetKeys = canOpen ? [...current.openedGoalAssetKeys, key] : current.openedGoalAssetKeys;
+  return {
+    state: { observedRunningGoalIds, openedGoalAssetKeys },
+    artifact: canOpen ? display.artifact : null,
+  };
 }
 
 export function isGrowthBoundRun(current: GrowthPresentation | null, runId: string): boolean {
@@ -123,6 +182,10 @@ function eventKey(event: GrowthEvent): string {
 
 function activityKey(activity: GrowthAgentActivity): string {
   return `${activity.runId}:${activity.phase}:${activity.label}:${activity.domains.join(",")}`;
+}
+
+function artifactKey(artifact: AgentArtifact): string {
+  return artifact.kind === "image" ? `image:${artifact.assetId}` : JSON.stringify(artifact);
 }
 
 function cycleSummary(status: GrowthCycle["status"]): string {

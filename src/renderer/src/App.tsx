@@ -74,6 +74,7 @@ export function App() {
   const [initializing, setInitializing] = useState(false);
   const [activity, setActivity] = useState<{ label: string; domains: string[] } | null>(null);
   const [growthPresentation, setGrowthPresentation] = useState<GrowthPresentation | null>(null);
+  const [growthArtifacts, setGrowthArtifacts] = useState<AgentArtifact[]>([]);
   const [collaboration, setCollaboration] = useState<CollaborationListResult>({ sharedMemories: [], handoffs: [] });
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [handoffBusy, setHandoffBusy] = useState(false);
@@ -88,6 +89,14 @@ export function App() {
   const [renameResourceTarget, setRenameResourceTarget] = useState<WorkspaceSnapshot["resources"][number] | null>(null);
   const [deleteResourceTarget, setDeleteResourceTarget] = useState<WorkspaceSnapshot["resources"][number] | null>(null);
   const editorRef = useRef<EditorHostHandle | null>(null);
+  const showcaseNavigationScope = useRef({ key: null as string | null, generation: 0 });
+  const currentShowcaseScopeKey = activeProjectId && activeSessionId ? `${activeProjectId}:${activeSessionId}` : null;
+  if (showcaseNavigationScope.current.key !== currentShowcaseScopeKey) {
+    showcaseNavigationScope.current = {
+      key: currentShowcaseScopeKey,
+      generation: showcaseNavigationScope.current.generation + 1,
+    };
+  }
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const activeSession = sessionsByProject[activeProjectId ?? ""]?.find((session) => session.id === activeSessionId) ?? null;
@@ -123,6 +132,10 @@ export function App() {
   useEffect(() => {
     applyBackgroundPreference(background, snowBackgroundUrl, document.documentElement, window.localStorage);
   }, [background]);
+
+  useEffect(() => {
+    setGrowthArtifacts([]);
+  }, [activeProjectId, activeSessionId]);
 
   function changeBackground(next: NovaxBackgroundPreference): boolean {
     const saved = applyBackgroundPreference(next, snowBackgroundUrl, document.documentElement, window.localStorage);
@@ -367,9 +380,12 @@ export function App() {
   }
 
   const openReadyImageShowcase = useCallback(async (artifact: Extract<AgentArtifact, { kind: "image" }>) => {
+    const requestGeneration = showcaseNavigationScope.current.generation;
     const currentWorkspace = await window.novaxDesktop.workspace.getCurrent() ?? workspace;
+    if (showcaseNavigationScope.current.generation !== requestGeneration) return;
     if (!currentWorkspace) return;
     const result = await window.novaxDesktop.workspace.listImageAssets();
+    if (showcaseNavigationScope.current.generation !== requestGeneration) return;
     if (!result.ok) return;
     const asset = result.assets.find((candidate) => candidate.assetId === artifact.assetId);
     if (!asset) return;
@@ -382,6 +398,7 @@ export function App() {
       ? candidates[0]
       : candidates.length === 0 && stories.length === 1 ? stories[0] : null;
     if (!target) return;
+    if (showcaseNavigationScope.current.generation !== requestGeneration) return;
     setWorkspace(currentWorkspace);
     setShowcaseStoryId(target.id);
     setCommittedWorkspaceRefreshKey((value) => value + 1);
@@ -589,6 +606,7 @@ export function App() {
         onReadyImage={openReadyImageShowcase}
         onActivityChange={setActivity}
         onGrowthPresentationChange={setGrowthPresentation}
+        onGrowthArtifactsChange={setGrowthArtifacts}
       />
     </section>
   );
@@ -684,11 +702,13 @@ export function App() {
               session={activeSession}
               activity={activity}
               growthPresentation={growthPresentation}
+              growthArtifacts={growthArtifacts}
               collaboration={collaboration}
               refreshKey={changeSetRefreshKey}
               onOpenResource={openActivityResource}
               onOpenDocument={openShowcaseDocument}
               onOpenChangeSet={openChangeSet}
+              onOpenReadyImage={openReadyImageShowcase}
               onOpenGraph={openGrowthGraph}
               onViewAll={() => setMode("ide")}
               onCreateHandoff={() => setHandoffOpen(true)}

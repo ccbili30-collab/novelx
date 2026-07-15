@@ -1,13 +1,15 @@
-import type { WorkspaceSnapshot } from "../../../../shared/ipcContract";
-import type { GrowthPresentation } from "../agent/growthPresentation";
+import type { AgentArtifact, WorkspaceSnapshot } from "../../../../shared/ipcContract";
+import { getGrowthWorldMapDisplay, type GrowthPresentation } from "../agent/growthPresentation";
 
 export function RunWorkTargetPane(props: {
   presentation: GrowthPresentation | null;
+  artifacts: AgentArtifact[];
   workspace: WorkspaceSnapshot | null;
   onOpenResource(resourceId: string): Promise<void>;
   onOpenDocument(documentId: string, resourceId: string): Promise<void>;
   onOpenChangeSet(changeSetId: string): Promise<void>;
   onOpenGraph(): Promise<void>;
+  onOpenReadyImage(image: Extract<AgentArtifact, { kind: "image" }>): Promise<void> | void;
 }) {
   const current = props.presentation?.current ?? null;
   const event = current?.events.at(-1) ?? null;
@@ -19,6 +21,8 @@ export function RunWorkTargetPane(props: {
   const target = resolveTarget(reference, props.workspace);
   const domains = current?.activities.flatMap((activity) => activity.domains) ?? [];
   const uniqueDomains = [...new Set(domains)];
+  const worldMap = getGrowthWorldMapDisplay(props.artifacts);
+  const worldMapArtifact = worldMap.artifact;
 
   return (
     <section className="run-work-target-pane" aria-label="当前创作">
@@ -38,6 +42,16 @@ export function RunWorkTargetPane(props: {
             </div>
           ) : event ? <p className="run-work-target-pane__unresolved">当前目标尚未出现在工作区投影中。</p> : null}
           {uniqueDomains.length ? <div className="run-work-target-pane__domains" aria-label="当前领域">{uniqueDomains.map((domain) => <span key={domain}>{domainLabel(domain)}</span>)}</div> : null}
+          {worldMapArtifact ? <section className="run-work-target-pane__world-map" data-status={worldMapArtifact.status} aria-label="世界地图产物">
+            {worldMap.canPreview ? <img src={worldMapArtifact.thumbnailUrl ?? undefined} alt={`${worldMapArtifact.title}缩略图`} />
+              : <div className="run-work-target-pane__world-map-placeholder">{worldMapStatusLabel(worldMapArtifact.status)}</div>}
+            <div>
+              <strong>{worldMapArtifact.title}</strong>
+              <small>{worldMapArtifact.sourceLabel}</small>
+              <span>{worldMapStatusLabel(worldMapArtifact.status)}</span>
+            </div>
+            {worldMap.canOpenShowcase ? <button type="button" onClick={() => void props.onOpenReadyImage(worldMapArtifact)}>查看完整成果</button> : null}
+          </section> : null}
           {props.presentation.terminalLabel ? <footer role="status">{props.presentation.terminalLabel}</footer> : null}
         </>
       )}
@@ -72,4 +86,8 @@ function phaseLabel(phase: "cycle_planned" | "run_attached" | "receipt_recorded"
 
 function domainLabel(domain: string): string {
   return ({ world: "世界", oc: "OC", story: "故事", graph: "图谱", timeline: "时间线", asset: "资产" })[domain] ?? domain;
+}
+
+function worldMapStatusLabel(status: Extract<AgentArtifact, { kind: "image" }>["status"]): string {
+  return ({ queued: "等待生成地图", generating: "正在生成地图", ready: "地图已就绪", failed: "地图生成失败", stale: "地图已过期" })[status];
 }

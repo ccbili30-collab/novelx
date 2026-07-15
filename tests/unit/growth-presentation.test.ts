@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AgentRunEvent, GrowthStartResponse } from "../../src/shared/ipcContract";
+import type { AgentArtifact, AgentRunEvent, GrowthStartResponse } from "../../src/shared/ipcContract";
 
 const presentationModulePath = "../../src/renderer/src/features/agent/growthPresentation";
 const stewardModulePath = "../../src/renderer/src/features/agent/StewardRuntimePanel";
@@ -45,6 +45,22 @@ function event(overrides: Partial<GrowthStartResponse["events"][number]> = {}): 
     targetId: "resource-1",
     targetVersionId: null,
     contentRef: null,
+    ...overrides,
+  };
+}
+
+function worldMapArtifact(
+  status: Extract<AgentArtifact, { kind: "image" }>["status"],
+  overrides: Partial<Extract<AgentArtifact, { kind: "image" }>> = {},
+): Extract<AgentArtifact, { kind: "image" }> {
+  return {
+    kind: "image",
+    assetId: "map-asset-1",
+    title: "潮汐海港地图",
+    status,
+    purpose: "world_map",
+    sourceLabel: "潮汐海港世界",
+    thumbnailUrl: status === "ready" ? "novax-asset://image/map-asset-1" : null,
     ...overrides,
   };
 }
@@ -144,5 +160,59 @@ describe("growth presentation", () => {
     if (isCurrentGrowthRequest(newerRestore, newerRestore)) applied.push("current-success");
 
     expect(applied).toEqual(["current-success"]);
+  });
+
+  it("selects the latest managed ready world map for a truthful preview", async () => {
+    const { getGrowthWorldMapDisplay } = await presentation();
+    const display = getGrowthWorldMapDisplay([
+      worldMapArtifact("failed", { assetId: "map-asset-old" }),
+      worldMapArtifact("ready"),
+    ]);
+
+    expect(display.artifact).toMatchObject({ assetId: "map-asset-1", title: "潮汐海港地图" });
+    expect(display.canPreview).toBe(true);
+    expect(display.canOpenShowcase).toBe(true);
+  });
+
+  it("keeps queued, generating, failed, and stale world maps visibly non-ready", async () => {
+    const { getGrowthWorldMapDisplay } = await presentation();
+    for (const status of ["queued", "generating", "failed", "stale"] as const) {
+      const display = getGrowthWorldMapDisplay([worldMapArtifact(status)]);
+      expect(display.artifact?.status).toBe(status);
+      expect(display.canPreview).toBe(false);
+      expect(display.canOpenShowcase).toBe(false);
+    }
+  });
+
+  it("opens a live observed Growth world map once after its coordinator completes", async () => {
+    const { advanceGrowthVisualClimax, createGrowthPresentation } = await presentation();
+    const map = worldMapArtifact("ready");
+    const running = createGrowthPresentation(snapshot());
+    const observed = advanceGrowthVisualClimax({ observedRunningGoalIds: [], openedGoalAssetKeys: [] }, running, [map]);
+    const completed = createGrowthPresentation(snapshot({ coordinatorStatus: "completed", goal: { id: goalId, status: "active", currentCycleSequence: 3 } }));
+    const opened = advanceGrowthVisualClimax(observed.state, completed, [map]);
+    const duplicate = advanceGrowthVisualClimax(opened.state, completed, [map]);
+
+    expect(observed.artifact).toBeNull();
+    expect(opened.artifact?.assetId).toBe("map-asset-1");
+    expect(duplicate.artifact).toBeNull();
+  });
+
+  it("does not auto-open restored completed, blocked, failed, or unrelated Growth goals", async () => {
+    const { advanceGrowthVisualClimax, createGrowthPresentation } = await presentation();
+    const map = worldMapArtifact("ready");
+    const initial = { observedRunningGoalIds: [], openedGoalAssetKeys: [] };
+    const restoredCompleted = createGrowthPresentation(snapshot({ coordinatorStatus: "completed", goal: { id: goalId, status: "active", currentCycleSequence: 3 } }));
+    const observed = advanceGrowthVisualClimax(initial, createGrowthPresentation(snapshot()), [map]);
+    const unrelatedCompleted = createGrowthPresentation(snapshot({
+      coordinatorStatus: "completed",
+      goal: { id: "goal-2", status: "active", currentCycleSequence: 3 },
+      events: [],
+    }));
+
+    expect(advanceGrowthVisualClimax(initial, restoredCompleted, [map]).artifact).toBeNull();
+    expect(advanceGrowthVisualClimax(observed.state, createGrowthPresentation(snapshot({ coordinatorStatus: "blocked" })), [map]).artifact).toBeNull();
+    expect(advanceGrowthVisualClimax(observed.state, createGrowthPresentation(snapshot({ coordinatorStatus: "failed" })), [map]).artifact).toBeNull();
+    expect(advanceGrowthVisualClimax(observed.state, unrelatedCompleted, [map]).artifact).toBeNull();
   });
 });
