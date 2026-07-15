@@ -14,7 +14,7 @@
 
 - 仅适用于受信任 `GrowthRunBinding.phase === "world"` 的 Run；普通 Steward 与 story/oc 阶段行为不变。
 - Main 必须从当前 workspace 的初始化 domain roots 派生受信任的 world/oc/story root IDs；模型和 Renderer 不得提供或覆盖。
-- world Fragment 不规定固定实体数量。它必须至少包含一个 world、一个稳定世界设定文档和一个有文档来源的事实；location、faction、附加文档、事实和 `related_to` 关系均可开放增长。
+- world Fragment 不规定固定实体数量。它必须至少包含一个 world、一个稳定世界设定文档和至少三个有文档来源的事实；location、faction、附加文档、事实和 `related_to` 关系均可开放增长。
 - 模型提供所有创作语义：标题、正文、事实 subject/predicate/value、关系端点选择。编译器不得补写世界事实、正文或标题。
 - 编译器可生成且只能生成：稳定内部 ID、资源父级、create/state/sortOrder、Change Set item ID、dependsOn、`greenfield_document_output:` 来源占位符及 author/gateway 已有机械字段。
 - 编译结果只调用一次现有 `executor.proposeChangeSet`。不得持久化 Fragment，不得多 Change Set，不得 post-apply retry，不得绕过 Policy/Gateway/ChangeSetService。

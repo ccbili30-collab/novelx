@@ -13,7 +13,7 @@ import {
   growthWorldMapBriefSchema,
   type TrustedGrowthWorldMapSources,
 } from "./growth/growthWorldMapBrief";
-import { compileGrowthWorldFragment } from "./growth/growthWorldFragment";
+import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "./growth/growthWorldFragment";
 import {
   isExplicitGreenfieldFreeCreateRequest,
   inspectProjectFilesResultSchema,
@@ -314,6 +314,9 @@ export function createStewardExecutionStateMachine(input: {
     } : input.growthBinding?.phase === "oc" && original.name === "propose_change_set" ? {
       description: "Submit one high-level OC Fragment. Supply two to eight character titles and character-profile metadata/content, plus optional character-to-character relationships. The trusted story target comes from pinned retrieval. Do not supply story/resource/evidence IDs, parents, dependencies, create/state fields, relation or document kinds, or project-file operations.",
       parameters: growthOcFragmentParameters,
+    } : input.growthBinding?.phase === "world" && original.name === "propose_change_set" ? {
+      description: "Submit one high-level world Fragment with at least one world, one setting document, and at least three model-supplied Assertions, each bound to one or more Fragment document sources. Locations, factions, additional documents, facts, and related_to selections remain open arrays. Do not supply low-level IDs, parents, dependencies, create/state fields, or project-file operations.",
+      parameters: growthWorldFragmentParameters,
     } : input.growthBinding?.phase === "world" && original.name === "generate_image" ? {
       description: "Generate the required source-bound world map. Supply only a creative title and visual prompt. The committed formal world and setting-document versions, purpose, idempotency key, Provider, and all identifiers are trusted by the Harness. Do not supply resource IDs, version IDs, hashes, paths, or authority fields.",
       parameters: growthWorldMapBriefParameters,

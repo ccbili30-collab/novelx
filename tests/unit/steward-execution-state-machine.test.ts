@@ -81,6 +81,10 @@ describe("Steward tool handoff state machine", () => {
     expect(machine.snapshot().plan).toEqual({
       objective: "change_set", scopeResourceIds: ["world-1", "oc-root", "story-root"], steps: ["retrieve_graph_evidence", "propose_change_set", "generate_image"],
     });
+    const worldProposalTool = tool(machine.tools, "propose_change_set");
+    expect(worldProposalTool.description).toContain("at least three model-supplied Assertions");
+    expect(JSON.stringify(worldProposalTool.parameters)).toContain('"assertions"');
+    expect(JSON.stringify(worldProposalTool.parameters)).toContain('"minItems":3');
     expect(machine.requiredNextTool()).toBe("retrieve_graph_evidence");
     await expect(tool(machine.tools, "retrieve_graph_evidence").execute("growth-legacy-retrieve", { scopeResourceIds: ["world-1"] }))
       .rejects.toMatchObject({ code: "STEWARD_GROWTH_RETRIEVAL_REQUIRED" });
@@ -808,7 +812,11 @@ function worldFragment() {
     world: { localId: "world", title: "Harbour World" },
     entities: [{ localId: "harbor", kind: "location" as const, title: "Harbor" }, { localId: "guild", kind: "faction" as const, title: "Guild" }],
     documents: [{ localId: "setting", ownerRef: "world", kind: "setting" as const, title: "Setting", content: "A stable setting document explains the coast, the historical rule, the culture shaped by its tides, the geography of each harbour, and the conflict that binds the world into one coherent creative source for future stories and characters." }],
-    assertions: [{ localId: "fact", scopeRef: "world", subject: "Harbour World", predicate: "has_rule", object: { rule: "tides" }, sourceDocumentRefs: ["setting"] }],
+    assertions: [
+      { localId: "fact", scopeRef: "world", subject: "Harbour World", predicate: "has_rule", object: { rule: "tides" }, sourceDocumentRefs: ["setting"] },
+      { localId: "culture", scopeRef: "world", subject: "Harbour culture", predicate: "is_shaped_by", object: { force: "tides" }, sourceDocumentRefs: ["setting"] },
+      { localId: "conflict", scopeRef: "world", subject: "Harbour conflict", predicate: "binds", object: { scope: "world" }, sourceDocumentRefs: ["setting"] },
+    ],
     relations: [],
   };
 }

@@ -9,7 +9,11 @@ const fragment = {
   world: { localId: "world", title: "Tide World" },
   entities: [{ localId: "harbor", kind: "location", title: "Harbor" }, { localId: "guild", kind: "faction", title: "Guild" }],
   documents: [{ localId: "setting", ownerRef: "world", kind: "setting", title: "Setting", content: settingContent }],
-  assertions: [{ localId: "tide", scopeRef: "world", subject: "tide", predicate: "governs", object: { target: "harbor" }, sourceDocumentRefs: ["setting"] }],
+  assertions: [
+    { localId: "tide", scopeRef: "world", subject: "tide", predicate: "governs", object: { target: "harbor", wording: "  model bytes stay exact  " }, sourceDocumentRefs: ["setting"] },
+    { localId: "ledger", scopeRef: "world", subject: "mariners", predicate: "record", object: { target: "public ledgers" }, sourceDocumentRefs: ["setting"] },
+    { localId: "moon", scopeRef: "world", subject: "families", predicate: "plan_by", object: { target: "moon" }, sourceDocumentRefs: ["setting"] },
+  ],
   relations: [{ localId: "world-harbor", sourceRef: "world", targetRef: "harbor" }],
 };
 
@@ -19,6 +23,21 @@ describe("Growth world Fragment compiler", () => {
     expect(growthWorldFragmentSchema.safeParse({ ...fragment, entities: [fragment.entities[0]] }).success).toBe(false);
     expect(growthWorldFragmentSchema.safeParse(fragment).success).toBe(true);
     expect((growthWorldFragmentParameters.properties.entities as { minItems?: number }).minItems).toBe(2);
+  });
+
+  it("requires at least three model-supplied source-bound assertions in both model contracts", () => {
+    for (const assertionCount of [0, 1, 2]) {
+      const candidate = { ...fragment, assertions: fragment.assertions.slice(0, assertionCount) };
+      expect(growthWorldFragmentSchema.safeParse(candidate).success).toBe(false);
+      expect(Value.Check(growthWorldFragmentParameters, candidate)).toBe(false);
+      expectFragmentCode(() => compileGrowthWorldFragment(candidate, {
+        cycleId: `cycle-assertions-${assertionCount}`,
+        worldRootResourceId: "world-root",
+      }), "GROWTH_FRAGMENT_INVALID");
+    }
+    expect(growthWorldFragmentSchema.safeParse(fragment).success).toBe(true);
+    expect(Value.Check(growthWorldFragmentParameters, fragment)).toBe(true);
+    expect((growthWorldFragmentParameters.properties.assertions as { minItems?: number }).minItems).toBe(3);
   });
 
   it("requires 200 trimmed setting characters while preserving accepted model bytes", () => {
@@ -34,7 +53,7 @@ describe("Growth world Fragment compiler", () => {
   it("enforces the setting branch with the TypeBox value validator", () => {
     const shortSetting = { ...fragment, documents: [{ ...fragment.documents[0], content: "x".repeat(199) }] };
     const exactSetting = { ...fragment, documents: [{ ...fragment.documents[0], content: "x".repeat(200) }] };
-    const shortKnowledge = { ...fragment, documents: [{ ...fragment.documents[0], localId: "note", kind: "knowledge_note", title: "Note", content: "brief" }], assertions: [{ ...fragment.assertions[0], sourceDocumentRefs: ["note"] }] };
+    const shortKnowledge = { ...fragment, documents: [{ ...fragment.documents[0], localId: "note", kind: "knowledge_note", title: "Note", content: "brief" }], assertions: fragment.assertions.map((assertion) => ({ ...assertion, sourceDocumentRefs: ["note"] })) };
     expect(Value.Check(growthWorldFragmentParameters, shortSetting)).toBe(false);
     expect(Value.Check(growthWorldFragmentParameters, exactSetting)).toBe(true);
     expect(Value.Check(growthWorldFragmentParameters, shortKnowledge)).toBe(true);
@@ -53,8 +72,19 @@ describe("Growth world Fragment compiler", () => {
     expect(first.items.every((item) => item.kind !== "project_file.put" && item.kind !== "project_file.delete")).toBe(true);
     const world = first.items.find((item) => item.kind === "resource.put" && item.payload.objectKind === "world");
     expect(world).toMatchObject({ payload: { create: true, state: "active", parentId: "world-root", title: fragment.world.title } });
-    const assertion = first.items.find((item) => item.kind === "assertion.put");
-    expect(assertion).toMatchObject({ payload: { subject: "tide", predicate: "governs", evidenceIds: [expect.stringMatching(/^greenfield_document_output:/)] } });
+    const assertions = first.items.filter((item) => item.kind === "assertion.put");
+    expect(assertions).toHaveLength(fragment.assertions.length);
+    for (const [index, assertion] of assertions.entries()) {
+      expect(assertion).toMatchObject({
+        payload: {
+          subject: fragment.assertions[index]!.subject,
+          predicate: fragment.assertions[index]!.predicate,
+          object: fragment.assertions[index]!.object,
+          evidenceIds: [expect.stringMatching(/^greenfield_document_output:/)],
+        },
+      });
+      expect(JSON.stringify((assertion.payload as { object: unknown }).object)).toBe(JSON.stringify(fragment.assertions[index]!.object));
+    }
   });
 
   it("orders nested resources topologically regardless of model input order", () => {

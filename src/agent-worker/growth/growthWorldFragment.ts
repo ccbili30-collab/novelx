@@ -27,7 +27,7 @@ export const growthWorldFragmentSchema = z.object({
   assertions: z.array(z.object({
     localId, scopeRef: localRef, subject: z.string().trim().min(1).max(500), predicate: z.string().trim().min(1).max(240),
     object: z.record(z.string().min(1).max(240), z.json()), sourceDocumentRefs: z.array(localRef).min(1).max(20),
-  }).strict()).min(1).max(200),
+  }).strict()).min(3).max(200),
   relations: z.array(z.object({ localId, sourceRef: localRef, targetRef: localRef }).strict()).max(200),
 }).strict().superRefine((value, ctx) => {
   const ids = [value.world.localId, ...value.entities.map((item) => item.localId), ...value.documents.map((item) => item.localId), ...value.assertions.map((item) => item.localId), ...value.relations.map((item) => item.localId)];
@@ -68,7 +68,7 @@ export const growthWorldFragmentParameters = Type.Object({
     Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), ownerRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), kind: Type.Literal("setting"), title: Type.String({ minLength: 1, maxLength: 500 }), content: Type.String({ minLength: 200, maxLength: 80000 }) }, { additionalProperties: false }),
     Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), ownerRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), kind: Type.Union([Type.Literal("location_profile"), Type.Literal("faction_profile"), Type.Literal("knowledge_note")]), title: Type.String({ minLength: 1, maxLength: 500 }), content: Type.String({ minLength: 1, maxLength: 80000 }) }, { additionalProperties: false }),
   ]), { minItems: 1, maxItems: 100 }),
-  assertions: Type.Array(Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), scopeRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), subject: Type.String({ minLength: 1, maxLength: 500 }), predicate: Type.String({ minLength: 1, maxLength: 240 }), object: Type.Object({}, { additionalProperties: true }), sourceDocumentRefs: Type.Array(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), { minItems: 1, maxItems: 20 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 200 }),
+  assertions: Type.Array(Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), scopeRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), subject: Type.String({ minLength: 1, maxLength: 500 }), predicate: Type.String({ minLength: 1, maxLength: 240 }), object: Type.Object({}, { additionalProperties: true }), sourceDocumentRefs: Type.Array(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), { minItems: 1, maxItems: 20 }) }, { additionalProperties: false }), { minItems: 3, maxItems: 200 }),
   relations: Type.Array(Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), sourceRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), targetRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }) }, { additionalProperties: false }), { maxItems: 200 }),
 }, { additionalProperties: false });
 

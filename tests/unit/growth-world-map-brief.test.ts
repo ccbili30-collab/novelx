@@ -12,7 +12,11 @@ const worldFragment = {
   world: { localId: "world", title: "Tidal World" },
   entities: [{ localId: "harbor", kind: "location" as const, title: "Harbor" }, { localId: "guild", kind: "faction" as const, title: "Guild" }],
   documents: [{ localId: "setting", ownerRef: "world", kind: "setting" as const, title: "Setting", content: "A stable world setting with tides, history, geography, rules, and cultural consequences. Mariners preserve the causal history in public records, map safe routes across changing coasts, and teach each generation why the rule remains binding when new conflicts emerge." }],
-  assertions: [{ localId: "fact", scopeRef: "world", subject: "Tide", predicate: "governs", object: { realm: "world" }, sourceDocumentRefs: ["setting"] }],
+  assertions: [
+    { localId: "fact", scopeRef: "world", subject: "Tide", predicate: "governs", object: { realm: "world" }, sourceDocumentRefs: ["setting"] },
+    { localId: "record", scopeRef: "world", subject: "Mariners", predicate: "preserve", object: { target: "causal history" }, sourceDocumentRefs: ["setting"] },
+    { localId: "route", scopeRef: "world", subject: "Maps", predicate: "show", object: { target: "safe routes" }, sourceDocumentRefs: ["setting"] },
+  ],
   relations: [],
 };
 
