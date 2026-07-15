@@ -2,8 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { validateToolArguments } from "@earendil-works/pi-ai/compat";
 import { handleAgentWorkerCommand, projectPublicArtifacts } from "../../src/agent-worker/workerController";
 import { createRoleOutputTool } from "../../src/agent-worker/contracts/roleOutputTool";
+import { growthIllustrationPlanParameters } from "../../src/agent-worker/growth/growthIllustrationPlan";
 import type { PublishedPrompt } from "../../src/agent-worker/promptRegistry";
-import { agentWorkerToolResponseSchema, growthRetrieveGraphEvidenceResultSchema, growthRunBindingSchema } from "../../src/shared/agentWorkerProtocol";
+import {
+  agentWorkerToolResponseSchema,
+  growthIllustrationPlanSchema,
+  growthRetrieveGraphEvidenceResultSchema,
+  growthRunBindingSchema,
+} from "../../src/shared/agentWorkerProtocol";
 import { agentRunEventSchema } from "../../src/shared/ipcContract";
 
 const auditRecorder = { record: async () => undefined };
@@ -80,6 +86,36 @@ describe("agent worker fail-closed contract", () => {
     expect(growthRetrieveGraphEvidenceResultSchema.safeParse({
       ...base, evidence: [{ ...relation, relation: { ...relation.relation, kind: "unknown_relation_kind" } }],
     }).success).toBe(false);
+  });
+
+  it("keeps the model-visible Growth Illustration Plan strict and authority-free", () => {
+    const item = {
+      targetEvidenceRef: "world",
+      evidenceRefs: ["world", "setting"],
+      purpose: "world_map" as const,
+      title: "Tidal atlas",
+      compositionDescription: "Arrange only the authorized geographic evidence.",
+      variantKey: "map_primary",
+    };
+    const plan = { coverageMode: "default" as const, items: [item] };
+
+    expect(growthIllustrationPlanSchema.parse(plan)).toEqual(plan);
+    for (const forbiddenField of [
+      "resourceId", "documentId", "branchId", "checkpointId", "permission", "jobId", "assetId",
+      "policyId", "policyHash", "providerId", "modelId", "sourceVersionId",
+    ]) {
+      expect(growthIllustrationPlanSchema.safeParse({
+        ...plan, items: [{ ...item, [forbiddenField]: "forged" }],
+      }).success).toBe(false);
+    }
+    const visibleSchema = JSON.stringify(growthIllustrationPlanParameters);
+    for (const forbidden of [
+      "resourceId", "documentId", "branchId", "checkpointId", "permission", "jobId", "assetId",
+      "policyId", "policyHash", "providerId", "modelId", "sourceVersionId",
+    ]) expect(visibleSchema).not.toContain(forbidden);
+    expect(visibleSchema).toContain("world_map");
+    expect(visibleSchema).toContain("character_portrait");
+    expect(visibleSchema).toContain("scene");
   });
 
   it("exposes strict Writer and Checker branch schemas at the Provider tool boundary", () => {

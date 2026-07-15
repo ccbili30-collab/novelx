@@ -102,6 +102,37 @@ export const growthRetrieveGraphEvidenceResultSchema = z.object({
   }).strict(),
 }).strict();
 
+const growthIllustrationPlanItemSchema = z.object({
+  targetEvidenceRef: identifierSchema,
+  evidenceRefs: z.array(identifierSchema).min(1).max(100),
+  purpose: z.enum(["world_map", "character_portrait", "scene"]),
+  title: z.string().trim().min(1).max(240),
+  compositionDescription: z.string().trim().min(1).max(8_000),
+  variantKey: z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/),
+  styleMode: z.literal("user_override").optional(),
+  userVisualSummary: z.string().trim().min(1).max(2_000).optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.styleMode === undefined) !== (value.userVisualSummary === undefined)) {
+    context.addIssue({ code: "custom", message: "Growth illustration style override fields must be paired." });
+  }
+  if (!value.evidenceRefs.includes(value.targetEvidenceRef)) {
+    context.addIssue({ code: "custom", path: ["targetEvidenceRef"], message: "Growth illustration target evidence must be cited." });
+  }
+  if (new Set(value.evidenceRefs).size !== value.evidenceRefs.length) {
+    context.addIssue({ code: "custom", path: ["evidenceRefs"], message: "Growth illustration evidence refs must be unique." });
+  }
+});
+
+export const growthIllustrationPlanSchema = z.object({
+  coverageMode: z.enum(["default", "all_visible_nodes", "custom"]),
+  items: z.array(growthIllustrationPlanItemSchema).min(1),
+}).strict().superRefine((value, context) => {
+  const variantKeys = value.items.map((item) => item.variantKey);
+  if (new Set(variantKeys).size !== variantKeys.length) {
+    context.addIssue({ code: "custom", path: ["items"], message: "Growth illustration variant keys must be unique." });
+  }
+});
+
 export const agentRetrieveGraphEvidenceArgsSchema = z.union([
   retrieveGraphEvidenceArgsSchema,
   growthRetrieveGraphEvidenceArgsSchema,
@@ -967,6 +998,7 @@ export type RetrieveGraphEvidenceResult = z.infer<typeof retrieveGraphEvidenceRe
 export type GrowthRunBinding = z.infer<typeof growthRunBindingSchema>;
 export type GrowthRetrieveGraphEvidenceArgs = z.infer<typeof growthRetrieveGraphEvidenceArgsSchema>;
 export type GrowthRetrieveGraphEvidenceResult = z.infer<typeof growthRetrieveGraphEvidenceResultSchema>;
+export type GrowthIllustrationPlan = z.infer<typeof growthIllustrationPlanSchema>;
 export type AgentRetrieveGraphEvidenceArgs = z.infer<typeof agentRetrieveGraphEvidenceArgsSchema>;
 export type InspectProjectFilesArgs = z.infer<typeof inspectProjectFilesArgsSchema>;
 export type InspectProjectFilesResult = z.infer<typeof inspectProjectFilesResultSchema>;
