@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "goalId": "growth-goal:3080fd1d-1189-4fae-acf1-5dba2900f942",
+  "failureCode": "GROWTH_LIVE_ACCEPTANCE_FAILED",
+  "postTermination": {
+    "cycles": [
+      {
+        "id": "growth-goal:3080fd1d-1189-4fae-acf1-5dba2900f942:cycle:1",
+        "sequence": 1,
+        "status": "blocked",
+        "failureCode": "GROWTH_CHANGE_SET_NOT_COMMITTED",
+        "runId": "73c14c8c-155e-464d-b0d2-68222be94a66",
+        "receiptId": "growth-receipt-3115ad90-b4c8-408d-af0a-07d5cf927cd9",
+        "changeSetId": null,
+        "inputCheckpointId": "c1e6d7f5-1988-4d78-95c6-e656f68611c8",
+        "outputCheckpointId": null,
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "blocked",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "blocked",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "counts": {
+      "resources": 0,
+      "documents": 0,
+      "assertions": 0,
+      "relations": 0
+    }
+  }
+}

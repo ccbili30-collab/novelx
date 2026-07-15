@@ -1,0 +1,219 @@
+{
+  "schemaVersion": 1,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [
+    {
+      "id": "growth-goal:286ecf6c-5dab-470d-9ae2-97b6d8869e5a:cycle:1",
+      "sequence": 1,
+      "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+      "status": "failed"
+    }
+  ],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "goalId": "growth-goal:286ecf6c-5dab-470d-9ae2-97b6d8869e5a",
+  "preTermination": {
+    "elapsedMs": 90787,
+    "cycles": [
+      {
+        "id": "growth-goal:286ecf6c-5dab-470d-9ae2-97b6d8869e5a:cycle:1",
+        "sequence": 1,
+        "status": "failed",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2"
+      }
+    ],
+    "growthEvents": [
+      {
+        "sequence": 1,
+        "cycleId": "growth-goal:286ecf6c-5dab-470d-9ae2-97b6d8869e5a:cycle:1",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 2,
+        "cycleId": "growth-goal:286ecf6c-5dab-470d-9ae2-97b6d8869e5a:cycle:1",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 3,
+        "cycleId": "growth-goal:286ecf6c-5dab-470d-9ae2-97b6d8869e5a:cycle:1",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 4,
+        "cycleId": "growth-goal:286ecf6c-5dab-470d-9ae2-97b6d8869e5a:cycle:1",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "phase": "cycle_terminal",
+        "durableState": "failed"
+      }
+    ],
+    "agentEvents": [
+      {
+        "type": "run.started",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "生成候选变更",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "生成候选变更",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "生成候选变更",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.failed",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "code": "PROVIDER_RUNTIME_FAILED"
+      }
+    ]
+  },
+  "failureCode": "GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED",
+  "postTermination": {
+    "cycles": [
+      {
+        "id": "growth-goal:286ecf6c-5dab-470d-9ae2-97b6d8869e5a:cycle:1",
+        "sequence": 1,
+        "status": "failed",
+        "failureCode": "GROWTH_PROVIDER_RUNTIME_FAILED",
+        "runId": "fdcab245-4021-4dc1-b62a-8b998d63a6f2",
+        "receiptId": "growth-receipt-f3ed44d8-acf9-4ac2-9a53-91d71736d6bf",
+        "changeSetId": null,
+        "inputCheckpointId": "741ad3ad-2e87-4fce-98bf-fb1772496f27",
+        "outputCheckpointId": null,
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "failed",
+              "errorCode": "GREENFIELD_PROJECT_FILE_MUTATION_FORBIDDEN"
+            },
+            {
+              "entityType": "tool",
+              "eventType": "failed",
+              "errorCode": "GREENFIELD_DOCUMENT_TARGET_REQUIRED"
+            },
+            {
+              "entityType": "tool",
+              "eventType": "failed",
+              "errorCode": "AGENT_TOOL_FAILED"
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "failed",
+              "errorCode": "PROVIDER_RUNTIME_FAILED"
+            },
+            {
+              "entityType": "run",
+              "eventType": "failed",
+              "errorCode": "PROVIDER_RUNTIME_FAILED"
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "failed"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "failed"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "failed"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "counts": {
+      "resources": 0,
+      "documents": 0,
+      "assertions": 0,
+      "relations": 0
+    }
+  }
+}
