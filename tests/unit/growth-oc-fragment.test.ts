@@ -41,6 +41,20 @@ describe("Growth OC Fragment compiler", () => {
     }, trusted), "GROWTH_OC_FRAGMENT_INVALID");
   });
 
+  it("accepts exactly 20,000 raw profile characters and rejects 20,001", () => {
+    const maximum = `${profile}${" ".repeat(20_000 - profile.length)}`;
+    expect(maximum).toHaveLength(20_000);
+    const atBoundary = compileGrowthOcFragment({
+      ...fragment,
+      characters: [{ ...fragment.characters[0], profile: { ...fragment.characters[0].profile, content: maximum } }, fragment.characters[1]],
+    }, trusted);
+    expect(atBoundary.items.filter((item) => item.kind === "document.put")[0]!.payload.content).toBe(maximum);
+    expectCode(() => compileGrowthOcFragment({
+      ...fragment,
+      characters: [{ ...fragment.characters[0], profile: { ...fragment.characters[0].profile, content: `${maximum}x` } }, fragment.characters[1]],
+    }, trusted), "GROWTH_OC_FRAGMENT_INVALID");
+  });
+
   it("rejects malformed local references, duplicate relationships, short profiles, and low-level fields", () => {
     expect(growthOcFragmentSchema.safeParse({ ...fragment, resourceId: "forged" }).success).toBe(false);
     expect((growthOcFragmentParameters as unknown as { properties: Record<string, unknown> }).properties).not.toHaveProperty("storyResourceId");

@@ -5,7 +5,7 @@ import { proposeChangeSetArgsSchema, type ProposeChangeSetArgs } from "../../sha
 
 const localId = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
 const title = z.string().trim().min(1).max(500);
-const profileContent = z.string().max(19_999).superRefine((value, context) => {
+const profileContent = z.string().max(20_000).superRefine((value, context) => {
   if (value.trim().length < 100) {
     context.addIssue({ code: "custom", message: "GROWTH_OC_FRAGMENT_INVALID" });
   }
@@ -60,7 +60,7 @@ export const growthOcFragmentParameters = Type.Object({
     profile: Type.Object({
       localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }),
       title: Type.String({ minLength: 1, maxLength: 500 }),
-      content: Type.String({ minLength: 1, maxLength: 19_999 }),
+      content: Type.String({ minLength: 1, maxLength: 20_000 }),
     }, { additionalProperties: false }),
   }, { additionalProperties: false }), { minItems: 2, maxItems: 8 }),
   relationships: Type.Optional(Type.Array(Type.Object({
