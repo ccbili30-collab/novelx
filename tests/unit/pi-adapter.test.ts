@@ -204,6 +204,27 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
     }
   });
 
+  it("classifies an incomplete terminal tool flow without exposing Provider output", async () => {
+    const faux = fauxProvider({ provider: "novax-incomplete-tool-flow-fixture" });
+    faux.setResponses([fauxAssistantMessage("", { stopReason: "toolUse" })]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const adapter = new NovaxPiRuntimeAdapter({
+      model: faux.getModel(),
+      streamFn: (model, context, options) => models.streamSimple(model, context, options),
+    });
+
+    await expect(adapter.run({
+      systemPrompt: "Contract fixture only.",
+      userInput: "测试",
+      tools: [],
+    })).rejects.toMatchObject({
+      code: "PROVIDER_PROTOCOL_FAILED",
+      providerProtocolStage: "PROVIDER_PROTOCOL_TOOL_FLOW_INCOMPLETE",
+      message: "Provider protocol failed.",
+    });
+  });
+
   it("uses one audited follow-up turn when the model omits the required result tool", async () => {
     const faux = fauxProvider({
       provider: "novax-correction-fixture",
@@ -241,7 +262,7 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
 
     expect(submitted).toBe(true);
     expect(result.receipt.correctionAttempts).toBe(1);
-    expect(faux.state.callCount).toBe(3);
+    expect(faux.state.callCount).toBe(2);
   });
 
   it("ends a rejected final-tool turn so the bounded correction loop can repair it", async () => {
@@ -280,7 +301,7 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
 
     expect(attempts).toBe(2);
     expect(result.receipt.correctionAttempts).toBe(1);
-    expect(faux.state.callCount).toBe(3);
+    expect(faux.state.callCount).toBe(2);
   });
 
   it("repairs one schema-invalid guarded result call with exactly one structured correction", async () => {
@@ -317,7 +338,7 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
 
     expect(submitted).toBe(true);
     expect(result.receipt.correctionAttempts).toBe(1);
-    expect(faux.state.callCount).toBe(3);
+    expect(faux.state.callCount).toBe(2);
   });
 
   it("repairs an unsatisfied toolUse turn even when no guarded-tool execution error is emitted", async () => {
@@ -353,7 +374,7 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
 
     expect(submitted).toBe(true);
     expect(result.receipt.correctionAttempts).toBe(1);
-    expect(faux.state.callCount).toBe(3);
+    expect(faux.state.callCount).toBe(2);
   });
 
   it("forces the single specialist result tool at the OpenAI-compatible payload boundary", async () => {
@@ -392,6 +413,8 @@ describe("Novax Pi Runtime Adapter contract fixture", () => {
       }],
       completionGuard: { toolName: "submit_result", isSatisfied: () => submitted, forceTool: true },
     });
+
+    expect(faux.state.callCount).toBe(1);
 
     expect(payloads).toContainEqual(expect.objectContaining({
       tool_choice: { type: "function", function: { name: "submit_result" } },

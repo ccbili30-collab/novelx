@@ -25,6 +25,7 @@ import {
   STRUCTURED_SUBMISSION_CORRECTION,
 } from "../../shared/agentRuntimeProfiles";
 import type { AgentCollaborationContext, AgentSessionHistory } from "../../shared/agentWorkerProtocol";
+import { providerProtocolError } from "./providerProtocolStage";
 
 interface AdapterDependencies {
   model: Model<string>;
@@ -142,7 +143,7 @@ export class NovaxPiRuntimeAdapter {
       streamFn: guardedStreamFn,
       toolExecution: "sequential",
       afterToolCall: input.completionGuard
-        ? async (context) => context.toolCall.name === input.completionGuard!.toolName && context.isError
+        ? async (context) => context.toolCall.name === input.completionGuard!.toolName
           ? { terminate: true }
           : undefined
         : undefined,
@@ -198,14 +199,14 @@ export class NovaxPiRuntimeAdapter {
     }
 
     if (admissionFailure) throw admissionFailure;
-    if (!finalMessage) throw piRuntimeError("PROVIDER_PROTOCOL_FAILED", "模型服务没有返回最终消息。");
+    if (!finalMessage) throw providerProtocolError("PROVIDER_PROTOCOL_NO_FINAL_MESSAGE");
     if (finalMessage.stopReason === "error") {
       throw piRuntimeError("PROVIDER_RUNTIME_FAILED", `模型服务运行失败：${safeProviderErrorDetail(finalMessage.errorMessage)}`);
     }
     if (finalMessage.stopReason === "aborted") throw piRuntimeError("AGENT_RUN_CANCELLED", "任务已取消。");
     if (finalMessage.stopReason === "length") throw piRuntimeError("PROVIDER_OUTPUT_INCOMPLETE", "模型输出被截断。");
     if (finalMessage.stopReason === "toolUse" && !input.completionGuard?.isSatisfied()) {
-      throw piRuntimeError("PROVIDER_PROTOCOL_FAILED", "模型工具流程没有正常结束。");
+      throw providerProtocolError("PROVIDER_PROTOCOL_TOOL_FLOW_INCOMPLETE");
     }
 
     const maximumAdmission = admissionDecisions.reduce((maximum, decision) =>

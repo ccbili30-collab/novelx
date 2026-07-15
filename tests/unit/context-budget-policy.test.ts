@@ -66,12 +66,16 @@ describe("token-estimated context admission policy", () => {
       maxTokens: 1_000,
       requestNumber: 1,
     })).toThrow(expect.objectContaining({ code: "AGENT_CONTEXT_BUDGET_EXCEEDED" }));
-    expect(() => evaluateContextAdmission({
+    const requestLimit = () => evaluateContextAdmission({
       context: contextWithText("x"),
       contextWindow: 64_000,
       maxTokens: 8_000,
       requestNumber: 129,
-    })).toThrow(expect.objectContaining({ code: "PROVIDER_PROTOCOL_FAILED" }));
+    });
+    expect(requestLimit).toThrow(expect.objectContaining({
+      code: "PROVIDER_PROTOCOL_FAILED",
+      providerProtocolStage: "PROVIDER_PROTOCOL_REQUEST_LIMIT_EXCEEDED",
+    }));
   });
 
   it("blocks before the stream function can make a network request", async () => {

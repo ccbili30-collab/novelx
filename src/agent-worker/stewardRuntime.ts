@@ -6,6 +6,7 @@ import type { ProviderRuntimeProfile } from "../shared/providerContract";
 import type { RoleOutputToolCapture } from "./contracts/roleOutputTool";
 import { stewardOutputSchema, type StewardOutput } from "./contracts/roleOutputs";
 import type { SafePiEvent } from "./pi/eventProjection";
+import { auditProviderProtocolStage, providerProtocolError } from "./pi/providerProtocolStage";
 import type { RuntimeAdapter } from "./pi/runtimeAdapterContract";
 import type { PublishedPrompt } from "./promptRegistry";
 import { createStewardExecutionStateMachine, type GeneratedImageReference, type InspectedProjectFileReference, type RetrievedDocumentReference } from "./stewardExecutionStateMachine";
@@ -101,8 +102,13 @@ export async function runStewardRuntime(input: {
     if (input.signal?.aborted) throw stewardRuntimeError("AGENT_RUN_CANCELLED");
     const submission = machine.resultCapture.getSubmission();
     const submissionCount = machine.resultCapture.getSubmissionCount();
-    if (submissionCount !== 1 || !submission) throw stewardRuntimeError("PROVIDER_PROTOCOL_FAILED");
-    const output = stewardOutputSchema.parse(submission);
+    if (submissionCount !== 1 || !submission) throw providerProtocolError("PROVIDER_PROTOCOL_STRUCTURED_RESULT_MISSING");
+    let output: StewardOutput;
+    try {
+      output = stewardOutputSchema.parse(submission);
+    } catch {
+      throw providerProtocolError("PROVIDER_PROTOCOL_STRUCTURED_RESULT_INVALID");
+    }
     await input.audit.record(input.runId, {
       type: "invocation.terminal",
       invocationId,
@@ -132,7 +138,7 @@ export async function runStewardRuntime(input: {
         type: "invocation.terminal",
         invocationId,
         eventType: readErrorCode(effectiveCause) === "AGENT_RUN_CANCELLED" ? "cancelled" : "failed",
-        errorCode: readErrorCode(effectiveCause) ?? "AGENT_RUN_FAILED",
+        errorCode: auditProviderProtocolStage(effectiveCause) ?? readErrorCode(effectiveCause) ?? "AGENT_RUN_FAILED",
         receipt: emptyAuditReceipt(null),
         structuredSubmissionCount: input.resultCapture.getSubmissionCount(),
         outputSha256: null,

@@ -4,6 +4,7 @@ import {
   CONTEXT_ADMISSION_POLICY_VERSION,
   TOKEN_ESTIMATOR_VERSION,
 } from "../../shared/contextAdmissionContract";
+import { providerProtocolError } from "./providerProtocolStage";
 
 export { CONTEXT_ADMISSION_POLICY_VERSION } from "../../shared/contextAdmissionContract";
 export const MAX_PROVIDER_REQUESTS_PER_INVOCATION = 128;
@@ -40,7 +41,7 @@ export function evaluateContextAdmission(input: {
   classification?: ContextAdmissionClassification;
 }): ContextAdmissionDecision {
   if (input.requestNumber > MAX_PROVIDER_REQUESTS_PER_INVOCATION) {
-    throw contextAdmissionError("PROVIDER_PROTOCOL_FAILED");
+    throw providerProtocolError("PROVIDER_PROTOCOL_REQUEST_LIMIT_EXCEEDED");
   }
   const safetyReserve = Math.max(4_096, Math.ceil(input.contextWindow * 0.1));
   const serializedContext = canonicalJson(input.context);
