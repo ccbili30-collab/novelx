@@ -1,0 +1,3 @@
+# Growth Story Fragment Compiler
+
+Growth story Cycles expose a compact Story Fragment rather than low-level Change Set items. The model supplies only summary and titles plus a retrieved world evidence ID. The preceding Writer candidate is the sole prose source; the compiler copies it byte-for-byte and creates one story, prose document pair, and `uses_world` relation with deterministic IDs and dependencies. Invalid Fragment/evidence failures occur before the existing executor and may use only the existing bounded pre-executor correction. Gateway or ChangeSetService failures are terminal and never retried. This adds no persistence, public protocol, or policy change; OC support remains separate.

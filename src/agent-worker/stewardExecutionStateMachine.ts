@@ -2,7 +2,8 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type TSchema } from "typebox";
 import { z } from "zod";
 import type { RoleOutputToolCapture } from "./contracts/roleOutputTool";
-import { stewardOutputSchema, type StewardOutput } from "./contracts/roleOutputs";
+import { stewardOutputSchema, writerOutputSchema, type StewardOutput } from "./contracts/roleOutputs";
+import { compileGrowthStoryFragment, growthStoryFragmentParameters } from "./growth/growthStoryFragment";
 import {
   isExplicitGreenfieldFreeCreateRequest,
   inspectProjectFilesResultSchema,
@@ -61,6 +62,12 @@ const greenfieldCorrectionCodes = new Set([
   "GREENFIELD_RELATION_ENDPOINT_REQUIRED",
   "GREENFIELD_RELATION_DEPENDENCY_REQUIRED",
   "GREENFIELD_CONSTRAINT_SCOPE_REQUIRED",
+]);
+const storyCorrectionCodes = new Set([
+  "GROWTH_STORY_FRAGMENT_INVALID",
+  "GROWTH_STORY_FRAGMENT_DUPLICATE_LOCAL_ID",
+  "GROWTH_STORY_FRAGMENT_WRITER_EVIDENCE_REQUIRED",
+  "GROWTH_STORY_FRAGMENT_WORLD_EVIDENCE_INVALID",
 ]);
 
 const planSchema = z.object({
@@ -148,11 +155,11 @@ function isGreenfieldProposalCorrection(
   tool: OperationalToolName,
   error: unknown,
 ): boolean {
-  return binding?.phase === "world"
-    && binding.greenfieldCreateAuthorized
-    && tool === "propose_change_set"
-    && Boolean(error && typeof error === "object" && "code" in error
-      && typeof error.code === "string" && greenfieldCorrectionCodes.has(error.code));
+  const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
+  return tool === "propose_change_set" && code !== null && (
+    (binding?.phase === "world" && binding.greenfieldCreateAuthorized && greenfieldCorrectionCodes.has(code))
+    || (binding?.phase === "story" && storyCorrectionCodes.has(code))
+  );
 }
 
 interface ExecutionRecord {
@@ -220,6 +227,9 @@ export function createStewardExecutionStateMachine(input: {
   const allowedEvidenceIds = new Set<string>();
   let proposedChangeSet: z.infer<typeof proposeChangeSetResultSchema> | null = null;
   let growthReceiptRecorded = false;
+  const growthWorldsByEvidenceId = new Map<string, string>();
+  let trustedStoryWorld: { evidenceId: string; resourceId: string } | null = null;
+  let writerCandidate: { text: string; evidenceIds: string[] } | null = null;
   let greenfieldProposalCorrectionAttempts = 0;
   const committedOutputIds = new Set<string>();
   const forbiddenExternalEchoTokens = extractExternalEchoTokens(input.userInput);
@@ -272,6 +282,10 @@ export function createStewardExecutionStateMachine(input: {
 
   const wrappedOperationalTools = input.operationalTools.map((original): AgentTool => ({
     ...original,
+    ...(input.growthBinding?.phase === "story" && original.name === "propose_change_set" ? {
+      description: "Submit one high-level Story Fragment. Supply only story and prose creative metadata; the trusted unique world target comes from pinned retrieval, and prose content comes only from the preceding Writer result. Do not supply world evidence or resource IDs, low-level IDs, dependencies, create/state fields, relation kinds, or project-file operations.",
+      parameters: growthStoryFragmentParameters,
+    } : {}),
     execute: async (toolCallId, params, signal, onUpdate) => {
       const name = asOperationalToolName(original.name);
       const nextFile = name === "read_project_file" && plan?.objective === "inspect_files" ? nextLongReadFile() : null;
@@ -291,9 +305,23 @@ export function createStewardExecutionStateMachine(input: {
         : normalizeOperationalParams(name, params);
       requireCurrentStep(name, effectiveParams);
       try {
-        const result = await original.execute(toolCallId, effectiveParams, signal, onUpdate);
+        const writerParams = readObject(effectiveParams);
+        const writerEvidence = Array.isArray(writerParams?.evidenceIds) ? writerParams.evidenceIds.filter((value): value is string => typeof value === "string") : [];
+        const compiledParams = input.growthBinding?.phase === "story" && name === "writer" && trustedStoryWorld
+          ? { ...(writerParams ?? {}), evidenceIds: [...new Set([...writerEvidence, trustedStoryWorld.evidenceId])] }
+          : input.growthBinding?.phase === "story" && name === "propose_change_set"
+          ? compileGrowthStoryFragment(effectiveParams, {
+              cycleId: input.growthBinding.cycleId,
+              storyRootResourceId: input.growthBinding.domainRootResourceIds.story,
+              writerCandidateText: writerCandidate?.text ?? "",
+              writerEvidenceIds: writerCandidate?.evidenceIds ?? [],
+              worldEvidenceId: trustedStoryWorld?.evidenceId ?? "",
+              worldResourceId: trustedStoryWorld?.resourceId ?? "",
+            })
+          : effectiveParams;
+        const result = await original.execute(toolCallId, compiledParams, signal, onUpdate);
         const details = readToolDetails(result);
-        applySuccessfulResult(name, details);
+        applySuccessfulResult(name, details, effectiveParams);
         if (plan?.objective !== "inspect_files") nextStepIndex += 1;
         executions.push({ tool: name, status: "succeeded", details });
         return appendRequiredNextTool(result, requiredNextTool());
@@ -456,6 +484,12 @@ export function createStewardExecutionStateMachine(input: {
     if (name === "propose_change_set" && input.growthBinding && !growthReceiptRecorded) {
       throw stateError("STEWARD_GROWTH_RECEIPT_REQUIRED");
     }
+    if (name === "writer" && input.growthBinding?.phase === "story") {
+      const writer = readObject(params);
+      const evidenceIds = Array.isArray(writer?.evidenceIds) ? writer.evidenceIds.filter((value): value is string => typeof value === "string") : [];
+      if (evidenceIds.some((id) => !allowedEvidenceIds.has(id)) || !trustedStoryWorld) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");
+    }
+    if (name === "propose_change_set" && input.growthBinding?.phase === "story" && !writerCandidate) throw stateError("STEWARD_STORY_WRITER_REQUIRED");
     if (name === "save_task_note") {
       const note = saveTaskNoteArgsSchema.safeParse(params);
       if (!note.success || !pendingReadRange || note.data.source.path !== pendingReadRange.path
@@ -484,7 +518,7 @@ export function createStewardExecutionStateMachine(input: {
     }
   }
 
-  function applySuccessfulResult(name: OperationalToolName, details: unknown): void {
+  function applySuccessfulResult(name: OperationalToolName, details: unknown, params?: unknown): void {
     if (name === "list_project_directory") {
       const listing = listProjectDirectoryResultSchema.safeParse(details);
       if (!listing.success) throw stateError("STEWARD_TOOL_RESULT_INVALID");
@@ -504,7 +538,15 @@ export function createStewardExecutionStateMachine(input: {
         const retrieval = growthRetrieveGraphEvidenceResultSchema.safeParse(details);
         if (!retrieval.success || !retrieval.data.receiptRecorded) throw stateError("STEWARD_TOOL_RESULT_INVALID");
         growthReceiptRecorded = true;
-        for (const evidence of retrieval.data.evidence) allowedEvidenceIds.add(evidence.evidenceId);
+        for (const evidence of retrieval.data.evidence) {
+          allowedEvidenceIds.add(evidence.evidenceId);
+          if (evidence.kind === "resource" && evidence.resource.type === "world" && evidence.resource.objectKind === "world") growthWorldsByEvidenceId.set(evidence.evidenceId, evidence.resource.resourceId);
+        }
+        if (input.growthBinding.phase === "story") {
+          const worlds = [...growthWorldsByEvidenceId.entries()].map(([evidenceId, resourceId]) => ({ evidenceId, resourceId })).filter((world, index, all) => all.findIndex((candidate) => candidate.resourceId === world.resourceId) === index);
+          if (worlds.length !== 1) { blockReason = "missing_source"; return; }
+          trustedStoryWorld = worlds[0]!;
+        }
         if (retrieval.data.evidence.length === 0 && !input.growthBinding.greenfieldCreateAuthorized) {
           blockReason = "missing_source";
         }
@@ -552,6 +594,16 @@ export function createStewardExecutionStateMachine(input: {
         kind: file.kind,
         complete: file.complete,
       })));
+      return;
+    }
+    if (name === "writer" && input.growthBinding?.phase === "story") {
+      const output = writerOutputSchema.safeParse(details);
+      if (!output.success) throw stateError("STEWARD_TOOL_RESULT_INVALID");
+      if (output.data.status !== "candidate") { blockReason = "tool_failed"; return; }
+      const writerInput = readObject(params);
+      const evidenceIds = Array.isArray(writerInput?.evidenceIds) ? writerInput.evidenceIds.filter((value): value is string => typeof value === "string") : [];
+      if (trustedStoryWorld && !evidenceIds.includes(trustedStoryWorld.evidenceId)) evidenceIds.push(trustedStoryWorld.evidenceId);
+      writerCandidate = { text: output.data.candidateText, evidenceIds };
       return;
     }
     if (name === "read_project_file") {

@@ -20,6 +20,7 @@ import { ImageAssetRepository } from "../../src/domain/asset/imageAssetRepositor
 import { ImageAssetStore } from "../../src/domain/asset/imageAssetStore";
 import { ImageGenerationService } from "../../src/domain/asset/imageGenerationService";
 import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growthWorldFragment";
+import { compileGrowthStoryFragment } from "../../src/agent-worker/growth/growthStoryFragment";
 
 const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
@@ -167,6 +168,30 @@ describe("Workspace Agent tool gateway", () => {
     expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get() as { count: number }).count)).toBe(0);
     expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_set_outputs").get() as { count: number }).count)).toBe(0);
     expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM resource_revisions WHERE object_kind <> 'domain_root'").get() as { count: number }).count)).toBe(0);
+  });
+
+  it("commits a compiled Story Fragment with Writer prose and one uses_world relation", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    seedProposeTool(workspace);
+    const gateway = createWorkspaceAgentToolGateway(workspace, new WorkspaceChangeSetPolicy(workspace), () => true);
+    const worldResult = await gateway.proposeChangeSet({ summary: "World", items: greenfieldWorldItems(worldRoot.id) }, invocationContext("free", true));
+    const world = new ResourceRepository(workspace).listCurrent().find((resource) => resource.objectKind === "world")!;
+    const storyRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "story" && resource.objectKind === "domain_root")!;
+    const initialHead = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+    const args = compileGrowthStoryFragment({ summary: "Story", story: { localId: "story", title: "Story" }, prose: { localId: "prose", title: "Prose" } }, {
+      cycleId: "cycle-story", storyRootResourceId: storyRoot.id, writerCandidateText: "Writer prose exactly.", writerEvidenceIds: ["world-evidence"], worldEvidenceId: "world-evidence", worldResourceId: world.id,
+    });
+    seedTool(workspace, "propose_change_set", "22222222-2222-4222-8222-222222222222");
+    const result = await gateway.proposeChangeSet(args, { ...invocationContext("free"), requestId: "22222222-2222-4222-8222-222222222222" });
+    expect(result).toMatchObject({ status: "committed", itemCount: 4 });
+    expect(new CheckpointRepository(workspace).getActiveBranch().headCheckpointId).not.toBe(initialHead);
+    expect(new ChangeSetRepository(workspace).listOutputs(result.changeSetId)).toHaveLength(4);
+    const story = new ResourceRepository(workspace).listCurrent().find((resource) => resource.objectKind === "story" && resource.parentId === storyRoot.id)!;
+    expect(new DocumentRepository(workspace).getCurrentStable(story.id)?.content).toBe("Writer prose exactly.");
+    const relation = workspace.db.prepare("SELECT source_resource_id, target_resource_id, kind FROM creative_relation_versions ORDER BY created_at DESC LIMIT 1").get() as { source_resource_id: string; target_resource_id: string; kind: string };
+    expect(relation).toEqual({ source_resource_id: story.id, target_resource_id: world.id, kind: "uses_world" });
+    expect(worldResult.changeSetId).not.toBe(result.changeSetId);
   });
 
   it("rejects Greenfield requests after formal content exists and never creates a Change Set", async () => {
@@ -553,10 +578,11 @@ function seedProposeTool(workspace: WorkspaceDatabase): void {
   seedTool(workspace, "propose_change_set");
 }
 
-function seedTool(workspace: WorkspaceDatabase, toolName: "propose_change_set" | "generate_image"): void {
+function seedTool(workspace: WorkspaceDatabase, toolName: "propose_change_set" | "generate_image", requestId = "11111111-1111-4111-8111-111111111111"): void {
   const audit = new AgentAuditRepository(workspace);
   const hash = "a".repeat(64);
-  audit.beginRun({
+  const existing = Boolean(workspace.db.prepare("SELECT 1 FROM agent_runs WHERE id = ?").get("run-test-only"));
+  if (!existing) audit.beginRun({
     runId: "run-test-only",
     mode: "assist",
     userInputSha256: hash,
@@ -564,7 +590,7 @@ function seedTool(workspace: WorkspaceDatabase, toolName: "propose_change_set" |
     requestedModelId: "test-model",
     providerConfigSha256: hash,
   });
-  audit.beginInvocation({
+  if (!existing) audit.beginInvocation({
     invocationId: "run-test-only:steward",
     runId: "run-test-only",
     parentInvocationId: null,
@@ -588,7 +614,7 @@ function seedTool(workspace: WorkspaceDatabase, toolName: "propose_change_set" |
     inputSha256: hash,
   });
   audit.beginTool({
-    toolInvocationId: "11111111-1111-4111-8111-111111111111",
+    toolInvocationId: requestId,
     runId: "run-test-only",
     invocationId: "run-test-only:steward",
     toolName,

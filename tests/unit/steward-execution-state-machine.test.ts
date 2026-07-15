@@ -145,7 +145,9 @@ describe("Steward tool handoff state machine", () => {
   it("binds trusted story and OC Growth phases to retrieve, Writer, then one proposal", async () => {
     for (const phase of ["story", "oc"] as const) {
       const retrieve = successfulTool("retrieve_graph_evidence", growthRetrievalResult());
-      const writer = successfulTool("writer", { accepted: true });
+      const writer = successfulTool("writer", phase === "story"
+        ? { status: "candidate", candidateText: "Writer prose.", evidenceIds: ["version-growth-setting"], gmResolutionId: null, authorityChanges: [] }
+        : { accepted: true });
       const propose = successfulTool("propose_change_set", {
         changeSetId: `growth-${phase}`, mode: "free", status: "committed", gateStatus: "ready", blockedReason: null, itemCount: 1,
         committedOutputs: [{ itemId: `output-${phase}`, kind: "document_version", outputId: `version-${phase}` }],
@@ -169,8 +171,10 @@ describe("Steward tool handoff state machine", () => {
       });
       await expect(tool(machine.tools, "propose_change_set").execute("writer-required", { summary: "blocked", items: [] }))
         .rejects.toMatchObject({ code: "STEWARD_STEP_OUT_OF_ORDER" });
-      await tool(machine.tools, "writer").execute("writer", {});
-      await tool(machine.tools, "propose_change_set").execute("propose", { summary: "complete", items: [{}] });
+      await tool(machine.tools, "writer").execute("writer", phase === "story" ? { evidenceIds: ["world-growth", "version-growth-setting"] } : {});
+      await tool(machine.tools, "propose_change_set").execute("propose", phase === "story"
+        ? { summary: "complete", story: { localId: "story", title: "Story" }, prose: { localId: "prose", title: "Prose" } }
+        : { summary: "complete", items: [{}] });
       expect(machine.snapshot().executions.map((entry) => entry.tool)).toEqual(["retrieve_graph_evidence", "writer", "propose_change_set"]);
     }
   });
@@ -771,6 +775,9 @@ function growthRetrievalResult() {
     variant: "growth_v1" as const,
     receiptRecorded: true,
     evidence: [{
+      evidenceId: "world-growth", kind: "resource" as const, label: "世界",
+      excerpt: null, resource: { resourceId: "world-1", type: "world" as const, objectKind: "world" as const },
+    }, {
       evidenceId: "version-growth-setting", kind: "document" as const, label: "世界设定",
       excerpt: "可追溯的设定依据。",
     }],
