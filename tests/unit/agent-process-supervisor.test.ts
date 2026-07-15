@@ -352,7 +352,12 @@ describe("Agent Process Supervisor internal tool gateway", () => {
   it("dispatches a source-bound world_map tool and emits only the structured ready result", async () => {
     const child = new FakeWorkerProcess();
     const events: unknown[] = [];
-    const generateImage = vi.fn(createGateway().generateImage);
+    const generateImage = vi.fn(async (args: Parameters<AgentToolGateway["generateImage"]>[0], context: Parameters<AgentToolGateway["generateImage"]>[1]) => {
+      context.onImageProgress?.("queued");
+      context.onImageProgress?.("generating");
+      context.onImageProgress?.("ready");
+      return createGateway().generateImage(args, context);
+    });
     const supervisor = new AgentProcessSupervisor("worker.js", {
       acquireRuntimeLease: () => createLease(createGateway({ generateImage })),
       spawnWorker: () => child,
@@ -383,8 +388,11 @@ describe("Agent Process Supervisor internal tool gateway", () => {
     });
     expect(JSON.stringify(child.sent[1])).not.toContain("apiKey");
     expect(events).toEqual([
-      { type: "run.activity", runId, label: "生成角色或场景图片", phase: "started", domains: ["asset"] },
-      { type: "run.activity", runId, label: "生成角色或场景图片", phase: "completed", domains: ["asset"] },
+      { type: "run.activity", runId, label: "生成世界地图", phase: "started", domains: ["asset"] },
+      { type: "run.activity", runId, label: "世界地图排队中", phase: "started", domains: ["asset"] },
+      { type: "run.activity", runId, label: "生成世界地图", phase: "started", domains: ["asset"] },
+      { type: "run.activity", runId, label: "世界地图已生成", phase: "completed", domains: ["asset"] },
+      { type: "run.activity", runId, label: "生成世界地图", phase: "completed", domains: ["asset"] },
     ]);
   });
 

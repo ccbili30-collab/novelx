@@ -7,6 +7,14 @@ import { compileGrowthOcFragment, growthOcFragmentParameters } from "./growth/gr
 import { compileGrowthStoryBrief, growthStoryBriefParameters, type TrustedStoryWorldEvidence } from "./growth/growthStoryBrief";
 import { compileGrowthStoryFragment, growthStoryFragmentParameters } from "./growth/growthStoryFragment";
 import {
+  compileGrowthWorldMapBrief,
+  deriveGrowthWorldMapSources,
+  growthWorldMapBriefParameters,
+  growthWorldMapBriefSchema,
+  type TrustedGrowthWorldMapSources,
+} from "./growth/growthWorldMapBrief";
+import { compileGrowthWorldFragment } from "./growth/growthWorldFragment";
+import {
   isExplicitGreenfieldFreeCreateRequest,
   inspectProjectFilesResultSchema,
   listProjectDirectoryResultSchema,
@@ -153,7 +161,9 @@ function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
   return {
     objective: "change_set",
     scopeResourceIds: [...binding.authorizedScopeResourceIds],
-    steps: binding.phase === "world" || binding.phase === "oc"
+    steps: binding.phase === "world"
+      ? ["retrieve_graph_evidence", "propose_change_set", "generate_image"]
+      : binding.phase === "oc"
       ? ["retrieve_graph_evidence", "propose_change_set"]
       : ["retrieve_graph_evidence", "writer", "propose_change_set"],
   };
@@ -241,6 +251,7 @@ export function createStewardExecutionStateMachine(input: {
   const growthStoriesByEvidenceId = new Map<string, string>();
   let trustedStoryWorld: TrustedStoryWorldEvidence | null = null;
   let trustedOcStory: { evidenceId: string; resourceId: string } | null = null;
+  let trustedWorldMapSources: TrustedGrowthWorldMapSources | null = null;
   let writerCandidate: { text: string; evidenceIds: string[] } | null = null;
   let greenfieldProposalCorrectionAttempts = 0;
   const committedOutputIds = new Set<string>();
@@ -303,6 +314,9 @@ export function createStewardExecutionStateMachine(input: {
     } : input.growthBinding?.phase === "oc" && original.name === "propose_change_set" ? {
       description: "Submit one high-level OC Fragment. Supply two to eight character titles and character-profile metadata/content, plus optional character-to-character relationships. The trusted story target comes from pinned retrieval. Do not supply story/resource/evidence IDs, parents, dependencies, create/state fields, relation or document kinds, or project-file operations.",
       parameters: growthOcFragmentParameters,
+    } : input.growthBinding?.phase === "world" && original.name === "generate_image" ? {
+      description: "Generate the required source-bound world map. Supply only a creative title and visual prompt. The committed formal world and setting-document versions, purpose, idempotency key, Provider, and all identifiers are trusted by the Harness. Do not supply resource IDs, version IDs, hashes, paths, or authority fields.",
+      parameters: growthWorldMapBriefParameters,
     } : {}),
     execute: async (toolCallId, params, signal, onUpdate) => {
       const name = asOperationalToolName(original.name);
@@ -340,7 +354,15 @@ export function createStewardExecutionStateMachine(input: {
               ocRootResourceId: input.growthBinding.domainRootResourceIds.oc,
               storyResourceId: trustedOcStory?.resourceId ?? "",
             })
+          : input.growthBinding?.phase === "world" && name === "generate_image"
+          ? compileGrowthWorldMapBrief(effectiveParams, {
+              cycleId: input.growthBinding.cycleId,
+              sources: trustedWorldMapSources ?? { worldResourceId: "", sourceVersionIds: [] },
+            })
           : effectiveParams;
+        if (input.growthBinding?.phase === "world" && name === "generate_image") {
+          registerPendingImageRequest(compiledParams);
+        }
         const result = await original.execute(toolCallId, compiledParams, signal, onUpdate);
         const details = readToolDetails(result);
         applySuccessfulResult(name, details, compiledParams);
@@ -523,6 +545,13 @@ export function createStewardExecutionStateMachine(input: {
       }
     }
     if (name === "generate_image") {
+      if (input.growthBinding?.phase === "world") {
+        if (!growthWorldMapBriefSchema.safeParse(params).success) throw stateError("STEWARD_IMAGE_SOURCE_MISMATCH");
+        if (proposedChangeSet?.status !== "committed" || !trustedWorldMapSources) {
+          throw stateError("STEWARD_GREENFIELD_WORLD_MAP_SOURCE_MISMATCH");
+        }
+        return;
+      }
       const image = generateImageArgsSchema.safeParse(params);
       if (!image.success
         || (!isGreenfieldWorldMapPlan(activePlan)
@@ -537,8 +566,26 @@ export function createStewardExecutionStateMachine(input: {
           throw stateError("STEWARD_GREENFIELD_WORLD_MAP_SOURCE_MISMATCH");
         }
       }
-      pendingImageRequest = image.data;
+      registerPendingImageRequest(image.data);
     }
+  }
+
+  function registerPendingImageRequest(params: unknown): void {
+    const image = generateImageArgsSchema.safeParse(params);
+    if (!image.success
+      || (!isGreenfieldWorldMapPlan(plan!)
+        && image.data.sourceResourceIds.some((resourceId) => !plan!.scopeResourceIds.includes(resourceId)))
+      || image.data.sourceVersionIds.some((versionId) => !allowedEvidenceIds.has(versionId))) {
+      throw stateError("STEWARD_IMAGE_SOURCE_MISMATCH");
+    }
+    if (isGreenfieldWorldMapPlan(plan!)) {
+      if (image.data.purpose !== "world_map" || proposedChangeSet?.status !== "committed"
+        || committedOutputIds.size === 0
+        || image.data.sourceVersionIds.some((versionId) => !committedOutputIds.has(versionId))) {
+        throw stateError("STEWARD_GREENFIELD_WORLD_MAP_SOURCE_MISMATCH");
+      }
+    }
+    pendingImageRequest = image.data;
   }
 
   function applySuccessfulResult(name: OperationalToolName, details: unknown, params?: unknown): void {
@@ -696,6 +743,17 @@ export function createStewardExecutionStateMachine(input: {
         for (const output of proposal.data.committedOutputs ?? []) {
           allowedEvidenceIds.add(output.outputId);
           committedOutputIds.add(output.outputId);
+        }
+        if (input.growthBinding?.phase === "world") {
+          try {
+            const compiledWorldProposal = compileGrowthWorldFragment(params, {
+              cycleId: input.growthBinding.cycleId,
+              worldRootResourceId: input.growthBinding.domainRootResourceIds.world,
+            });
+            trustedWorldMapSources = deriveGrowthWorldMapSources(compiledWorldProposal, proposal.data);
+          } catch {
+            throw stateError("STEWARD_GREENFIELD_WORLD_MAP_SOURCE_MISMATCH");
+          }
         }
       }
       if (proposal.data.status === "failed" || proposal.data.status === "rejected" || proposal.data.gateStatus === "blocked") {

@@ -1,6 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { describe, expect, it, vi } from "vitest";
 import { createRoleOutputTool } from "../../src/agent-worker/contracts/roleOutputTool";
+import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growthWorldFragment";
 import { createStewardExecutionStateMachine } from "../../src/agent-worker/stewardExecutionStateMachine";
 import {
   isExplicitGreenfieldFreeCreateRequest,
@@ -78,7 +79,7 @@ describe("Steward tool handoff state machine", () => {
 
     expect(machine.tools.map((candidate) => candidate.name)).not.toContain("submit_steward_plan");
     expect(machine.snapshot().plan).toEqual({
-      objective: "change_set", scopeResourceIds: ["world-1", "oc-root", "story-root"], steps: ["retrieve_graph_evidence", "propose_change_set"],
+      objective: "change_set", scopeResourceIds: ["world-1", "oc-root", "story-root"], steps: ["retrieve_graph_evidence", "propose_change_set", "generate_image"],
     });
     expect(machine.requiredNextTool()).toBe("retrieve_graph_evidence");
     await expect(tool(machine.tools, "retrieve_graph_evidence").execute("growth-legacy-retrieve", { scopeResourceIds: ["world-1"] }))
@@ -90,9 +91,9 @@ describe("Steward tool handoff state machine", () => {
       variant: "growth_v1", query: "世界设定", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
       expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
     });
-    await tool(machine.tools, "propose_change_set").execute("growth-propose", { summary: "补充", items: [{}] });
+    expect(machine.requiredNextTool()).toBe("propose_change_set");
     expect(machine.snapshot().executions.map((execution) => `${execution.tool}:${execution.status}`))
-      .toEqual(["retrieve_graph_evidence:succeeded", "propose_change_set:succeeded"]);
+      .toEqual(["retrieve_graph_evidence:succeeded"]);
   });
 
   it("rejects skipped steps and binds final tool outcomes to the real trace", async () => {
@@ -328,10 +329,10 @@ describe("Steward tool handoff state machine", () => {
     const retrieve = successfulTool("retrieve_graph_evidence", emptyReceipt);
     let attempts = 0;
     const propose = successfulTool("propose_change_set", greenfieldCommittedProposal());
-    propose.execute = async () => {
+    propose.execute = async (_requestId, args) => {
       attempts += 1;
       if (attempts === 1) throw Object.assign(new Error("safe"), { code: "GREENFIELD_RESOURCE_CREATE_REQUIRED" });
-      return { content: [{ type: "text", text: "ok" }], details: greenfieldCommittedProposal() };
+      return { content: [{ type: "text", text: "ok" }], details: committedWorldProposalFor(compileGrowthWorldFragment(args, { cycleId: "cycle", worldRootResourceId: "world-root" })) };
     };
     const machine = createStewardExecutionStateMachine({
       mode: "free", userInput: "Growth seed", authorizedScopeResourceIds: ["world-root"], growthBinding: binding,
@@ -341,10 +342,10 @@ describe("Steward tool handoff state machine", () => {
       variant: "growth_v1", query: "seed", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
       expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
     });
-    await expect(tool(machine.tools, "propose_change_set").execute("invalid", { summary: "retry", items: [] }))
+    await expect(tool(machine.tools, "propose_change_set").execute("invalid", worldFragment()))
       .rejects.toMatchObject({ code: "GREENFIELD_RESOURCE_CREATE_REQUIRED" });
     expect(machine.requiredNextTool()).toBe("propose_change_set");
-    await tool(machine.tools, "propose_change_set").execute("valid", { summary: "corrected", items: [{}] });
+    await tool(machine.tools, "propose_change_set").execute("valid", worldFragment());
     expect(attempts).toBe(2);
     expect(machine.snapshot().executions.map((entry) => `${entry.tool}:${entry.status}`))
       .toEqual(["retrieve_graph_evidence:succeeded", "propose_change_set:failed", "propose_change_set:succeeded"]);
@@ -360,7 +361,7 @@ describe("Steward tool handoff state machine", () => {
       expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
     });
     for (const requestId of ["one", "two", "three"]) {
-      await expect(tool(blocked.tools, "propose_change_set").execute(requestId, { summary: "retry", items: [] }))
+      await expect(tool(blocked.tools, "propose_change_set").execute(requestId, worldFragment()))
         .rejects.toMatchObject({ code: "GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED" });
     }
     expect(blocked.requiredNextTool()).toBe("submit_steward_result");
@@ -380,7 +381,7 @@ describe("Steward tool handoff state machine", () => {
       variant: "growth_v1", query: "seed", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
       expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
     });
-    await expect(tool(nonRetry.tools, "propose_change_set").execute("policy", { summary: "no retry", items: [] }))
+    await expect(tool(nonRetry.tools, "propose_change_set").execute("policy", worldFragment()))
       .rejects.toMatchObject({ code: "CHANGE_SET_POLICY_INVALID" });
     expect(policyAttempts).toBe(1);
     expect(nonRetry.requiredNextTool()).toBe("submit_steward_result");
@@ -799,6 +800,32 @@ function greenfieldCommittedProposal() {
       { itemId: "world-assertion", kind: "assertion_version", outputId: "version-world-assertion" },
     ],
   } as const;
+}
+
+function worldFragment() {
+  return {
+    summary: "Create a world with a stable setting.",
+    world: { localId: "world", title: "Harbour World" },
+    entities: [{ localId: "harbor", kind: "location" as const, title: "Harbor" }, { localId: "guild", kind: "faction" as const, title: "Guild" }],
+    documents: [{ localId: "setting", ownerRef: "world", kind: "setting" as const, title: "Setting", content: "A stable setting document explains the coast, the historical rule, the culture shaped by its tides, the geography of each harbour, and the conflict that binds the world into one coherent creative source for future stories and characters." }],
+    assertions: [{ localId: "fact", scopeRef: "world", subject: "Harbour World", predicate: "has_rule", object: { rule: "tides" }, sourceDocumentRefs: ["setting"] }],
+    relations: [],
+  };
+}
+
+function committedWorldProposalFor(args: unknown) {
+  const items = (args as { items: Array<{ id: string; kind: string; payload: Record<string, unknown> }> }).items;
+  const world = items.find((item) => item.kind === "resource.put" && item.payload.objectKind === "world");
+  const setting = items.find((item) => item.kind === "document.put");
+  if (!world || !setting) throw new Error("TEST_WORLD_PROPOSAL_INVALID");
+  return {
+    changeSetId: "change-greenfield", mode: "free" as const, status: "committed" as const, gateStatus: "ready" as const,
+    blockedReason: null, itemCount: items.length,
+    committedOutputs: [
+      { itemId: world.id, kind: "resource_revision" as const, outputId: "version-world-resource" },
+      { itemId: setting.id, kind: "document_version" as const, outputId: "version-world-document" },
+    ],
+  };
 }
 
 function worldMapRequest() {

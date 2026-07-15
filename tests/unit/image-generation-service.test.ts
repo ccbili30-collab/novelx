@@ -17,31 +17,44 @@ describe("ImageGenerationService", () => {
   it("persists one real response-shaped asset and reuses it without a second charge", async () => {
     const client = vi.fn().mockResolvedValue({ bytes: ONE_PIXEL_PNG, responseId: "response-1" });
     const service = createService(client);
-    const first = await service.generate(request(), profile());
-    const replay = await service.generate(request(), profile());
+    const firstProgress: string[] = [];
+    const replayProgress: string[] = [];
+    const first = await service.generate(request(), profile(), undefined, (progress) => firstProgress.push(progress));
+    const replay = await service.generate(request(), profile(), undefined, (progress) => replayProgress.push(progress));
     expect(client).toHaveBeenCalledTimes(1);
     expect(replay.asset).toEqual(first.asset);
     expect(first.job.status).toBe("succeeded");
     expect(fs.existsSync(path.join(root, first.asset.relativePath))).toBe(true);
+    expect(firstProgress).toEqual(["queued", "generating", "ready"]);
+    expect(replayProgress).toEqual(["ready"]);
   });
 
   it("requires reconciliation after an uncertain network outcome and never retries it", async () => {
     const client = vi.fn().mockRejectedValue(new ResponsesImageProviderError("IMAGE_PROVIDER_CONNECTION_FAILED", true));
     const service = createService(client);
-    await expect(service.generate(request(), profile())).rejects.toMatchObject({ code: "IMAGE_PROVIDER_CONNECTION_FAILED" });
+    const progress: string[] = [];
+    await expect(service.generate(request(), profile(), undefined, (state) => progress.push(state))).rejects.toMatchObject({ code: "IMAGE_PROVIDER_CONNECTION_FAILED" });
     const job = new ImageAssetRepository(workspace!).getJobByIdempotencyKey("visual-1")!;
     expect(job.status).toBe("reconciliation_required");
     await expect(service.generate(request(), profile())).rejects.toMatchObject({ code: "IMAGE_JOB_RECONCILIATION_REQUIRED" });
     expect(client).toHaveBeenCalledTimes(1);
+    expect(progress).toEqual(["queued", "generating", "reconciliation_required"]);
   });
 
   it("records a definitive provider rejection as failed", async () => {
     const client = vi.fn().mockRejectedValue(new ResponsesImageProviderError("IMAGE_PROVIDER_GENERATION_FAILED", false, 400));
     const service = createService(client);
-    await expect(service.generate(request(), profile())).rejects.toMatchObject({ code: "IMAGE_PROVIDER_GENERATION_FAILED" });
+    const progress: string[] = [];
+    await expect(service.generate(request(), profile(), undefined, (state) => progress.push(state))).rejects.toMatchObject({ code: "IMAGE_PROVIDER_GENERATION_FAILED" });
     expect(new ImageAssetRepository(workspace!).getJobByIdempotencyKey("visual-1")).toMatchObject({
       status: "failed", errorCode: "IMAGE_PROVIDER_GENERATION_FAILED",
     });
+    expect(progress).toEqual(["queued", "generating", "failed"]);
+  });
+
+  it("isolates observer failures from durable image completion", async () => {
+    const service = createService(vi.fn().mockResolvedValue({ bytes: ONE_PIXEL_PNG, responseId: "response-observer" }));
+    await expect(service.generate(request(), profile(), undefined, () => { throw new Error("observer"); })).resolves.toMatchObject({ job: { status: "succeeded" } });
   });
 
   it("serializes separate service instances for the same workspace", async () => {

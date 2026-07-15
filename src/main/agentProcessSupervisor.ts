@@ -23,6 +23,7 @@ import {
   statProjectFileResultSchema,
   saveTaskNoteResultSchema,
   listTaskNotesResultSchema,
+  generateImageArgsSchema,
   generateImageResultSchema,
   agentToolInternalErrorCodeSchema,
   type AgentWorkerToolRequest,
@@ -63,6 +64,7 @@ import {
 } from "../shared/providerContract";
 import type { AgentAuditStore } from "../domain/audit/agentAuditRepository";
 import { canonicalAuditHash } from "../domain/audit/canonicalAuditHash";
+import type { ImageGenerationProgress } from "../domain/asset/imageGenerationService";
 import { promptManifest } from "../agent-worker/prompts/manifest";
 
 export interface AgentToolInvocationContext {
@@ -71,6 +73,7 @@ export interface AgentToolInvocationContext {
   requestId: string;
   mode: "free" | "assist";
   greenfieldCreateRequested?: boolean;
+  onImageProgress?: (progress: ImageGenerationProgress) => void;
   signal: AbortSignal;
 }
 
@@ -192,7 +195,7 @@ export class AgentProcessSupervisor {
     this.#acquireRuntimeLease = options.acquireRuntimeLease ?? (() => null);
     this.#getProviderProfile = options.getProviderProfile ?? (() => null);
     this.#toolTimeoutMs = options.toolTimeoutMs ?? 15_000;
-    this.#imageToolTimeoutMs = options.imageToolTimeoutMs ?? 180_000;
+    this.#imageToolTimeoutMs = options.imageToolTimeoutMs ?? 300_000;
     this.#cancelGraceMs = options.cancelGraceMs ?? 1_000;
     this.#spawnWorker = options.spawnWorker ?? spawnWorkerProcess;
     this.#reportWorkerDiagnostic = options.reportWorkerDiagnostic ?? (() => undefined);
@@ -469,6 +472,14 @@ export class AgentProcessSupervisor {
       requestId: request.requestId,
       mode: run.mode,
       greenfieldCreateRequested: run.greenfieldCreateRequested,
+      onImageProgress: request.tool === "generate_image"
+        ? (progress) => {
+            try {
+              const activity = imageProgressActivity(request.args, progress);
+              run.emit({ type: "run.activity", runId, label: activity.label, phase: activity.phase, domains: ["asset"] });
+            } catch { /* Safe progress delivery cannot alter the image outcome. */ }
+          }
+        : undefined,
       signal: controller.signal,
     };
     const operation: Promise<unknown> = (async () => {
@@ -613,7 +624,7 @@ export class AgentProcessSupervisor {
         run.emit({
           type: "run.activity",
           runId,
-          label: "生成角色或场景图片",
+          label: presentation.label,
           phase: "completed",
           domains: ["asset"],
         });
@@ -987,8 +998,32 @@ function toolPresentation(request: AgentWorkerToolRequest): { label: string; dom
   if (isProjectFileTool(request.tool)) return { label: "检查项目文件" };
   if (request.tool === "retrieve_graph_evidence") return { label: "检索项目事实", domains: ["graph"] };
   if (request.tool === "inspect_project_files") return { label: "检查项目文件" };
-  if (request.tool === "generate_image") return { label: "生成角色或场景图片", domains: ["asset"] };
+  if (request.tool === "generate_image") {
+    const image = generateImageArgsSchema.safeParse(request.args);
+    return { label: image.success && image.data.purpose === "world_map" ? "生成世界地图" : "生成角色或场景图片", domains: ["asset"] };
+  }
   return { label: "生成候选变更", domains: proposalDomains(request.args as ProposeChangeSetArgs) };
+}
+
+function imageProgressActivity(
+  args: unknown,
+  progress: ImageGenerationProgress,
+): { label: string; phase: "started" | "completed" | "failed" } {
+  const worldMap = generateImageArgsSchema.safeParse(args).success
+    && generateImageArgsSchema.parse(args).purpose === "world_map";
+  if (!worldMap) {
+    return progress === "ready"
+      ? { label: "图片已生成", phase: "completed" }
+      : progress === "failed" || progress === "reconciliation_required"
+      ? { label: "图片生成失败", phase: "failed" }
+      : { label: "生成角色或场景图片", phase: "started" };
+  }
+  if (progress === "queued") return { label: "世界地图排队中", phase: "started" };
+  if (progress === "generating") return { label: "生成世界地图", phase: "started" };
+  if (progress === "ready") return { label: "世界地图已生成", phase: "completed" };
+  return progress === "reconciliation_required"
+    ? { label: "世界地图需要核对", phase: "failed" }
+    : { label: "世界地图生成失败", phase: "failed" };
 }
 
 function proposalDomains(args: ProposeChangeSetArgs): ActivityDomain[] {

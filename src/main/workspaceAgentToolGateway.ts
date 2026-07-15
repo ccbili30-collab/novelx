@@ -33,6 +33,8 @@ import { ImageAssetStore } from "../domain/asset/imageAssetStore";
 import { ImageGenerationService } from "../domain/asset/imageGenerationService";
 import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeSetPolicy";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
+import { CreativeDocumentRepository } from "../domain/workspace/creativeDocumentRepository";
+import { DocumentRepository } from "../domain/workspace/documentRepository";
 
 interface WorkspaceAgentToolGatewayOptions {
   getImageProviderProfile?(): ImageProviderRuntimeProfile | null;
@@ -140,7 +142,7 @@ export function createWorkspaceAgentToolGateway(
           prompt: args.prompt,
           sourceResourceIds: args.sourceResourceIds,
           sourceVersionIds: args.sourceVersionIds,
-        }, profile, context.signal);
+        }, profile, context.signal, context.onImageProgress);
         assertAvailable(context.signal);
         return generateImageResultSchema.parse({
           jobId: result.job.id,
@@ -235,28 +237,24 @@ function assertCurrentWorldMapSources(
   })) {
     throw gatewayError("WORLD_MAP_SOURCE_WORLD_REQUIRED", "A world map requires a current formal world resource.");
   }
-  const rows = workspace.db.prepare(`
-    WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
-      SELECT head_checkpoint_id, 0 FROM branches WHERE id = ?
-      UNION ALL
-      SELECT checkpoints.parent_checkpoint_id, ancestry.depth + 1
-      FROM checkpoints JOIN ancestry ON checkpoints.id = ancestry.checkpoint_id
-      WHERE checkpoints.parent_checkpoint_id IS NOT NULL
-    ), current_resource_versions AS (
-      SELECT resource_id, id, ROW_NUMBER() OVER (PARTITION BY resource_id ORDER BY ancestry.depth ASC) AS revision_rank
-      FROM resource_revisions JOIN ancestry ON ancestry.checkpoint_id = resource_revisions.created_checkpoint_id
-    ), current_document_versions AS (
-      SELECT resource_id, id, ROW_NUMBER() OVER (
-        PARTITION BY resource_id ORDER BY ancestry.depth ASC, document_versions.created_at DESC, document_versions.rowid DESC
-      ) AS version_rank
-      FROM document_versions JOIN ancestry ON ancestry.checkpoint_id = document_versions.created_checkpoint_id
-    )
-    SELECT resource_id, id FROM current_resource_versions WHERE revision_rank = 1
-    UNION ALL
-    SELECT resource_id, id FROM current_document_versions WHERE version_rank = 1
-  `).all(branch.id) as Array<{ resource_id: string; id: string }>;
-  const versionOwners = new Map(rows.map((row) => [row.id, row.resource_id]));
-  if (args.sourceVersionIds.some((versionId) => !args.sourceResourceIds.includes(versionOwners.get(versionId) ?? ""))) {
+  const resources = new ResourceRepository(workspace);
+  const documents = new DocumentRepository(workspace);
+  const creativeDocuments = new CreativeDocumentRepository(workspace);
+  const currentDocumentOwners = new Map<string, string>();
+  for (const resourceId of args.sourceResourceIds) {
+    const legacy = documents.getCurrentStable(resourceId, branch.id);
+    if (legacy) currentDocumentOwners.set(legacy.id, resourceId);
+    for (const creative of creativeDocuments.listCurrent(resourceId, branch.id)) {
+      const stable = documents.getCurrentStableForCreativeDocument(creative.id, branch.id);
+      if (stable) currentDocumentOwners.set(stable.id, resourceId);
+    }
+  }
+  const valid = args.sourceVersionIds.every((versionId) => {
+    const resource = resources.getVisibleByRevisionIdAtCheckpoint(versionId, branch.headCheckpointId);
+    return args.sourceResourceIds.includes(resource?.id ?? "")
+      || args.sourceResourceIds.includes(currentDocumentOwners.get(versionId) ?? "");
+  });
+  if (!valid) {
     throw gatewayError(
       "WORLD_MAP_SOURCE_VERSION_INVALID",
       "World map sources must be current stable versions bound to the supplied resources.",

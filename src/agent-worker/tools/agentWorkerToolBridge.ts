@@ -53,7 +53,7 @@ export class AgentWorkerToolBridge {
   readonly #imageTimeoutMs: number;
   readonly #pending = new Map<string, PendingRequest>();
 
-  constructor(send: SendToMain, timeoutMs = 20_000, imageTimeoutMs = 190_000) {
+  constructor(send: SendToMain, timeoutMs = 20_000, imageTimeoutMs = 310_000) {
     this.#send = send;
     this.#timeoutMs = timeoutMs;
     this.#imageTimeoutMs = imageTimeoutMs;

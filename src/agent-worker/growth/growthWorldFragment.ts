@@ -5,18 +5,25 @@ import { proposeChangeSetArgsSchema, type ProposeChangeSetArgs } from "../../sha
 
 const localId = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
 const localRef = localId;
-const text = z.string().trim().min(1).max(80_000);
+const documentContent = z.string().max(80_000).refine((value) => value.trim().length > 0, "GROWTH_FRAGMENT_INVALID");
+const settingDocument = z.object({
+  localId, ownerRef: localRef, kind: z.literal("setting"),
+  title: z.string().trim().min(1).max(500), content: documentContent,
+}).strict().superRefine((value, ctx) => {
+  if (value.content.trim().length < 200) ctx.addIssue({ code: "custom", message: "GROWTH_FRAGMENT_WORLD_SETTING_MIN_LENGTH" });
+});
+const otherDocument = z.object({
+  localId, ownerRef: localRef, kind: z.enum(["location_profile", "faction_profile", "knowledge_note"]),
+  title: z.string().trim().min(1).max(500), content: documentContent,
+}).strict();
 
 export const growthWorldFragmentSchema = z.object({
   summary: z.string().trim().min(1).max(2_000),
   world: z.object({ localId, title: z.string().trim().min(1).max(500) }).strict(),
   entities: z.array(z.object({
     localId, kind: z.enum(["location", "faction"]), title: z.string().trim().min(1).max(500), parentRef: localRef.optional(),
-  }).strict()).max(100),
-  documents: z.array(z.object({
-    localId, ownerRef: localRef, kind: z.enum(["setting", "location_profile", "faction_profile", "knowledge_note"]),
-    title: z.string().trim().min(1).max(500), content: text,
-  }).strict()).min(1).max(100),
+  }).strict()).min(2).max(100),
+  documents: z.array(z.discriminatedUnion("kind", [settingDocument, otherDocument])).min(1).max(100),
   assertions: z.array(z.object({
     localId, scopeRef: localRef, subject: z.string().trim().min(1).max(500), predicate: z.string().trim().min(1).max(240),
     object: z.record(z.string().min(1).max(240), z.json()), sourceDocumentRefs: z.array(localRef).min(1).max(20),
@@ -50,13 +57,17 @@ export type GrowthWorldFragmentErrorCode =
   | "GROWTH_FRAGMENT_REFERENCE_CYCLE"
   | "GROWTH_FRAGMENT_PARENT_KIND_INVALID"
   | "GROWTH_FRAGMENT_WORLD_SETTING_REQUIRED"
+  | "GROWTH_FRAGMENT_WORLD_SETTING_MIN_LENGTH"
   | "GROWTH_FRAGMENT_RELATION_INVALID";
 
 export const growthWorldFragmentParameters = Type.Object({
   summary: Type.String({ minLength: 1, maxLength: 2000 }),
   world: Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), title: Type.String({ minLength: 1, maxLength: 500 }) }, { additionalProperties: false }),
-  entities: Type.Array(Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), kind: Type.Union([Type.Literal("location"), Type.Literal("faction")]), title: Type.String({ minLength: 1, maxLength: 500 }), parentRef: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" })) }, { additionalProperties: false }), { maxItems: 100 }),
-  documents: Type.Array(Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), ownerRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), kind: Type.Union([Type.Literal("setting"), Type.Literal("location_profile"), Type.Literal("faction_profile"), Type.Literal("knowledge_note")]), title: Type.String({ minLength: 1, maxLength: 500 }), content: Type.String({ minLength: 1, maxLength: 80000 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 100 }),
+  entities: Type.Array(Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), kind: Type.Union([Type.Literal("location"), Type.Literal("faction")]), title: Type.String({ minLength: 1, maxLength: 500 }), parentRef: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" })) }, { additionalProperties: false }), { minItems: 2, maxItems: 100 }),
+  documents: Type.Array(Type.Union([
+    Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), ownerRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), kind: Type.Literal("setting"), title: Type.String({ minLength: 1, maxLength: 500 }), content: Type.String({ minLength: 200, maxLength: 80000 }) }, { additionalProperties: false }),
+    Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), ownerRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), kind: Type.Union([Type.Literal("location_profile"), Type.Literal("faction_profile"), Type.Literal("knowledge_note")]), title: Type.String({ minLength: 1, maxLength: 500 }), content: Type.String({ minLength: 1, maxLength: 80000 }) }, { additionalProperties: false }),
+  ]), { minItems: 1, maxItems: 100 }),
   assertions: Type.Array(Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), scopeRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), subject: Type.String({ minLength: 1, maxLength: 500 }), predicate: Type.String({ minLength: 1, maxLength: 240 }), object: Type.Object({}, { additionalProperties: true }), sourceDocumentRefs: Type.Array(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), { minItems: 1, maxItems: 20 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 200 }),
   relations: Type.Array(Type.Object({ localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), sourceRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }), targetRef: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }) }, { additionalProperties: false }), { maxItems: 200 }),
 }, { additionalProperties: false });
@@ -71,6 +82,7 @@ export function compileGrowthWorldFragment(input: unknown, trusted: { cycleId: s
       "GROWTH_FRAGMENT_REFERENCE_INVALID",
       "GROWTH_FRAGMENT_PARENT_KIND_INVALID",
       "GROWTH_FRAGMENT_WORLD_SETTING_REQUIRED",
+      "GROWTH_FRAGMENT_WORLD_SETTING_MIN_LENGTH",
       "GROWTH_FRAGMENT_RELATION_INVALID",
     ] as const) if (messages.has(code)) throw fragmentError(code);
     throw fragmentError("GROWTH_FRAGMENT_INVALID");

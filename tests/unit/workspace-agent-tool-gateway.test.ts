@@ -13,6 +13,7 @@ import { ChangeSetRepository } from "../../src/domain/changeSet/changeSetReposit
 import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
+import { CreativeDocumentRepository } from "../../src/domain/workspace/creativeDocumentRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
 import { createWorkspaceAgentToolGateway } from "../../src/main/workspaceAgentToolGateway";
@@ -128,7 +129,7 @@ describe("Workspace Agent tool gateway", () => {
         { localId: "pier", kind: "location", title: "Pier", parentRef: "harbor" },
         { localId: "harbor", kind: "location", title: "Harbor", parentRef: "world" },
       ],
-      documents: [{ localId: "setting", ownerRef: "world", kind: "setting", title: "Setting", content: "The tide governs the harbor." }],
+      documents: [{ localId: "setting", ownerRef: "world", kind: "setting", title: "Setting", content: "The tide governs the harbor, drawing saltwater through the old piers at dawn and leaving silver channels across the market stones by noon. Harbor families read the moon tables before they trade, while watchkeepers keep the lantern towers lit whenever the current turns rough. Every new voyage is planned around the floodgates, and every home keeps a brass tide bell beside its door." }],
       assertions: [{ localId: "tide", scopeRef: "world", subject: "tide", predicate: "governs", object: { target: "harbor" }, sourceDocumentRefs: ["setting"] }],
       relations: [{ localId: "world-harbor", sourceRef: "world", targetRef: "harbor" }],
     }, { cycleId: "cycle-compiled", worldRootResourceId: worldRoot.id });
@@ -469,6 +470,27 @@ describe("Workspace Agent tool gateway", () => {
 
     expect(result).toMatchObject({ purpose: "world_map", status: "ready" });
     expect(client).toHaveBeenCalledOnce();
+  });
+
+  it("accepts the current setting version when a world also has a later active knowledge note, and rejects a superseded setting version", async () => {
+    const { root, workspace } = createWorkspace();
+    const resources = new ResourceRepository(workspace);
+    const checkpoints = new CheckpointRepository(workspace);
+    const worldRoot = resources.listCurrent().find((resource) => resource.type === "world")!;
+    const world = resources.putRevisionWithReceipt({ resourceId: "world.multi-document", create: true, checkpointId: checkpoints.getActiveBranch().headCheckpointId, type: "world", objectKind: "world", title: "Source World", parentId: worldRoot.id, state: "active" });
+    const creative = new CreativeDocumentRepository(workspace);
+    const setting = creative.putRevisionWithReceipt({ documentId: "setting.multi-document", create: true, checkpointId: checkpoints.getActiveBranch().headCheckpointId, resourceId: world.resourceId, kind: "setting", title: "Setting", state: "active" });
+    const knowledge = creative.putRevisionWithReceipt({ documentId: "knowledge.multi-document", create: true, checkpointId: checkpoints.getActiveBranch().headCheckpointId, resourceId: world.resourceId, kind: "knowledge_note", title: "Knowledge", state: "active" });
+    const documents = new DocumentRepository(workspace);
+    const settingVersion = documents.putVersion({ resourceId: world.resourceId, creativeDocumentId: setting.documentId, checkpointId: checkpoints.getActiveBranch().headCheckpointId, content: "Current setting." , authorKind: "user" });
+    documents.putVersion({ resourceId: world.resourceId, creativeDocumentId: knowledge.documentId, checkpointId: checkpoints.getActiveBranch().headCheckpointId, content: "Later knowledge note.", authorKind: "user" });
+    seedTool(workspace, "generate_image");
+    const client = vi.fn().mockResolvedValue({ bytes: ONE_PIXEL_PNG, responseId: "multi-document-map" });
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true, { getImageProviderProfile: imageProfile, createImageGenerationService: () => new ImageGenerationService(new ImageAssetRepository(workspace), new ImageAssetStore(root), client) });
+    await expect(gateway.generateImage({ title: "Map", purpose: "world_map", prompt: "Map", sourceResourceIds: [world.resourceId], sourceVersionIds: [world.revisionId, settingVersion], idempotencyKey: "multi-document-current" }, invocationContext("assist"))).resolves.toMatchObject({ status: "ready" });
+    const nextCheckpoint = checkpoints.appendCheckpoint(checkpoints.getActiveBranch().id, "Supersede setting");
+    documents.putVersion({ resourceId: world.resourceId, creativeDocumentId: setting.documentId, checkpointId: nextCheckpoint, content: "New setting.", authorKind: "user" });
+    await expect(gateway.generateImage({ title: "Old map", purpose: "world_map", prompt: "Old map", sourceResourceIds: [world.resourceId], sourceVersionIds: [world.revisionId, settingVersion], idempotencyKey: "multi-document-superseded" }, invocationContext("assist"))).rejects.toMatchObject({ code: "WORLD_MAP_SOURCE_VERSION_INVALID" });
   });
 
   it("rejects a world_map source that is not a formal world before calling the Provider", async () => {

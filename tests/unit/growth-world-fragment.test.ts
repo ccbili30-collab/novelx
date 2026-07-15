@@ -1,16 +1,45 @@
 import { describe, expect, it } from "vitest";
-import { compileGrowthWorldFragment, growthWorldFragmentSchema } from "../../src/agent-worker/growth/growthWorldFragment";
+import { Value } from "typebox/value";
+import { compileGrowthWorldFragment, growthWorldFragmentParameters, growthWorldFragmentSchema } from "../../src/agent-worker/growth/growthWorldFragment";
+
+const settingContent = "The tide governs the harbor, its history, its geography, its rules, and the cultural consequences carried by every voyage. Mariners record the changes in public ledgers, families plan their work by the moon, and the guild preserves warnings so the world remains coherent across seasons and stories.";
 
 const fragment = {
   summary: "Create a source-bound world.",
   world: { localId: "world", title: "Tide World" },
-  entities: [{ localId: "harbor", kind: "location", title: "Harbor" }],
-  documents: [{ localId: "setting", ownerRef: "world", kind: "setting", title: "Setting", content: "The tide governs the harbor." }],
+  entities: [{ localId: "harbor", kind: "location", title: "Harbor" }, { localId: "guild", kind: "faction", title: "Guild" }],
+  documents: [{ localId: "setting", ownerRef: "world", kind: "setting", title: "Setting", content: settingContent }],
   assertions: [{ localId: "tide", scopeRef: "world", subject: "tide", predicate: "governs", object: { target: "harbor" }, sourceDocumentRefs: ["setting"] }],
   relations: [{ localId: "world-harbor", sourceRef: "world", targetRef: "harbor" }],
 };
 
 describe("Growth world Fragment compiler", () => {
+  it("requires at least two location or faction entities in both model contracts", () => {
+    expect(growthWorldFragmentSchema.safeParse({ ...fragment, entities: [] }).success).toBe(false);
+    expect(growthWorldFragmentSchema.safeParse({ ...fragment, entities: [fragment.entities[0]] }).success).toBe(false);
+    expect(growthWorldFragmentSchema.safeParse(fragment).success).toBe(true);
+    expect((growthWorldFragmentParameters.properties.entities as { minItems?: number }).minItems).toBe(2);
+  });
+
+  it("requires 200 trimmed setting characters while preserving accepted model bytes", () => {
+    expect(growthWorldFragmentSchema.safeParse({ ...fragment, documents: [{ ...fragment.documents[0], content: "x".repeat(199) }] }).success).toBe(false);
+    expect(growthWorldFragmentSchema.safeParse({ ...fragment, documents: [{ ...fragment.documents[0], content: `${" ".repeat(100)}${"x".repeat(199)}` }] }).success).toBe(false);
+    const exact = "x".repeat(200);
+    const compiled = compileGrowthWorldFragment({ ...fragment, documents: [{ ...fragment.documents[0], content: exact }] }, { cycleId: "cycle-setting-minimum", worldRootResourceId: "world-root" });
+    expect(compiled.items.find((item) => item.kind === "document.put")).toMatchObject({ payload: { content: exact } });
+    expect(JSON.stringify(growthWorldFragmentParameters)).toContain('"minLength":200');
+    expect(growthWorldFragmentSchema.safeParse({ ...fragment, documents: [{ ...fragment.documents[0], content: " ".repeat(200) }] }).success).toBe(false);
+  });
+
+  it("enforces the setting branch with the TypeBox value validator", () => {
+    const shortSetting = { ...fragment, documents: [{ ...fragment.documents[0], content: "x".repeat(199) }] };
+    const exactSetting = { ...fragment, documents: [{ ...fragment.documents[0], content: "x".repeat(200) }] };
+    const shortKnowledge = { ...fragment, documents: [{ ...fragment.documents[0], localId: "note", kind: "knowledge_note", title: "Note", content: "brief" }], assertions: [{ ...fragment.assertions[0], sourceDocumentRefs: ["note"] }] };
+    expect(Value.Check(growthWorldFragmentParameters, shortSetting)).toBe(false);
+    expect(Value.Check(growthWorldFragmentParameters, exactSetting)).toBe(true);
+    expect(Value.Check(growthWorldFragmentParameters, shortKnowledge)).toBe(true);
+  });
+
   it("rejects duplicate or missing local references without accepting low-level fields", () => {
     expect(growthWorldFragmentSchema.safeParse({ ...fragment, entities: [...fragment.entities, { localId: "world", kind: "location", title: "Duplicate" }] }).success).toBe(false);
     expect(growthWorldFragmentSchema.safeParse({ ...fragment, documents: [{ ...fragment.documents[0], ownerRef: "missing" }] }).success).toBe(false);
