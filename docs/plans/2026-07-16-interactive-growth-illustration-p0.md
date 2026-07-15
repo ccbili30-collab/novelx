@@ -232,7 +232,9 @@ const defaultVisualStyle = {
 - Test: `tests/unit/agent-worker-contract.test.ts`
 - Test: `tests/unit/steward-execution-state-machine.test.ts`
 - Test: `tests/unit/growth-coordinator.test.ts`
+- Test: `tests/unit/growth-guidance-ipc.test.ts`
 - Test: `tests/unit/growth-run-bridge.test.ts`
+- Test: `tests/unit/graph-retrieval-service.test.ts`
 - Test: `tests/unit/ipc-contract.test.ts`
 - Test: `tests/unit/workspace-persistence.test.ts`
 
