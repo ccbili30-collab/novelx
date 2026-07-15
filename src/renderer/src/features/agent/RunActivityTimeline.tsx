@@ -30,6 +30,12 @@ export function RunActivityTimeline(props: {
           </details>
         ))}
       </div>
+      {props.presentation.guidance?.pending && props.presentation.guidance.nextCycleSequence && props.presentation.guidance.nextCyclePhase ? (
+        <details className="growth-guidance-card">
+          <summary><strong>规则修订 #{props.presentation.guidance.latestSavedRevision}</strong><span>待下一边界</span></summary>
+          <p>将在第 {props.presentation.guidance.nextCycleSequence} 轮（{props.presentation.guidance.nextCyclePhase === "story" ? "故事" : "OC"}）开始前生效。</p>
+        </details>
+      ) : null}
       {props.artifacts.length ? <AgentArtifactList artifacts={props.artifacts} onOpenChangeSet={props.onOpenChangeSet} onOpenDocumentReference={props.onOpenDocumentReference} /> : null}
       {props.presentation.terminalLabel ? <footer role="status">{props.presentation.terminalLabel}</footer> : null}
     </section>

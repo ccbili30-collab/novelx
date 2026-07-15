@@ -1,4 +1,4 @@
-import type { AgentArtifact, AgentRunEvent, GrowthStartResponse } from "../../../../shared/ipcContract";
+import type { AgentArtifact, AgentRunEvent, GrowthGuideResponse, GrowthStartResponse } from "../../../../shared/ipcContract";
 
 type GrowthEvent = GrowthStartResponse["events"][number];
 type GrowthCycle = GrowthStartResponse["cycles"][number];
@@ -22,6 +22,19 @@ export interface GrowthTimelineRow {
   activities: GrowthAgentActivity[];
 }
 
+export interface GrowthGuidancePresentation {
+  activeRevision: number;
+  latestSavedRevision: number;
+  pending: boolean;
+  nextCycleSequence: number | null;
+  nextCyclePhase: "story" | "oc" | null;
+}
+
+export interface GrowthGuidanceAvailability {
+  canGuide: boolean;
+  reason: string | null;
+}
+
 export interface GrowthPresentation {
   goalId: string;
   coordinatorStatus: CoordinatorStatus;
@@ -32,6 +45,7 @@ export interface GrowthPresentation {
   agentActivities: GrowthAgentActivity[];
   rows: GrowthTimelineRow[];
   current: GrowthTimelineRow | null;
+  guidance: GrowthGuidancePresentation | null;
   running: boolean;
   terminalLabel: string | null;
 }
@@ -65,6 +79,7 @@ export function createGrowthPresentation(snapshot: GrowthStartResponse): GrowthP
     cycles: snapshot.cycles,
     events: uniqueEvents(snapshot.events),
     agentActivities: [],
+    guidance: guidanceFromSnapshot(snapshot),
   });
 }
 
@@ -81,7 +96,34 @@ export function mergeGrowthSnapshot(current: GrowthPresentation | null, snapshot
     cycles: snapshot.cycles,
     events: uniqueEvents([...current.events, ...snapshot.events]),
     agentActivities: current.agentActivities,
+    guidance: guidanceFromSnapshot(snapshot),
   });
+}
+
+export function recordGrowthGuidanceResponse(
+  current: GrowthPresentation,
+  response: GrowthGuideResponse,
+): GrowthPresentation {
+  if (response.goalId !== current.goalId || response.persistedRevision < (current.guidance?.latestSavedRevision ?? 0)) return current;
+  return derive({
+    ...current,
+    guidance: {
+      activeRevision: response.currentCycleRevision,
+      latestSavedRevision: response.persistedRevision,
+      pending: response.status === "persisted_pending_boundary",
+      nextCycleSequence: response.nextCycleSequence,
+      nextCyclePhase: response.nextCyclePhase,
+    },
+  });
+}
+
+export function getGrowthGuidanceAvailability(current: GrowthPresentation): GrowthGuidanceAvailability {
+  if (!current.running) return { canGuide: false, reason: "当前生长任务已不再运行，不能追加下一轮指导。" };
+  if (current.currentCycleSequence >= 3) return { canGuide: false, reason: "第 3 轮之后没有安全的下一轮边界。" };
+  if (current.currentCycleSequence < 1 || !current.guidance) {
+    return { canGuide: false, reason: "规则修订状态不可用，无法安全保存指导。" };
+  }
+  return { canGuide: true, reason: null };
 }
 
 export function mergeGrowthEvent(current: GrowthPresentation, event: GrowthEvent): GrowthPresentation {
@@ -187,6 +229,25 @@ function derive(input: Omit<GrowthPresentation, "rows" | "current" | "running" |
     current,
     running: input.coordinatorStatus === "running",
     terminalLabel: input.coordinatorStatus === "running" ? null : coordinatorLabel(input.coordinatorStatus),
+  };
+}
+
+function guidanceFromSnapshot(snapshot: GrowthStartResponse): GrowthGuidancePresentation | null {
+  const latestSavedRevision = snapshot.currentRuleRevision;
+  const activeRevision = snapshot.activeCycleRuleRevision;
+  const status = snapshot.guidanceStatus;
+  if (typeof latestSavedRevision !== "number" || typeof activeRevision !== "number" || status === undefined) return null;
+  if (status === "none") {
+    return { activeRevision, latestSavedRevision, pending: false, nextCycleSequence: null, nextCyclePhase: null };
+  }
+  const nextCycleSequence = snapshot.goal.currentCycleSequence + 1;
+  if ((nextCycleSequence !== 2 && nextCycleSequence !== 3) || latestSavedRevision <= activeRevision) return null;
+  return {
+    activeRevision,
+    latestSavedRevision,
+    pending: true,
+    nextCycleSequence,
+    nextCyclePhase: nextCycleSequence === 2 ? "story" : "oc",
   };
 }
 

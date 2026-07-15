@@ -17,10 +17,12 @@ import {
   appendGrowthAgentEvent,
   advanceGrowthVisualClimax,
   createGrowthPresentation,
+  getGrowthGuidanceAvailability,
   isGrowthBoundRun,
   mergeGrowthArtifacts,
   mergeGrowthEvent,
   mergeGrowthSnapshot,
+  recordGrowthGuidanceResponse,
   settleGrowthVisualClimax,
   type GrowthVisualClimaxState,
   type GrowthPresentation,
@@ -97,6 +99,10 @@ export function StewardRuntimePanel({
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [growthPresentation, setGrowthPresentation] = useState<GrowthPresentation | null>(null);
   const [growthArtifacts, setGrowthArtifacts] = useState<AgentArtifact[]>([]);
+  const [guidanceDraft, setGuidanceDraft] = useState("");
+  const [guidanceSaving, setGuidanceSaving] = useState(false);
+  const [guidanceNotice, setGuidanceNotice] = useState<string | null>(null);
+  const [guidanceError, setGuidanceError] = useState<string | null>(null);
   const nextEntryId = useRef(1);
   const terminalRunIds = useRef(new Set<string>());
   const growthRef = useRef<GrowthPresentation | null>(null);
@@ -123,14 +129,24 @@ export function StewardRuntimePanel({
   };
 
   const growthStorageKey = projectId && session ? `novelx:growth-goal:${projectId}:${session.id}` : null;
-  const growthRequestToken = useRef<GrowthRequestToken>({ generation: 0, scopeKey: null });
-  if (growthRequestToken.current.scopeKey !== growthStorageKey) {
-    growthRequestToken.current = advanceGrowthRequestToken(growthRequestToken.current, growthStorageKey);
+  const growthLoadRequestToken = useRef<GrowthRequestToken>({ generation: 0, scopeKey: null });
+  const growthGuidanceRequestToken = useRef<GrowthRequestToken>({ generation: 0, scopeKey: null });
+  if (growthLoadRequestToken.current.scopeKey !== growthStorageKey) {
+    growthLoadRequestToken.current = advanceGrowthRequestToken(growthLoadRequestToken.current, growthStorageKey);
+  }
+  if (growthGuidanceRequestToken.current.scopeKey !== growthStorageKey) {
+    growthGuidanceRequestToken.current = advanceGrowthRequestToken(growthGuidanceRequestToken.current, growthStorageKey);
   }
 
-  function beginGrowthRequest() {
-    const next = advanceGrowthRequestToken(growthRequestToken.current, growthStorageKey);
-    growthRequestToken.current = next;
+  function beginGrowthLoadRequest() {
+    const next = advanceGrowthRequestToken(growthLoadRequestToken.current, growthStorageKey);
+    growthLoadRequestToken.current = next;
+    return next;
+  }
+
+  function beginGrowthGuidanceRequest() {
+    const next = advanceGrowthRequestToken(growthGuidanceRequestToken.current, growthStorageKey);
+    growthGuidanceRequestToken.current = next;
     return next;
   }
 
@@ -197,7 +213,7 @@ export function StewardRuntimePanel({
       if (!session || event.sessionId !== session.id) return;
       const growth = growthRef.current;
       const isGrowthRun = isGrowthBoundRun(growth, event.runId);
-      if (isGrowthRun && growthRequestToken.current.scopeKey !== subscriptionScopeKey) return;
+      if (isGrowthRun && growthLoadRequestToken.current.scopeKey !== subscriptionScopeKey) return;
       if (event.type === "run.started") {
         if (!terminalRunIds.current.has(event.runId)) setActiveRunId(event.runId);
         return;
@@ -245,7 +261,7 @@ export function StewardRuntimePanel({
     const subscriptionScopeKey = growthStorageKey;
     return window.novaxDesktop.growth.subscribe((live) => {
       const current = growthRef.current;
-      if (growthRequestToken.current.scopeKey !== subscriptionScopeKey
+      if (growthLoadRequestToken.current.scopeKey !== subscriptionScopeKey
         || live.sessionId !== session.id || !current || live.event.goalId !== current.goalId) return;
       const next = mergeGrowthEvent(current, live.event);
       publishGrowth(next);
@@ -261,6 +277,10 @@ export function StewardRuntimePanel({
     });
   }, [growthStorageKey, session?.id]);
 
+  useEffect(() => () => {
+    growthGuidanceRequestToken.current = advanceGrowthRequestToken(growthGuidanceRequestToken.current, null);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     setEntries([]);
@@ -270,6 +290,10 @@ export function StewardRuntimePanel({
     setActivity(null);
     setCopiedEntryId(null);
     setActionNotice(null);
+    setGuidanceDraft("");
+    setGuidanceSaving(false);
+    setGuidanceNotice(null);
+    setGuidanceError(null);
     resetGrowthVisualState();
     growthRef.current = null;
     setGrowthPresentation(null);
@@ -300,17 +324,17 @@ export function StewardRuntimePanel({
     const restoreProjectId = projectId;
     const restoreSessionId = session?.id;
     if (!restoreProjectId || !restoreSessionId) return;
-    const request = beginGrowthRequest();
+    const request = beginGrowthLoadRequest();
     try {
       const snapshot = await window.novaxDesktop.growth.get({ projectId: restoreProjectId, sessionId: restoreSessionId, goalId });
-      if (!isCurrentGrowthRequest(growthRequestToken.current, request)) return;
+      if (!isCurrentGrowthRequest(growthLoadRequestToken.current, request)) return;
       const next = mergeGrowthSnapshot(growthRef.current, snapshot);
       publishGrowth(next);
       const runId = snapshot.cycles.find((cycle) => cycle.status === "running")?.runId ?? null;
       setActiveRunId(runId);
       setStarting(false);
     } catch {
-      if (!isCurrentGrowthRequest(growthRequestToken.current, request)) return;
+      if (!isCurrentGrowthRequest(growthLoadRequestToken.current, request)) return;
       clearStoredGrowth();
       setActiveRunId(null);
       setStarting(false);
@@ -328,7 +352,7 @@ export function StewardRuntimePanel({
       const startProjectId = projectId;
       const startSessionId = session.id;
       const startStorageKey = growthStorageKey;
-      const request = beginGrowthRequest();
+      const request = beginGrowthLoadRequest();
       try {
         const snapshot = await window.novaxDesktop.growth.start({
           requestId: crypto.randomUUID(),
@@ -338,7 +362,7 @@ export function StewardRuntimePanel({
           initialRuleText: userInput,
           strategy: "grow_world_story_oc_v1",
         });
-        if (!isCurrentGrowthRequest(growthRequestToken.current, request)) return;
+        if (!isCurrentGrowthRequest(growthLoadRequestToken.current, request)) return;
         if (startStorageKey) window.localStorage.setItem(startStorageKey, snapshot.goal.id);
         committedGrowthChangeSets.current.clear();
         resetGrowthVisualState();
@@ -347,7 +371,7 @@ export function StewardRuntimePanel({
         setActiveRunId(runId);
         setStarting(false);
       } catch {
-        if (!isCurrentGrowthRequest(growthRequestToken.current, request)) return;
+        if (!isCurrentGrowthRequest(growthLoadRequestToken.current, request)) return;
         setStarting(false);
         appendEntry({ kind: "error", text: "生长任务启动失败，未生成任何本地替代结果。", artifacts: [] });
       }
@@ -365,6 +389,53 @@ export function StewardRuntimePanel({
     } catch {
       setStarting(false);
       appendEntry({ kind: "error", text: "大管家启动失败，请重试。", artifacts: [] });
+    }
+  }
+
+  async function saveGrowthGuidance() {
+    const current = growthRef.current;
+    const ruleText = guidanceDraft.trim();
+    const guideProjectId = projectId;
+    const guideSessionId = session?.id;
+    const availability = current ? getGrowthGuidanceAvailability(current) : null;
+    if (!current || !guideProjectId || !guideSessionId || !ruleText || guidanceSaving
+      || !availability?.canGuide || !current.guidance) return;
+    const request = beginGrowthGuidanceRequest();
+    setGuidanceSaving(true);
+    setGuidanceNotice(null);
+    setGuidanceError(null);
+    try {
+      const response = await window.novaxDesktop.growth.guide({
+        goalId: current.goalId,
+        expectedRevision: current.guidance.latestSavedRevision,
+        ruleText,
+        requestId: crypto.randomUUID(),
+      });
+      if (!isCurrentGrowthRequest(growthGuidanceRequestToken.current, request)) return;
+      const latest = growthRef.current;
+      if (!latest || latest.goalId !== current.goalId) return;
+      publishGrowth(recordGrowthGuidanceResponse(latest, response));
+      setGuidanceDraft("");
+      setGuidanceNotice(`已保存为规则修订 #${response.persistedRevision}，将在第 ${response.nextCycleSequence} 轮（${growthPhaseLabel(response.nextCyclePhase)}）开始前生效`);
+    } catch {
+      if (!isCurrentGrowthRequest(growthGuidanceRequestToken.current, request)) return;
+      try {
+        const snapshot = await window.novaxDesktop.growth.get({
+          projectId: guideProjectId,
+          sessionId: guideSessionId,
+          goalId: current.goalId,
+        });
+        if (!isCurrentGrowthRequest(growthGuidanceRequestToken.current, request)) return;
+        const latest = growthRef.current;
+        if (!latest || latest.goalId !== current.goalId) return;
+        publishGrowth(mergeGrowthSnapshot(latest, snapshot));
+        setGuidanceError("规则修订可能已变化，已刷新最新状态；未自动重试，请确认后再次保存。");
+      } catch {
+        if (!isCurrentGrowthRequest(growthGuidanceRequestToken.current, request)) return;
+        setGuidanceError("指导保存失败，且无法刷新最新规则状态；未自动重试，请稍后重试。");
+      }
+    } finally {
+      if (isCurrentGrowthRequest(growthGuidanceRequestToken.current, request)) setGuidanceSaving(false);
     }
   }
 
@@ -407,6 +478,9 @@ export function StewardRuntimePanel({
 
   const running = starting || activeRunId !== null || growthPresentation?.running === true;
   const lastUserEntryIndex = findLastUserEntryIndex(entries);
+  const guidanceAvailability = growthPresentation ? getGrowthGuidanceAvailability(growthPresentation) : null;
+  const showGuidanceComposer = Boolean(growthPresentation?.running && growthPresentation.currentCycleSequence > 0
+    && growthPresentation.currentCycleSequence < 3);
 
   return (
     <>
@@ -461,6 +535,32 @@ export function StewardRuntimePanel({
           />
         ) : null}
       </div>
+      {growthPresentation ? (
+        <section className="growth-guidance-composer" aria-label="追加世界规则或指导">
+          <header>
+            <strong>追加世界规则/指导</strong>
+            {growthPresentation.guidance ? <small>最新已保存 #{growthPresentation.guidance.latestSavedRevision}</small> : null}
+          </header>
+          {showGuidanceComposer ? (
+            <>
+              <textarea
+                aria-label="追加世界规则或指导"
+                disabled={!guidanceAvailability?.canGuide || guidanceSaving}
+                placeholder={guidanceAvailability?.reason ?? "补充只会在下一轮边界生效"}
+                rows={2}
+                value={guidanceDraft}
+                onChange={(event) => setGuidanceDraft(event.target.value)}
+              />
+              <button type="button" onClick={() => void saveGrowthGuidance()} disabled={!guidanceAvailability?.canGuide || guidanceSaving || !guidanceDraft.trim()}>
+                {guidanceSaving ? "保存中" : "保存到下一轮"}
+              </button>
+            </>
+          ) : <p>{guidanceAvailability?.reason ?? "当前没有可安全追加指导的下一轮边界。"}</p>}
+          {showGuidanceComposer && guidanceAvailability?.reason ? <p>{guidanceAvailability.reason}</p> : null}
+          {guidanceNotice ? <div className="growth-guidance-composer__notice" role="status"><strong>待下一边界</strong><span>{guidanceNotice}</span></div> : null}
+          {guidanceError ? <p className="growth-guidance-composer__error" role="alert">{guidanceError}</p> : null}
+        </section>
+      ) : null}
       <div className="steward-composer">
         <div className="agent-permission-switch" role="radiogroup" aria-label="大管家提交模式">
           <button type="button" role="radio" aria-checked={mode === "assist"} onClick={() => setMode("assist")} disabled={running}>
@@ -520,4 +620,8 @@ function findLastUserEntryIndex(entries: FeedEntry[]): number {
     if (entries[index]?.kind === "user") return index;
   }
   return -1;
+}
+
+function growthPhaseLabel(phase: "story" | "oc"): string {
+  return phase === "story" ? "故事" : "OC";
 }

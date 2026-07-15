@@ -33,6 +33,15 @@ export function RunWorkTargetPane(props: {
             <small>{phaseLabel(event?.phase, current?.durableState)}</small>
           </header>
           <p className="run-work-target-pane__summary">{current?.summary ?? props.presentation.terminalLabel ?? "等待 Main 安排"}</p>
+          {props.presentation.guidance ? (
+            <div className="run-work-target-pane__revisions" aria-label="Growth 规则修订">
+              <span>当前轮使用 #{props.presentation.guidance.activeRevision}</span>
+              <span>最新已保存 #{props.presentation.guidance.latestSavedRevision}</span>
+              <span>{props.presentation.guidance.pending && props.presentation.guidance.nextCycleSequence
+                ? `待下一轮生效 · 第 ${props.presentation.guidance.nextCycleSequence} 轮`
+                : "当前无待生效规则"}</span>
+            </div>
+          ) : null}
           {target ? (
             <div className="run-work-target-pane__target">
               <span>{target.kind}</span>

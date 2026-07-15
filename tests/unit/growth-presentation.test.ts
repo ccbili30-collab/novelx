@@ -71,6 +71,80 @@ function worldMapArtifact(
 }
 
 describe("growth presentation", () => {
+  it("fails closed when restored guidance revision fields are incomplete", async () => {
+    const { createGrowthPresentation } = await presentation();
+
+    const complete = createGrowthPresentation(snapshot({
+      currentRuleRevision: 2,
+      activeCycleRuleRevision: 1,
+      guidanceStatus: "persisted_pending_boundary",
+    }));
+    const missingActiveRevision = createGrowthPresentation(snapshot({
+      currentRuleRevision: 2,
+      guidanceStatus: "persisted_pending_boundary",
+    }));
+
+    expect(complete.guidance).toMatchObject({
+      activeRevision: 1,
+      latestSavedRevision: 2,
+      pending: true,
+      nextCycleSequence: 2,
+      nextCyclePhase: "story",
+    });
+    expect(missingActiveRevision.guidance).toBeNull();
+  });
+
+  it("advances consecutive persisted guidance revisions and disables unsafe boundaries", async () => {
+    const { createGrowthPresentation, getGrowthGuidanceAvailability, recordGrowthGuidanceResponse } = await presentation();
+    let state = createGrowthPresentation(snapshot({
+      currentRuleRevision: 1,
+      activeCycleRuleRevision: 1,
+      guidanceStatus: "none",
+    }));
+
+    state = recordGrowthGuidanceResponse(state, {
+      goalId,
+      persistedRevision: 2,
+      currentCycleRevision: 1,
+      appliesAt: "next_cycle_boundary",
+      nextCycleSequence: 2,
+      nextCyclePhase: "story",
+      status: "persisted_pending_boundary",
+    });
+    state = recordGrowthGuidanceResponse(state, {
+      goalId,
+      persistedRevision: 3,
+      currentCycleRevision: 1,
+      appliesAt: "next_cycle_boundary",
+      nextCycleSequence: 2,
+      nextCyclePhase: "story",
+      status: "persisted_pending_boundary",
+    });
+
+    expect(state.guidance).toMatchObject({ activeRevision: 1, latestSavedRevision: 3, pending: true });
+    expect(getGrowthGuidanceAvailability(state)).toEqual({ canGuide: true, reason: null });
+
+    const cycleThree = createGrowthPresentation(snapshot({
+      goal: { id: goalId, status: "active", currentCycleSequence: 3 },
+      currentRuleRevision: 3,
+      activeCycleRuleRevision: 3,
+      guidanceStatus: "none",
+    }));
+    expect(getGrowthGuidanceAvailability(cycleThree)).toEqual({ canGuide: false, reason: "第 3 轮之后没有安全的下一轮边界。" });
+    for (const coordinatorStatus of ["completed", "blocked", "failed", "reconciliation_required"] as const) {
+      const terminal = createGrowthPresentation(snapshot({
+        coordinatorStatus,
+        currentRuleRevision: 1,
+        activeCycleRuleRevision: 1,
+        guidanceStatus: "none",
+      }));
+      expect(getGrowthGuidanceAvailability(terminal), coordinatorStatus).toEqual({
+        canGuide: false,
+        reason: "当前生长任务已不再运行，不能追加下一轮指导。",
+      });
+    }
+  });
+
   it("dedupes and orders out-of-order repository events without regressing committed state", async () => {
     const { createGrowthPresentation, mergeGrowthEvent } = await presentation();
     const committed = event({ sequence: 3, phase: "change_set_committed", durableState: "committed", targetKind: "change_set", targetId: "change-set-1" });
@@ -189,19 +263,29 @@ describe("growth presentation", () => {
     ]);
   });
 
-  it("makes stale Growth restore successes and rejections inert after scope or newer request wins", async () => {
+  it("keeps load and guidance identities independent while invalidating stale scope or guidance work", async () => {
     const { advanceGrowthRequestToken, isCurrentGrowthRequest } = await steward();
-    const oldRestore = advanceGrowthRequestToken({ generation: 0, scopeKey: null }, "novelx:growth-goal:project-a:session-a");
-    const switchedScope = advanceGrowthRequestToken(oldRestore, "novelx:growth-goal:project-b:session-b");
-    const newerRestore = advanceGrowthRequestToken(switchedScope, "novelx:growth-goal:project-b:session-b");
-    const applied: string[] = [];
+    const scopeA = "novelx:growth-goal:project-a:session-a";
+    const scopeB = "novelx:growth-goal:project-b:session-b";
+    let load = advanceGrowthRequestToken({ generation: 0, scopeKey: null }, scopeA);
+    let guidance = advanceGrowthRequestToken({ generation: 0, scopeKey: null }, scopeA);
+    const pendingGuide = advanceGrowthRequestToken(guidance, scopeA);
+    guidance = pendingGuide;
 
-    if (isCurrentGrowthRequest(newerRestore, oldRestore)) applied.push("old-success");
-    if (isCurrentGrowthRequest(newerRestore, oldRestore)) applied.push("old-rejection-cleared-storage");
-    if (isCurrentGrowthRequest(newerRestore, switchedScope)) applied.push("older-same-scope-success");
-    if (isCurrentGrowthRequest(newerRestore, newerRestore)) applied.push("current-success");
+    load = advanceGrowthRequestToken(load, scopeA);
+    expect(isCurrentGrowthRequest(guidance, pendingGuide)).toBe(true);
 
-    expect(applied).toEqual(["current-success"]);
+    load = advanceGrowthRequestToken(load, scopeB);
+    guidance = advanceGrowthRequestToken(guidance, scopeB);
+    const newScopeGuide = advanceGrowthRequestToken(guidance, scopeB);
+    guidance = newScopeGuide;
+    let newScopeSaving = true;
+    if (isCurrentGrowthRequest(guidance, pendingGuide)) newScopeSaving = false;
+
+    expect(isCurrentGrowthRequest(load, pendingGuide)).toBe(false);
+    expect(isCurrentGrowthRequest(guidance, pendingGuide)).toBe(false);
+    expect(isCurrentGrowthRequest(guidance, newScopeGuide)).toBe(true);
+    expect(newScopeSaving).toBe(true);
   });
 
   it("selects the latest managed ready world map for a truthful preview", async () => {
