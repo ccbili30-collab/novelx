@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 2,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "imageProvider": {
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [
+    {
+      "sequence": 1,
+      "status": "committed",
+      "ruleRevision": 1,
+      "hasRun": true,
+      "hasReceipt": true,
+      "hasChangeSet": true,
+      "hasOutputCheckpoint": true
+    },
+    {
+      "sequence": 2,
+      "status": "committed",
+      "ruleRevision": 2,
+      "hasRun": true,
+      "hasReceipt": true,
+      "hasChangeSet": true,
+      "hasOutputCheckpoint": true
+    },
+    {
+      "sequence": 3,
+      "status": "committed",
+      "ruleRevision": 2,
+      "hasRun": true,
+      "hasReceipt": true,
+      "hasChangeSet": true,
+      "hasOutputCheckpoint": true
+    }
+  ],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "guidance": {
+    "formEnabledOnCycle1": true,
+    "preSaveAcknowledgementAbsent": true,
+    "persistedRevision": 2,
+    "currentCycleRevisionAtSave": 1,
+    "nextCycleSequence": 2,
+    "nextCycleStoryBoundary": true,
+    "pendingBoundaryVisible": true,
+    "notShownAsAppliedBeforeBoundary": true,
+    "screenshotSha256": "5840f6028970acb5f519f37c2233537cb3e9d8ec45f0bfff3b9476f636715690",
+    "cycleRuleRevisions": [
+      1,
+      2,
+      2
+    ],
+    "showcaseStoryNodePresent": false
+  },
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "visual": {
+    "userMessageVisible": true,
+    "timelineVisible": true,
+    "maximumTimelineRows": 3,
+    "mapLifecycleSequenceObserved": true,
+    "rightReadyWorldMapObserved": true,
+    "autoShowcaseObserved": true,
+    "autoShowcaseOpenCount": 1,
+    "finalTimelineStatus": "completed",
+    "finalTimelineTerminalCategory": "completed",
+    "rightWorldMapStatus": "ready",
+    "manualActionPresent": false,
+    "manualDomClickDispatched": false,
+    "manualShowcaseObserved": false,
+    "manualShowcaseOpenCount": 0,
+    "finalRouteAgent": false,
+    "finalRouteShowcase": true,
+    "route": "showcase",
+    "finalReadyMapEvidenced": false,
+    "screenshots": {}
+  },
+  "failureCode": "GROWTH_LIVE_ACCEPTANCE_FAILED",
+  "postTermination": {
+    "cycles": [
+      {
+        "sequence": 1,
+        "status": "committed",
+        "ruleRevision": 1,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "audit": {
+          "terminalCount": 5,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": true,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 2,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "audit": {
+          "terminalCount": 6,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 3,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "audit": {
+          "terminalCount": 4,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "counts": {
+      "resources": 13,
+      "documents": 11,
+      "assertions": 5,
+      "relations": 17
+    },
+    "changeSets": {
+      "total": 3,
+      "byStatus": [
+        {
+          "status": "committed",
+          "count": 3
+        }
+      ],
+      "outputCount": 57,
+      "checkpointCount": 4,
+      "checkpointDeltaFromInitial": 3
+    }
+  }
+}
