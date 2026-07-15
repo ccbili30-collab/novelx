@@ -10,6 +10,8 @@
 
 每个 Cycle 最多一个 Run、Receipt、已提交 Change Set 和输出 Checkpoint（检查点）。只有已提交 Change Set 的真实 base/output checkpoint 可使 Cycle committed。Outcome Unknown（结果未知）必须进入 reconciliation_required，禁止后续 Cycle。
 
+规则修订是仅追加历史。`appendRule` 在 `BEGIN IMMEDIATE` 事务内执行 CAS（比较并交换），可在 planned/running Cycle 存在时持久化 `currentRevision + 1`，但不得修改既有 Cycle 的 `ruleRevision`、`inputCheckpointId` 或 Run 绑定；新 revision 只供后续新 Cycle 选择。failed/blocked/reconciliation_required Cycle 之后也允许追加规则元数据，但不会恢复 Goal 或授权启动新 Cycle。completed/cancelled Goal 仍拒绝新追加。
+
 ## 合同与审计边界
 
 - 共享合同使用严格 Zod；未知字段和 Player Lens（玩家视角）失败关闭。v1 Event 只持久化 Cycle 事件：cycle_planned、run_attached、receipt_recorded、change_set_committed、cycle_terminal。虽然 v23 数据库 CHECK 为兼容已接受更宽集合，所有写入均经更窄的 shared schema 与 Repository（仓储）约束。
@@ -19,6 +21,8 @@
 - Event append 输入不接受 createdAt；Repository 生成时间并以 (goalId, sequence) 实现精确重放。listEvents 供未来 UI 读取单调历史。Event 不保存通用 payload、Prompt、工具参数、原始日志、思维链或磁盘路径。
 - Event target 与 contentRef 只允许稳定的 document/resource/assertion/relation/change_set 版本，不允许 image 或 working copy。Repository 对 target 和 contentRef 都验证对应 Cycle checkpoint 的可见性；resource target 未指定版本时仍必须存在于该 checkpoint。change_set_committed 目标必须等于 Cycle 已绑定 Change Set/output checkpoint。
 - Creator/Player Lens 与权限仍由未来服务端接入层执行；本合同仅接受 creator，player 输入失败关闭。
+- 规则追加以 `expectedRevision` 保持 CAS；相同旧请求可按目标 revision、`sourceMessageId` 和规则正文精确重放，相同 source 的冲突正文或其他旧 payload 失败关闭。`GrowthRepository.getRuleRevision(goalId, revision)` 精确读取历史，缺失时失败关闭；`listRuleRevisions` 按 revision 升序并强制 1–100 条边界，禁止无界读取。
+- Growth Run bridge（生长运行桥）验证 Cycle 固定 revision 的历史记录真实存在，不再要求它等于 Goal 最新 revision；传给 Worker 的仍是 Cycle 固定 revision，不暴露规则正文，也不会把运行中 Cycle 切换到新规则。
 
 ## 迁移与恢复
 
@@ -30,4 +34,5 @@ v22→v23 仅新增 growth_* 表和索引；不重写资源、文档、断言、
 
 - 图查询、向量召回、别名、N-hop（多跳）推演或相关性排序。
 - Agent 编排、IPC（进程间通信）、Renderer（渲染层）、Provider 或 Live（真实运行）验收。
+- 规则修订的 IPC、Renderer、Coordinator（协调器）接线，以及自动创建或启动下一 Cycle。
 - 修改 A2.2 Runtime（第二版运行时）恢复/权限/审计语义，或 Change Set/Checkpoint 提交语义。

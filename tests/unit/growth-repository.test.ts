@@ -20,6 +20,167 @@ afterEach(() => {
 });
 
 describe("GrowthRepository", () => {
+  it("reads one exact historical rule revision and rejects a missing revision", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const goal = createGoal(repository, setup);
+    repository.appendRule({ goalId: goal.id, expectedRevision: 1, ruleText: "second rule", sourceMessageId: "message-rule-2" });
+
+    expect(repository.getRuleRevision(goal.id, 1)).toMatchObject({
+      goalId: goal.id,
+      revision: 1,
+      ruleText: "keep sources",
+    });
+    expect(() => repository.getRuleRevision(goal.id, 3))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_RULE_REVISION_NOT_FOUND" }));
+  });
+
+  it("lists rule revisions in bounded revision order", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const goal = createGoal(repository, setup);
+    repository.appendRule({ goalId: goal.id, expectedRevision: 1, ruleText: "second rule", sourceMessageId: "message-rule-2" });
+    repository.appendRule({ goalId: goal.id, expectedRevision: 2, ruleText: "third rule", sourceMessageId: "message-rule-3" });
+
+    expect(repository.listRuleRevisions(goal.id, { fromRevision: 2, limit: 1 }))
+      .toEqual([repository.getRuleRevision(goal.id, 2)]);
+    expect(repository.listRuleRevisions(goal.id, { limit: 100 }).map((rule) => rule.revision)).toEqual([1, 2, 3]);
+    expect(() => repository.listRuleRevisions(goal.id, { limit: 101 }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_RULE_LIST_BOUNDS_INVALID" }));
+  });
+
+  it("replays an exact old append request after later revisions exist", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const goal = createGoal(repository, setup);
+    const oldRequest = { goalId: goal.id, expectedRevision: 1, ruleText: "second rule", sourceMessageId: "message-rule-2" };
+    const second = repository.appendRule(oldRequest);
+    repository.appendRule({ goalId: goal.id, expectedRevision: 2, ruleText: "third rule", sourceMessageId: "message-rule-3" });
+
+    expect(repository.appendRule(oldRequest)).toEqual(second);
+    expect(repository.getGoal(goal.id)?.currentRuleRevision).toBe(3);
+  });
+
+  it("rejects reusing one source message for different rule content", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const goal = createGoal(repository, setup);
+    repository.appendRule({ goalId: goal.id, expectedRevision: 1, ruleText: "second rule", sourceMessageId: "message-rule-2" });
+
+    expect(() => repository.appendRule({
+      goalId: goal.id,
+      expectedRevision: 2,
+      ruleText: "conflicting content",
+      sourceMessageId: "message-rule-2",
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_RULE_REVISION_MISMATCH" }));
+    expect(repository.getGoal(goal.id)?.currentRuleRevision).toBe(2);
+  });
+
+  it.each(["failed", "blocked", "reconciliation_required"] as const)(
+    "allows rule metadata append after a %s Cycle without changing the terminal Cycle",
+    (status) => {
+      const setup = createSetup();
+      const repository = new GrowthRepository(setup.workspace);
+      const goal = createGoal(repository, setup);
+      const cycle = repository.beginCycle({
+        id: "cycle-1",
+        goalId: goal.id,
+        idempotencyKey: "cycle-idempotency",
+        inputCheckpointId: setup.checkpointId,
+        ruleRevision: 1,
+      });
+      repository.terminalizeCycle({ cycleId: cycle.id, status, failureCode: "STOPPED" });
+
+      expect(repository.appendRule({
+        goalId: goal.id,
+        expectedRevision: 1,
+        ruleText: `rule after ${status}`,
+        sourceMessageId: `message-after-${status}`,
+      }).revision).toBe(2);
+      expect(repository.getCycle(cycle.id)).toMatchObject({ status, ruleRevision: 1, failureCode: "STOPPED" });
+      expect(() => repository.beginCycle({
+        id: "cycle-2",
+        goalId: goal.id,
+        idempotencyKey: "cycle-2-idempotency",
+        inputCheckpointId: setup.checkpointId,
+        ruleRevision: 2,
+      })).toThrowError(expect.objectContaining({ code: "GROWTH_GOAL_NOT_ACTIVE" }));
+    },
+  );
+
+  it("allows only one competing repository connection to win the same CAS revision", () => {
+    const setup = createSetup();
+    const competitorWorkspace = openWorkspace(setup.workspace.rootPath);
+    try {
+      const first = new GrowthRepository(setup.workspace);
+      const competitor = new GrowthRepository(competitorWorkspace);
+      const goal = createGoal(first, setup);
+
+      expect(first.appendRule({
+        goalId: goal.id,
+        expectedRevision: 1,
+        ruleText: "winner",
+        sourceMessageId: "message-winner",
+      }).revision).toBe(2);
+      expect(() => competitor.appendRule({
+        goalId: goal.id,
+        expectedRevision: 1,
+        ruleText: "loser",
+        sourceMessageId: "message-loser",
+      })).toThrowError(expect.objectContaining({ code: "GROWTH_RULE_REVISION_MISMATCH" }));
+      expect(competitor.listRuleRevisions(goal.id, { limit: 100 }).map((rule) => rule.ruleText))
+        .toEqual(["keep sources", "winner"]);
+    } finally {
+      competitorWorkspace.close();
+    }
+  });
+
+  it("replays persisted rule history after reopening SQLite", () => {
+    const setup = createSetup();
+    const goal = createGoal(new GrowthRepository(setup.workspace), setup);
+    new GrowthRepository(setup.workspace).appendRule({
+      goalId: goal.id,
+      expectedRevision: 1,
+      ruleText: "persist across reopen",
+      sourceMessageId: "message-persisted",
+    });
+    const rootPath = setup.workspace.rootPath;
+    setup.workspace.close();
+    workspace = undefined;
+
+    const reopened = openWorkspace(rootPath);
+    workspace = reopened;
+    const repository = new GrowthRepository(reopened);
+    expect(repository.getRuleRevision(goal.id, 2)).toMatchObject({
+      revision: 2,
+      ruleText: "persist across reopen",
+      sourceMessageId: "message-persisted",
+    });
+    expect(repository.listRuleRevisions(goal.id, { limit: 100 }).map((rule) => rule.revision)).toEqual([1, 2]);
+  });
+
+  it("persists a new rule revision while a running Cycle remains pinned to its original revision", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
+
+    const revision = repository.appendRule({
+      goalId: goal.id,
+      expectedRevision: 1,
+      ruleText: "apply only to the next Cycle",
+      sourceMessageId: "message-rule-2",
+    });
+
+    expect(revision).toMatchObject({ goalId: goal.id, revision: 2, ruleText: "apply only to the next Cycle" });
+    expect(repository.getGoal(goal.id)?.currentRuleRevision).toBe(2);
+    expect(repository.getCycle(cycle.id)).toMatchObject({
+      status: "running",
+      ruleRevision: 1,
+      inputCheckpointId: setup.checkpointId,
+      runId: run.runId,
+    });
+  });
+
   it("creates idempotent scoped Goals and replays rule, Run, Receipt and Change Set bindings", () => {
     const setup = createSetup();
     const repository = new GrowthRepository(setup.workspace);
@@ -33,8 +194,8 @@ describe("GrowthRepository", () => {
       .toThrowError(expect.objectContaining({ code: "GROWTH_RULE_REVISION_MISMATCH" }));
     const cycle = repository.beginCycle({ id: "cycle-1", goalId: goal.id, idempotencyKey: "cycle-idempotency", inputCheckpointId: setup.checkpointId, ruleRevision: 2 });
     expect(repository.listCycles(goal.id)).toEqual([cycle]);
-    expect(() => repository.appendRule({ goalId: goal.id, expectedRevision: 2, ruleText: "third rule", sourceMessageId: null }))
-      .toThrowError(expect.objectContaining({ code: "GROWTH_RULE_CHANGE_REQUIRES_CYCLE_BOUNDARY" }));
+    expect(repository.appendRule({ goalId: goal.id, expectedRevision: 2, ruleText: "third rule", sourceMessageId: null }).revision).toBe(3);
+    expect(repository.getCycle(cycle.id)?.ruleRevision).toBe(2);
     const run = seedRun(setup.workspace, setup.branchId, setup.checkpointId);
     expect(repository.attachRun({ cycleId: cycle.id, runId: run.runId }).status).toBe("running");
     expect(repository.attachRun({ cycleId: cycle.id, runId: run.runId }).status).toBe("running");

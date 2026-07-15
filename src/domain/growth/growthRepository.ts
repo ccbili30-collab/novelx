@@ -87,6 +87,32 @@ export class GrowthRepository {
     });
   }
 
+  getRuleRevision(goalId: string, revision: number): GrowthRuleRevision {
+    this.#requiredGoal(goalId);
+    const row = this.workspace.db.prepare(`
+      SELECT * FROM growth_goal_rule_revisions WHERE goal_id = ? AND revision = ?
+    `).get(goalId, revision) as Row | undefined;
+    if (!row) throw growthError("GROWTH_RULE_REVISION_NOT_FOUND");
+    return mapRuleRevision(row);
+  }
+
+  listRuleRevisions(
+    goalId: string,
+    options: { fromRevision?: number; limit: number },
+  ): GrowthRuleRevision[] {
+    this.#requiredGoal(goalId);
+    const fromRevision = options.fromRevision ?? 1;
+    if (!Number.isInteger(fromRevision) || fromRevision < 1 || !Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100) {
+      throw growthError("GROWTH_RULE_LIST_BOUNDS_INVALID");
+    }
+    return (this.workspace.db.prepare(`
+      SELECT * FROM growth_goal_rule_revisions
+      WHERE goal_id = ? AND revision >= ?
+      ORDER BY revision
+      LIMIT ?
+    `).all(goalId, fromRevision, options.limit) as Row[]).map(mapRuleRevision);
+  }
+
   getCycle(cycleId: string): GrowthCycle | null {
     const row = this.workspace.db.prepare("SELECT * FROM growth_cycles WHERE id = ?").get(cycleId) as Row | undefined;
     return row ? mapCycle(row) : null;
@@ -137,18 +163,31 @@ export class GrowthRepository {
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const goal = this.#requiredGoal(value.goalId);
+      const sourceReplay = value.sourceMessageId === null
+        ? undefined
+        : this.workspace.db.prepare(`
+          SELECT * FROM growth_goal_rule_revisions
+          WHERE goal_id = ? AND source_message_id = ?
+          ORDER BY revision
+          LIMIT 1
+        `).get(value.goalId, value.sourceMessageId) as Row | undefined;
+      if (sourceReplay) {
+        if (readNumber(sourceReplay, "revision") === value.expectedRevision + 1 && readString(sourceReplay, "rule_text") === value.ruleText) {
+          this.workspace.db.exec("COMMIT");
+          return mapRuleRevision(sourceReplay);
+        }
+        throw growthError("GROWTH_RULE_REVISION_MISMATCH");
+      }
       if (goal.currentRuleRevision !== value.expectedRevision) {
-        const replay = value.expectedRevision === goal.currentRuleRevision - 1
-          ? this.workspace.db.prepare("SELECT * FROM growth_goal_rule_revisions WHERE goal_id = ? AND revision = ?").get(value.goalId, goal.currentRuleRevision) as Row | undefined
-          : undefined;
+        const replay = this.workspace.db.prepare("SELECT * FROM growth_goal_rule_revisions WHERE goal_id = ? AND revision = ?")
+          .get(value.goalId, value.expectedRevision + 1) as Row | undefined;
         if (replay && readString(replay, "rule_text") === value.ruleText && readNullableString(replay, "source_message_id") === value.sourceMessageId) {
           this.workspace.db.exec("COMMIT");
           return mapRuleRevision(replay);
         }
         throw growthError("GROWTH_RULE_REVISION_MISMATCH");
       }
-      if (goal.status !== "active") throw growthError("GROWTH_GOAL_NOT_ACTIVE");
-      if (this.#hasOpenCycle(value.goalId)) throw growthError("GROWTH_RULE_CHANGE_REQUIRES_CYCLE_BOUNDARY");
+      if (!["active", "blocked", "reconciliation_required"].includes(goal.status)) throw growthError("GROWTH_GOAL_NOT_ACTIVE");
       const revision = value.expectedRevision + 1;
       const now = new Date().toISOString();
       this.workspace.db.prepare(`

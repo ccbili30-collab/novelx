@@ -61,7 +61,15 @@ export class GrowthRunLifecycle {
     if (!cycle || !goal || cycle.goalId !== goal.id || cycle.status !== "planned" || cycle.runId !== null) {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
-    if (cycle.inputCheckpointId !== this.#activeCheckpoint(goal.branchId) || cycle.ruleRevision !== goal.currentRuleRevision) {
+    if (cycle.inputCheckpointId !== this.#activeCheckpoint(goal.branchId)) {
+      throw growthRunError("GROWTH_BINDING_INVALID");
+    }
+    try {
+      const pinnedRule = repository.getRuleRevision(cycle.goalId, cycle.ruleRevision);
+      if (pinnedRule.goalId !== cycle.goalId || pinnedRule.revision !== cycle.ruleRevision) {
+        throw growthRunError("GROWTH_BINDING_INVALID");
+      }
+    } catch {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
     const phase = growthPhaseForCycleSequence(cycle.sequence);

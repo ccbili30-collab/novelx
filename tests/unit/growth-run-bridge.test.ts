@@ -82,6 +82,33 @@ describe("Growth Run bridge", () => {
     expect(() => growthPhaseForCycleSequence(4)).toThrow(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
   });
 
+  it("starts a planned Cycle with its pinned historical rule after a newer revision is appended", async () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    repository.appendRule({
+      goalId: setup.goalId,
+      expectedRevision: 1,
+      ruleText: "use from the next Cycle",
+      sourceMessageId: "message-rule-2",
+    });
+    const worker = new FakeWorker();
+    const supervisor = createSupervisor(setup, worker);
+
+    const runId = new GrowthRunLifecycle(setup.workspace, supervisor).start({
+      goalId: setup.goalId,
+      cycleId: setup.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "continue pinned Cycle", mode: "free" },
+      emit: () => undefined,
+    });
+    worker.spawn();
+
+    expect((worker.sent[0] as { growthBinding: { ruleRevision: number } }).growthBinding.ruleRevision).toBe(1);
+    expect(repository.getGoal(setup.goalId)?.currentRuleRevision).toBe(2);
+    expect(repository.getCycle(setup.cycleId)?.ruleRevision).toBe(1);
+    supervisor.cancel(runId);
+    await vi.waitFor(() => expect(repository.getCycle(setup.cycleId)?.status).toBe("cancelled"));
+  });
+
   it("pins a source-document seed to its owning resource without exposing source content", async () => {
     const setup = createSourceDocumentSetup();
     const worker = new FakeWorker();
