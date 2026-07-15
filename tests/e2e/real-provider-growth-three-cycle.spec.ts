@@ -9,11 +9,15 @@ import { ChangeSetRepository } from "../../src/domain/changeSet/changeSetReposit
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
 import { AssertionRepository, type SourcedAssertionRecord } from "../../src/domain/graph/assertionRepository";
 import { CreativeRelationRepository } from "../../src/domain/workspace/creativeRelationRepository";
+import { ImageAssetRepository } from "../../src/domain/asset/imageAssetRepository";
+import { ImageAssetStore } from "../../src/domain/asset/imageAssetStore";
 import { DocumentRepository, type DocumentVersionRecord } from "../../src/domain/workspace/documentRepository";
+import { CreativeDocumentRepository } from "../../src/domain/workspace/creativeDocumentRepository";
 import { ResourceRepository, type ResourceRecord } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace } from "../../src/domain/workspace/workspaceRepository";
 import { ApplicationRegistryRepository } from "../../src/domain/application/applicationRegistryRepository";
 import { PROVIDER_STORE_FILE_NAME } from "../../src/main/providerSecureStore";
+import { IMAGE_PROVIDER_STORE_FILE_NAME } from "../../src/main/imageProviderSecureStore";
 import type { AgentRunEvent, DesktopApi, GrowthLiveEvent } from "../../src/shared/ipcContract";
 import { closeTestElectronApp } from "./support/electronCleanup";
 import { watchGrowthTerminal } from "./support/growthWatcher";
@@ -22,8 +26,10 @@ const require = createRequire(import.meta.url);
 const electronPath = require("electron") as string;
 const configuredProviderStorePath = process.env.NOVAX_REAL_E2E_PROVIDER_STORE?.trim()
   || (process.env.APPDATA ? path.join(process.env.APPDATA, "novelx-desktop", PROVIDER_STORE_FILE_NAME) : "");
+const configuredImageProviderStorePath = process.env.NOVAX_REAL_E2E_IMAGE_PROVIDER_STORE?.trim()
+  || (process.env.APPDATA ? path.join(process.env.APPDATA, "novelx-desktop", IMAGE_PROVIDER_STORE_FILE_NAME) : "");
 
-test.skip(!configuredProviderStorePath || !fs.existsSync(configuredProviderStorePath), "A machine-local encrypted gpt-5.4 Provider store is required.");
+test.skip(!configuredProviderStorePath || !configuredImageProviderStorePath || !fs.existsSync(configuredProviderStorePath) || !fs.existsSync(configuredImageProviderStorePath), "Machine-local encrypted gpt-5.4 and gpt-image-2 Provider stores are required.");
 
 test("runs one real gpt-5.4 Growth goal through three committed cycles and a later research retrieval", async () => {
   test.setTimeout(990_000);
@@ -35,7 +41,7 @@ test("runs one real gpt-5.4 Growth goal through three committed cycles and a lat
   let providerStarted = false;
   let evidence: SafeEvidence = {
     schemaVersion: 1,
-    provider: { providerId: null, modelId: null },
+    provider: { providerId: null, modelId: null }, imageProvider: { providerId: null, modelId: null },
     providerStarted: false,
     outcome: "not_started",
     cycles: [],
@@ -47,9 +53,13 @@ test("runs one real gpt-5.4 Growth goal through three committed cycles and a lat
   fs.mkdirSync(userDataPath, { recursive: true });
   fs.mkdirSync(workspacePath, { recursive: true });
   fs.copyFileSync(configuredProviderStorePath, path.join(userDataPath, PROVIDER_STORE_FILE_NAME));
-  const localState = path.join(path.dirname(configuredProviderStorePath), "Local State");
-  if (!fs.existsSync(localState)) throw new Error("REAL_PROVIDER_LOCAL_STATE_MISSING");
-  fs.copyFileSync(localState, path.join(userDataPath, "Local State"));
+  fs.copyFileSync(configuredImageProviderStorePath, path.join(userDataPath, IMAGE_PROVIDER_STORE_FILE_NAME));
+  const textLocalState = path.join(path.dirname(configuredProviderStorePath), "Local State");
+  const imageLocalState = path.join(path.dirname(configuredImageProviderStorePath), "Local State");
+  if (!fs.existsSync(textLocalState) || !fs.existsSync(imageLocalState)) throw new Error("REAL_PROVIDER_LOCAL_STATE_MISSING");
+  if (path.resolve(textLocalState) !== path.resolve(imageLocalState)
+    && !fs.readFileSync(textLocalState).equals(fs.readFileSync(imageLocalState))) throw new Error("REAL_PROVIDER_LOCAL_STATE_MISMATCH");
+  fs.copyFileSync(textLocalState, path.join(userDataPath, "Local State"));
   initializeProject(userDataPath, workspacePath);
   evidence.initialGreenfield = captureInitialGreenfieldEligibility(workspacePath);
   if (!evidence.initialGreenfield.eligible) {
@@ -66,10 +76,13 @@ test("runs one real gpt-5.4 Growth goal through three committed cycles and a lat
     const provider = await providerStatus(page);
     evidence.provider = provider;
     if (provider.modelId !== "gpt-5.4") throw new Error("REAL_PROVIDER_MODEL_ID_MISMATCH");
+    const imageProvider = await imageProviderStatus(page);
+    evidence.imageProvider = imageProvider;
+    if (imageProvider.modelId !== "gpt-image-2") throw new Error("REAL_IMAGE_PROVIDER_MODEL_ID_MISMATCH");
 
     providerStarted = true;
     evidence.providerStarted = true;
-    const first = await startGrowthAndWatch(page, randomUUID(), 900_000, 300_000);
+    const first = await startGrowthAndWatch(page, randomUUID(), 900_000, 420_000);
     evidence.goalId = first.goalId;
     evidence.preTermination = first.preTermination;
     if (first.termination) {
@@ -99,9 +112,11 @@ test("runs one real gpt-5.4 Growth goal through three committed cycles and a lat
     const persisted = inspectCommittedGrowth(workspacePath, first.goalId);
     evidence.cycles = persisted.cycles;
     evidence.counts = persisted.counts;
+    evidence.worldMap = persisted.worldMap;
 
     app = await launch(userDataPath, workspacePath);
     const researchPage = await app.firstWindow();
+    await assertShowcaseWorldMap(researchPage, persisted);
     const research = await runResearchOnly(researchPage, persisted);
     evidence.research = research.safe;
     await closeTestElectronApp(app);
@@ -135,6 +150,7 @@ test("runs one real gpt-5.4 Growth goal through three committed cycles and a lat
 interface SafeEvidence {
   schemaVersion: 1;
   provider: { providerId: string | null; modelId: string | null };
+  imageProvider: { providerId: string | null; modelId: string | null };
   providerStarted: boolean;
   outcome: "not_started" | "blocked_before_provider_start" | "failed_after_provider_start" | "completed";
   failureCode?: string;
@@ -142,6 +158,7 @@ interface SafeEvidence {
   cycles: Array<{ id: string; sequence: number; runId: string | null; status: string }>;
   research: { runId: string; retrieveSucceeded: boolean; noMutationTools: boolean } | null;
   counts: { resources: number; documents: number; assertions: number; relations: number } | null;
+  worldMap?: { jobId: string; assetId: string; providerId: string; modelId: string; sourceResourceCount: number; sourceVersionCount: number; mimeType: string; width: number; height: number; byteLength: number; sha256: string };
   leakScan: "not_run" | "passed";
   preTermination?: SafePreTermination;
   termination?: SafeTermination;
@@ -269,6 +286,15 @@ async function providerStatus(page: Page): Promise<{ providerId: string | null; 
     const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
     const status = await desktop.provider.getStatus();
     if (!status.ok || !status.state.hasCredential || !status.state.config) throw new Error("REAL_PROVIDER_CONFIG_UNAVAILABLE");
+    return { providerId: status.state.config.providerId, modelId: status.state.config.modelId };
+  });
+}
+
+async function imageProviderStatus(page: Page): Promise<{ providerId: string | null; modelId: string | null }> {
+  return page.evaluate(async () => {
+    const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
+    const status = await desktop.imageProvider.getStatus();
+    if (!status.ok || !status.state.hasCredential || !status.state.config) return { providerId: null, modelId: null };
     return { providerId: status.state.config.providerId, modelId: status.state.config.modelId };
   });
 }
@@ -525,6 +551,21 @@ function assertPublicGrowth(
   }
   expect(growthEvents.every((event) => event.strategy === "grow_world_story_oc_v1")).toBe(true);
   expect(agentEvents.filter((event) => event.type === "run.completed").length).toBeGreaterThanOrEqual(3);
+  const worldRunId = snapshot.cycles[0]!.runId!;
+  const mapActivities = agentEvents.filter((event): event is Extract<AgentRunEvent, { type: "run.activity" }> => event.runId === worldRunId && event.type === "run.activity")
+    .map((event) => `${event.label}:${event.phase}`);
+  const queued = mapActivities.indexOf("世界地图排队中:started");
+  const generating = mapActivities.indexOf("生成世界地图:started", queued + 1);
+  const ready = mapActivities.indexOf("世界地图已生成:completed", generating + 1);
+  expect(queued).toBeGreaterThanOrEqual(0);
+  expect(generating).toBeGreaterThan(queued);
+  expect(ready).toBeGreaterThan(generating);
+  for (const cycle of snapshot.cycles.slice(1)) {
+    const labels = agentEvents.filter((event): event is Extract<AgentRunEvent, { type: "run.activity" }> => event.runId === cycle.runId && event.type === "run.activity").map((event) => event.label);
+    for (const forbiddenLabel of ["世界地图排队中", "生成世界地图", "世界地图已生成"]) {
+      expect(labels.includes(forbiddenLabel)).toBe(false);
+    }
+  }
 }
 
 interface PersistedGrowth {
@@ -537,6 +578,9 @@ interface PersistedGrowth {
   counts: { resources: number; documents: number; assertions: number; relations: number };
   changeSetCount: number;
   checkpointCount: number;
+  imageJobCount: number;
+  imageAssetCount: number;
+  worldMap: { jobId: string; assetId: string; providerId: string; modelId: string; sourceResourceCount: number; sourceVersionCount: number; mimeType: string; width: number; height: number; byteLength: number; sha256: string };
 }
 
 function inspectCommittedGrowth(workspacePath: string, goalId: string): PersistedGrowth {
@@ -565,13 +609,16 @@ function inspectCommittedGrowth(workspacePath: string, goalId: string): Persiste
     expect(formal.filter((resource) => resource.objectKind === "location" || resource.objectKind === "faction").length).toBeGreaterThanOrEqual(2);
 
     const documents = new DocumentRepository(workspace);
-    const worldDocument = requiredStable(documents, world!);
+    const settingDocuments = new CreativeDocumentRepository(workspace).listCurrent(world!.id).filter((document) => document.kind === "setting");
+    expect(settingDocuments).toHaveLength(1);
+    const worldDocument = documents.getCurrentStableForCreativeDocument(settingDocuments[0]!.id);
+    expect(worldDocument).not.toBeNull();
     const storyDocument = requiredStable(documents, story!);
     const ocDocuments = ocs.map((oc) => requiredStable(documents, oc));
-    expect(worldDocument.content.trim().length).toBeGreaterThanOrEqual(200);
+    expect(worldDocument!.content.trim().length).toBeGreaterThanOrEqual(200);
     expect(storyDocument.content.trim().length).toBeGreaterThanOrEqual(300);
     expect(ocDocuments.every((document) => document.content.trim().length >= 100)).toBe(true);
-    expect([worldDocument, storyDocument, ...ocDocuments].reduce((total, document) => total + document.content.trim().length, 0)).toBeGreaterThanOrEqual(1_000);
+    expect([worldDocument!, storyDocument, ...ocDocuments].reduce((total, document) => total + document.content.trim().length, 0)).toBeGreaterThanOrEqual(1_000);
 
     const assertions = new AssertionRepository(workspace).listCurrentInScopes([world!.id, story!.id, ...ocs.map((oc) => oc.id)]);
     const sourced = assertions.filter((assertion) => assertion.sources.length > 0);
@@ -588,10 +635,35 @@ function inspectCommittedGrowth(workspacePath: string, goalId: string): Persiste
       const changeSet = changeSets.get(cycle.changeSetId!);
       expect(changeSet?.status).toBe("committed");
       expect(changeSets.listOutputs(cycle.changeSetId!).length).toBeGreaterThan(0);
-      assertGrowthRunAudit(new AgentAuditRepository(workspace), cycle.runId!);
+      assertGrowthRunAudit(new AgentAuditRepository(workspace), cycle.runId!, cycle.sequence);
     }
     const checkpointCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM checkpoints").get()?.count ?? 0);
     const changeSetCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()?.count ?? 0);
+    const imageJobCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()?.count ?? 0);
+    const imageAssetCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_assets").get()?.count ?? 0);
+    expect(imageJobCount).toBe(1);
+    expect(imageAssetCount).toBe(1);
+    const worldMap = new ImageAssetRepository(workspace).listShowcaseJobs().filter((job) => job.purpose === "world_map" && job.status === "succeeded");
+    expect(worldMap).toHaveLength(1);
+    const worldMapJob = worldMap[0]!;
+    expect(worldMapJob.asset).not.toBeNull();
+    expect(worldMapJob.sourceResourceIds).toEqual([world!.id]);
+    expect(worldMapJob.sourceVersionIds).toHaveLength(2);
+    expect(new Set(worldMapJob.sourceVersionIds).size).toBe(2);
+    const authoritativeJob = new ImageAssetRepository(workspace).getRequiredJob(worldMapJob.jobId);
+    expect(authoritativeJob).toMatchObject({ status: "succeeded", providerId: "openai-compatible-image", modelId: "gpt-image-2", purpose: "world_map" });
+    const worldOutputs = new Set(changeSets.listOutputs(cycles[0]!.changeSetId!).map((output) => output.outputId));
+    expect(worldMapJob.sourceVersionIds.every((versionId) => worldOutputs.has(versionId))).toBe(true);
+    const resourceVersions = new ResourceRepository(workspace);
+    expect(worldMapJob.sourceVersionIds.some((versionId) => resourceVersions.getVisibleByRevisionIdAtCheckpoint(versionId, cycles[0]!.outputCheckpointId!)?.id === world!.id)).toBe(true);
+    expect(worldMapJob.sourceVersionIds).toContain(worldDocument!.id);
+    const asset = worldMapJob.asset!;
+    const bytes = new ImageAssetStore(workspacePath).readVerified(asset.relativePath, asset.sha256);
+    expect(bytes.byteLength).toBe(asset.byteLength);
+    expect(asset.byteLength).toBeGreaterThan(0);
+    expect(asset.mimeType).toBe("image/png");
+    expect(asset.width).toBeGreaterThan(0);
+    expect(asset.height).toBeGreaterThan(0);
     return {
       goalId,
       cycles: cycles.map((cycle) => ({ id: cycle.id, sequence: cycle.sequence, runId: cycle.runId, status: cycle.status })),
@@ -599,6 +671,9 @@ function inspectCommittedGrowth(workspacePath: string, goalId: string): Persiste
       counts: { resources: formal.length, documents: 2 + ocDocuments.length, assertions: sourced.length, relations: relations.length },
       changeSetCount,
       checkpointCount,
+      imageJobCount,
+      imageAssetCount,
+      worldMap: { jobId: worldMapJob.jobId, assetId: asset.id, providerId: authoritativeJob.providerId, modelId: authoritativeJob.modelId, sourceResourceCount: worldMapJob.sourceResourceIds.length, sourceVersionCount: worldMapJob.sourceVersionIds.length, mimeType: asset.mimeType, width: asset.width, height: asset.height, byteLength: asset.byteLength, sha256: asset.sha256 },
     };
   } finally {
     workspace.close();
@@ -611,16 +686,45 @@ function requiredStable(documents: DocumentRepository, resource: ResourceRecord)
   return stable!;
 }
 
-function assertGrowthRunAudit(audit: AgentAuditRepository, runId: string): void {
+function assertGrowthRunAudit(audit: AgentAuditRepository, runId: string, sequence: number): void {
   const tools = audit.listTools(runId);
   const toolNames = tools.map((row) => String(row.tool_name));
   expect(toolNames.filter((name) => name === "retrieve_graph_evidence")).toHaveLength(1);
   expect(toolNames.filter((name) => name === "propose_change_set")).toHaveLength(1);
+  expect(toolNames.filter((name) => name === "generate_image")).toHaveLength(sequence === 1 ? 1 : 0);
   const events = audit.listEvents(runId);
-  for (const name of ["retrieve_graph_evidence", "propose_change_set"]) {
+  for (const name of sequence === 1 ? ["retrieve_graph_evidence", "propose_change_set", "generate_image"] : ["retrieve_graph_evidence", "propose_change_set"]) {
     const invocationIds = new Set(tools.filter((row) => row.tool_name === name).map((row) => String(row.id)));
     expect(events.some((event) => invocationIds.has(String(event.tool_invocation_id)) && event.event_type === "succeeded")).toBe(true);
   }
+}
+
+async function assertShowcaseWorldMap(page: Page, persisted: PersistedGrowth): Promise<void> {
+  const image = await page.evaluate(async ({ storyResourceId, jobId, assetId }) => {
+    const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
+    const result = await desktop.showcase.get({ storyResourceId });
+    if (!result.ok) throw new Error("SHOWCASE_WORLD_MAP_UNAVAILABLE");
+    const match = result.showcase.images.find((candidate) => candidate.jobId === jobId && candidate.assetId === assetId);
+    if (!match) throw new Error("SHOWCASE_WORLD_MAP_MISSING");
+    return {
+      jobId: match.jobId,
+      assetId: match.assetId,
+      purpose: match.purpose,
+      status: match.status,
+      sourceResourceIds: match.sourceResourceIds,
+      sourceVersionIds: match.sourceVersionIds,
+      mimeType: match.mimeType,
+      width: match.width,
+      height: match.height,
+      thumbnailUrl: match.thumbnailUrl,
+    };
+  }, { storyResourceId: persisted.story.id, jobId: persisted.worldMap.jobId, assetId: persisted.worldMap.assetId });
+  expect(image).toMatchObject({ jobId: persisted.worldMap.jobId, assetId: persisted.worldMap.assetId, purpose: "world_map", status: "ready", mimeType: persisted.worldMap.mimeType });
+  expect(image.sourceResourceIds).toContain(persisted.world.id);
+  expect(image.sourceVersionIds).toHaveLength(2);
+  expect(image.width).toBeGreaterThan(0);
+  expect(image.height).toBeGreaterThan(0);
+  expect(image.thumbnailUrl).toMatch(/^novax-asset:\/\/image\//);
 }
 
 async function runResearchOnly(page: Page, persisted: PersistedGrowth): Promise<{ runId: string; safe: { runId: string; retrieveSucceeded: boolean; noMutationTools: boolean } }> {
@@ -676,6 +780,8 @@ function inspectResearchAudit(workspacePath: string, persisted: PersistedGrowth,
     expect(events.some((event) => retrieveIds.has(String(event.tool_invocation_id)) && event.event_type === "succeeded")).toBe(true);
     expect(Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()?.count ?? 0)).toBe(persisted.changeSetCount);
     expect(Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM checkpoints").get()?.count ?? 0)).toBe(persisted.checkpointCount);
+    expect(Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()?.count ?? 0)).toBe(persisted.imageJobCount);
+    expect(Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_assets").get()?.count ?? 0)).toBe(persisted.imageAssetCount);
   } finally {
     workspace.close();
   }
@@ -687,8 +793,9 @@ function assertNoPlaintextCredentialSurface(
   growthEvents: GrowthLiveEvent[],
   agentEvents: AgentRunEvent[],
 ): void {
-  expect(containsCredentialMarker(workspacePath, new Set(["provider-profile.v1.json", "Local State"]))).toBe(false);
-  expect(containsCredentialMarker(userDataPath, new Set(["provider-profile.v1.json", "Local State"]))).toBe(false);
+  const excluded = new Set([PROVIDER_STORE_FILE_NAME, IMAGE_PROVIDER_STORE_FILE_NAME, "Local State"]);
+  expect(containsCredentialMarker(workspacePath, excluded)).toBe(false);
+  expect(containsCredentialMarker(userDataPath, excluded)).toBe(false);
   const publicSurface = JSON.stringify({ growthEvents, agentEvents });
   expect(containsCredentialMarkerInText(publicSurface)).toBe(false);
 }
