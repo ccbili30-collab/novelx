@@ -239,10 +239,11 @@ const defaultVisualStyle = {
 7. 同一边界前追加多条规则时，全部 revision 持久化，但允许一个 revision Cycle 使用最新 revision 合并处理；不得丢失中间审计记录。
 8. revision Cycle 失败时停止后续调度并保留恢复入口；未知结果进入 `reconciliation_required`。
 9. `growth.guide` 回执增加 `nextCycleKind: "revision"` 与预计 `focusKinds`，但不承诺尚未提交的结果。
-10. 写确定性测试矩阵：world→story/oc、story→world/oc、oc→story/world、mixed seed 保留、unknown seed 澄清/保守生长；另覆盖 C1 中断、初始完成后继续、连续规则、重开、取消、CAS 冲突和 terminal event 精确一次。
-11. 运行定向测试、typecheck、Prompt publication gate。
-12. 如果连续两个 Cycle 没有新增/修订任何 closure facet、没有解决冲突且没有字符/视觉进度，进入 `blocked / GROWTH_CLOSURE_NO_PROGRESS`，显示需要用户指导；不得无限消耗 Provider。
-13. 提交：`feat(growth): plan world story and oc from any seed`。
+10. Task 1 的 `beginCycle` 省略 Intent 回退只是迁移桥。本任务接管 Coordinator 后，所有新 Cycle 必须显式传入持久 Intent，并删除 sequence 1–3 的新 Cycle fallback；旧 v23 行仍只保留查询时 `legacy_v23_projection`，不得回填历史。
+11. 写确定性测试矩阵：world→story/oc、story→world/oc、oc→story/world、mixed seed 保留、unknown seed 澄清/保守生长；另覆盖 C1 中断、初始完成后继续、连续规则、重开、取消、CAS 冲突和 terminal event 精确一次。
+12. 运行定向测试、typecheck、Prompt publication gate。
+13. 如果连续两个 Cycle 没有新增/修订任何 closure facet、没有解决冲突且没有字符/视觉进度，进入 `blocked / GROWTH_CLOSURE_NO_PROGRESS`，显示需要用户指导；不得无限消耗 Provider。
+14. 提交：`feat(growth): plan world story and oc from any seed`。
 
 ---
 
@@ -298,10 +299,14 @@ interface GrowthInquiryBrief {
 - Create: `src/agent-worker/growth/growthLongformOutline.ts`
 - Create: `src/agent-worker/growth/growthLongformSection.ts`
 - Modify: `src/main/growthCoordinator.ts`
+- Modify: `src/main/growthRunLifecycle.ts`
 - Modify: `src/agent-worker/stewardExecutionStateMachine.ts`
 - Test: `tests/unit/growth-closure-evaluator.test.ts`
 - Test: `tests/unit/growth-longform-authoring.test.ts`
+- Test: `tests/unit/growth-run-bridge.test.ts`
 - Test: `tests/unit/steward-execution-state-machine.test.ts`
+
+**Decision gate:** Task 1 只允许 Closure assessment 在 `running` evaluation Cycle 中评估它的 pinned input checkpoint；Receipt、Cycle input、Closure revision 与 assessment checkpoint 必须完全一致。编码本任务前，必须先冻结“Checker accepted 且无需 Change Set”时 evaluation Cycle 的真实成功终态。不得把它伪装成 `blocked/cancelled`，也不得提交空 Change Set。若现有状态合同无法表达该终态，停止并返回产品负责人/Main Head 决策，不得在本任务中静默改 schema。
 
 **Closure profiles:**
 
@@ -316,15 +321,16 @@ interface GrowthInquiryBrief {
 6. 每个 Writer Cycle 只写一个有界 section，并把 Writer candidateText 原字节写入独立稳定 prose document；不得用模板、重复段落或确定性 filler 补字符数。
 7. 下一 section 必须从最新 checkpoint 检索已写正文、世界规则和角色状态；不能只依赖会话历史。
 8. 每完成若干有实际进展的内容 Cycle，Steward 必须提交严格 `ClosureSelfAssessment`：缺失 facets、冲突、继续生长理由或 `ready_for_checker`。这不是思维链，也没有关闭权限。
-9. 只有 deterministic facets 达到 review 门槛且 Steward 提交 `ready_for_checker` 后，Coordinator 才启动独立真实 Checker Run。Checker 固定当前 checkpoint、Closure Profile 和 Creator Lens 图谱证据，不能直接写项目。
-10. Checker 输出严格 findings：severity、category、target evidence refs、安全问题摘要和 repair objective。没有来源的评价不能成为阻塞项；Checker 不生成替代正文。
-11. 有 blocking findings 时，Coordinator 为其创建 repair intent；Steward/Writer 在下一原子 Cycle 修复并提交 Change Set，然后重新执行 evaluator 和 Checker。只有 deterministic facets 全通过、Steward `ready_for_checker`、Checker `accepted` 且无未解决 blocking finding，内容才能 `closed`。
-12. Closure 是 checkpoint-versioned（按检查点版本化）的临时闭环。后续故事或 OC 修改影响已关闭世界 facet 时，旧 review 失效并重新打开对应 closure，不能把一次 accepted 当永久真理。
-13. 相同 finding fingerprint 连续两轮出现，或两个 repair Cycle 没有解决任何 finding 时，进入 `blocked / GROWTH_CLOSURE_REPAIR_STALLED` 等待用户；不得让两个 Agent 无限互相打回。
-14. 用户中途修改角色秘密、世界规则或故事方向时，相关 sections、reviews 和图片进入受影响集合；修订后重新执行 evaluator，不把旧字符数直接算入当前闭环。
-15. 定向测试覆盖 9,999/10,000 字符边界、Unicode、跨多个 prose 文档累计、superseded 版本排除、重复 filler 拒绝、Steward 提前自我通过无效、Checker 无来源 finding 拒绝、repair→recheck→accepted、重复 finding 停止、旧 closure 被下游修改重新打开、重开恢复。
-16. 运行定向 Vitest、typecheck、Prompt publication gate。
-17. 提交：`feat(growth): review and repair closure profiles`。
+9. Closure assessment 使用独立的 evaluation Cycle：它先从待评估 checkpoint 检索，Steward 与 Checker 使用同一可信 Receipt、不同且角色匹配的终态 invocation；不得复用产生该 checkpoint 之前的旧 Receipt。
+10. 只有 deterministic facets 达到 review 门槛且 Steward 提交 `ready_for_checker` 后，Coordinator 才启动独立真实 Checker 调用。Checker 固定当前 checkpoint、Closure Profile 和 Creator Lens 图谱证据，不能直接写项目。
+11. Checker 输出严格 findings：severity、category、target evidence refs、安全问题摘要和 repair objective。没有来源的评价不能成为阻塞项；Checker 不生成替代正文。
+12. 有 blocking findings 时，Coordinator 为其创建 repair intent；Steward/Writer 在下一原子 Cycle 修复并提交 Change Set，然后重新执行 evaluator 和 Checker。只有 deterministic facets 全通过、Steward `ready_for_checker`、Checker `accepted` 且无未解决 blocking finding，内容才能 `closed`。
+13. Closure 是 checkpoint-versioned（按检查点版本化）的临时闭环。后续故事或 OC 修改影响已关闭世界 facet 时，旧 review 失效并重新打开对应 closure，不能把一次 accepted 当永久真理。
+14. 相同 finding fingerprint 连续两轮出现，或两个 repair Cycle 没有解决任何 finding 时，进入 `blocked / GROWTH_CLOSURE_REPAIR_STALLED` 等待用户；不得让两个 Agent 无限互相打回。
+15. 用户中途修改角色秘密、世界规则或故事方向时，相关 sections、reviews 和图片进入受影响集合；修订后重新执行 evaluator，不把旧字符数直接算入当前闭环。
+16. 定向测试覆盖 9,999/10,000 字符边界、Unicode、跨多个 prose 文档累计、superseded 版本排除、重复 filler 拒绝、Steward 提前自我通过无效、Checker 无来源 finding 拒绝、repair→recheck→accepted、重复 finding 停止、旧 closure 被下游修改重新打开、evaluation Cycle 成功终态和重开恢复。
+17. 运行定向 Vitest、typecheck、Prompt publication gate。
+18. 提交：`feat(growth): review and repair closure profiles`。
 
 ---
 
