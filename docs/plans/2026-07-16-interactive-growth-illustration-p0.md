@@ -244,6 +244,8 @@ const defaultVisualStyle = {
 - Test: `tests/unit/ipc-contract.test.ts`
 - Test: `tests/unit/growth-presentation.test.ts`
 - Test: `tests/e2e/growth-presentation-ui.spec.ts`（仅 fixture/类型迁移；本任务不运行 Electron）
+- Test: `tests/e2e/support/growthWatcher.ts`
+- Test: `tests/e2e/support/growthWatcher.test.ts`
 - Test: `tests/unit/workspace-persistence.test.ts`
 
 **Frontier and scheduling rules:**
@@ -253,16 +255,17 @@ const defaultVisualStyle = {
 3. 每轮从最新图谱 coverage、缺失关系和用户规则计算 Growth Frontier；`focusKinds` 可以是一种或多种，不再按 sequence 硬编码阶段。
 4. Planner 不能因为“已有一个 world/story/oc 资源”就停止；它必须读取 Closure State。只有当前 profile 的内容 facets 全部满足，才停止创建内容 Cycle 并等待默认视觉集合完成。
 5. 用户指导在任意 running/committed/awaiting-guidance 状态均可追加；删除现有 C3 后 `GROWTH_GUIDANCE_NO_NEXT_CYCLE` 的产品限制。
-6. 正在运行的 Cycle 固定旧 revision。边界到达后，如果 Goal 最新 revision 大于刚完成 Cycle revision，先计划一个 `revision` intent；完成后重新计算 frontier，而不是恢复写死阶段。
+6. 正在运行的 Cycle 固定旧 revision。边界到达后，如果 Goal 最新 revision 大于刚完成 Cycle revision，Task 3 公开进入 `awaiting_guidance` 并保留预计的 `revision` Intent；Task 6 接入受影响节点与修订 Fragment 后才创建真实 revision Cycle。不得为了占位先制造一个注定 blocked 的 Cycle。
 7. 同一边界前追加多条规则时，全部 revision 持久化，但允许一个 revision Cycle 使用最新 revision 合并处理；不得丢失中间审计记录。
-8. revision Cycle 失败时停止后续调度并保留恢复入口；未知结果进入 `reconciliation_required`。
-9. `growth.guide` 回执增加 `nextCycleKind: "revision"` 与预计 `focusKinds`，但不承诺尚未提交的结果。
-10. Task 1 的 `beginCycle` 省略 Intent 回退只是迁移桥。本任务接管 Coordinator 后，`growthCycleBeginSchema.intent` 对所有新 Cycle 必填，Coordinator、测试和内部调用方必须显式传入持久 Intent，并删除 sequence 1–3 的新 Cycle fallback；旧 v23 行仍只保留查询时 `legacy_v23_projection`，不得回填历史。
+8. revision Cycle 失败时停止后续调度并保留恢复入口；未知结果进入 `reconciliation_required`。Task 3 的 Lifecycle 仍需对任何提前出现的 revision Intent 在 Worker/Change Set 前失败关闭，作为 Task 6 接线前的防线。
+9. `growth.guide` 回执增加 `nextCycleKind: "revision"` 与预计 `focusKinds`，但文案只说明“已保存，等待安全修订轮”，不得承诺尚未创建或提交的 Cycle。连续指导必须逐条通过 CAS 持久化，不得被占位 blocked Cycle 阻断。
+10. Task 1 的 `beginCycle` 省略 Intent 回退只是迁移桥。本任务接管 Coordinator 后，`growthCycleBeginSchema.intent` 对所有新 Cycle 必填，Coordinator、测试和内部调用方必须显式传入持久 Intent，并删除 sequence 1–3 的新 Cycle fallback；旧 v23 行仍只保留查询时 `legacy_v23_projection`，不得回填历史。缺 Intent 的行只有在其 `payload_hash` 能证明来自旧版无 Intent 输入时才可投影；新 v24 行丢失 Intent 必须失败关闭。
 11. 写确定性测试矩阵：world→story/oc、story→world/oc、oc→story/world、mixed seed 保留、unknown seed 澄清/保守生长；另覆盖 C1 中断、初始完成后继续、连续规则、重开、取消、CAS 冲突和 terminal event 精确一次。
 12. 运行定向测试、typecheck、Prompt publication gate。
 13. Worker binding 不再暴露或依赖 sequence 推导的单一 `phase`；它携带 Main 从持久 Intent 投影出的 `kind`、`focusKinds` 与 `resumeFrontier`。状态机只开放当前 Intent 允许的高层 Fragment 路径，保持单 Cycle 最多一个 Change Set、Greenfield create-only 与既有 Gateway 最终权限校验。
-14. Task 3 不输出 Closure（闭环）完成结论。没有 Task 5 的独立 Steward/Checker 接受证据时，Coordinator 只能保持 growing、awaiting-guidance 或安全 blocked；“连续两轮无 closure facet 进展”检测在 Task 5 接入真实 Closure Assessment 后实现。
-15. 提交：`feat(growth): plan world story and oc from any seed`。
+14. Task 3 不输出 Closure（闭环）完成结论。没有 Task 5 的独立 Steward/Checker 接受证据时，Coordinator 在没有可执行 frontier 时必须公开 `awaiting_guidance`，不能以 `running` 或 `completed` 冒充；“连续两轮无 closure facet 进展”检测在 Task 5 接入真实 Closure Assessment 后实现。
+15. `growth.get` 必须重新注册当前 project/session 的安全事件 route，并在 committed 边界幂等推进恰好一个下一 expand Cycle或恢复为 `awaiting_guidance`；不能要求 Renderer 猜测或重新调用 start。
+16. 提交：`feat(growth): plan world story and oc from any seed`。
 
 ---
 
