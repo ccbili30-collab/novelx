@@ -36,7 +36,7 @@ describe("Agent Worker tool bridge", () => {
       ),
     }, {
       growthBinding: {
-        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", phase: "world", inputCheckpointId: "checkpoint-1",
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], inputCheckpointId: "checkpoint-1",
         ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
       },
     });

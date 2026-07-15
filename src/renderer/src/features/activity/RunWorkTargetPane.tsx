@@ -29,7 +29,7 @@ export function RunWorkTargetPane(props: {
       {!props.presentation ? <p>尚未启动生长任务。</p> : (
         <>
           <header>
-            <strong>{current ? `第 ${current.sequence}/3 轮` : "等待安排"}</strong>
+            <strong>{current ? `第 ${current.sequence} 轮` : "等待安排"}</strong>
             <small>{phaseLabel(event?.phase, current?.durableState)}</small>
           </header>
           <p className="run-work-target-pane__summary">{current?.summary ?? props.presentation.terminalLabel ?? "等待 Main 安排"}</p>
@@ -38,7 +38,7 @@ export function RunWorkTargetPane(props: {
               <span>当前轮使用 #{props.presentation.guidance.activeRevision}</span>
               <span>最新已保存 #{props.presentation.guidance.latestSavedRevision}</span>
               <span>{props.presentation.guidance.pending && props.presentation.guidance.nextCycleSequence
-                ? `待下一轮生效 · 第 ${props.presentation.guidance.nextCycleSequence} 轮`
+                ? `已保存，等待安全修订轮 · 候选第 ${props.presentation.guidance.nextCycleSequence} 轮`
                 : "当前无待生效规则"}</span>
             </div>
           ) : null}

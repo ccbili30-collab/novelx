@@ -157,7 +157,19 @@ export class GrowthRepository {
   getCycleIntent(cycleId: string): GrowthCycleIntent {
     const cycle = this.#requiredCycle(cycleId);
     const row = this.workspace.db.prepare("SELECT kind FROM growth_cycle_intents WHERE cycle_id = ?").get(cycleId) as Row | undefined;
-    if (!row) return legacyCycleIntent(cycle);
+    if (!row) {
+      const legacyPayloadHash = canonicalAuditHash({
+        id: cycle.id,
+        goalId: cycle.goalId,
+        idempotencyKey: cycle.idempotencyKey,
+        inputCheckpointId: cycle.inputCheckpointId,
+        ruleRevision: cycle.ruleRevision,
+      });
+      const stored = this.workspace.db.prepare("SELECT payload_hash FROM growth_cycles WHERE id = ?")
+        .get(cycle.id) as Row | undefined;
+      if (!stored || readString(stored, "payload_hash") !== legacyPayloadHash) throw growthError("GROWTH_CYCLE_INTENT_REQUIRED");
+      return legacyCycleIntent(cycle);
+    }
     const focusKinds = (this.workspace.db.prepare(`
       SELECT focus_kind FROM growth_cycle_intent_focuses WHERE cycle_id = ? ORDER BY ordinal
     `).all(cycleId) as Array<{ focus_kind: string }>).map((entry) => entry.focus_kind);
@@ -171,6 +183,14 @@ export class GrowthRepository {
 
   listCycleIntents(goalId: string): GrowthCycleIntent[] {
     return this.listCycles(goalId).map((cycle) => this.getCycleIntent(cycle.id));
+  }
+
+  listClosureStates(goalId: string): GrowthClosureState[] {
+    this.#requiredGoal(goalId);
+    const rows = this.workspace.db.prepare(`
+      SELECT id FROM growth_closure_profiles WHERE goal_id = ? ORDER BY created_at, id
+    `).all(goalId) as Array<{ id: string }>;
+    return rows.map((row) => this.getClosureState(row.id));
   }
 
   getReceipt(receiptId: string): GrowthRetrievalReceipt | null {
@@ -925,7 +945,7 @@ export class GrowthRepository {
       }
       this.#assertCheckpointBranch(value.inputCheckpointId, goal.branchId);
       const sequence = goal.currentCycleSequence + 1;
-      const intent = value.intent ?? legacyIntentForSequence(sequence);
+      const intent = value.intent;
       const now = new Date().toISOString();
       this.workspace.db.prepare(`
         INSERT INTO growth_cycles (
@@ -1431,12 +1451,6 @@ const legacyCycleIntentMapping: Record<number, { focusKinds: Array<"world" | "st
   2: { focusKinds: ["story"], resumeFrontier: ["oc"] },
   3: { focusKinds: ["oc"], resumeFrontier: [] },
 };
-
-function legacyIntentForSequence(sequence: number): { kind: "expand"; focusKinds: Array<"world" | "story" | "oc">; resumeFrontier: Array<"world" | "story" | "oc"> } {
-  const intent = legacyCycleIntentMapping[sequence];
-  if (!intent) throw growthError("GROWTH_CYCLE_INTENT_REQUIRED");
-  return { kind: "expand", ...intent };
-}
 
 function legacyCycleIntent(cycle: GrowthCycle): GrowthCycleIntent {
   const intent = legacyCycleIntentMapping[cycle.sequence];

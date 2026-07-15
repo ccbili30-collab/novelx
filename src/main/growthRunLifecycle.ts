@@ -72,13 +72,26 @@ export class GrowthRunLifecycle {
     } catch {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
-    const phase = growthPhaseForCycleSequence(cycle.sequence);
-    const phaseAnchor = trustedPhaseAnchor(this.workspace, repository, goal, cycle, phase);
+    const intent = repository.getCycleIntent(cycle.id);
+    if (intent.kind === "expand" && intent.focusKinds.length !== 1) {
+      throw growthRunError("GROWTH_BINDING_INVALID");
+    }
+    if (intent.kind === "revision") {
+      const terminal = repository.terminalizeCycle({
+        cycleId: cycle.id, status: "blocked", failureCode: "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED",
+      });
+      const event = repairTerminalEvent(repository, goal, terminal, "修订 Cycle 执行路径尚未接入，已安全阻塞。");
+      if (event) notifyPersistedEvent(input.onPersistedEvent, event);
+      throw growthRunError("GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED");
+    }
+    const intentAnchors = trustedIntentAnchors(this.workspace, repository, goal, cycle, intent.focusKinds[0]!);
     const binding = growthRunBindingSchema.parse({
       capabilityVersion: growthCapabilityVersion,
       goalId: goal.id,
       cycleId: cycle.id,
-      phase,
+      kind: intent.kind,
+      focusKinds: intent.focusKinds,
+      resumeFrontier: intent.resumeFrontier,
       inputCheckpointId: cycle.inputCheckpointId,
       ruleRevision: cycle.ruleRevision,
       authorizedScopeResourceIds: goal.authorizedScopeResourceIds,
@@ -86,9 +99,10 @@ export class GrowthRunLifecycle {
       domainRootResourceIds: trustedDomainRoots(this.workspace, cycle.inputCheckpointId, goal.authorizedScopeResourceIds),
       greenfieldCreateAuthorized: input.request.mode === "free"
         && cycle.sequence === 1
+        && intent.focusKinds[0] === "world"
         && isGreenfieldWorkspaceEmpty(this.workspace),
     });
-    const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent, phaseAnchor);
+    const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent, intentAnchors);
     return this.supervisor.start(
       { ...input.request, scopeResourceIds: binding.authorizedScopeResourceIds },
       input.emit,
@@ -136,13 +150,6 @@ export class GrowthRunLifecycle {
   }
 }
 
-export function growthPhaseForCycleSequence(sequence: number): "world" | "story" | "oc" {
-  if (sequence === 1) return "world";
-  if (sequence === 2) return "story";
-  if (sequence === 3) return "oc";
-  throw growthRunError("GROWTH_BINDING_INVALID");
-}
-
 class BoundGrowthRun implements AgentRunInternalBinding {
   readonly #repository: GrowthRepository;
   #runId: string | null = null;
@@ -154,7 +161,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     readonly workerBinding: GrowthRunBinding,
     readonly branchId: string,
     readonly onPersistedEvent: ((event: GrowthEvent) => void) | undefined,
-    readonly phaseAnchor: TrustedPhaseAnchor | null,
+    readonly intentAnchors: TrustedIntentAnchor[],
   ) {
     this.#repository = new GrowthRepository(workspace);
     this.#graph = new GraphRetrievalService(workspace);
@@ -217,9 +224,9 @@ class BoundGrowthRun implements AgentRunInternalBinding {
         lens: "creator",
         authorizedScopeResourceIds: this.workerBinding.authorizedScopeResourceIds,
         ...retrievalArgs,
-        aliases: uniqueStrings([...retrievalArgs.aliases, ...(this.phaseAnchor ? [this.phaseAnchor.title] : [])]),
-        seedResourceIds: uniqueStrings([...this.workerBinding.seedResourceIds, ...retrievalArgs.seedResourceIds, ...(this.phaseAnchor ? [this.phaseAnchor.resourceId] : [])]),
-        requiredResourceIds: this.phaseAnchor ? [this.phaseAnchor.resourceId] : [],
+        aliases: uniqueStrings([...retrievalArgs.aliases, ...this.intentAnchors.map((anchor) => anchor.title)]),
+        seedResourceIds: uniqueStrings([...this.workerBinding.seedResourceIds, ...retrievalArgs.seedResourceIds, ...this.intentAnchors.map((anchor) => anchor.resourceId)]),
+        requiredResourceIds: this.intentAnchors.map((anchor) => anchor.resourceId),
         validTime: null,
         recordedTime: null,
       });
@@ -378,7 +385,7 @@ function repairTerminalEvent(repository: GrowthRepository, goal: GrowthGoal, cyc
       targetVersionId: cycle.outputCheckpointId, durableState: cycle.status, contentRef: null,
     });
   }
-  if (!cycle.runId || (cycle.status !== "blocked" && cycle.status !== "failed" && cycle.status !== "cancelled" && cycle.status !== "reconciliation_required")) {
+  if (cycle.status !== "blocked" && cycle.status !== "failed" && cycle.status !== "cancelled" && cycle.status !== "reconciliation_required") {
     throw growthRunError("GROWTH_BINDING_INVALID");
   }
   if (repository.listEvents(goal.id).some((event) => event.cycleId === cycle.id && event.phase === "cycle_terminal")) return null;
@@ -417,45 +424,52 @@ function nextGrowthEventSequence(repository: GrowthRepository, goalId: string): 
   return last ? last.sequence + 1 : 1;
 }
 
-interface TrustedPhaseAnchor {
+interface TrustedIntentAnchor {
   resourceId: string;
   title: string;
 }
 
 /**
- * Later Growth Cycles are anchored only by the immediately preceding committed
- * Change Set outputs at the next Cycle's pinned checkpoint. The model and the
- * Worker neither choose nor receive this authority.
+ * Intent prerequisites come from formal resources visible at the pinned
+ * checkpoint. A preceding Cycle still has to expose a valid committed resource
+ * output, but it no longer dictates a sequence-derived phase.
  */
-function trustedPhaseAnchor(
+function trustedIntentAnchors(
   workspace: WorkspaceDatabase,
   repository: GrowthRepository,
   goal: GrowthGoal,
   cycle: GrowthCycle,
-  phase: "world" | "story" | "oc",
-): TrustedPhaseAnchor | null {
-  if (phase === "world") return null;
+  focusKind: "world" | "story" | "oc",
+): TrustedIntentAnchor[] {
+  if (focusKind === "world") return [];
   const prior = repository.listCycles(goal.id).find((candidate) => candidate.sequence === cycle.sequence - 1);
-  if (!prior || prior.status !== "committed" || !prior.changeSetId || !prior.outputCheckpointId
-    || prior.outputCheckpointId !== cycle.inputCheckpointId) {
-    throw growthRunError("GROWTH_BINDING_INVALID");
+  const resources = new ResourceRepository(workspace);
+  if (prior) {
+    if (prior.status !== "committed" || !prior.changeSetId || !prior.outputCheckpointId
+      || prior.outputCheckpointId !== cycle.inputCheckpointId) {
+      throw growthRunError("GROWTH_BINDING_INVALID");
+    }
+    const visibleOutputs = new ChangeSetRepository(workspace).listOutputs(prior.changeSetId)
+      .filter((output) => output.kind === "resource_revision")
+      .map((output) => resources.getVisibleByRevisionIdAtCheckpoint(output.outputId, cycle.inputCheckpointId))
+      .filter((resource): resource is NonNullable<typeof resource> => Boolean(resource));
+    if (visibleOutputs.length === 0) throw growthRunError("GROWTH_BINDING_INVALID");
   }
-  const expected = phase === "story"
+  const expected = focusKind === "story"
     ? { type: "world" as const, objectKind: "world" as const }
     : { type: "story" as const, objectKind: "story" as const };
-  const resources = new ResourceRepository(workspace);
-  const matches = new ChangeSetRepository(workspace).listOutputs(prior.changeSetId)
-    .filter((output) => output.kind === "resource_revision")
-    .map((output) => resources.getVisibleByRevisionIdAtCheckpoint(output.outputId, cycle.inputCheckpointId))
-    .filter((resource): resource is NonNullable<typeof resource> => Boolean(resource))
-    .filter((resource) => resource.type === expected.type && resource.objectKind === expected.objectKind);
+  const allResources = resources.listAtCheckpoint(cycle.inputCheckpointId);
+  const matches = allResources.filter((resource) => resource.type === expected.type && resource.objectKind === expected.objectKind)
+    .filter((resource) => goal.authorizedScopeResourceIds.includes(resource.id)
+      || isDescendantOfAuthorizedScope(resource.id, goal.authorizedScopeResourceIds, allResources));
+  if (matches.length === 0) return [];
   if (matches.length !== 1) throw growthRunError("GROWTH_BINDING_INVALID");
   const anchor = matches[0]!;
   if (!goal.authorizedScopeResourceIds.some((scopeId) => scopeId === anchor.id)
     && !isDescendantOfAuthorizedScope(anchor.id, goal.authorizedScopeResourceIds, resources.listAtCheckpoint(cycle.inputCheckpointId))) {
     throw growthRunError("GROWTH_BINDING_INVALID");
   }
-  return { resourceId: anchor.id, title: anchor.title };
+  return [{ resourceId: anchor.id, title: anchor.title }];
 }
 
 function isDescendantOfAuthorizedScope(resourceId: string, scopeIds: string[], resources: ReturnType<ResourceRepository["listAtCheckpoint"]>): boolean {
@@ -531,6 +545,6 @@ function sameStrings(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function growthRunError(code: "GROWTH_BINDING_INVALID" | "GROWTH_RETRIEVAL_INPUT_INVALID" | "GROWTH_PERSISTENCE_FAILED" | "GROWTH_RETRIEVAL_REQUIRED" | "GROWTH_RECONCILIATION_REQUIRED" | "GROWTH_RUN_FAILED"): Error & { code: string } {
+function growthRunError(code: "GROWTH_BINDING_INVALID" | "GROWTH_RETRIEVAL_INPUT_INVALID" | "GROWTH_PERSISTENCE_FAILED" | "GROWTH_RETRIEVAL_REQUIRED" | "GROWTH_RECONCILIATION_REQUIRED" | "GROWTH_RUN_FAILED" | "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED"): Error & { code: string } {
   return Object.assign(new Error("Growth Run bridge failed."), { code });
 }

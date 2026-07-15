@@ -23,8 +23,8 @@ const cycleTwo = "cycle-2";
 
 function snapshot(overrides: Partial<GrowthStartResponse> = {}): GrowthStartResponse {
   return {
-    capabilityVersion: "hackathon-growth-persistence-v1",
-    strategy: "grow_world_story_oc_v1",
+    capabilityVersion: "hackathon-growth-dynamic-v2",
+    strategy: "grow_world_story_oc_dynamic_v2",
     coordinatorStatus: "running",
     goal: { id: goalId, status: "active", currentCycleSequence: 1 },
     cycles: [
@@ -89,13 +89,14 @@ describe("growth presentation", () => {
       latestSavedRevision: 2,
       pending: true,
       nextCycleSequence: 2,
-      nextCyclePhase: "story",
+      nextCycleKind: "revision",
+      focusKinds: [],
     });
     expect(missingActiveRevision.guidance).toBeNull();
   });
 
   it("advances consecutive persisted guidance revisions and disables unsafe boundaries", async () => {
-    const { createGrowthPresentation, getGrowthGuidanceAvailability, recordGrowthGuidanceResponse } = await presentation();
+    const { createGrowthPresentation, getGrowthGuidanceAvailability, mergeGrowthSnapshot, recordGrowthGuidanceResponse } = await presentation();
     let state = createGrowthPresentation(snapshot({
       currentRuleRevision: 1,
       activeCycleRuleRevision: 1,
@@ -108,7 +109,8 @@ describe("growth presentation", () => {
       currentCycleRevision: 1,
       appliesAt: "next_cycle_boundary",
       nextCycleSequence: 2,
-      nextCyclePhase: "story",
+      nextCycleKind: "revision",
+      focusKinds: ["world", "story", "oc"],
       status: "persisted_pending_boundary",
     });
     state = recordGrowthGuidanceResponse(state, {
@@ -117,11 +119,19 @@ describe("growth presentation", () => {
       currentCycleRevision: 1,
       appliesAt: "next_cycle_boundary",
       nextCycleSequence: 2,
-      nextCyclePhase: "story",
+      nextCycleKind: "revision",
+      focusKinds: ["world", "story", "oc"],
       status: "persisted_pending_boundary",
     });
+    state = mergeGrowthSnapshot(state, snapshot({
+      currentRuleRevision: 3,
+      activeCycleRuleRevision: 1,
+      guidanceStatus: "persisted_pending_boundary",
+    }));
 
-    expect(state.guidance).toMatchObject({ activeRevision: 1, latestSavedRevision: 3, pending: true });
+    expect(state.guidance).toMatchObject({
+      activeRevision: 1, latestSavedRevision: 3, pending: true, focusKinds: ["world", "story", "oc"],
+    });
     expect(getGrowthGuidanceAvailability(state)).toEqual({ canGuide: true, reason: null });
 
     const cycleThree = createGrowthPresentation(snapshot({
@@ -130,7 +140,22 @@ describe("growth presentation", () => {
       activeCycleRuleRevision: 3,
       guidanceStatus: "none",
     }));
-    expect(getGrowthGuidanceAvailability(cycleThree)).toEqual({ canGuide: false, reason: "第 3 轮之后没有安全的下一轮边界。" });
+    expect(getGrowthGuidanceAvailability(cycleThree)).toEqual({ canGuide: true, reason: null });
+    const awaiting = createGrowthPresentation(snapshot({
+      coordinatorStatus: "awaiting_guidance",
+      goal: { id: goalId, status: "active", currentCycleSequence: 3 },
+      currentRuleRevision: 3,
+      activeCycleRuleRevision: 1,
+      guidanceStatus: "persisted_pending_boundary",
+      cycles: [
+        { id: cycleOne, sequence: 1, runId: "run-1", status: "committed" },
+        { id: cycleTwo, sequence: 2, runId: "run-2", status: "committed" },
+        { id: "cycle-3", sequence: 3, runId: "run-3", status: "committed" },
+      ],
+    }));
+    expect(awaiting.running).toBe(false);
+    expect(awaiting.terminalLabel).toBe("当前无 Agent 运行，等待追加指导");
+    expect(getGrowthGuidanceAvailability(awaiting)).toEqual({ canGuide: true, reason: null });
     for (const coordinatorStatus of ["completed", "blocked", "failed", "reconciliation_required"] as const) {
       const terminal = createGrowthPresentation(snapshot({
         coordinatorStatus,
@@ -140,7 +165,7 @@ describe("growth presentation", () => {
       }));
       expect(getGrowthGuidanceAvailability(terminal), coordinatorStatus).toEqual({
         canGuide: false,
-        reason: "当前生长任务已不再运行，不能追加下一轮指导。",
+        reason: "当前生长任务已结束，不能追加规则修订。",
       });
     }
   });

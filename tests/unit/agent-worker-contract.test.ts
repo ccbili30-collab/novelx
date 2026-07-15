@@ -17,16 +17,18 @@ const auditRecorder = { record: async () => undefined };
 describe("agent worker fail-closed contract", () => {
   it("requires a bounded unique trusted seed set in the internal Growth binding", () => {
     const binding = {
-      capabilityVersion: "hackathon-growth-persistence-v1", goalId: "goal-1", cycleId: "cycle-1",
+      capabilityVersion: "hackathon-growth-dynamic-v2", goalId: "goal-1", cycleId: "cycle-1",
       inputCheckpointId: "checkpoint-1", ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
-      phase: "world", seedResourceIds: ["seed-resource"], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
+      kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], seedResourceIds: ["seed-resource"],
+      domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
     };
     expect(growthRunBindingSchema.parse(binding)).toEqual(binding);
     expect(growthRunBindingSchema.safeParse({ ...binding, seedResourceIds: ["seed-resource", "seed-resource"] }).success).toBe(false);
     expect(growthRunBindingSchema.safeParse({ ...binding, branchId: "forged" }).success).toBe(false);
     expect(growthRunBindingSchema.safeParse({ ...binding, greenfieldCreateAuthorized: "forged" }).success).toBe(false);
-    expect(growthRunBindingSchema.safeParse({ ...binding, phase: "forged" }).success).toBe(false);
-    expect(growthRunBindingSchema.safeParse(({ ...binding, phase: undefined }) as unknown).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, focusKinds: ["forged"] }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse(({ ...binding, kind: undefined }) as unknown).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, focusKinds: ["world", "world"] }).success).toBe(false);
     expect(growthRunBindingSchema.safeParse({ ...binding, rendererRequestedAuthority: true }).success).toBe(false);
   });
 

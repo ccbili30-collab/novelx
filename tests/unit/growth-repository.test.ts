@@ -8,6 +8,7 @@ import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspac
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { ChangeSetRepository } from "../../src/domain/changeSet/changeSetRepository";
+import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
 
 let workspace: WorkspaceDatabase | undefined;
 let root: string | undefined;
@@ -348,11 +349,25 @@ describe("GrowthRepository", () => {
 
     const cycle = repository.beginCycle({
       id: "cycle-1", goalId: goal.id, idempotencyKey: "cycle-1", inputCheckpointId: setup.checkpointId,
-      ruleRevision: 1,
+      ruleRevision: 1, intent: cycleIntent(),
     });
     expect(repository.getCycleIntent(cycle.id)).toEqual({
       cycleId: cycle.id, kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], provenance: "persisted_v24",
     });
+    setup.workspace.db.prepare("DELETE FROM growth_cycle_intents WHERE cycle_id = ?").run(cycle.id);
+    expect(() => repository.getCycleIntent(cycle.id))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_CYCLE_INTENT_REQUIRED" }));
+    setup.workspace.db.prepare("UPDATE growth_cycles SET payload_hash = ? WHERE id = ?").run(canonicalAuditHash({
+      id: cycle.id,
+      goalId: goal.id,
+      idempotencyKey: "cycle-1",
+      inputCheckpointId: setup.checkpointId,
+      ruleRevision: 1,
+    }), cycle.id);
+    expect(repository.getCycleIntent(cycle.id)).toEqual({
+      cycleId: cycle.id, kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], provenance: "legacy_v23_projection",
+    });
+    expect(setup.workspace.db.prepare("SELECT 1 FROM growth_cycle_intents WHERE cycle_id = ?").get(cycle.id)).toBeUndefined();
     expect(() => setup.workspace.db.prepare(`
       INSERT INTO growth_cycles (
         id, goal_id, sequence, idempotency_key, payload_hash, input_checkpoint_id, rule_revision,

@@ -299,7 +299,7 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
           text: JSON.stringify({
             result,
             novaxInstruction: options.growthBinding
-              ? options.growthBinding.phase === "world" && options.growthBinding.greenfieldCreateAuthorized
+              ? options.growthBinding.kind === "expand" && options.growthBinding.focusKinds[0] === "world" && options.growthBinding.greenfieldCreateAuthorized
                 ? "The Growth Receipt is recorded. Empty evidence is expected for authorized Greenfield creation. Create from the locked seed and rules: the required next tool is propose_change_set with one high-level world Fragment. Do not block solely because retrieval is empty."
                 : "This pinned Growth receipt is recorded. Do not repeat the retrieval. If evidence is sufficient, call propose_change_set."
               : "Do not repeat the same retrieval. If the user requested a Change Set and evidence is sufficient, call propose_change_set. If the evidence conflicts or the user requested validation, call checker. Otherwise submit the final structured result.",
@@ -310,7 +310,9 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
     },
   };
 
-  const worldFragment = options.growthBinding?.phase === "world" ? options.growthBinding : null;
+  const worldFragment = options.growthBinding?.kind === "expand" && options.growthBinding.focusKinds[0] === "world"
+    ? options.growthBinding
+    : null;
   const propose: AgentTool<typeof proposeParameters | typeof growthWorldFragmentParameters> = {
     name: "propose_change_set",
     label: "生成候选变更",

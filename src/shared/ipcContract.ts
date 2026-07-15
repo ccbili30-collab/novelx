@@ -1247,7 +1247,7 @@ export const agentRunCancelRequestSchema = z.object({
   runId: z.string().min(1).max(120),
 }).strict();
 
-export const growthStrategySchema = z.literal("grow_world_story_oc_v1");
+export const growthStrategySchema = z.literal("grow_world_story_oc_dynamic_v2");
 
 export const growthStartRequestSchema = z.object({
   requestId: z.uuid(),
@@ -1306,7 +1306,7 @@ export const growthPublicEventSchema = z.object({
 const growthPublicSnapshotSchema = z.object({
   capabilityVersion: z.literal(growthCapabilityVersion),
   strategy: growthStrategySchema,
-  coordinatorStatus: z.enum(["running", "completed", "blocked", "failed", "cancelled", "reconciliation_required"]),
+  coordinatorStatus: z.enum(["running", "awaiting_guidance", "completed", "blocked", "failed", "cancelled", "reconciliation_required"]),
   goal: growthPublicGoalSchema,
   currentRuleRevision: z.number().int().min(1).max(1_000_000).optional(),
   activeCycleRuleRevision: z.number().int().min(1).max(1_000_000).nullable().optional(),
@@ -1322,10 +1322,15 @@ export const growthGuideResponseSchema = z.object({
   persistedRevision: z.number().int().min(2).max(1_000_000),
   currentCycleRevision: z.number().int().min(1).max(1_000_000),
   appliesAt: z.literal("next_cycle_boundary"),
-  nextCycleSequence: z.number().int().min(2).max(3),
-  nextCyclePhase: z.enum(["story", "oc"]),
+  nextCycleSequence: z.number().int().min(2).max(1_000_000),
+  nextCycleKind: z.literal("revision"),
+  focusKinds: z.array(z.enum(["world", "story", "oc"])).min(1).max(3),
   status: z.literal("persisted_pending_boundary"),
-}).strict();
+}).strict().superRefine((value, context) => {
+  if (new Set(value.focusKinds).size !== value.focusKinds.length) {
+    context.addIssue({ code: "custom", path: ["focusKinds"], message: "Growth guidance focus kinds must be unique." });
+  }
+});
 export const growthLiveEventSchema = z.object({
   sessionId: opaqueIdSchema,
   strategy: growthStrategySchema,

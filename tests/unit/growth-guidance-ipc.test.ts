@@ -59,7 +59,8 @@ describe("growth guidance IPC", () => {
       currentCycleRevision: 1,
       appliesAt: "next_cycle_boundary",
       nextCycleSequence: 2,
-      nextCyclePhase: "story",
+      nextCycleKind: "revision",
+      focusKinds: ["world"],
       status: "persisted_pending_boundary",
     });
     for (const field of ["projectId", "sessionId", "branchId", "checkpointId", "scopeResourceIds", "lens", "cycleId", "runId"]) {
@@ -98,6 +99,7 @@ function createSetup() {
     idempotencyKey: `${goalId}:cycle:1`,
     inputCheckpointId: context.checkpointId,
     ruleRevision: 1,
+    intent: { kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"] },
   });
   const registered = registerDesktopIpc("unused-worker.js", application, undefined, undefined, undefined, undefined, undefined, session);
   dispose = registered.dispose;

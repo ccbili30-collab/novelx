@@ -2,6 +2,23 @@ import { describe, expect, it } from "vitest";
 import { watchGrowthTerminal, type GrowthWatchSnapshot } from "./growthWatcher";
 
 describe("Growth live watcher", () => {
+  it("returns awaiting guidance without treating a committed Cycle as an active Worker", async () => {
+    let released = 0;
+    const result = await watchGrowthTerminal({
+      getSnapshot: async () => ({
+        coordinatorStatus: "awaiting_guidance" as const,
+        cycles: [{ id: "cycle-1", status: "committed", runId: "run-1" }],
+      }),
+      readEvents: async () => [{ type: "run.completed", runId: "run-1" }],
+      release: async () => { released += 1; },
+      overallTimeoutMs: 900,
+      cycleTimeoutMs: 300,
+    });
+    expect(result).toMatchObject({ termination: null, snapshot: { coordinatorStatus: "awaiting_guidance" } });
+    expect(result.snapshot.cycles.some((cycle) => cycle.status === "running")).toBe(false);
+    expect(released).toBe(1);
+  });
+
   it("returns a terminal coordinator snapshot promptly and releases subscriptions", async () => {
     let released = 0;
     const result = await watchGrowthTerminal({

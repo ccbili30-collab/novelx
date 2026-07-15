@@ -158,15 +158,22 @@ const planSchema = z.object({
 type StewardPlan = z.infer<typeof planSchema>;
 
 function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
+  const focus = growthFocus(binding);
   return {
     objective: "change_set",
     scopeResourceIds: [...binding.authorizedScopeResourceIds],
-    steps: binding.phase === "world"
+    steps: focus === "world"
       ? ["retrieve_graph_evidence", "propose_change_set", "generate_image"]
-      : binding.phase === "oc"
+      : focus === "oc"
       ? ["retrieve_graph_evidence", "propose_change_set"]
       : ["retrieve_graph_evidence", "writer", "propose_change_set"],
   };
+}
+
+function growthFocus(binding: GrowthRunBinding | undefined): "world" | "story" | "oc" | null {
+  if (!binding) return null;
+  if (binding.kind === "revision") throw stateError("STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED");
+  return binding.focusKinds[0] ?? null;
 }
 
 function isGreenfieldProposalCorrection(
@@ -176,9 +183,9 @@ function isGreenfieldProposalCorrection(
 ): boolean {
   const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
   return tool === "propose_change_set" && code !== null && (
-    (binding?.phase === "world" && binding.greenfieldCreateAuthorized && greenfieldCorrectionCodes.has(code))
-    || (binding?.phase === "story" && storyCorrectionCodes.has(code))
-    || (binding?.phase === "oc" && ocCorrectionCodes.has(code))
+    (growthFocus(binding) === "world" && binding?.greenfieldCreateAuthorized && greenfieldCorrectionCodes.has(code))
+    || (growthFocus(binding) === "story" && storyCorrectionCodes.has(code))
+    || (growthFocus(binding) === "oc" && ocCorrectionCodes.has(code))
   );
 }
 
@@ -305,19 +312,19 @@ export function createStewardExecutionStateMachine(input: {
 
   const wrappedOperationalTools = input.operationalTools.map((original): AgentTool => ({
     ...original,
-    ...(input.growthBinding?.phase === "story" && original.name === "writer" ? {
+    ...(growthFocus(input.growthBinding) === "story" && original.name === "writer" ? {
       description: "Create a candidate formal story opening from a high-level Story Brief and the pinned formal-world evidence. Supply only the creative brief: premise, opening situation, central tension, point of view, tone, required/avoided elements, and target length. This is Creator authoring, not a player or GM turn. Do not supply source material, evidence IDs, GM resolutions, resource IDs, or authority fields.",
       parameters: growthStoryBriefParameters,
-    } : input.growthBinding?.phase === "story" && original.name === "propose_change_set" ? {
+    } : growthFocus(input.growthBinding) === "story" && original.name === "propose_change_set" ? {
       description: "Submit one high-level Story Fragment. Supply only story and prose creative metadata; the trusted unique world target comes from pinned retrieval, and prose content comes only from the preceding Writer result. Do not supply world evidence or resource IDs, low-level IDs, dependencies, create/state fields, relation kinds, or project-file operations.",
       parameters: growthStoryFragmentParameters,
-    } : input.growthBinding?.phase === "oc" && original.name === "propose_change_set" ? {
+    } : growthFocus(input.growthBinding) === "oc" && original.name === "propose_change_set" ? {
       description: "Submit one high-level OC Fragment. Supply two to eight character titles and character-profile metadata/content, plus optional character-to-character relationships. The trusted story target comes from pinned retrieval. Do not supply story/resource/evidence IDs, parents, dependencies, create/state fields, relation or document kinds, or project-file operations.",
       parameters: growthOcFragmentParameters,
-    } : input.growthBinding?.phase === "world" && original.name === "propose_change_set" ? {
+    } : growthFocus(input.growthBinding) === "world" && original.name === "propose_change_set" ? {
       description: "Submit one high-level world Fragment with at least one world, one setting document, and at least three model-supplied Assertions, each bound to one or more Fragment document sources. Locations, factions, additional documents, facts, and related_to selections remain open arrays. Do not supply low-level IDs, parents, dependencies, create/state fields, or project-file operations.",
       parameters: growthWorldFragmentParameters,
-    } : input.growthBinding?.phase === "world" && original.name === "generate_image" ? {
+    } : growthFocus(input.growthBinding) === "world" && original.name === "generate_image" ? {
       description: "Generate the required source-bound world map. Supply only a creative title and visual prompt. The committed formal world and setting-document versions, purpose, idempotency key, Provider, and all identifiers are trusted by the Harness. Do not supply resource IDs, version IDs, hashes, paths, or authority fields.",
       parameters: growthWorldMapBriefParameters,
     } : {}),
@@ -340,30 +347,30 @@ export function createStewardExecutionStateMachine(input: {
         : normalizeOperationalParams(name, params);
       requireCurrentStep(name, effectiveParams);
       try {
-        const compiledParams = input.growthBinding?.phase === "story" && name === "writer"
+        const compiledParams = growthFocus(input.growthBinding) === "story" && name === "writer"
           ? compileGrowthStoryBrief(effectiveParams, trustedStoryWorld ?? { evidenceId: "", label: "", excerpt: null, resourceId: "" })
-          : input.growthBinding?.phase === "story" && name === "propose_change_set"
+          : growthFocus(input.growthBinding) === "story" && name === "propose_change_set"
           ? compileGrowthStoryFragment(effectiveParams, {
-              cycleId: input.growthBinding.cycleId,
-              storyRootResourceId: input.growthBinding.domainRootResourceIds.story,
+              cycleId: input.growthBinding!.cycleId,
+              storyRootResourceId: input.growthBinding!.domainRootResourceIds.story,
               writerCandidateText: writerCandidate?.text ?? "",
               writerEvidenceIds: writerCandidate?.evidenceIds ?? [],
               worldEvidenceId: trustedStoryWorld?.evidenceId ?? "",
               worldResourceId: trustedStoryWorld?.resourceId ?? "",
             })
-          : input.growthBinding?.phase === "oc" && name === "propose_change_set"
+          : growthFocus(input.growthBinding) === "oc" && name === "propose_change_set"
           ? compileGrowthOcFragment(effectiveParams, {
-              cycleId: input.growthBinding.cycleId,
-              ocRootResourceId: input.growthBinding.domainRootResourceIds.oc,
+              cycleId: input.growthBinding!.cycleId,
+              ocRootResourceId: input.growthBinding!.domainRootResourceIds.oc,
               storyResourceId: trustedOcStory?.resourceId ?? "",
             })
-          : input.growthBinding?.phase === "world" && name === "generate_image"
+          : growthFocus(input.growthBinding) === "world" && name === "generate_image"
           ? compileGrowthWorldMapBrief(effectiveParams, {
-              cycleId: input.growthBinding.cycleId,
+              cycleId: input.growthBinding!.cycleId,
               sources: trustedWorldMapSources ?? { worldResourceId: "", sourceVersionIds: [] },
             })
           : effectiveParams;
-        if (input.growthBinding?.phase === "world" && name === "generate_image") {
+        if (growthFocus(input.growthBinding) === "world" && name === "generate_image") {
           registerPendingImageRequest(compiledParams);
         }
         const result = await original.execute(toolCallId, compiledParams, signal, onUpdate);
@@ -372,7 +379,7 @@ export function createStewardExecutionStateMachine(input: {
         if (plan?.objective !== "inspect_files") nextStepIndex += 1;
         executions.push({ tool: name, status: "succeeded", details });
         const nextTool = requiredNextTool();
-        const instruction = name === "retrieve_graph_evidence" && input.growthBinding?.phase === "oc" && nextTool === "propose_change_set"
+        const instruction = name === "retrieve_graph_evidence" && growthFocus(input.growthBinding) === "oc" && nextTool === "propose_change_set"
           ? "The pinned Growth Receipt contains one trusted formal story. Create the required high-level OC Fragment now; do not repeat retrieval or supply low-level identifiers."
           : undefined;
         return appendRequiredNextTool(result, nextTool, instruction);
@@ -535,9 +542,9 @@ export function createStewardExecutionStateMachine(input: {
     if (name === "propose_change_set" && input.growthBinding && !growthReceiptRecorded) {
       throw stateError("STEWARD_GROWTH_RECEIPT_REQUIRED");
     }
-    if (name === "writer" && input.growthBinding?.phase === "story" && !trustedStoryWorld) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");
-    if (name === "propose_change_set" && input.growthBinding?.phase === "story" && !writerCandidate) throw stateError("STEWARD_STORY_WRITER_REQUIRED");
-    if (name === "propose_change_set" && input.growthBinding?.phase === "oc" && !trustedOcStory) throw stateError("STEWARD_OC_STORY_REQUIRED");
+    if (name === "writer" && growthFocus(input.growthBinding) === "story" && !trustedStoryWorld) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");
+    if (name === "propose_change_set" && growthFocus(input.growthBinding) === "story" && !writerCandidate) throw stateError("STEWARD_STORY_WRITER_REQUIRED");
+    if (name === "propose_change_set" && growthFocus(input.growthBinding) === "oc" && !trustedOcStory) throw stateError("STEWARD_OC_STORY_REQUIRED");
     if (name === "save_task_note") {
       const note = saveTaskNoteArgsSchema.safeParse(params);
       if (!note.success || !pendingReadRange || note.data.source.path !== pendingReadRange.path
@@ -548,7 +555,7 @@ export function createStewardExecutionStateMachine(input: {
       }
     }
     if (name === "generate_image") {
-      if (input.growthBinding?.phase === "world") {
+      if (growthFocus(input.growthBinding) === "world") {
         if (!growthWorldMapBriefSchema.safeParse(params).success) throw stateError("STEWARD_IMAGE_SOURCE_MISMATCH");
         if (proposedChangeSet?.status !== "committed" || !trustedWorldMapSources) {
           throw stateError("STEWARD_GREENFIELD_WORLD_MAP_SOURCE_MISMATCH");
@@ -616,7 +623,7 @@ export function createStewardExecutionStateMachine(input: {
           if (evidence.kind === "resource" && evidence.resource.type === "world" && evidence.resource.objectKind === "world") growthWorldsByEvidenceId.set(evidence.evidenceId, evidence.resource.resourceId);
           if (evidence.kind === "resource" && evidence.resource.type === "story" && evidence.resource.objectKind === "story") growthStoriesByEvidenceId.set(evidence.evidenceId, evidence.resource.resourceId);
         }
-        if (input.growthBinding.phase === "story") {
+        if (growthFocus(input.growthBinding) === "story") {
           const worlds = retrieval.data.evidence
             .filter((evidence): evidence is Extract<typeof evidence, { kind: "resource" }> => evidence.kind === "resource" && evidence.resource.type === "world" && evidence.resource.objectKind === "world")
             .map((evidence) => ({ evidenceId: evidence.evidenceId, resourceId: evidence.resource.resourceId, label: evidence.label, excerpt: evidence.excerpt }))
@@ -624,7 +631,7 @@ export function createStewardExecutionStateMachine(input: {
           if (worlds.length !== 1) { blockReason = "missing_source"; return; }
           trustedStoryWorld = worlds[0]!;
         }
-        if (input.growthBinding.phase === "oc") {
+        if (growthFocus(input.growthBinding) === "oc") {
           const stories = [...growthStoriesByEvidenceId.entries()]
             .map(([evidenceId, resourceId]) => ({ evidenceId, resourceId }))
             .filter((story, index, all) => all.findIndex((candidate) => candidate.resourceId === story.resourceId) === index);
@@ -680,7 +687,7 @@ export function createStewardExecutionStateMachine(input: {
       })));
       return;
     }
-    if (name === "writer" && input.growthBinding?.phase === "story") {
+    if (name === "writer" && growthFocus(input.growthBinding) === "story") {
       const output = writerOutputSchema.safeParse(details);
       if (!output.success) throw stateError("STEWARD_TOOL_RESULT_INVALID");
       if (output.data.status !== "candidate") { blockReason = "tool_failed"; return; }
@@ -747,11 +754,11 @@ export function createStewardExecutionStateMachine(input: {
           allowedEvidenceIds.add(output.outputId);
           committedOutputIds.add(output.outputId);
         }
-        if (input.growthBinding?.phase === "world") {
+        if (growthFocus(input.growthBinding) === "world") {
           try {
             const compiledWorldProposal = compileGrowthWorldFragment(params, {
-              cycleId: input.growthBinding.cycleId,
-              worldRootResourceId: input.growthBinding.domainRootResourceIds.world,
+              cycleId: input.growthBinding!.cycleId,
+              worldRootResourceId: input.growthBinding!.domainRootResourceIds.world,
             });
             trustedWorldMapSources = deriveGrowthWorldMapSources(compiledWorldProposal, proposal.data);
           } catch {

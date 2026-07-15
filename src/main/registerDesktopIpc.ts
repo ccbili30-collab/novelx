@@ -113,10 +113,17 @@ export function registerDesktopIpc(
       },
     }));
   });
-  ipcMain.handle(desktopIpcChannels.growthGet, (_event, payload: unknown) => {
+  ipcMain.handle(desktopIpcChannels.growthGet, (event, payload: unknown) => {
     const request = growthGetRequestSchema.parse(payload);
     if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
-    return growthGetResponseSchema.parse(growthCoordinator.get(request));
+    return growthGetResponseSchema.parse(growthCoordinator.get(request, {
+      growth: (growthEvent) => {
+        if (!event.sender.isDestroyed()) event.sender.send(desktopIpcChannels.growthEvent, growthLiveEventSchema.parse(growthEvent));
+      },
+      agent: (agentEvent) => {
+        if (!event.sender.isDestroyed()) event.sender.send(desktopIpcChannels.agentEvent, agentEvent);
+      },
+    }));
   });
   ipcMain.handle(desktopIpcChannels.growthGuide, (_event, payload: unknown) => {
     const request = growthGuideRequestSchema.parse(payload);

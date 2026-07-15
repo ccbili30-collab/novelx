@@ -10,6 +10,13 @@ import {
 import { growthCapabilityVersion } from "../../src/shared/growthContract";
 
 describe("Steward tool handoff state machine", () => {
+  it("fails closed before exposing legacy create-only tools for a revision intent", () => {
+    expect(() => createGrowthMachine("world", [
+      successfulTool("retrieve_graph_evidence", growthRetrievalResult()),
+      successfulTool("propose_change_set", greenfieldCommittedProposal()),
+    ], "revision")).toThrowError(expect.objectContaining({ code: "STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED" }));
+  });
+
   it("recognizes only conservative explicit Free Greenfield creation requests", () => {
     expect(isExplicitGreenfieldFreeCreateRequest("free", "不要讨论，自己生成一套中世纪幻想世界包")).toBe(true);
     expect(isExplicitGreenfieldFreeCreateRequest("free", "不要讨论，自行创建世界包")).toBe(true);
@@ -70,7 +77,7 @@ describe("Steward tool handoff state machine", () => {
       userInput: "基于当前证据继续发展设定",
       authorizedScopeResourceIds: ["world-1"],
       growthBinding: {
-        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", phase: "world", inputCheckpointId: "checkpoint-1",
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], inputCheckpointId: "checkpoint-1",
         ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
       },
       operationalTools: [retrieve, propose],
@@ -292,7 +299,7 @@ describe("Steward tool handoff state machine", () => {
       userInput: "从种子建立正式世界",
       authorizedScopeResourceIds: ["world-root"],
       growthBinding: {
-        capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", phase: "world", inputCheckpointId: "checkpoint",
+        capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], inputCheckpointId: "checkpoint",
         ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized,
       },
       operationalTools: [retrieve, propose], resultCapture: createRoleOutputTool("steward"),
@@ -327,7 +334,7 @@ describe("Steward tool handoff state machine", () => {
       diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
     };
     const binding = {
-      capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", phase: "world" as const, inputCheckpointId: "checkpoint",
+      capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", kind: "expand" as const, focusKinds: ["world" as const], resumeFrontier: ["story" as const, "oc" as const], inputCheckpointId: "checkpoint",
         ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: true,
     };
     const retrieve = successfulTool("retrieve_graph_evidence", emptyReceipt);
@@ -912,13 +919,13 @@ function growthRetrieveArgs() {
   };
 }
 
-function createGrowthMachine(phase: "world" | "story" | "oc", operationalTools: AgentTool[]) {
+function createGrowthMachine(focus: "world" | "story" | "oc", operationalTools: AgentTool[], kind: "expand" | "revision" = "expand") {
   return createStewardExecutionStateMachine({
     mode: "free",
     userInput: "由可信 Growth 阶段驱动",
     authorizedScopeResourceIds: ["world-1"],
     growthBinding: {
-      capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: `cycle-${phase}`, phase, inputCheckpointId: "checkpoint",
+      capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: `cycle-${focus}`, kind, focusKinds: [focus], resumeFrontier: [], inputCheckpointId: "checkpoint",
       ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [],
       domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
     },

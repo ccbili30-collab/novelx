@@ -360,7 +360,7 @@ export function StewardRuntimePanel({
           sessionId: startSessionId,
           seed: { kind: "text", text: userInput },
           initialRuleText: userInput,
-          strategy: "grow_world_story_oc_v1",
+          strategy: "grow_world_story_oc_dynamic_v2",
         });
         if (!isCurrentGrowthRequest(growthLoadRequestToken.current, request)) return;
         if (startStorageKey) window.localStorage.setItem(startStorageKey, snapshot.goal.id);
@@ -416,7 +416,7 @@ export function StewardRuntimePanel({
       if (!latest || latest.goalId !== current.goalId) return;
       publishGrowth(recordGrowthGuidanceResponse(latest, response));
       setGuidanceDraft("");
-      setGuidanceNotice(`已保存为规则修订 #${response.persistedRevision}，将在第 ${response.nextCycleSequence} 轮（${growthPhaseLabel(response.nextCyclePhase)}）开始前生效`);
+      setGuidanceNotice(`已保存为规则修订 #${response.persistedRevision}，等待安全修订轮；第 ${response.nextCycleSequence} 轮仅为候选边界，不承诺一定执行。预计范围：${growthFocusLabels(response.focusKinds)}`);
     } catch {
       if (!isCurrentGrowthRequest(growthGuidanceRequestToken.current, request)) return;
       try {
@@ -479,8 +479,8 @@ export function StewardRuntimePanel({
   const running = starting || activeRunId !== null || growthPresentation?.running === true;
   const lastUserEntryIndex = findLastUserEntryIndex(entries);
   const guidanceAvailability = growthPresentation ? getGrowthGuidanceAvailability(growthPresentation) : null;
-  const showGuidanceComposer = Boolean(growthPresentation?.running && growthPresentation.currentCycleSequence > 0
-    && growthPresentation.currentCycleSequence < 3);
+  const showGuidanceComposer = Boolean(guidanceAvailability?.canGuide && growthPresentation
+    && growthPresentation.currentCycleSequence > 0 && growthPresentation.guidance);
 
   return (
     <>
@@ -546,18 +546,18 @@ export function StewardRuntimePanel({
               <textarea
                 aria-label="追加世界规则或指导"
                 disabled={!guidanceAvailability?.canGuide || guidanceSaving}
-                placeholder={guidanceAvailability?.reason ?? "补充只会在下一轮边界生效"}
+                placeholder={guidanceAvailability?.reason ?? "补充会保存并等待安全修订轮"}
                 rows={2}
                 value={guidanceDraft}
                 onChange={(event) => setGuidanceDraft(event.target.value)}
               />
               <button type="button" onClick={() => void saveGrowthGuidance()} disabled={!guidanceAvailability?.canGuide || guidanceSaving || !guidanceDraft.trim()}>
-                {guidanceSaving ? "保存中" : "保存到下一轮"}
+                {guidanceSaving ? "保存中" : "保存规则修订"}
               </button>
             </>
           ) : <p>{guidanceAvailability?.reason ?? "当前没有可安全追加指导的下一轮边界。"}</p>}
           {showGuidanceComposer && guidanceAvailability?.reason ? <p>{guidanceAvailability.reason}</p> : null}
-          {guidanceNotice ? <div className="growth-guidance-composer__notice" role="status"><strong>待下一边界</strong><span>{guidanceNotice}</span></div> : null}
+          {guidanceNotice ? <div className="growth-guidance-composer__notice" role="status"><strong>等待安全修订轮</strong><span>{guidanceNotice}</span></div> : null}
           {guidanceError ? <p className="growth-guidance-composer__error" role="alert">{guidanceError}</p> : null}
         </section>
       ) : null}
@@ -622,6 +622,6 @@ function findLastUserEntryIndex(entries: FeedEntry[]): number {
   return -1;
 }
 
-function growthPhaseLabel(phase: "story" | "oc"): string {
-  return phase === "story" ? "故事" : "OC";
+function growthFocusLabels(focusKinds: Array<"world" | "story" | "oc">): string {
+  return focusKinds.map((kind) => ({ world: "世界", story: "故事", oc: "OC" })[kind]).join("、");
 }

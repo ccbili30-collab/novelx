@@ -114,7 +114,7 @@ describe("GraphRetrievalService", () => {
     const graph = new GraphRetrievalService(setup.workspace);
     const growth = new GrowthRepository(setup.workspace);
     const goal = growth.createGoal({ id: "goal", idempotencyKey: "goal", branchId: setup.branchId, seed: { kind: "text", text: "grow" }, authorizedScopeResourceIds: [setup.storyRootId, setup.worldRootId], initialRuleText: "sources", sourceMessageId: null });
-    const cycle = growth.beginCycle({ id: "cycle", goalId: goal.id, idempotencyKey: "cycle", inputCheckpointId: setup.checkpointId, ruleRevision: 1 });
+    const cycle = growth.beginCycle({ id: "cycle", goalId: goal.id, idempotencyKey: "cycle", inputCheckpointId: setup.checkpointId, ruleRevision: 1, intent: { kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"] } });
     const run = seedRun(setup.workspace, setup.branchId, setup.checkpointId);
     growth.attachRun({ cycleId: cycle.id, runId: run.runId });
     const result = graph.retrieve(request(setup, { id: "receipt", cycleId: cycle.id, runId: run.runId, toolInvocationId: run.toolInvocationId, query: "潮汐" }));

@@ -5,7 +5,7 @@ const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const timestampSchema = z.iso.datetime({ offset: true });
 
 export const growthContractVersion = "1.0.0" as const;
-export const growthCapabilityVersion = "hackathon-growth-persistence-v1" as const;
+export const growthCapabilityVersion = "hackathon-growth-dynamic-v2" as const;
 
 export const growthGoalStatusSchema = z.enum([
   "active", "completed", "blocked", "cancelled", "reconciliation_required",
@@ -107,7 +107,7 @@ export const growthCycleBeginSchema = z.object({
   }).strict().superRefine((value, context) => {
     uniqueValues(value.focusKinds, context, "focusKinds");
     uniqueValues(value.resumeFrontier, context, "resumeFrontier");
-  }).optional(),
+  }),
 }).strict();
 export const growthCycleAttachRunSchema = z.object({ cycleId: idSchema, runId: idSchema }).strict();
 export const growthCycleAttachChangeSetSchema = z.object({ cycleId: idSchema, changeSetId: idSchema }).strict();

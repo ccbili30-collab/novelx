@@ -31,8 +31,8 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
       const mode = state.__growthSnapshotMode;
       const cycleSequence = mode === "cycle3" ? 3 : 1;
       return {
-        capabilityVersion: "hackathon-growth-persistence-v1",
-        strategy: "grow_world_story_oc_v1",
+        capabilityVersion: "hackathon-growth-dynamic-v2",
+        strategy: "grow_world_story_oc_dynamic_v2",
         coordinatorStatus: "running",
         goal: { id: goalId, status: "active", currentCycleSequence: cycleSequence },
         ...(mode === "missing" ? {} : {
@@ -80,7 +80,8 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
         currentCycleRevision: 1,
         appliesAt: "next_cycle_boundary",
         nextCycleSequence: 2,
-        nextCyclePhase: "story",
+        nextCycleKind: "revision",
+        focusKinds: ["world", "story", "oc"],
         status: "persisted_pending_boundary",
       };
     });
@@ -125,7 +126,7 @@ test("starts explicit Growth mode once and visibly fails closed without a Provid
     await expect(page.locator(".steward-message--user").filter({ hasText: "建立一个有潮汐禁令的海港世界" })).toBeVisible();
     const timeline = page.getByRole("region", { name: "生长活动时间线" });
     await expect(timeline).toBeVisible({ timeout: 8_000 });
-    await expect(timeline.locator(".growth-timeline__row").first()).toContainText("第 1/3 轮");
+    await expect(timeline.locator(".growth-timeline__row").first()).toContainText("第 1 轮");
     await expect(page.locator(".project-files-panel")).toBeVisible();
 
     await expect.poll(async () => timeline.getAttribute("data-status"), { timeout: 15_000 }).toMatch(/^(blocked|failed)$/);
@@ -178,7 +179,7 @@ test("keeps a newer scope guide saving when the previous scope resolves", async 
     let guidance = page.getByRole("textbox", { name: "追加世界规则或指导" });
     await expect(guidance).toBeEnabled({ timeout: 8_000 });
     await guidance.fill("延迟旧会话指导");
-    await page.getByRole("button", { name: "保存到下一轮" }).click();
+    await page.getByRole("button", { name: "保存规则修订" }).click();
     await expect(page.getByRole("button", { name: "保存中" })).toBeVisible();
 
     const newSession = rail.getByRole("button", { name: "新规则会话", exact: true });
@@ -190,7 +191,7 @@ test("keeps a newer scope guide saving when the previous scope resolves", async 
     guidance = page.getByRole("textbox", { name: "追加世界规则或指导" });
     await expect(guidance).toBeEnabled({ timeout: 8_000 });
     await guidance.fill("延迟新会话指导");
-    await page.getByRole("button", { name: "保存到下一轮" }).click();
+    await page.getByRole("button", { name: "保存规则修订" }).click();
     await expect(page.getByRole("button", { name: "保存中" })).toBeVisible();
 
     await app.evaluate(() => { (globalThis as typeof globalThis & { __growthGuideResolvers?: Record<string, () => void> }).__growthGuideResolvers?.["延迟旧会话指导"]?.(); });
@@ -202,7 +203,7 @@ test("keeps a newer scope guide saving when the previous scope resolves", async 
     await expect(page.getByText(/已保存为规则修订/)).toHaveCount(0);
 
     await app.evaluate(() => { (globalThis as typeof globalThis & { __growthGuideResolvers?: Record<string, () => void> }).__growthGuideResolvers?.["延迟新会话指导"]?.(); });
-    await expect(page.getByText("已保存为规则修订 #2，将在第 2 轮（故事）开始前生效", { exact: true })).toBeVisible();
+    await expect(page.getByText("已保存为规则修订 #2，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：故事", { exact: true })).toBeVisible();
     await expect(guidance).toHaveValue("");
     await expect(page.getByRole("button", { name: "保存中" })).toHaveCount(0);
   } finally {
@@ -241,7 +242,7 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
     await page.getByTitle("发送").click();
 
     const guidance = page.getByRole("textbox", { name: "追加世界规则或指导" });
-    const save = page.getByRole("button", { name: "保存到下一轮" });
+    const save = page.getByRole("button", { name: "保存规则修订" });
     await expect(guidance).toBeEnabled({ timeout: 8_000 });
     await expect(composer).toBeDisabled();
     await guidance.fill("港口钟声必须服从双月潮汐");
@@ -251,7 +252,7 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.webContents.send("novax:growth-event", {
         sessionId: (globalThis as typeof globalThis & { __growthStartCalls?: Array<{ sessionId?: string }> }).__growthStartCalls?.[0]?.sessionId,
-        strategy: "grow_world_story_oc_v1",
+        strategy: "grow_world_story_oc_dynamic_v2",
         event: {
           goalId: "goal-guidance-ui",
           cycleId: "cycle-1",
@@ -270,18 +271,18 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
     await expect.poll(async () => app?.evaluate(() => (
       (globalThis as typeof globalThis & { __growthGetCalls?: unknown[] }).__growthGetCalls?.length ?? 0
     ))).toBe(1);
-    await expect(page.getByText("已保存为规则修订 #2，将在第 2 轮（故事）开始前生效", { exact: true })).toBeVisible();
+    await expect(page.getByText("已保存为规则修订 #2，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：故事", { exact: true })).toBeVisible();
     await expect(guidance).toHaveValue("");
     await expect(page.getByRole("button", { name: "保存中" })).toHaveCount(0);
     await expect(page.locator(".growth-guidance-card")).toContainText("规则修订 #2");
-    await expect(page.locator(".growth-guidance-card")).toContainText("待下一边界");
+    await expect(page.locator(".growth-guidance-card")).toContainText("等待安全修订轮");
     await expect(page.getByLabel("Growth 规则修订")).toContainText("当前轮使用 #1");
     await expect(page.getByLabel("Growth 规则修订")).toContainText("最新已保存 #2");
-    await expect(page.getByLabel("Growth 规则修订")).toContainText("待下一轮生效");
+    await expect(page.getByLabel("Growth 规则修订")).toContainText("已保存，等待安全修订轮");
 
     await guidance.fill("OC 必须携带退潮印记");
     await save.click();
-    await expect(page.getByText("已保存为规则修订 #3，将在第 2 轮（故事）开始前生效", { exact: true })).toBeVisible();
+    await expect(page.getByText("已保存为规则修订 #3，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：故事", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Growth 规则修订")).toContainText("最新已保存 #3");
 
     await app.evaluate(() => { (globalThis as typeof globalThis & { __growthSnapshotMode?: string }).__growthSnapshotMode = "complete"; });
@@ -309,8 +310,8 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
 
     await app.evaluate(() => { (globalThis as typeof globalThis & { __growthSnapshotMode?: string }).__growthSnapshotMode = "cycle3"; });
     await page.reload();
-    await expect(page.getByText("第 3 轮之后没有安全的下一轮边界。", { exact: true })).toBeVisible({ timeout: 8_000 });
-    await expect(page.getByRole("textbox", { name: "追加世界规则或指导" })).toHaveCount(0);
+    await expect(page.getByRole("textbox", { name: "追加世界规则或指导" })).toBeEnabled({ timeout: 8_000 });
+    await expect(page.getByText("第 3 轮之后没有安全的下一轮边界。", { exact: true })).toHaveCount(0);
 
     await app.evaluate(() => { (globalThis as typeof globalThis & { __growthSnapshotMode?: string }).__growthSnapshotMode = "missing"; });
     await page.reload();

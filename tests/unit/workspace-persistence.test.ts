@@ -9,6 +9,7 @@ import { ResourceRepository } from "../../src/domain/workspace/resourceRepositor
 import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
+import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
 
 const opened: WorkspaceDatabase[] = [];
 const roots: string[] = [];
@@ -166,12 +167,19 @@ describe("local workspace persistence", () => {
       INSERT INTO growth_goal_rule_revisions (goal_id, revision, rule_text, source_message_id, created_at)
       VALUES ('goal-v23', 1, 'legacy rule', NULL, ?)
     `).run(now);
+    const legacyCycleHash = canonicalAuditHash({
+      id: "cycle-v23",
+      goalId: "goal-v23",
+      idempotencyKey: "cycle-v23-key",
+      inputCheckpointId: checkpointId,
+      ruleRevision: 1,
+    });
     workspace.db.prepare(`
       INSERT INTO growth_cycles (
         id, goal_id, sequence, idempotency_key, payload_hash, input_checkpoint_id, rule_revision,
         run_id, receipt_id, change_set_id, output_checkpoint_id, status, failure_code, created_at, updated_at, terminal_at
       ) VALUES ('cycle-v23', 'goal-v23', 1, 'cycle-v23-key', ?, ?, 1, NULL, NULL, NULL, NULL, 'planned', NULL, ?, ?, NULL)
-    `).run(hash, checkpointId, now, now);
+    `).run(legacyCycleHash, checkpointId, now, now);
     workspace.db.exec(`
       DROP TABLE growth_illustration_item_sources;
       DROP TABLE growth_illustration_items;

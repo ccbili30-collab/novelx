@@ -35,7 +35,7 @@ describe("desktop IPC contract", () => {
   it("admits only bounded Growth start/get input and safe persisted event projections", () => {
     const start = {
       requestId: "11111111-1111-4111-8111-111111111111", projectId: "project-1", sessionId: "session-1",
-      seed: { kind: "text", text: "A seed." }, initialRuleText: "Keep sources.", strategy: "grow_world_story_oc_v1",
+      seed: { kind: "text", text: "A seed." }, initialRuleText: "Keep sources.", strategy: "grow_world_story_oc_dynamic_v2",
     };
     expect(growthStartRequestSchema.parse(start)).toEqual(start);
     for (const field of ["goalId", "cycleId", "runId", "branchId", "checkpointId", "lens", "authorizedScopeResourceIds", "apiKey"]) {
@@ -53,11 +53,11 @@ describe("desktop IPC contract", () => {
     }
     expect(growthGuideResponseSchema.parse({
       goalId: "goal-1", persistedRevision: 2, currentCycleRevision: 1,
-      appliesAt: "next_cycle_boundary", nextCycleSequence: 2, nextCyclePhase: "story",
+      appliesAt: "next_cycle_boundary", nextCycleSequence: 2, nextCycleKind: "revision", focusKinds: ["world", "story", "oc"],
       status: "persisted_pending_boundary",
     }).status).toBe("persisted_pending_boundary");
     const event = {
-      sessionId: "session-1", strategy: "grow_world_story_oc_v1",
+      sessionId: "session-1", strategy: "grow_world_story_oc_dynamic_v2",
       event: { goalId: "goal-1", cycleId: "cycle-1", runId: "run-1", sequence: 1, phase: "run_attached", durableState: "running", safeSummary: "Run attached.", targetKind: "resource", targetId: "world-root", targetVersionId: null, contentRef: null },
     };
     expect(growthLiveEventSchema.parse(event)).toEqual(event);
@@ -77,7 +77,7 @@ describe("desktop IPC contract", () => {
       ...versioned, event: { ...versioned.event, contentRef: { ...versioned.event.contentRef, locator: "unsafe" } },
     }).success).toBe(false);
     expect(growthStartResponseSchema.safeParse({
-      capabilityVersion: "hackathon-growth-persistence-v1", strategy: "grow_world_story_oc_v1", coordinatorStatus: "completed",
+      capabilityVersion: "hackathon-growth-dynamic-v2", strategy: "grow_world_story_oc_dynamic_v2", coordinatorStatus: "awaiting_guidance",
       goal: { id: "goal-1", status: "active", currentCycleSequence: 3 },
       cycles: Array.from({ length: 4 }, (_, index) => ({ id: `cycle-${index}`, sequence: index + 1, runId: null, status: "committed" })),
       events: [],

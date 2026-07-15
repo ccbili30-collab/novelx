@@ -27,7 +27,8 @@ export interface GrowthGuidancePresentation {
   latestSavedRevision: number;
   pending: boolean;
   nextCycleSequence: number | null;
-  nextCyclePhase: "story" | "oc" | null;
+  nextCycleKind: "revision" | null;
+  focusKinds: Array<"world" | "story" | "oc">;
 }
 
 export interface GrowthGuidanceAvailability {
@@ -88,6 +89,16 @@ export function mergeGrowthSnapshot(current: GrowthPresentation | null, snapshot
   const coordinatorStatus = terminalCoordinatorStates.has(current.coordinatorStatus) && snapshot.coordinatorStatus === "running"
     ? current.coordinatorStatus
     : snapshot.coordinatorStatus;
+  const restoredGuidance = guidanceFromSnapshot(snapshot);
+  const guidance = restoredGuidance?.pending && current.guidance?.pending
+    && restoredGuidance.latestSavedRevision === current.guidance.latestSavedRevision
+    ? {
+        ...restoredGuidance,
+        nextCycleSequence: current.guidance.nextCycleSequence,
+        nextCycleKind: current.guidance.nextCycleKind,
+        focusKinds: current.guidance.focusKinds,
+      }
+    : restoredGuidance;
   return derive({
     goalId: current.goalId,
     coordinatorStatus,
@@ -96,7 +107,7 @@ export function mergeGrowthSnapshot(current: GrowthPresentation | null, snapshot
     cycles: snapshot.cycles,
     events: uniqueEvents([...current.events, ...snapshot.events]),
     agentActivities: current.agentActivities,
-    guidance: guidanceFromSnapshot(snapshot),
+    guidance,
   });
 }
 
@@ -112,14 +123,16 @@ export function recordGrowthGuidanceResponse(
       latestSavedRevision: response.persistedRevision,
       pending: response.status === "persisted_pending_boundary",
       nextCycleSequence: response.nextCycleSequence,
-      nextCyclePhase: response.nextCyclePhase,
+      nextCycleKind: response.nextCycleKind,
+      focusKinds: response.focusKinds,
     },
   });
 }
 
 export function getGrowthGuidanceAvailability(current: GrowthPresentation): GrowthGuidanceAvailability {
-  if (!current.running) return { canGuide: false, reason: "当前生长任务已不再运行，不能追加下一轮指导。" };
-  if (current.currentCycleSequence >= 3) return { canGuide: false, reason: "第 3 轮之后没有安全的下一轮边界。" };
+  if (current.coordinatorStatus !== "running" && current.coordinatorStatus !== "awaiting_guidance") {
+    return { canGuide: false, reason: "当前生长任务已结束，不能追加规则修订。" };
+  }
   if (current.currentCycleSequence < 1 || !current.guidance) {
     return { canGuide: false, reason: "规则修订状态不可用，无法安全保存指导。" };
   }
@@ -238,16 +251,17 @@ function guidanceFromSnapshot(snapshot: GrowthStartResponse): GrowthGuidancePres
   const status = snapshot.guidanceStatus;
   if (typeof latestSavedRevision !== "number" || typeof activeRevision !== "number" || status === undefined) return null;
   if (status === "none") {
-    return { activeRevision, latestSavedRevision, pending: false, nextCycleSequence: null, nextCyclePhase: null };
+    return { activeRevision, latestSavedRevision, pending: false, nextCycleSequence: null, nextCycleKind: null, focusKinds: [] };
   }
   const nextCycleSequence = snapshot.goal.currentCycleSequence + 1;
-  if ((nextCycleSequence !== 2 && nextCycleSequence !== 3) || latestSavedRevision <= activeRevision) return null;
+  if (nextCycleSequence < 2 || latestSavedRevision <= activeRevision) return null;
   return {
     activeRevision,
     latestSavedRevision,
     pending: true,
     nextCycleSequence,
-    nextCyclePhase: nextCycleSequence === 2 ? "story" : "oc",
+    nextCycleKind: "revision",
+    focusKinds: [],
   };
 }
 
@@ -274,5 +288,12 @@ function cycleSummary(status: GrowthCycle["status"]): string {
 }
 
 function coordinatorLabel(status: Exclude<CoordinatorStatus, "running">): string {
-  return ({ completed: "本次生长已完成", blocked: "已阻塞", failed: "已失败", cancelled: "已取消", reconciliation_required: "需要核对" })[status];
+  return ({
+    awaiting_guidance: "当前无 Agent 运行，等待追加指导",
+    completed: "本次生长已完成",
+    blocked: "已阻塞",
+    failed: "已失败",
+    cancelled: "已取消",
+    reconciliation_required: "需要核对",
+  })[status];
 }

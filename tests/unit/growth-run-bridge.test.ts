@@ -14,7 +14,7 @@ import { DocumentRepository } from "../../src/domain/workspace/documentRepositor
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
 import { AgentProcessSupervisor, type AgentRuntimeLease, type AgentWorkerProcess } from "../../src/main/agentProcessSupervisor";
-import { GrowthRunLifecycle, growthPhaseForCycleSequence, safeFailureCode } from "../../src/main/growthRunLifecycle";
+import { GrowthRunLifecycle, safeFailureCode } from "../../src/main/growthRunLifecycle";
 import { createWorkspaceAgentToolGateway } from "../../src/main/workspaceAgentToolGateway";
 
 class FakeWorker extends EventEmitter implements AgentWorkerProcess {
@@ -52,7 +52,8 @@ describe("Growth Run bridge", () => {
       request: { projectId: "project-1", sessionId: "session-1", userInput: "普通 Growth 种子", mode: "free" }, emit: () => undefined,
     });
     emptyWorker.spawn();
-    expect((emptyWorker.sent[0] as { growthBinding: { phase: string } }).growthBinding.phase).toBe("world");
+    expect((emptyWorker.sent[0] as { growthBinding: { kind: string; focusKinds: string[] } }).growthBinding)
+      .toMatchObject({ kind: "expand", focusKinds: ["world"] });
     expect((emptyWorker.sent[0] as { growthBinding: { greenfieldCreateAuthorized: boolean } }).growthBinding.greenfieldCreateAuthorized).toBe(true);
     emptySupervisor.cancel(emptyRun);
     await vi.waitFor(() => expect(new GrowthRepository(empty.workspace).getCycle(empty.cycleId)?.status).toBe("cancelled"));
@@ -75,11 +76,22 @@ describe("Growth Run bridge", () => {
     await vi.waitFor(() => expect(new GrowthRepository(nonempty.workspace).getCycle(nonempty.cycleId)?.status).toBe("cancelled"));
   });
 
-  it("derives only the three trusted Growth phases from persisted Cycle sequence", () => {
-    expect(growthPhaseForCycleSequence(1)).toBe("world");
-    expect(growthPhaseForCycleSequence(2)).toBe("story");
-    expect(growthPhaseForCycleSequence(3)).toBe("oc");
-    expect(() => growthPhaseForCycleSequence(4)).toThrow(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
+  it("rejects a manually persisted multi-focus expand intent before Worker spawn or Change Set creation", () => {
+    const setup = createSetup(["world", "story"]);
+    const spawn = vi.fn(() => new FakeWorker());
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
+
+    expect(() => lifecycle.start({
+      goalId: setup.goalId,
+      cycleId: setup.cycleId,
+      request: { projectId: "project-1", sessionId: "multi-focus", userInput: "invalid multi focus", mode: "free" },
+      emit: () => undefined,
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
+    expect(spawn).not.toHaveBeenCalled();
+    expect(new GrowthRepository(setup.workspace).getCycle(setup.cycleId)).toMatchObject({
+      status: "planned", runId: null, changeSetId: null, outputCheckpointId: null,
+    });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toEqual({ count: 0 });
   });
 
   it("starts a planned Cycle with its pinned historical rule after a newer revision is appended", async () => {
@@ -109,6 +121,44 @@ describe("Growth Run bridge", () => {
     await vi.waitFor(() => expect(repository.getCycle(setup.cycleId)?.status).toBe("cancelled"));
   });
 
+  it("starts sequence 4 from persisted expand intent without deriving a phase", async () => {
+    const setup = createSetup();
+    const world = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "sequence4-world");
+    const growth = new GrowthRepository(setup.workspace);
+    const storyRoot = setup.authorizedScopeResourceIds.find((id) => new ResourceRepository(setup.workspace).listAtCheckpoint(world.outputCheckpointId).find((resource) => resource.id === id)?.type === "story")!;
+    const cycle2 = growth.beginCycle({ id: "sequence4-cycle-2", goalId: setup.goalId, idempotencyKey: "sequence4-cycle-2", inputCheckpointId: world.outputCheckpointId, ruleRevision: 1, intent: { kind: "expand", focusKinds: ["story"], resumeFrontier: ["oc"] } });
+    const story = await commitPriorResourceCycle(setup, cycle2.id, "story", "story", storyRoot, "sequence4-story");
+    const ocRoot = setup.authorizedScopeResourceIds.find((id) => new ResourceRepository(setup.workspace).listAtCheckpoint(story.outputCheckpointId).find((resource) => resource.id === id)?.type === "oc")!;
+    const cycle3 = growth.beginCycle({ id: "sequence4-cycle-3", goalId: setup.goalId, idempotencyKey: "sequence4-cycle-3", inputCheckpointId: story.outputCheckpointId, ruleRevision: 1, intent: { kind: "expand", focusKinds: ["oc"], resumeFrontier: [] } });
+    const oc = await commitPriorResourceCycle(setup, cycle3.id, "oc", "oc", ocRoot, "sequence4-oc");
+    const cycle4 = growth.beginCycle({ id: "sequence4-cycle-4", goalId: setup.goalId, idempotencyKey: "sequence4-cycle-4", inputCheckpointId: oc.outputCheckpointId, ruleRevision: 1, intent: { kind: "expand", focusKinds: ["world"], resumeFrontier: [] } });
+    const worker = new FakeWorker();
+    const supervisor = createSupervisor(setup, worker);
+    const runId = new GrowthRunLifecycle(setup.workspace, supervisor).start({ goalId: setup.goalId, cycleId: cycle4.id, request: { projectId: "project-1", sessionId: "sequence-4", userInput: "continue", mode: "free" }, emit: () => undefined });
+    worker.spawn();
+    expect((worker.sent[0] as { growthBinding: { kind: string; focusKinds: string[] } }).growthBinding)
+      .toMatchObject({ kind: "expand", focusKinds: ["world"] });
+    supervisor.cancel(runId);
+    await vi.waitFor(() => expect(growth.getCycle(cycle4.id)?.status).toBe("cancelled"));
+  });
+
+  it("blocks a revision intent before Worker spawn and repairs its terminal event exactly once", async () => {
+    const setup = createSetup();
+    const prior = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "revision-world");
+    const growth = new GrowthRepository(setup.workspace);
+    growth.appendRule({ goalId: setup.goalId, expectedRevision: 1, ruleText: "revision two", sourceMessageId: "revision-two" });
+    const revision = growth.beginCycle({ id: "revision-cycle", goalId: setup.goalId, idempotencyKey: "revision-cycle", inputCheckpointId: prior.outputCheckpointId, ruleRevision: 2, intent: { kind: "revision", focusKinds: ["world"], resumeFrontier: ["story", "oc"] } });
+    const spawn = vi.fn(() => new FakeWorker());
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
+    expect(() => lifecycle.start({ goalId: setup.goalId, cycleId: revision.id, request: { projectId: "project-1", sessionId: "revision", userInput: "revise", mode: "free" }, emit: () => undefined }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED" }));
+    expect(spawn).not.toHaveBeenCalled();
+    expect(growth.getCycle(revision.id)).toMatchObject({ status: "blocked", runId: null, changeSetId: null, failureCode: "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED" });
+    lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: revision.id });
+    lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: revision.id });
+    expect(growth.listEvents(setup.goalId).filter((event) => event.cycleId === revision.id && event.phase === "cycle_terminal")).toHaveLength(1);
+  });
+
   it("pins a source-document seed to its owning resource without exposing source content", async () => {
     const setup = createSourceDocumentSetup();
     const worker = new FakeWorker();
@@ -134,6 +184,7 @@ describe("Growth Run bridge", () => {
     const cycle = growth.beginCycle({
       id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key",
       inputCheckpointId: prior.outputCheckpointId, ruleRevision: 1,
+      intent: { kind: "expand", focusKinds: ["story"], resumeFrontier: ["oc"] },
     });
     const worker = new FakeWorker();
     const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker));
@@ -142,8 +193,8 @@ describe("Growth Run bridge", () => {
       request: { projectId: "project-1", sessionId: "session-1", userInput: "continue", mode: "free" }, emit: () => undefined,
     });
     worker.spawn();
-    expect((worker.sent[0] as { growthBinding: { phase: string; seedResourceIds: string[] } }).growthBinding)
-      .toMatchObject({ phase: "story", seedResourceIds: [] });
+    expect((worker.sent[0] as { growthBinding: { kind: string; focusKinds: string[]; seedResourceIds: string[] } }).growthBinding)
+      .toMatchObject({ kind: "expand", focusKinds: ["story"], seedResourceIds: [] });
     beginStewardInvocation(setup.workspace, runId);
     requestGrowthRetrieval(worker, runId, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "unmatched", 1);
     await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
@@ -158,10 +209,10 @@ describe("Growth Run bridge", () => {
     const setup = createSetup();
     const world = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "prior-world");
     const growth = new GrowthRepository(setup.workspace);
-    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: world.outputCheckpointId, ruleRevision: 1 });
+    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: world.outputCheckpointId, ruleRevision: 1, intent: { kind: "expand", focusKinds: ["story"], resumeFrontier: ["oc"] } });
     const storyRootId = setup.authorizedScopeResourceIds.find((id) => new ResourceRepository(setup.workspace).listAtCheckpoint(world.outputCheckpointId).find((resource) => resource.id === id)?.type === "story")!;
     const story = await commitPriorResourceCycle(setup, cycle2.id, "story", "story", storyRootId, "prior-story");
-    const cycle3 = growth.beginCycle({ id: "growth-cycle-3", goalId: setup.goalId, idempotencyKey: "growth-cycle-3-key", inputCheckpointId: story.outputCheckpointId, ruleRevision: 1 });
+    const cycle3 = growth.beginCycle({ id: "growth-cycle-3", goalId: setup.goalId, idempotencyKey: "growth-cycle-3-key", inputCheckpointId: story.outputCheckpointId, ruleRevision: 1, intent: { kind: "expand", focusKinds: ["oc"], resumeFrontier: [] } });
     const worker = new FakeWorker();
     const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker));
     const runId = lifecycle.start({ goalId: setup.goalId, cycleId: cycle3.id, request: { projectId: "project-1", sessionId: "session-1", userInput: "continue", mode: "free" }, emit: () => undefined });
@@ -178,7 +229,7 @@ describe("Growth Run bridge", () => {
     const setup = createSetup();
     const first = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "prior-world");
     const growth = new GrowthRepository(setup.workspace);
-    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: first.outputCheckpointId, ruleRevision: 1 });
+    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: first.outputCheckpointId, ruleRevision: 1, intent: { kind: "expand", focusKinds: ["story"], resumeFrontier: ["oc"] } });
     setup.workspace.db.prepare("DELETE FROM change_set_outputs WHERE change_set_id = ?").run(first.changeSetId);
     const spawn = vi.fn(() => new FakeWorker());
     const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
@@ -203,7 +254,7 @@ describe("Growth Run bridge", () => {
       VALUES (?, 'second-world-output', 'resource_revision', ?, ?, ?)
     `).run(first.changeSetId, second.revisionId, second.revisionSha256, new Date().toISOString());
     const growth = new GrowthRepository(setup.workspace);
-    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: first.outputCheckpointId, ruleRevision: 1 });
+    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: first.outputCheckpointId, ruleRevision: 1, intent: { kind: "expand", focusKinds: ["story"], resumeFrontier: ["oc"] } });
     const spawn = vi.fn(() => new FakeWorker());
     const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
     expect(() => lifecycle.start({ goalId: setup.goalId, cycleId: cycle2.id, request: { projectId: "project-1", sessionId: "session-1", userInput: "continue", mode: "free" }, emit: () => undefined }))
@@ -215,7 +266,7 @@ describe("Growth Run bridge", () => {
     const setup = createSetup();
     const first = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "prior-world");
     const growth = new GrowthRepository(setup.workspace);
-    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: first.outputCheckpointId, ruleRevision: 1 });
+    const cycle2 = growth.beginCycle({ id: "growth-cycle-2", goalId: setup.goalId, idempotencyKey: "growth-cycle-2-key", inputCheckpointId: first.outputCheckpointId, ruleRevision: 1, intent: { kind: "expand", focusKinds: ["story"], resumeFrontier: ["oc"] } });
     new CheckpointRepository(setup.workspace).appendCheckpoint(new CheckpointRepository(setup.workspace).getActiveBranch().id, "stale anchor test");
     const spawn = vi.fn(() => new FakeWorker());
     const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
@@ -588,7 +639,7 @@ describe("Growth Run bridge", () => {
   });
 });
 
-function createSetup() {
+function createSetup(focusKinds: Array<"world" | "story" | "oc"> = ["world"]) {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-growth-run-bridge-"));
   workspace = openWorkspace(root);
   const branch = new CheckpointRepository(workspace).getActiveBranch();
@@ -600,7 +651,7 @@ function createSetup() {
     id: "growth-goal", idempotencyKey: "growth-goal-key", branchId: branch.id,
     seed: { kind: "text", text: "从海岸传说开始" }, authorizedScopeResourceIds, initialRuleText: "保留来源", sourceMessageId: null,
   });
-  const cycle = repository.beginCycle({ id: "growth-cycle", goalId: goal.id, idempotencyKey: "growth-cycle-key", inputCheckpointId: branch.headCheckpointId, ruleRevision: goal.currentRuleRevision });
+  const cycle = repository.beginCycle({ id: "growth-cycle", goalId: goal.id, idempotencyKey: "growth-cycle-key", inputCheckpointId: branch.headCheckpointId, ruleRevision: goal.currentRuleRevision, intent: { kind: "expand", focusKinds, resumeFrontier: ["story", "oc"] } });
   return { workspace, goalId: goal.id, cycleId: cycle.id, scopeId, authorizedScopeResourceIds };
 }
 
@@ -633,6 +684,7 @@ function createSourceDocumentSetup() {
   const cycle = repository.beginCycle({
     id: "source-cycle", goalId: goal.id, idempotencyKey: "source-cycle-key",
     inputCheckpointId: branch.headCheckpointId, ruleRevision: goal.currentRuleRevision,
+    intent: { kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"] },
   });
   return { workspace, goalId: goal.id, cycleId: cycle.id, scopeId, authorizedScopeResourceIds };
 }
@@ -705,8 +757,8 @@ function requestGrowthRetrieval(worker: FakeWorker, runId: string, requestId: st
 async function commitPriorResourceCycle(
   setup: ReturnType<typeof createSetup>,
   cycleId: string,
-  type: "world" | "story",
-  objectKind: "world" | "story",
+  type: "world" | "story" | "oc",
+  objectKind: "world" | "story" | "oc",
   parentId: string,
   resourceId: string,
 ): Promise<{ changeSetId: string; outputCheckpointId: string; resourceId: string }> {

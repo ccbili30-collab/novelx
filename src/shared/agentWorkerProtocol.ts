@@ -17,7 +17,9 @@ export const growthRunBindingSchema = z.object({
   capabilityVersion: z.literal(growthCapabilityVersion),
   goalId: identifierSchema,
   cycleId: identifierSchema,
-  phase: z.enum(["world", "story", "oc"]),
+  kind: z.enum(["expand", "revision"]),
+  focusKinds: z.array(z.enum(["world", "story", "oc"])).min(1).max(3),
+  resumeFrontier: z.array(z.enum(["world", "story", "oc"])).max(3),
   inputCheckpointId: identifierSchema,
   ruleRevision: z.number().int().min(1).max(1_000_000),
   authorizedScopeResourceIds: z.array(identifierSchema).min(1).max(100),
@@ -30,6 +32,9 @@ export const growthRunBindingSchema = z.object({
   }
   if (new Set(value.seedResourceIds).size !== value.seedResourceIds.length) {
     context.addIssue({ code: "custom", path: ["seedResourceIds"], message: "Growth binding seeds must be unique." });
+  }
+  if (new Set(value.focusKinds).size !== value.focusKinds.length || new Set(value.resumeFrontier).size !== value.resumeFrontier.length) {
+    context.addIssue({ code: "custom", path: ["focusKinds"], message: "Growth intent kinds must be unique." });
   }
   const roots = Object.values(value.domainRootResourceIds);
   if (new Set(roots).size !== roots.length || roots.some((root) => !value.authorizedScopeResourceIds.includes(root))) {

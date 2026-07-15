@@ -1,5 +1,5 @@
 export interface GrowthWatchSnapshot {
-  coordinatorStatus: "running" | "completed" | "blocked" | "failed" | "cancelled" | "reconciliation_required";
+  coordinatorStatus: "running" | "awaiting_guidance" | "completed" | "blocked" | "failed" | "cancelled" | "reconciliation_required";
   cycles: Array<{ id: string; status: string; runId: string | null }>;
 }
 

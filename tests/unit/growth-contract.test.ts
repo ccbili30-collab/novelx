@@ -66,14 +66,14 @@ describe("growth persistence contract", () => {
     expect(growthEventSchema.safeParse({ ...baseEventAppend(), createdAt: now }).success).toBe(true);
   });
 
-  it("accepts ordered unique v24 Cycle intent without breaking the existing v23 caller shape", () => {
+  it("requires ordered unique v24 Cycle intent for every new Cycle", () => {
     const input = {
       id: "cycle-1", goalId: "goal-1", idempotencyKey: "cycle-key", inputCheckpointId: "checkpoint-1", ruleRevision: 2,
       intent: { kind: "revision" as const, focusKinds: ["oc" as const, "world" as const], resumeFrontier: ["story" as const] },
     };
     expect(growthCycleBeginSchema.safeParse(input).success).toBe(true);
     const { intent: _intent, ...legacyInput } = input;
-    expect(growthCycleBeginSchema.safeParse(legacyInput).success).toBe(true);
+    expect(growthCycleBeginSchema.safeParse(legacyInput).success).toBe(false);
     expect(growthCycleBeginSchema.safeParse({ ...input, intent: { ...input.intent, focusKinds: ["oc", "oc"] } }).success).toBe(false);
     expect(growthCycleBeginSchema.safeParse({ ...input, intent: { ...input.intent, ruleRevision: 2 } }).success).toBe(false);
   });

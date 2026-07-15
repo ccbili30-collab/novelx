@@ -2,7 +2,7 @@
 
 日期：2026-07-16
 
-状态：产品负责人和 Main Head（主线负责人）已接受决策门禁；v24 实现等待父级最终验收。
+状态：产品负责人和 Main Head（主线负责人）已接受决策门禁；v24 持久化与 Task 3 动态 Intent 路由已实现并通过定向验收，Task 4–7 执行链仍待接入。
 
 ## 决策范围
 
@@ -19,11 +19,21 @@
 
 v24 新建 Cycle 必须通过同一个 `BEGIN IMMEDIATE` 事务同时写入 `growth_cycles`、`growth_cycle_intents` 及其有序子表。Intent 不复制 Cycle 已固定的规则 revision；`growth_cycles.rule_revision` 仍是唯一权威。`growth_cycles_one_open_goal_idx` 以部分唯一索引保证每个 Goal 同时最多一个 `planned/running` Cycle，仓储前置检查只用于返回稳定错误码，不代替数据库约束。
 
-本任务不修改现有 Coordinator 调用点。为避免把加法持久化变成现有运行链的破坏性协议变更，`beginCycle` 暂时接受可选显式 Intent：当前 v23 形状调用仅在 sequence 1–3 时按已冻结的 `world → story → oc` 规则生成并持久化明确 Intent，超过三轮而未提供 Intent 时失败关闭。这只是新 Cycle 的短期迁移桥，不是长期兼容层；Task 3 接管 Coordinator 时必须让所有新 Cycle 显式传入 Intent，并删除该新 Cycle fallback。旧 v23 行仍只允许通过 `legacy_v23_projection` 查询投影读取，不回填、不再增加兼容层，也不表示动态调度已经接线。
+Task 3 已接管 Coordinator 调用点：`beginCycle` 对所有新调用强制要求显式 Intent，不再按 sequence 生成新 Cycle fallback。旧 v23 行仍只允许通过 `legacy_v23_projection` 查询投影读取，不回填、不再增加兼容层。缺少 Intent 的行只有在其持久化 `payload_hash` 精确等于旧版“不含 Intent 的 begin payload”规范哈希时才有资格投影；新 v24 Cycle 若 Intent 行损坏或丢失，必须以 `GROWTH_CYCLE_INTENT_REQUIRED` 失败关闭。
 
 `cycle_planned` 事件仍由现有事件 API 在事务提交之后发布，因此崩溃只能留下“已持久化、尚未发布”的可恢复状态，不能留下孤立事件。
 
-从 v23 升级时不回填 Intent。读取缺少 Intent 的历史 Cycle 时，只按 sequence 1/2/3 投影为 `world → story → oc` 的 `legacy_v23_projection`；该投影不会写回数据库。无法映射的历史 sequence 失败关闭，不伪造历史。
+从 v23 升级时不回填 Intent。读取通过旧 payload hash 证明身份且缺少 Intent 的历史 Cycle 时，只按 sequence 1/2/3 投影为 `world → story → oc` 的 `legacy_v23_projection`；该投影不会写回数据库。无法证明旧身份或无法映射 sequence 时失败关闭，不伪造历史。
+
+## 动态 Frontier 路由
+
+Coordinator 不再使用 sequence 推导 `world/story/oc` phase，也不再在第三轮后宣告完成。每个新 Expand Cycle 从仓储读取单焦点 Intent；剩余有序方向保存在 `resumeFrontier`，下一 committed checkpoint 到达后再计划恰好一个 Cycle。Worker binding 只接收 Main 从持久 Intent 投影的 `kind/focusKinds/resumeFrontier`；Lifecycle 对多焦点 Expand 或提前出现的 Revision Intent 在 Worker 和 Change Set 前失败关闭。
+
+由于 Worker binding 形状与公开 Coordinator 状态均不兼容于旧固定三轮语义，本路由使用 `hackathon-growth-dynamic-v2` capability 与 `grow_world_story_oc_dynamic_v2` strategy。旧 v1 标识不接受新 payload，也不以兼容垫片静默升级；数据库仍为加法 Schema v24，不因 IPC/Worker 能力版本变更而改写持久数据。
+
+正式 world/story/oc 资源种子按已有类型进行保守路由：world 先向 story/oc 生长，story 先反推 world 再进入 oc，oc 先进入 story 再反推 world。纯文本种子不在 Main 中做关键词或语义猜测，只采用 `world → story → oc` 的保守初始前沿；Task 4 才通过 pinned checkpoint 图检索和持久 Inquiry 提供证据化 Seed Analysis。
+
+规则指导只追加单调 Rule Revision 并返回候选 `revision` Intent 摘要，不立即创建一个注定 blocked 的占位 Cycle。当前 Cycle 固定旧 revision；Task 6 接入真实受影响节点和修订 Fragment 前，存在未应用规则或初始前沿耗尽且无独立 Closure 接受证据时，公开状态为 `awaiting_guidance`。该状态没有 active Worker，不冒充 `running`、`completed` 或失败。`growth.get` 会重新注册当前 project/session 的安全事件 route，并在 committed 崩溃边界幂等推进下一 Expand Cycle；同一边界不会创建重复 Worker。
 
 ## Inquiry
 
@@ -77,5 +87,5 @@ v23→v24 只创建新表、索引、外键和检查约束，不改写 Growth、
 
 - Domain Runtime（领域运行时）的 Checkpoint（检查点）、Change Set、document、Assertion、relation、Canon 和 Image Job/Asset 权威不变。
 - 不修改 Rust Runtime V2（第二版运行时）、A2.2、权限、Creator/Player Lens（创作者/玩家视角）、公开 Provider 协议或数据迁移语义。
-- 不接 Coordinator（协调器）、Worker（工作线程）、IPC（进程间通信）、Renderer、Player/GM/Writer 玩家回合或真实 Provider Live（真实运行）。这些属于后续任务，本文档不是完成证据。
+- Task 3 已接入 Coordinator（协调器）、Worker（工作线程）Intent binding、IPC（进程间通信）与 Renderer 的动态轮次/等待指导投影；这只证明确定性路由和失败关闭，不证明证据化自询、Closure、Revision 执行、插图队列、Player/GM 回合或真实 Provider Live（真实运行）。
 - 缺少真实角色 invocation、终态输出哈希、Receipt、版本或 Image Job 时全部失败关闭；不使用 Fixture（测试夹具）或本地模板冒充 Live。
