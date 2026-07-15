@@ -3,11 +3,22 @@ import { validateToolArguments } from "@earendil-works/pi-ai/compat";
 import { handleAgentWorkerCommand, projectPublicArtifacts } from "../../src/agent-worker/workerController";
 import { createRoleOutputTool } from "../../src/agent-worker/contracts/roleOutputTool";
 import type { PublishedPrompt } from "../../src/agent-worker/promptRegistry";
-import { growthRetrieveGraphEvidenceResultSchema } from "../../src/shared/agentWorkerProtocol";
+import { growthRetrieveGraphEvidenceResultSchema, growthRunBindingSchema } from "../../src/shared/agentWorkerProtocol";
 
 const auditRecorder = { record: async () => undefined };
 
 describe("agent worker fail-closed contract", () => {
+  it("requires a bounded unique trusted seed set in the internal Growth binding", () => {
+    const binding = {
+      capabilityVersion: "hackathon-growth-persistence-v1", goalId: "goal-1", cycleId: "cycle-1",
+      inputCheckpointId: "checkpoint-1", ruleRevision: 1, authorizedScopeResourceIds: ["world-root"],
+      seedResourceIds: ["seed-resource"],
+    };
+    expect(growthRunBindingSchema.parse(binding)).toEqual(binding);
+    expect(growthRunBindingSchema.safeParse({ ...binding, seedResourceIds: ["seed-resource", "seed-resource"] }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, branchId: "forged" }).success).toBe(false);
+  });
+
   it("rejects unknown Growth evidence resource and relation enum leaves", () => {
     const base = {
       variant: "growth_v1" as const,

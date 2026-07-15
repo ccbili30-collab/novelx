@@ -179,6 +179,29 @@ export class WorkspaceSession {
     return this.#workspace ? this.snapshot() : null;
   }
 
+  /** Main-only Growth coordinator context. It is never returned over IPC. */
+  getGrowthCoordinatorContext(): {
+    workspace: WorkspaceDatabase;
+    rootPath: string;
+    branchId: string;
+    checkpointId: string;
+    authorizedScopeResourceIds: string[];
+  } | null {
+    const workspace = this.#workspace;
+    if (!workspace) return null;
+    const branch = new CheckpointRepository(workspace).getActiveBranch();
+    const roots = new ResourceRepository(workspace).listCurrent()
+      .filter((resource) => resource.objectKind === "domain_root")
+      .map((resource) => resource.id);
+    return {
+      workspace,
+      rootPath: workspace.rootPath,
+      branchId: branch.id,
+      checkpointId: branch.headCheckpointId,
+      authorizedScopeResourceIds: roots.length > 0 && roots.length <= 100 ? roots : [],
+    };
+  }
+
   listProjectFiles(relativePath = "") {
     return new ProjectFileService(this.requireWorkspace().rootPath).list(relativePath);
   }

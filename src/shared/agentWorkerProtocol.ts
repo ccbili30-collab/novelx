@@ -20,9 +20,13 @@ export const growthRunBindingSchema = z.object({
   inputCheckpointId: identifierSchema,
   ruleRevision: z.number().int().min(1).max(1_000_000),
   authorizedScopeResourceIds: z.array(identifierSchema).min(1).max(100),
+  seedResourceIds: z.array(identifierSchema).max(100),
 }).strict().superRefine((value, context) => {
   if (new Set(value.authorizedScopeResourceIds).size !== value.authorizedScopeResourceIds.length) {
     context.addIssue({ code: "custom", path: ["authorizedScopeResourceIds"], message: "Growth binding scopes must be unique." });
+  }
+  if (new Set(value.seedResourceIds).size !== value.seedResourceIds.length) {
+    context.addIssue({ code: "custom", path: ["seedResourceIds"], message: "Growth binding seeds must be unique." });
   }
 });
 

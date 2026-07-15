@@ -13,6 +13,10 @@ import {
   documentSaveWorkingRequestSchema,
   graphInspectorResultSchema,
   graphSnapshotResultSchema,
+  growthGetRequestSchema,
+  growthLiveEventSchema,
+  growthStartResponseSchema,
+  growthStartRequestSchema,
   handoffSummarySchema,
   projectAddResultSchema,
   projectListResultSchema,
@@ -26,6 +30,44 @@ import {
 } from "../../src/shared/ipcContract";
 
 describe("desktop IPC contract", () => {
+  it("admits only bounded Growth start/get input and safe persisted event projections", () => {
+    const start = {
+      requestId: "11111111-1111-4111-8111-111111111111", projectId: "project-1", sessionId: "session-1",
+      seed: { kind: "text", text: "A seed." }, initialRuleText: "Keep sources.", strategy: "grow_world_story_oc_v1",
+    };
+    expect(growthStartRequestSchema.parse(start)).toEqual(start);
+    for (const field of ["goalId", "cycleId", "runId", "branchId", "checkpointId", "lens", "authorizedScopeResourceIds", "apiKey"]) {
+      expect(growthStartRequestSchema.safeParse({ ...start, [field]: "forged" }).success, field).toBe(false);
+    }
+    expect(growthGetRequestSchema.safeParse({ projectId: "project-1", sessionId: "session-1", goalId: "goal-1", scope: ["forged"] }).success).toBe(false);
+    const event = {
+      sessionId: "session-1", strategy: "grow_world_story_oc_v1",
+      event: { goalId: "goal-1", cycleId: "cycle-1", runId: "run-1", sequence: 1, phase: "run_attached", durableState: "running", safeSummary: "Run attached.", targetKind: "resource", targetId: "world-root", targetVersionId: null, contentRef: null },
+    };
+    expect(growthLiveEventSchema.parse(event)).toEqual(event);
+    for (const field of ["locator", "hash", "machinePath", "prompt", "toolArgs"]) {
+      expect(growthLiveEventSchema.safeParse({ ...event, event: { ...event.event, [field]: "unsafe" } }).success, field).toBe(false);
+    }
+    const versioned = {
+      ...event,
+      event: {
+        ...event.event,
+        targetKind: "document", targetId: "document-1", targetVersionId: "version-1",
+        contentRef: { kind: "document", targetId: "document-1", targetVersionId: "version-1" },
+      },
+    };
+    expect(growthLiveEventSchema.parse(versioned)).toEqual(versioned);
+    expect(growthLiveEventSchema.safeParse({
+      ...versioned, event: { ...versioned.event, contentRef: { ...versioned.event.contentRef, locator: "unsafe" } },
+    }).success).toBe(false);
+    expect(growthStartResponseSchema.safeParse({
+      capabilityVersion: "hackathon-growth-persistence-v1", strategy: "grow_world_story_oc_v1", coordinatorStatus: "completed",
+      goal: { id: "goal-1", status: "active", currentCycleSequence: 3 },
+      cycles: Array.from({ length: 4 }, (_, index) => ({ id: `cycle-${index}`, sequence: index + 1, runId: null, status: "committed" })),
+      events: [],
+    }).success).toBe(true);
+  });
+
   it("projects world_map as a first-class managed image purpose", () => {
     const image = {
       assetId: "asset-map", jobId: "job-map", title: "雾港群岛地图", purpose: "world_map",
@@ -182,6 +224,9 @@ describe("desktop IPC contract", () => {
       agentStart: "novax:agent-start",
       agentCancel: "novax:agent-cancel",
       agentEvent: "novax:agent-event",
+      growthStart: "novax:growth-start",
+      growthGet: "novax:growth-get",
+      growthEvent: "novax:growth-event",
     });
   });
 

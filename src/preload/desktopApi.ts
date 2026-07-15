@@ -4,6 +4,11 @@ import {
   agentRunEventSchema,
   agentRunStartRequestSchema,
   agentRunStartResponseSchema,
+  growthGetRequestSchema,
+  growthGetResponseSchema,
+  growthLiveEventSchema,
+  growthStartRequestSchema,
+  growthStartResponseSchema,
   changeSetDecisionRequestSchema,
   changeSetDetailResultSchema,
   changeSetFinalizeAssistRequestSchema,
@@ -543,6 +548,24 @@ export function exposeDesktopApi(): void {
         };
         ipcRenderer.on(desktopIpcChannels.agentEvent, handler);
         return () => ipcRenderer.removeListener(desktopIpcChannels.agentEvent, handler);
+      },
+    },
+    growth: {
+      async start(request) {
+        const safeRequest = growthStartRequestSchema.parse(request);
+        return growthStartResponseSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthStart, safeRequest));
+      },
+      async get(request) {
+        const safeRequest = growthGetRequestSchema.parse(request);
+        return growthGetResponseSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthGet, safeRequest));
+      },
+      subscribe(listener) {
+        const handler = (_event: IpcRendererEvent, payload: unknown) => {
+          const parsed = growthLiveEventSchema.safeParse(payload);
+          if (parsed.success) listener(parsed.data);
+        };
+        ipcRenderer.on(desktopIpcChannels.growthEvent, handler);
+        return () => ipcRenderer.removeListener(desktopIpcChannels.growthEvent, handler);
       },
     },
   };

@@ -10,6 +10,11 @@ import {
   decomposerCancelRequestSchema,
   publicDecomposerEventSchema,
   desktopIpcChannels,
+  growthGetRequestSchema,
+  growthGetResponseSchema,
+  growthLiveEventSchema,
+  growthStartRequestSchema,
+  growthStartResponseSchema,
   systemStatusSchema,
 } from "../shared/ipcContract";
 import { AgentProcessSupervisor, type AgentRuntimeLease } from "./agentProcessSupervisor";
@@ -18,6 +23,8 @@ import { DecomposerProcessSupervisor, type DecomposerRuntimeLease } from "./deco
 import type { ProviderRuntimeProfile } from "../shared/providerContract";
 import { ApplicationRegistryRepository } from "../domain/application/applicationRegistryRepository";
 import { createAgentWorkerDiagnosticReporter } from "./agentWorkerDiagnosticLog";
+import { GrowthCoordinator } from "./growthCoordinator";
+import type { WorkspaceSession } from "./workspaceIpc";
 
 export function registerDesktopIpc(
   workerPath: string,
@@ -27,6 +34,7 @@ export function registerDesktopIpc(
   acquirePlayerRuntimeLease: () => PlayerRuntimeLease | null = () => null,
   acquireDecomposerRuntimeLease: () => DecomposerRuntimeLease | null = () => null,
   userDataPath?: string,
+  workspaceSession?: WorkspaceSession,
 ): { dispose(): void } {
   const supervisor = new AgentProcessSupervisor(workerPath, {
     acquireRuntimeLease,
@@ -35,6 +43,7 @@ export function registerDesktopIpc(
   });
   const playerSupervisor = new PlayerProcessSupervisor(workerPath, { acquireRuntimeLease: acquirePlayerRuntimeLease, getProviderProfile });
   const decomposerSupervisor = new DecomposerProcessSupervisor(workerPath, { acquireRuntimeLease: acquireDecomposerRuntimeLease, getProviderProfile });
+  const growthCoordinator = workspaceSession ? new GrowthCoordinator(workspaceSession, applicationRegistry, supervisor) : null;
 
   ipcMain.handle(desktopIpcChannels.systemStatus, () => systemStatusSchema.parse({
     platform: process.platform,
@@ -89,6 +98,23 @@ export function registerDesktopIpc(
   ipcMain.handle(desktopIpcChannels.agentCancel, (_event, payload: unknown) => {
     const request = agentRunCancelRequestSchema.parse(payload);
     supervisor.cancel(request.runId);
+  });
+  ipcMain.handle(desktopIpcChannels.growthStart, (event, payload: unknown) => {
+    const request = growthStartRequestSchema.parse(payload);
+    if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
+    return growthStartResponseSchema.parse(growthCoordinator.start(request, {
+      growth: (growthEvent) => {
+        if (!event.sender.isDestroyed()) event.sender.send(desktopIpcChannels.growthEvent, growthLiveEventSchema.parse(growthEvent));
+      },
+      agent: (agentEvent) => {
+        if (!event.sender.isDestroyed()) event.sender.send(desktopIpcChannels.agentEvent, agentEvent);
+      },
+    }));
+  });
+  ipcMain.handle(desktopIpcChannels.growthGet, (_event, payload: unknown) => {
+    const request = growthGetRequestSchema.parse(payload);
+    if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
+    return growthGetResponseSchema.parse(growthCoordinator.get(request));
   });
   ipcMain.handle(desktopIpcChannels.playerTurnStart, (event, payload: unknown) => {
     const request = playerTurnStartRequestSchema.parse(payload);

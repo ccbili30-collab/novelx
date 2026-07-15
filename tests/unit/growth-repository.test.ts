@@ -32,6 +32,7 @@ describe("GrowthRepository", () => {
     expect(() => repository.appendRule({ goalId: goal.id, expectedRevision: 1, ruleText: "different", sourceMessageId: null }))
       .toThrowError(expect.objectContaining({ code: "GROWTH_RULE_REVISION_MISMATCH" }));
     const cycle = repository.beginCycle({ id: "cycle-1", goalId: goal.id, idempotencyKey: "cycle-idempotency", inputCheckpointId: setup.checkpointId, ruleRevision: 2 });
+    expect(repository.listCycles(goal.id)).toEqual([cycle]);
     expect(() => repository.appendRule({ goalId: goal.id, expectedRevision: 2, ruleText: "third rule", sourceMessageId: null }))
       .toThrowError(expect.objectContaining({ code: "GROWTH_RULE_CHANGE_REQUIRES_CYCLE_BOUNDARY" }));
     const run = seedRun(setup.workspace, setup.branchId, setup.checkpointId);

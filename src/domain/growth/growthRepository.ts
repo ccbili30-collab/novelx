@@ -92,6 +92,12 @@ export class GrowthRepository {
     return row ? mapCycle(row) : null;
   }
 
+  listCycles(goalId: string): GrowthCycle[] {
+    this.#requiredGoal(goalId);
+    return (this.workspace.db.prepare("SELECT * FROM growth_cycles WHERE goal_id = ? ORDER BY sequence").all(goalId) as Row[])
+      .map(mapCycle);
+  }
+
   getReceipt(receiptId: string): GrowthRetrievalReceipt | null {
     const row = this.workspace.db.prepare("SELECT * FROM growth_retrieval_receipts WHERE id = ?").get(receiptId) as Row | undefined;
     if (!row) return null;

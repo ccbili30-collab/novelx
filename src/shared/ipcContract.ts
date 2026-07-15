@@ -14,6 +14,7 @@ import type {
   ImageProviderTestRequest,
   ImageProviderTestResult,
 } from "./imageProviderContract";
+import { growthCapabilityVersion, growthContentRefSchema, growthSeedSchema } from "./growthContract";
 
 export const desktopIpcChannels = {
   systemStatus: "novax:system-status",
@@ -106,6 +107,9 @@ export const desktopIpcChannels = {
   agentStart: "novax:agent-start",
   agentCancel: "novax:agent-cancel",
   agentEvent: "novax:agent-event",
+  growthStart: "novax:growth-start",
+  growthGet: "novax:growth-get",
+  growthEvent: "novax:growth-event",
 } as const;
 
 const opaqueIdSchema = z.string().trim().min(1).max(120);
@@ -1242,6 +1246,67 @@ export const agentRunCancelRequestSchema = z.object({
   runId: z.string().min(1).max(120),
 }).strict();
 
+export const growthStrategySchema = z.literal("grow_world_story_oc_v1");
+
+export const growthStartRequestSchema = z.object({
+  requestId: z.uuid(),
+  projectId: opaqueIdSchema,
+  sessionId: opaqueIdSchema,
+  seed: growthSeedSchema,
+  initialRuleText: z.string().trim().min(1).max(12_000),
+  strategy: growthStrategySchema,
+}).strict();
+
+export const growthGetRequestSchema = z.object({
+  projectId: opaqueIdSchema,
+  sessionId: opaqueIdSchema,
+  goalId: opaqueIdSchema,
+}).strict();
+
+const growthPublicCycleSchema = z.object({
+  id: opaqueIdSchema,
+  sequence: z.number().int().min(1).max(1_000_000),
+  runId: z.string().min(1).max(120).nullable(),
+  status: z.enum(["planned", "running", "committed", "blocked", "failed", "cancelled", "reconciliation_required"]),
+}).strict();
+
+const growthPublicGoalSchema = z.object({
+  id: opaqueIdSchema,
+  status: z.enum(["active", "completed", "blocked", "cancelled", "reconciliation_required"]),
+  currentCycleSequence: z.number().int().min(0).max(1_000_000),
+}).strict();
+
+export const growthPublicEventSchema = z.object({
+  goalId: opaqueIdSchema,
+  cycleId: opaqueIdSchema,
+  runId: z.string().min(1).max(120).nullable(),
+  sequence: z.number().int().min(1).max(1_000_000),
+  phase: z.enum(["cycle_planned", "run_attached", "receipt_recorded", "change_set_committed", "cycle_terminal"]),
+  durableState: z.enum(["planned", "running", "committed", "blocked", "failed", "cancelled", "reconciliation_required"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  targetKind: z.enum(["document", "resource", "assertion", "relation", "change_set"]),
+  targetId: opaqueIdSchema,
+  targetVersionId: opaqueIdSchema.nullable(),
+  contentRef: growthContentRefSchema.nullable(),
+}).strict();
+
+const growthPublicSnapshotSchema = z.object({
+  capabilityVersion: z.literal(growthCapabilityVersion),
+  strategy: growthStrategySchema,
+  coordinatorStatus: z.enum(["running", "completed", "blocked", "failed", "cancelled", "reconciliation_required"]),
+  goal: growthPublicGoalSchema,
+  cycles: z.array(growthPublicCycleSchema).max(100),
+  events: z.array(growthPublicEventSchema).max(100),
+}).strict();
+
+export const growthStartResponseSchema = growthPublicSnapshotSchema;
+export const growthGetResponseSchema = growthPublicSnapshotSchema;
+export const growthLiveEventSchema = z.object({
+  sessionId: opaqueIdSchema,
+  strategy: growthStrategySchema,
+  event: growthPublicEventSchema,
+}).strict();
+
 export const publicErrorCodeSchema = z.enum([
   "REAL_GM_PROVIDER_REQUIRED",
   "PROMPT_SET_NOT_PUBLISHED",
@@ -1310,6 +1375,11 @@ export const systemStatusSchema = z.object({
 export type AgentRunStartRequest = z.input<typeof agentRunStartRequestSchema>;
 export type AgentRunStartResponse = z.infer<typeof agentRunStartResponseSchema>;
 export type AgentRunCancelRequest = z.infer<typeof agentRunCancelRequestSchema>;
+export type GrowthStartRequest = z.infer<typeof growthStartRequestSchema>;
+export type GrowthGetRequest = z.infer<typeof growthGetRequestSchema>;
+export type GrowthStartResponse = z.infer<typeof growthStartResponseSchema>;
+export type GrowthGetResponse = z.infer<typeof growthGetResponseSchema>;
+export type GrowthLiveEvent = z.infer<typeof growthLiveEventSchema>;
 export type AgentRunEvent = z.infer<typeof agentRunEventSchema>;
 export type PublicError = z.infer<typeof publicErrorSchema>;
 export type SystemStatus = z.infer<typeof systemStatusSchema>;
@@ -1563,5 +1633,10 @@ export interface DesktopApi {
     start(request: AgentRunStartRequest): Promise<AgentRunStartResponse>;
     cancel(request: AgentRunCancelRequest): Promise<void>;
     subscribe(listener: (event: AgentRunEvent) => void): () => void;
+  };
+  growth: {
+    start(request: GrowthStartRequest): Promise<GrowthStartResponse>;
+    get(request: GrowthGetRequest): Promise<GrowthGetResponse>;
+    subscribe(listener: (event: GrowthLiveEvent) => void): () => void;
   };
 }

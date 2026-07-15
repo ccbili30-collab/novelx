@@ -2,6 +2,7 @@ import type { AgentRunEvent, AgentRunStartRequest } from "../shared/ipcContract"
 import {
   growthCapabilityVersion,
   type GrowthCycle,
+  type GrowthEvent,
   type GrowthGoal,
 } from "../shared/growthContract";
 import {
@@ -19,6 +20,8 @@ import {
 import { GrowthRepository } from "../domain/growth/growthRepository";
 import { GraphRetrievalService } from "../domain/retrieval/graphRetrievalService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
+import { DocumentRepository } from "../domain/workspace/documentRepository";
+import { ResourceRepository } from "../domain/workspace/resourceRepository";
 import type { WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import {
   AgentProcessSupervisor,
@@ -35,6 +38,7 @@ export interface GrowthRunLifecycleStart {
   emit(event: AgentRunEvent): void;
   sessionHistory?: AgentSessionHistory;
   collaborationContext?: AgentCollaborationContext;
+  onPersistedEvent?(event: GrowthEvent): void;
 }
 
 /**
@@ -65,8 +69,9 @@ export class GrowthRunLifecycle {
       inputCheckpointId: cycle.inputCheckpointId,
       ruleRevision: cycle.ruleRevision,
       authorizedScopeResourceIds: goal.authorizedScopeResourceIds,
+      seedResourceIds: trustedSeedResourceIds(this.workspace, goal, cycle.inputCheckpointId),
     });
-    const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId);
+    const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent);
     return this.supervisor.start(
       { ...input.request, scopeResourceIds: binding.authorizedScopeResourceIds },
       input.emit,
@@ -77,7 +82,7 @@ export class GrowthRunLifecycle {
   }
 
   /** Main recovery entry for a Cycle left by a previous Main process. */
-  recoverCycle(input: { goalId: string; cycleId: string }): GrowthCycle {
+  recoverCycle(input: { goalId: string; cycleId: string; onPersistedEvent?: (event: GrowthEvent) => void }): GrowthCycle {
     const repository = new GrowthRepository(this.workspace);
     const goal = repository.getGoal(input.goalId);
     const cycle = repository.getCycle(input.cycleId);
@@ -85,7 +90,8 @@ export class GrowthRunLifecycle {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
     if (cycle.status === "committed") {
-      repairTerminalEvent(repository, goal, cycle);
+      const event = repairTerminalEvent(repository, goal, cycle);
+      if (event) notifyPersistedEvent(input.onPersistedEvent, event);
       return cycle;
     }
     if (cycle.status === "running") {
@@ -94,11 +100,13 @@ export class GrowthRunLifecycle {
         status: "reconciliation_required",
         failureCode: "GROWTH_RUN_INTERRUPTED",
       });
-      repairTerminalEvent(repository, goal, terminal);
+      const event = repairTerminalEvent(repository, goal, terminal);
+      if (event) notifyPersistedEvent(input.onPersistedEvent, event);
       return terminal;
     }
     if (["blocked", "failed", "cancelled", "reconciliation_required"].includes(cycle.status)) {
-      repairTerminalEvent(repository, goal, cycle);
+      const event = repairTerminalEvent(repository, goal, cycle);
+      if (event) notifyPersistedEvent(input.onPersistedEvent, event);
       return cycle;
     }
     throw growthRunError("GROWTH_BINDING_INVALID");
@@ -121,6 +129,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     workspace: WorkspaceDatabase,
     readonly workerBinding: GrowthRunBinding,
     readonly branchId: string,
+    readonly onPersistedEvent: ((event: GrowthEvent) => void) | undefined,
   ) {
     this.#repository = new GrowthRepository(workspace);
     this.#graph = new GraphRetrievalService(workspace);
@@ -183,6 +192,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
         lens: "creator",
         authorizedScopeResourceIds: this.workerBinding.authorizedScopeResourceIds,
         ...retrievalArgs,
+        seedResourceIds: uniqueStrings([...this.workerBinding.seedResourceIds, ...retrievalArgs.seedResourceIds]),
         validTime: null,
         recordedTime: null,
       });
@@ -267,7 +277,8 @@ class BoundGrowthRun implements AgentRunInternalBinding {
   #repairTerminalEvent(cycle: GrowthCycle, safeSummary?: string): void {
     const goal = this.#repository.getGoal(this.workerBinding.goalId);
     if (!goal) throw growthRunError("GROWTH_BINDING_INVALID");
-    repairTerminalEvent(this.#repository, goal, cycle, safeSummary);
+    const event = repairTerminalEvent(this.#repository, goal, cycle, safeSummary);
+    if (event) notifyPersistedEvent(this.onPersistedEvent, event);
   }
 
   #requiredCycle(): GrowthCycle {
@@ -283,10 +294,10 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     targetKind: "resource" | "document" | "assertion" | "relation" | "change_set" = "resource",
     targetId: string = this.workerBinding.authorizedScopeResourceIds[0]!,
     targetVersionId: string | null = null,
-  ): void {
+  ): GrowthEvent {
     const goal = this.#repository.getGoal(this.workerBinding.goalId);
     if (!goal) throw growthRunError("GROWTH_BINDING_INVALID");
-    this.#repository.appendEvent({
+    const event = this.#repository.appendEvent({
       goalId: goal.id,
       cycleId: cycle.id,
       runId: cycle.runId,
@@ -299,6 +310,8 @@ class BoundGrowthRun implements AgentRunInternalBinding {
       durableState: cycle.status,
       contentRef: null,
     });
+    notifyPersistedEvent(this.onPersistedEvent, event);
+    return event;
   }
 }
 
@@ -326,24 +339,23 @@ function projectEvidence(hit: ReturnType<GraphRetrievalService["retrieve"]>["hit
   };
 }
 
-function repairTerminalEvent(repository: GrowthRepository, goal: GrowthGoal, cycle: GrowthCycle, safeSummary?: string): void {
+function repairTerminalEvent(repository: GrowthRepository, goal: GrowthGoal, cycle: GrowthCycle, safeSummary?: string): GrowthEvent | null {
   if (cycle.status === "committed") {
     if (!cycle.runId || !cycle.changeSetId || !cycle.outputCheckpointId) throw growthRunError("GROWTH_BINDING_INVALID");
-    if (repository.listEvents(goal.id).some((event) => event.cycleId === cycle.id && event.phase === "change_set_committed")) return;
-    repository.appendEvent({
+    if (repository.listEvents(goal.id).some((event) => event.cycleId === cycle.id && event.phase === "change_set_committed")) return null;
+    return repository.appendEvent({
       goalId: goal.id, cycleId: cycle.id, runId: cycle.runId,
       sequence: nextGrowthEventSequence(repository, goal.id),
       safeSummary: safeSummary ?? "Growth Change Set 已提交并完成恢复核对。",
       phase: "change_set_committed", targetKind: "change_set", targetId: cycle.changeSetId,
       targetVersionId: cycle.outputCheckpointId, durableState: cycle.status, contentRef: null,
     });
-    return;
   }
   if (!cycle.runId || (cycle.status !== "blocked" && cycle.status !== "failed" && cycle.status !== "cancelled" && cycle.status !== "reconciliation_required")) {
     throw growthRunError("GROWTH_BINDING_INVALID");
   }
-  if (repository.listEvents(goal.id).some((event) => event.cycleId === cycle.id && event.phase === "cycle_terminal")) return;
-  repository.appendEvent({
+  if (repository.listEvents(goal.id).some((event) => event.cycleId === cycle.id && event.phase === "cycle_terminal")) return null;
+  return repository.appendEvent({
     goalId: goal.id, cycleId: cycle.id, runId: cycle.runId,
     sequence: nextGrowthEventSequence(repository, goal.id),
     safeSummary: safeSummary ?? terminalSummary(cycle.status),
@@ -376,6 +388,23 @@ function nextGrowthEventSequence(repository: GrowthRepository, goalId: string): 
   const events = repository.listEvents(goalId);
   const last = events.at(-1);
   return last ? last.sequence + 1 : 1;
+}
+
+function trustedSeedResourceIds(workspace: WorkspaceDatabase, goal: GrowthGoal, checkpointId: string): string[] {
+  const seed = goal.seed;
+  if (seed.kind === "text") return [];
+  if (seed.kind === "resource") return [seed.resourceId];
+  const document = new DocumentRepository(workspace).getVersion(seed.sourceVersionId);
+  if (!document || document.creativeDocumentId !== seed.sourceDocumentId) throw growthRunError("GROWTH_BINDING_INVALID");
+  if (!new ResourceRepository(workspace).listAtCheckpoint(checkpointId).some((resource) => resource.id === document.resourceId)) {
+    throw growthRunError("GROWTH_BINDING_INVALID");
+  }
+  return [document.resourceId];
+}
+
+function uniqueStrings(values: string[]): string[] { return [...new Set(values)]; }
+function notifyPersistedEvent(listener: ((event: GrowthEvent) => void) | undefined, event: GrowthEvent): void {
+  try { listener?.(event); } catch { /* Delivery is non-authoritative after persistence. */ }
 }
 
 export function safeFailureCode(value: string | null): string {

@@ -8,6 +8,8 @@ import { AgentAuditRepository } from "../../src/domain/audit/agentAuditRepositor
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { CreativeRelationRepository } from "../../src/domain/workspace/creativeRelationRepository";
+import { CreativeDocumentRepository } from "../../src/domain/workspace/creativeDocumentRepository";
+import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
 import { AgentProcessSupervisor, type AgentRuntimeLease, type AgentWorkerProcess } from "../../src/main/agentProcessSupervisor";
@@ -40,6 +42,24 @@ afterEach(() => {
 });
 
 describe("Growth Run bridge", () => {
+  it("pins a source-document seed to its owning resource without exposing source content", async () => {
+    const setup = createSourceDocumentSetup();
+    const worker = new FakeWorker();
+    const supervisor = createSupervisor(setup, worker);
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, supervisor);
+    const runId = lifecycle.start({
+      goalId: setup.goalId, cycleId: setup.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "seed", mode: "free" }, emit: () => undefined,
+    });
+    worker.spawn();
+    const command = worker.sent[0] as { growthBinding: { seedResourceIds: string[] } };
+    expect(command.growthBinding.seedResourceIds).toEqual(["source-world"]);
+    expect(JSON.stringify(command.growthBinding)).not.toContain("source document content");
+    expect(JSON.stringify(command.growthBinding)).not.toContain(setup.workspace.rootPath);
+    supervisor.cancel(runId);
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).getCycle(setup.cycleId)?.status).toBe("cancelled"));
+  });
+
   it("maps terminal failures to stable allowlisted categories", () => {
     expect(safeFailureCode("REAL_GM_PROVIDER_REQUIRED")).toBe("GROWTH_PROVIDER_CONFIGURATION_FAILED");
     expect(safeFailureCode("PROVIDER_RUNTIME_FAILED")).toBe("GROWTH_PROVIDER_RUNTIME_FAILED");
@@ -415,6 +435,37 @@ function createSetup() {
     seed: { kind: "text", text: "从海岸传说开始" }, authorizedScopeResourceIds: [scopeId], initialRuleText: "保留来源", sourceMessageId: null,
   });
   const cycle = repository.beginCycle({ id: "growth-cycle", goalId: goal.id, idempotencyKey: "growth-cycle-key", inputCheckpointId: branch.headCheckpointId, ruleRevision: goal.currentRuleRevision });
+  return { workspace, goalId: goal.id, cycleId: cycle.id, scopeId };
+}
+
+function createSourceDocumentSetup() {
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-growth-source-seed-"));
+  workspace = openWorkspace(root);
+  const branch = new CheckpointRepository(workspace).getActiveBranch();
+  const scopeId = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!.id;
+  new ResourceRepository(workspace).putRevision({
+    resourceId: "source-world", create: true, checkpointId: branch.headCheckpointId,
+    type: "world", objectKind: "world", title: "Source world", parentId: scopeId, state: "active", sortOrder: 0,
+  });
+  const documentId = "source-document";
+  new CreativeDocumentRepository(workspace).putRevisionWithReceipt({
+    documentId, create: true, checkpointId: branch.headCheckpointId, resourceId: "source-world",
+    kind: "setting", title: "Source setting", state: "active",
+  });
+  const sourceVersionId = new DocumentRepository(workspace).putVersion({
+    resourceId: "source-world", creativeDocumentId: documentId, checkpointId: branch.headCheckpointId,
+    content: "source document content", authorKind: "user",
+  });
+  const repository = new GrowthRepository(workspace);
+  const goal = repository.createGoal({
+    id: "source-goal", idempotencyKey: "source-goal-key", branchId: branch.id,
+    seed: { kind: "source_document", sourceDocumentId: documentId, sourceVersionId },
+    authorizedScopeResourceIds: [scopeId], initialRuleText: "Keep sources.", sourceMessageId: null,
+  });
+  const cycle = repository.beginCycle({
+    id: "source-cycle", goalId: goal.id, idempotencyKey: "source-cycle-key",
+    inputCheckpointId: branch.headCheckpointId, ruleRevision: goal.currentRuleRevision,
+  });
   return { workspace, goalId: goal.id, cycleId: cycle.id, scopeId };
 }
 

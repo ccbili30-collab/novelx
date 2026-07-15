@@ -70,6 +70,7 @@ app.whenReady().then(() => {
     () => workspaceSession.acquirePlayerRuntimeLease(),
     () => workspaceSession.acquireDecomposerRuntimeLease(),
     app.getPath("userData"),
+    workspaceSession,
   );
   app.once("before-quit", () => {
     disposeUpdateEvents();

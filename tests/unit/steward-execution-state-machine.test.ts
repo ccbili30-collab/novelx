@@ -70,7 +70,7 @@ describe("Steward tool handoff state machine", () => {
       authorizedScopeResourceIds: ["world-1"],
       growthBinding: {
         capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", inputCheckpointId: "checkpoint-1",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-1"],
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1"], seedResourceIds: [],
       },
       operationalTools: [retrieve, propose],
       resultCapture: createRoleOutputTool("steward"),
