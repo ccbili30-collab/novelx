@@ -263,9 +263,10 @@ const defaultVisualStyle = {
 11. 写确定性测试矩阵：world→story/oc、story→world/oc、oc→story/world、mixed seed 保留、unknown seed 澄清/保守生长；另覆盖 C1 中断、初始完成后继续、连续规则、重开、取消、CAS 冲突和 terminal event 精确一次。
 12. 运行定向测试、typecheck、Prompt publication gate。
 13. Worker binding 不再暴露或依赖 sequence 推导的单一 `phase`；它携带 Main 从持久 Intent 投影出的 `kind`、`focusKinds` 与 `resumeFrontier`。状态机只开放当前 Intent 允许的高层 Fragment 路径，保持单 Cycle 最多一个 Change Set、Greenfield create-only 与既有 Gateway 最终权限校验。
-14. Task 3 不输出 Closure（闭环）完成结论。没有 Task 5 的独立 Steward/Checker 接受证据时，Coordinator 在没有可执行 frontier 时必须公开 `awaiting_guidance`，不能以 `running` 或 `completed` 冒充；“连续两轮无 closure facet 进展”检测在 Task 5 接入真实 Closure Assessment 后实现。
-15. `growth.get` 必须重新注册当前 project/session 的安全事件 route，并在 committed 边界幂等推进恰好一个下一 expand Cycle或恢复为 `awaiting_guidance`；不能要求 Renderer 猜测或重新调用 start。
-16. 提交：`feat(growth): plan world story and oc from any seed`。
+14. 因 Worker binding 和公开 Coordinator 状态发生不兼容变化，Growth capability 与 strategy 必须显式升为 `hackathon-growth-dynamic-v2` / `grow_world_story_oc_dynamic_v2`；不得沿用 v1 标识伪装兼容。
+15. Task 3 不输出 Closure（闭环）完成结论。没有 Task 5 的独立 Steward/Checker 接受证据时，Coordinator 在没有可执行 frontier 时必须公开 `awaiting_guidance`，不能以 `running` 或 `completed` 冒充；“连续两轮无 closure facet 进展”检测在 Task 5 接入真实 Closure Assessment 后实现。
+16. `growth.get` 必须重新注册当前 project/session 的安全事件 route，并在 committed 边界幂等推进恰好一个下一 expand Cycle或恢复为 `awaiting_guidance`；不能要求 Renderer 猜测或重新调用 start。
+17. 提交：`feat(growth): plan world story and oc from any seed`。
 
 ---
 
