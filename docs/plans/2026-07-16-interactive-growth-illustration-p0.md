@@ -231,6 +231,7 @@ const defaultVisualStyle = {
 - Modify: `src/renderer/src/features/agent/growthPresentation.ts`
 - Modify: `src/renderer/src/features/agent/RunActivityTimeline.tsx`
 - Modify: `src/renderer/src/features/agent/StewardRuntimePanel.tsx`
+- Modify: `src/renderer/src/features/activity/RunWorkTargetPane.tsx`
 - Test: `tests/unit/growth-contract.test.ts`
 - Test: `tests/unit/growth-repository.test.ts`
 - Test: `tests/unit/agent-worker-contract.test.ts`
