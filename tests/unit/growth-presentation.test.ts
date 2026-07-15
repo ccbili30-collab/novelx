@@ -3,6 +3,7 @@ import type { AgentArtifact, AgentRunEvent, GrowthStartResponse } from "../../sr
 
 const presentationModulePath = "../../src/renderer/src/features/agent/growthPresentation";
 const stewardModulePath = "../../src/renderer/src/features/agent/StewardRuntimePanel";
+const artifactListModulePath = "../../src/renderer/src/features/agent/AgentArtifactList";
 
 async function presentation() {
   return import(presentationModulePath);
@@ -10,6 +11,10 @@ async function presentation() {
 
 async function steward() {
   return import(stewardModulePath);
+}
+
+async function artifactList() {
+  return import(artifactListModulePath);
 }
 
 const goalId = "goal-1";
@@ -172,6 +177,17 @@ describe("growth presentation", () => {
     expect(display.artifact).toMatchObject({ assetId: "map-asset-1", title: "潮汐海港地图" });
     expect(display.canPreview).toBe(true);
     expect(display.canOpenShowcase).toBe(true);
+  });
+
+  it("keeps the world map machine identity selective and presents it in Chinese", async () => {
+    const { getGrowthWorldMapDisplay } = await presentation();
+    const { imagePurposeLabel } = await artifactList();
+    const scene = worldMapArtifact("ready", { assetId: "scene-asset-1", purpose: "故事场景" });
+
+    expect(getGrowthWorldMapDisplay([scene]).artifact).toBeNull();
+    expect(imagePurposeLabel("world_map")).toBe("世界地图");
+    expect(imagePurposeLabel("故事场景")).toBe("故事场景");
+    expect(imagePurposeLabel("角色立绘")).toBe("角色立绘");
   });
 
   it("keeps queued, generating, failed, and stale world maps visibly non-ready", async () => {

@@ -4,6 +4,7 @@ import { handleAgentWorkerCommand, projectPublicArtifacts } from "../../src/agen
 import { createRoleOutputTool } from "../../src/agent-worker/contracts/roleOutputTool";
 import type { PublishedPrompt } from "../../src/agent-worker/promptRegistry";
 import { agentWorkerToolResponseSchema, growthRetrieveGraphEvidenceResultSchema, growthRunBindingSchema } from "../../src/shared/agentWorkerProtocol";
+import { agentRunEventSchema } from "../../src/shared/ipcContract";
 
 const auditRecorder = { record: async () => undefined };
 
@@ -364,7 +365,7 @@ describe("agent worker fail-closed contract", () => {
   });
 
   it("projects a committed managed image as a ready public artifact", () => {
-    expect(projectPublicArtifacts({
+    const artifacts = projectPublicArtifacts({
       status: "completed",
       message: "世界地图已生成。",
       evidenceIds: ["version-1"],
@@ -378,18 +379,31 @@ describe("agent worker fail-closed contract", () => {
       purpose: "world_map",
       sourceVersionIds: ["version-1"],
       thumbnailUrl: "novax-asset://image/asset-1",
-    }])).toEqual([
+    }]);
+
+    expect(artifacts).toEqual([
       { kind: "tool_call", tool: "generate_image", label: "生成角色或场景图片", status: "succeeded" },
       {
         kind: "image",
         assetId: "asset-1",
         title: "银湾夜潮",
         status: "ready",
-        purpose: "故事场景",
+        purpose: "world_map",
         sourceLabel: "基于 1 个稳定版本",
         thumbnailUrl: "novax-asset://image/asset-1",
       },
     ]);
+    const event = agentRunEventSchema.parse({
+      type: "run.completed",
+      runId: "run-world-map",
+      outcome: "completed",
+      message: "世界地图已生成。",
+      changeSetState: "none",
+      artifacts,
+    });
+    expect(event.type).toBe("run.completed");
+    if (event.type !== "run.completed") throw new Error("Expected a completed Agent Run event.");
+    expect(event.artifacts).toEqual(artifacts);
   });
 
   it("rejects missing structured submissions and unsafe public messages", async () => {

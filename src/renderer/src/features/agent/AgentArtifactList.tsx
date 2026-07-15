@@ -70,7 +70,7 @@ export function AgentArtifactList({ artifacts, onOpenChangeSet, onOpenDocumentRe
             {artifact.thumbnailUrl && artifact.status === "ready"
               ? <img src={artifact.thumbnailUrl} alt="" loading="lazy" />
               : null}
-            <div><strong>{artifact.title}</strong><small>{imageStatusLabel(artifact.status)} · {artifact.purpose}</small><small>来源：{artifact.sourceLabel}</small></div>
+            <div><strong>{artifact.title}</strong><small>{imageStatusLabel(artifact.status)} · {imagePurposeLabel(artifact.purpose)}</small><small>来源：{artifact.sourceLabel}</small></div>
           </section>
         );
       })}
@@ -87,4 +87,8 @@ function toolStatusLabel(status: Extract<AgentArtifact, { kind: "tool_call" }>["
 
 function imageStatusLabel(status: Extract<AgentArtifact, { kind: "image" }>["status"]): string {
   return { queued: "已排队", generating: "生成中", ready: "已完成", failed: "生成失败", stale: "已过期" }[status];
+}
+
+export function imagePurposeLabel(purpose: string): string {
+  return purpose === "world_map" ? "世界地图" : purpose;
 }

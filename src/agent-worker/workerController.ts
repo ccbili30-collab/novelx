@@ -200,7 +200,9 @@ export function projectPublicArtifacts(
     assetId: image.assetId,
     title: image.title,
     status: image.status,
-    purpose: image.purpose === "character_portrait" ? "角色立绘" : "故事场景",
+    purpose: image.purpose === "world_map"
+      ? "world_map"
+      : image.purpose === "character_portrait" ? "角色立绘" : "故事场景",
     sourceLabel: `基于 ${image.sourceVersionIds.length} 个稳定版本`,
     thumbnailUrl: image.thumbnailUrl,
   })));
