@@ -109,6 +109,7 @@ export const desktopIpcChannels = {
   agentEvent: "novax:agent-event",
   growthStart: "novax:growth-start",
   growthGet: "novax:growth-get",
+  growthGuide: "novax:growth-guide",
   growthEvent: "novax:growth-event",
 } as const;
 
@@ -1263,6 +1264,18 @@ export const growthGetRequestSchema = z.object({
   goalId: opaqueIdSchema,
 }).strict();
 
+export const growthGuideRequestSchema = z.object({
+  goalId: opaqueIdSchema,
+  expectedRevision: z.number().int().min(1).max(1_000_000),
+  ruleText: z.string().trim().min(1).max(12_000),
+  sourceMessageId: opaqueIdSchema.optional(),
+  requestId: z.uuid().optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.sourceMessageId === undefined) === (value.requestId === undefined)) {
+    context.addIssue({ code: "custom", message: "Exactly one replay identity is required." });
+  }
+});
+
 const growthPublicCycleSchema = z.object({
   id: opaqueIdSchema,
   sequence: z.number().int().min(1).max(1_000_000),
@@ -1295,12 +1308,24 @@ const growthPublicSnapshotSchema = z.object({
   strategy: growthStrategySchema,
   coordinatorStatus: z.enum(["running", "completed", "blocked", "failed", "cancelled", "reconciliation_required"]),
   goal: growthPublicGoalSchema,
+  currentRuleRevision: z.number().int().min(1).max(1_000_000).optional(),
+  activeCycleRuleRevision: z.number().int().min(1).max(1_000_000).nullable().optional(),
+  guidanceStatus: z.enum(["none", "persisted_pending_boundary"]).optional(),
   cycles: z.array(growthPublicCycleSchema).max(100),
   events: z.array(growthPublicEventSchema).max(100),
 }).strict();
 
 export const growthStartResponseSchema = growthPublicSnapshotSchema;
 export const growthGetResponseSchema = growthPublicSnapshotSchema;
+export const growthGuideResponseSchema = z.object({
+  goalId: opaqueIdSchema,
+  persistedRevision: z.number().int().min(2).max(1_000_000),
+  currentCycleRevision: z.number().int().min(1).max(1_000_000),
+  appliesAt: z.literal("next_cycle_boundary"),
+  nextCycleSequence: z.number().int().min(2).max(3),
+  nextCyclePhase: z.enum(["story", "oc"]),
+  status: z.literal("persisted_pending_boundary"),
+}).strict();
 export const growthLiveEventSchema = z.object({
   sessionId: opaqueIdSchema,
   strategy: growthStrategySchema,
@@ -1377,8 +1402,10 @@ export type AgentRunStartResponse = z.infer<typeof agentRunStartResponseSchema>;
 export type AgentRunCancelRequest = z.infer<typeof agentRunCancelRequestSchema>;
 export type GrowthStartRequest = z.infer<typeof growthStartRequestSchema>;
 export type GrowthGetRequest = z.infer<typeof growthGetRequestSchema>;
+export type GrowthGuideRequest = z.infer<typeof growthGuideRequestSchema>;
 export type GrowthStartResponse = z.infer<typeof growthStartResponseSchema>;
 export type GrowthGetResponse = z.infer<typeof growthGetResponseSchema>;
+export type GrowthGuideResponse = z.infer<typeof growthGuideResponseSchema>;
 export type GrowthLiveEvent = z.infer<typeof growthLiveEventSchema>;
 export type AgentRunEvent = z.infer<typeof agentRunEventSchema>;
 export type PublicError = z.infer<typeof publicErrorSchema>;
@@ -1637,6 +1664,7 @@ export interface DesktopApi {
   growth: {
     start(request: GrowthStartRequest): Promise<GrowthStartResponse>;
     get(request: GrowthGetRequest): Promise<GrowthGetResponse>;
+    guide(request: GrowthGuideRequest): Promise<GrowthGuideResponse>;
     subscribe(listener: (event: GrowthLiveEvent) => void): () => void;
   };
 }

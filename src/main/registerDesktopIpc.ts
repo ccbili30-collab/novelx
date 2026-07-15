@@ -12,6 +12,8 @@ import {
   desktopIpcChannels,
   growthGetRequestSchema,
   growthGetResponseSchema,
+  growthGuideRequestSchema,
+  growthGuideResponseSchema,
   growthLiveEventSchema,
   growthStartRequestSchema,
   growthStartResponseSchema,
@@ -115,6 +117,11 @@ export function registerDesktopIpc(
     const request = growthGetRequestSchema.parse(payload);
     if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
     return growthGetResponseSchema.parse(growthCoordinator.get(request));
+  });
+  ipcMain.handle(desktopIpcChannels.growthGuide, (_event, payload: unknown) => {
+    const request = growthGuideRequestSchema.parse(payload);
+    if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
+    return growthGuideResponseSchema.parse(growthCoordinator.guide(request));
   });
   ipcMain.handle(desktopIpcChannels.playerTurnStart, (event, payload: unknown) => {
     const request = playerTurnStartRequestSchema.parse(payload);

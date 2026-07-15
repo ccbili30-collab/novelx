@@ -15,6 +15,7 @@ import { AgentProcessSupervisor, type AgentWorkerProcess } from "../../src/main/
 import { GrowthCoordinator } from "../../src/main/growthCoordinator";
 import { WorkspaceSession } from "../../src/main/workspaceIpc";
 import { growthStartRequestSchema } from "../../src/shared/ipcContract";
+import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growthWorldFragment";
 
 class FakeWorker extends EventEmitter implements AgentWorkerProcess {
   killed = false;
@@ -39,6 +40,138 @@ afterEach(() => {
 });
 
 describe("GrowthCoordinator", () => {
+  it("persists guidance during C1 and applies its pinned rule only when C2 starts", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const started = coordinator.start(growthRequest(setup));
+
+    const guided = coordinator.guide({
+      goalId: started.goal.id,
+      expectedRevision: 1,
+      ruleText: "Use the revised rule.",
+      requestId: "22222222-2222-4222-8222-222222222222",
+    });
+
+    expect(guided).toEqual({
+      goalId: started.goal.id,
+      persistedRevision: 2,
+      currentCycleRevision: 1,
+      appliesAt: "next_cycle_boundary",
+      nextCycleSequence: 2,
+      nextCyclePhase: "story",
+      status: "persisted_pending_boundary",
+    });
+    workers[0]!.spawn();
+    await vi.waitFor(() => expect(workers[0]!.sent).toHaveLength(1));
+    expect((workers[0]!.sent[0] as { userInput: string }).userInput).toContain("Keep sources.");
+    expect((workers[0]!.sent[0] as { userInput: string }).userInput).not.toContain("Use the revised rule.");
+
+    await completeCycle(setup.workspace, workers[0]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    workers[1]!.spawn();
+    await vi.waitFor(() => expect(workers[1]!.sent).toHaveLength(1));
+    expect((workers[1]!.sent[0] as { userInput: string }).userInput).toContain("Use the revised rule.");
+    await completeCycle(setup.workspace, workers[1]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(3));
+    expect(new GrowthRepository(setup.workspace).listCycles(started.goal.id)[1]).toMatchObject({
+      ruleRevision: 2,
+      receiptId: expect.any(String),
+      status: "committed",
+    });
+    workers[2]!.spawn();
+    supervisor.cancel(runId(workers[2]!));
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).listCycles(started.goal.id)[2]!.status).toBe("cancelled"));
+  });
+
+  it("replays one guidance identity exactly and rejects a competing CAS write", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const started = coordinator.start(growthRequest(setup));
+    const request = {
+      goalId: started.goal.id, expectedRevision: 1, ruleText: "Revision two.",
+      sourceMessageId: "message-guidance-2",
+    };
+
+    const first = coordinator.guide(request);
+    expect(coordinator.guide(request)).toEqual(first);
+    expect(() => coordinator.guide({
+      goalId: started.goal.id, expectedRevision: 1, ruleText: "Competing revision.",
+      requestId: "33333333-3333-4333-8333-333333333333",
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_RULE_REVISION_MISMATCH" }));
+    expect(coordinator.guide({
+      goalId: started.goal.id, expectedRevision: 2, ruleText: "Revision three.",
+      requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    })).toMatchObject({ persistedRevision: 3, currentCycleRevision: 1, nextCycleSequence: 2 });
+    expect(coordinator.guide(request)).toEqual(first);
+    expect(coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id })).toMatchObject({
+      currentRuleRevision: 3,
+      activeCycleRuleRevision: 1,
+      guidanceStatus: "persisted_pending_boundary",
+    });
+
+    workers[0]!.spawn();
+    supervisor.cancel(runId(workers[0]!));
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).listCycles(started.goal.id)[0]!.status).toBe("cancelled"));
+  });
+
+  it("fails closed while C3 is running and after three completed Cycles because Cycle 4 is outside the bounded strategy", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const started = coordinator.start(growthRequest(setup));
+    await completeCycle(setup.workspace, workers[0]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    await completeCycle(setup.workspace, workers[1]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(3));
+
+    expect(() => coordinator.guide({
+      goalId: started.goal.id, expectedRevision: 1, ruleText: "Do not create Cycle 4.",
+      requestId: "44444444-4444-4444-8444-444444444444",
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_GUIDANCE_NO_NEXT_CYCLE" }));
+    expect(new GrowthRepository(setup.workspace).getGoal(started.goal.id)?.currentRuleRevision).toBe(1);
+    await completeCycle(setup.workspace, workers[2]!);
+    await vi.waitFor(() => expect(coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id }).coordinatorStatus).toBe("completed"));
+    expect(() => coordinator.guide({
+      goalId: started.goal.id, expectedRevision: 1, ruleText: "Still no Cycle 4.",
+      requestId: "99999999-9999-4999-8999-999999999999",
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_GUIDANCE_NO_NEXT_CYCLE" }));
+  });
+
+  it("rebuilds active workspace authority after restart and rejects unknown or cross-project Goals", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const started = new GrowthCoordinator(setup.session, setup.application, supervisor).start(growthRequest(setup));
+    const restarted = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    expect(restarted.guide({
+      goalId: started.goal.id, expectedRevision: 1, ruleText: "Restart-safe revision.",
+      requestId: "55555555-5555-4555-8555-555555555555",
+    }).persistedRevision).toBe(2);
+    expect(() => restarted.guide({
+      goalId: "unknown-goal", expectedRevision: 1, ruleText: "Unknown.",
+      requestId: "66666666-6666-4666-8666-666666666666",
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_GOAL_NOT_FOUND" }));
+
+    const otherRoot = path.join(root!, "other-project");
+    fs.mkdirSync(otherRoot);
+    const other = setup.application.registerProject(otherRoot, "ready");
+    setup.application.selectProject(other.id);
+    expect(() => restarted.guide({
+      goalId: started.goal.id, expectedRevision: 2, ruleText: "Cross project.",
+      requestId: "77777777-7777-4777-8777-777777777777",
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_WORKSPACE_REQUIRED" }));
+    setup.application.selectProject(setup.projectId);
+
+    workers[0]!.spawn();
+    supervisor.cancel(runId(workers[0]!));
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).listCycles(started.goal.id)[0]!.status).toBe("cancelled"));
+  });
+
   it("runs three persisted, sequential Cycle/Run pairs from one idempotent start", async () => {
     const setup = createSetup();
     const workers: FakeWorker[] = [];
@@ -340,8 +473,10 @@ function createSupervisor(setup: ReturnType<typeof createSetup>, workers: FakeWo
 function goalIdForRequest(request: { requestId: string }): string { return `growth-goal:${request.requestId}`; }
 
 async function completeCycle(workspace: WorkspaceDatabase, worker: FakeWorker): Promise<void> {
-  worker.spawn();
+  if (worker.sent.length === 0) worker.spawn();
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(1));
   const id = runId(worker);
+  const command = worker.sent[0] as { growthBinding: { cycleId: string; phase: "world" | "story" | "oc" } };
   worker.receive({ type: "run.started", runId: id });
   beginStewardInvocation(workspace, id);
   worker.receive({ type: "tool.request", runId: id, requestId: randomUUID(), tool: "retrieve_graph_evidence", args: {
@@ -349,9 +484,36 @@ async function completeCycle(workspace: WorkspaceDatabase, worker: FakeWorker): 
     expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
   } });
   await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
-  const scopeId = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!.id;
+  const roots = new ResourceRepository(workspace).listCurrent().filter((resource) => resource.objectKind === "domain_root");
+  const scopeId = roots.find((resource) => resource.type === command.growthBinding.phase)!.id;
+  const items = command.growthBinding.phase === "world"
+    ? compileGrowthWorldFragment({
+        summary: "Growth world",
+        world: { localId: "world", title: "World" },
+        entities: [
+          { localId: "harbor", kind: "location", title: "Harbor" },
+          { localId: "guild", kind: "faction", title: "Guild" },
+        ],
+        documents: [{
+          localId: "setting", ownerRef: "world", kind: "setting", title: "Setting",
+          content: "A sourced setting document for the coordinator fixture. ".repeat(5),
+        }],
+        assertions: [1, 2, 3].map((index) => ({
+          localId: `fact_${index}`, scopeRef: "world", subject: "World", predicate: `rule_${index}`,
+          object: { value: index }, sourceDocumentRefs: ["setting"],
+        })),
+        relations: [],
+      }, { cycleId: command.growthBinding.cycleId, worldRootResourceId: scopeId }).items
+    : [{
+        id: `resource-${id}`, dependsOn: [], kind: "resource.put" as const,
+        payload: {
+          resourceId: `${command.growthBinding.phase}-${id}`, create: true,
+          type: command.growthBinding.phase, objectKind: command.growthBinding.phase,
+          title: `${command.growthBinding.phase} fixture`, parentId: scopeId, state: "active" as const, sortOrder: 0,
+        },
+      }];
   worker.receive({ type: "tool.request", runId: id, requestId: randomUUID(), tool: "propose_change_set", args: {
-    summary: "Growth change", items: [{ id: `document-${id}`, dependsOn: [], kind: "document.put", payload: { resourceId: scopeId, content: `content ${id}` } }],
+    summary: "Growth change", items,
   } });
   await vi.waitFor(() => expect(worker.sent).toHaveLength(3));
   worker.receive({ type: "run.completed", runId: id, outcome: "completed", message: "done", changeSetState: "committed", artifacts: [] });

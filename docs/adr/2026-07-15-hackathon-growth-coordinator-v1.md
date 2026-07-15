@@ -32,10 +32,27 @@ delivery, validates the projected Agent event, and treats every renderer
 delivery failure as non-authoritative after durable state has been written.
 When several verified sessions replay one Goal, each route receives its own
 sessionId rather than the initiating session's label.
-Each stage instruction repeats the Goal's locked initial rule text. Main also
+`growth.guide` is a strict versioned IPC（进程间通信） write. Renderer（渲染层）
+supplies only the Goal ID, expected rule revision, new rule text, and exactly
+one replay identity (`sourceMessageId` or `requestId`). Main（主进程） rebuilds
+the active project, Workspace Session（工作区会话）, branch, and authorized
+scope, then uses the repository CAS（比较并交换） append. It accepts guidance
+only when the bounded strategy still has an unplanned next Cycle. The response
+states `persisted_pending_boundary` and `next_cycle_boundary`; it never claims
+that the running Cycle changed or that the rule was already applied.
+
+Each planned Cycle pins `ruleRevision` before its Run starts. Main reads that
+exact historical revision and uses its rule text for the Cycle instruction;
+it never reuses `growth.start.initialRuleText` for later Cycles. Main also
 derives trusted resource seed IDs from the persisted Goal (including the owner
 of a source-document seed) and unions them into Graph Retrieval; model tool
 arguments cannot remove or replace that pinning.
+
+`growth.get` adds optional, backward-compatible `currentRuleRevision`,
+`activeCycleRuleRevision`, and guidance status fields because the existing
+capability version is unchanged. Main always emits them. The projection does
+not expose rule text, Prompt（提示词）, credentials, branch, checkpoint, scope,
+Lens（视角）, Cycle authority, or Run authority.
 
 ## Consequences
 
@@ -43,6 +60,9 @@ arguments cannot remove or replace that pinning.
   Change Set. Planned Cycles start once; running Cycles are conservatively
   recovered to `reconciliation_required`; failed, blocked, cancelled, and
   reconciliation states stop automatic progress.
+- Exact guidance replay returns the persisted revision; a competing stale CAS
+  fails closed. C3 running and three committed Cycles both reject guidance
+  because this decision does not introduce Cycle 4 semantics.
 - Public snapshots carry a Main-computed coordinator status. Three committed
   Cycles are `completed` while the underlying Goal remains `active`; replay
   lists are bounded to the latest 100 cycles and events.
@@ -52,6 +72,6 @@ arguments cannot remove or replace that pinning.
   repair event is best-effort only; it never rewrites the authoritative state.
 - The Coordinator supplies phase intent and structural limits only. It does
   not create fictional facts, prose, titles, characters, or Change Set items.
-- This slice does not prove a real Provider run, automatic continuation beyond
-  three Cycles, user mid-Run rule insertion, Renderer UI, images, or any
+- This slice does not prove a real Provider（模型服务） run, automatic continuation beyond
+  three Cycles, Renderer UI, images, or any
   change to Canon, Lens, permissions, migrations, or Agent tool schemas.

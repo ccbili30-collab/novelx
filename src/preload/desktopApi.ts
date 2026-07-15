@@ -6,6 +6,8 @@ import {
   agentRunStartResponseSchema,
   growthGetRequestSchema,
   growthGetResponseSchema,
+  growthGuideRequestSchema,
+  growthGuideResponseSchema,
   growthLiveEventSchema,
   growthStartRequestSchema,
   growthStartResponseSchema,
@@ -558,6 +560,10 @@ export function exposeDesktopApi(): void {
       async get(request) {
         const safeRequest = growthGetRequestSchema.parse(request);
         return growthGetResponseSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthGet, safeRequest));
+      },
+      async guide(request) {
+        const safeRequest = growthGuideRequestSchema.parse(request);
+        return growthGuideResponseSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthGuide, safeRequest));
       },
       subscribe(listener) {
         const handler = (_event: IpcRendererEvent, payload: unknown) => {

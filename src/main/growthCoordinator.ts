@@ -10,11 +10,14 @@ import {
 import {
   agentRunEventSchema,
   growthGetResponseSchema,
+  growthGuideResponseSchema,
   growthLiveEventSchema,
   growthStartResponseSchema,
   type AgentRunEvent,
   type GrowthGetRequest,
   type GrowthGetResponse,
+  type GrowthGuideRequest,
+  type GrowthGuideResponse,
   type GrowthLiveEvent,
   type GrowthStartRequest,
   type GrowthStartResponse,
@@ -84,6 +87,41 @@ export class GrowthCoordinator {
     if (!goal) throw coordinatorError("GROWTH_GOAL_NOT_FOUND");
     this.#recoverStaleCycle(context, goal, input.sessionId);
     return growthGetResponseSchema.parse(this.#snapshot(repository, goal.id));
+  }
+
+  guide(input: GrowthGuideRequest): GrowthGuideResponse {
+    const projectId = this.applicationRegistry.getActiveProjectId();
+    if (!projectId || this.applicationRegistry.getProject(projectId).state !== "ready") {
+      throw coordinatorError("GROWTH_PROJECT_NOT_ACTIVE");
+    }
+    const context = this.#requiredContext(projectId);
+    const repository = new GrowthRepository(context.workspace);
+    const goal = repository.getGoal(input.goalId);
+    if (!goal) throw coordinatorError("GROWTH_GOAL_NOT_FOUND");
+    if (goal.branchId !== context.branchId || !sameStrings(goal.authorizedScopeResourceIds, context.authorizedScopeResourceIds)) {
+      throw coordinatorError("GROWTH_GUIDANCE_AUTHORITY_MISMATCH");
+    }
+    const cycles = repository.listCycles(goal.id);
+    const current = cycles.at(-1);
+    if (!current || current.sequence >= cycleInstructions.length
+      || !["planned", "running", "committed"].includes(current.status)) {
+      throw coordinatorError("GROWTH_GUIDANCE_NO_NEXT_CYCLE");
+    }
+    const persisted = repository.appendRule({
+      goalId: goal.id,
+      expectedRevision: input.expectedRevision,
+      ruleText: input.ruleText,
+      sourceMessageId: input.sourceMessageId ?? `request:${input.requestId}`,
+    });
+    return growthGuideResponseSchema.parse({
+      goalId: goal.id,
+      persistedRevision: persisted.revision,
+      currentCycleRevision: current.ruleRevision,
+      appliesAt: "next_cycle_boundary",
+      nextCycleSequence: current.sequence + 1,
+      nextCyclePhase: nextCyclePhase(current.sequence),
+      status: "persisted_pending_boundary",
+    });
   }
 
   #advance(input: {
@@ -163,13 +201,14 @@ export class GrowthCoordinator {
     repository: GrowthRepository;
   }, cycle: GrowthCycle): void {
     const lifecycle = new GrowthRunLifecycle(input.context.workspace, this.supervisor);
+    const pinnedRule = input.repository.getRuleRevision(input.goal.id, cycle.ruleRevision);
     const runId = lifecycle.start({
       goalId: input.goal.id,
       cycleId: cycle.id,
       request: {
         projectId: input.input.projectId,
         sessionId: input.input.sessionId,
-        userInput: stagePrompt(cycle.sequence, input.input.seed, input.input.initialRuleText),
+        userInput: stagePrompt(cycle.sequence, input.input.seed, pinnedRule.ruleText),
         mode: "free",
         scopeResourceIds: [],
       },
@@ -234,12 +273,25 @@ export class GrowthCoordinator {
   #snapshot(repository: GrowthRepository, goalId: string) {
     const goal = repository.getGoal(goalId);
     if (!goal) throw coordinatorError("GROWTH_GOAL_NOT_FOUND");
+    const cycles = repository.listCycles(goal.id);
+    const latestCycle = cycles.at(-1);
+    const activeCycle = latestCycle;
+    const activeCycleRuleRevision = activeCycle && ["planned", "running"].includes(activeCycle.status)
+      ? activeCycle.ruleRevision
+      : null;
     return {
       capabilityVersion: growthCapabilityVersion,
       strategy,
-      coordinatorStatus: coordinatorStatus(repository.listCycles(goal.id)),
+      coordinatorStatus: coordinatorStatus(cycles),
       goal: { id: goal.id, status: goal.status, currentCycleSequence: goal.currentCycleSequence },
-      cycles: repository.listCycles(goal.id).slice(-100).map((cycle) => ({
+      currentRuleRevision: goal.currentRuleRevision,
+      activeCycleRuleRevision,
+      guidanceStatus: latestCycle && latestCycle.sequence < cycleInstructions.length
+        && ["planned", "running", "committed"].includes(latestCycle.status)
+        && goal.currentRuleRevision > latestCycle.ruleRevision
+        ? "persisted_pending_boundary" as const
+        : "none" as const,
+      cycles: cycles.slice(-100).map((cycle) => ({
         id: cycle.id, sequence: cycle.sequence, runId: cycle.runId, status: cycle.status,
       })),
       events: repository.listEvents(goal.id).slice(-100).map(projectEvent),
@@ -313,6 +365,11 @@ function projectEvent(event: GrowthEvent) {
 function stagePrompt(sequence: number, seed: GrowthStartRequest["seed"], initialRuleText: string): string {
   const seedText = seed.kind === "text" ? `\n用户种子：${seed.text}` : "\n用户种子已保存为授权资料；先检索后创作。";
   return `Growth 策略 ${strategy}，第 ${sequence} 个 Cycle。锁定规则：${initialRuleText}\n${cycleInstructions[sequence - 1] ?? ""} 先使用 growth_v1 检索证据；仅经一个现有 Change Set 持久化模型生成的内容。${seedText}`;
+}
+function nextCyclePhase(currentSequence: number): "story" | "oc" {
+  if (currentSequence === 1) return "story";
+  if (currentSequence === 2) return "oc";
+  throw coordinatorError("GROWTH_GUIDANCE_NO_NEXT_CYCLE");
 }
 function coordinatorStatus(cycles: GrowthCycle[]): "running" | "completed" | "blocked" | "failed" | "cancelled" | "reconciliation_required" {
   const current = cycles.at(-1);

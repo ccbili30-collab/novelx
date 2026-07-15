@@ -14,6 +14,8 @@ import {
   graphInspectorResultSchema,
   graphSnapshotResultSchema,
   growthGetRequestSchema,
+  growthGuideRequestSchema,
+  growthGuideResponseSchema,
   growthLiveEventSchema,
   growthStartResponseSchema,
   growthStartRequestSchema,
@@ -40,6 +42,20 @@ describe("desktop IPC contract", () => {
       expect(growthStartRequestSchema.safeParse({ ...start, [field]: "forged" }).success, field).toBe(false);
     }
     expect(growthGetRequestSchema.safeParse({ projectId: "project-1", sessionId: "session-1", goalId: "goal-1", scope: ["forged"] }).success).toBe(false);
+    const guide = {
+      goalId: "goal-1", expectedRevision: 1, ruleText: "Use revised sources.",
+      requestId: "22222222-2222-4222-8222-222222222222",
+    };
+    expect(growthGuideRequestSchema.parse(guide)).toEqual(guide);
+    expect(growthGuideRequestSchema.safeParse({ ...guide, sourceMessageId: "message-1" }).success).toBe(false);
+    for (const field of ["projectId", "sessionId", "branchId", "checkpointId", "scopeResourceIds", "lens", "cycleId", "runId"]) {
+      expect(growthGuideRequestSchema.safeParse({ ...guide, [field]: "forged" }).success, field).toBe(false);
+    }
+    expect(growthGuideResponseSchema.parse({
+      goalId: "goal-1", persistedRevision: 2, currentCycleRevision: 1,
+      appliesAt: "next_cycle_boundary", nextCycleSequence: 2, nextCyclePhase: "story",
+      status: "persisted_pending_boundary",
+    }).status).toBe("persisted_pending_boundary");
     const event = {
       sessionId: "session-1", strategy: "grow_world_story_oc_v1",
       event: { goalId: "goal-1", cycleId: "cycle-1", runId: "run-1", sequence: 1, phase: "run_attached", durableState: "running", safeSummary: "Run attached.", targetKind: "resource", targetId: "world-root", targetVersionId: null, contentRef: null },
@@ -226,6 +242,7 @@ describe("desktop IPC contract", () => {
       agentEvent: "novax:agent-event",
       growthStart: "novax:growth-start",
       growthGet: "novax:growth-get",
+      growthGuide: "novax:growth-guide",
       growthEvent: "novax:growth-event",
     });
   });
