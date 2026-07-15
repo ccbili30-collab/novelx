@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { ArrowRightLeft, BookOpenText, Brain, CheckCircle2, ChevronRight, CircleUserRound, Clock3, Image, LoaderCircle, Map, Network } from "lucide-react";
 import type { CollaborationListResult, HandoffSummary, SessionSummary, WorkspaceSnapshot } from "../../../../shared/ipcContract";
+import type { GrowthPresentation } from "../agent/growthPresentation";
 import { ProjectFilesPanel } from "./ProjectFilesPanel";
+import { RunWorkTargetPane } from "./RunWorkTargetPane";
 
 const domains = [
   { type: "world", label: "世界", icon: Map },
@@ -17,9 +19,13 @@ interface ProjectActivityPanelProps {
   workspace: WorkspaceSnapshot | null;
   session: SessionSummary | null;
   activity: { label: string; domains: string[] } | null;
+  growthPresentation: GrowthPresentation | null;
   collaboration: CollaborationListResult;
   refreshKey: number;
   onOpenResource(resourceId: string): Promise<void>;
+  onOpenDocument(documentId: string, resourceId: string): Promise<void>;
+  onOpenChangeSet(changeSetId: string): Promise<void>;
+  onOpenGraph(): Promise<void>;
   onViewAll(): void;
   onCreateHandoff(): void;
   onUpdateHandoff(handoff: HandoffSummary, status: "accepted" | "completed"): Promise<void>;
@@ -27,22 +33,26 @@ interface ProjectActivityPanelProps {
 
 export function ProjectActivityPanel(props: ProjectActivityPanelProps) {
   const storageKey = props.projectId ? `novelx:right-panel:${props.projectId}` : null;
-  const [open, setOpen] = useState({ files: true, activity: false });
+  const [open, setOpen] = useState({ current: true, files: true, activity: false });
 
   useEffect(() => {
     if (!storageKey) {
-      setOpen({ files: true, activity: false });
+      setOpen({ current: true, files: true, activity: false });
       return;
     }
     try {
-      const saved = JSON.parse(window.localStorage.getItem(storageKey) ?? "null") as { files?: unknown; activity?: unknown } | null;
-      setOpen({ files: typeof saved?.files === "boolean" ? saved.files : true, activity: typeof saved?.activity === "boolean" ? saved.activity : false });
+      const saved = JSON.parse(window.localStorage.getItem(storageKey) ?? "null") as { current?: unknown; files?: unknown; activity?: unknown } | null;
+      setOpen({
+        current: typeof saved?.current === "boolean" ? saved.current : true,
+        files: typeof saved?.files === "boolean" ? saved.files : true,
+        activity: typeof saved?.activity === "boolean" ? saved.activity : false,
+      });
     } catch {
-      setOpen({ files: true, activity: false });
+      setOpen({ current: true, files: true, activity: false });
     }
   }, [storageKey]);
 
-  function setSection(section: "files" | "activity", value: boolean) {
+  function setSection(section: "current" | "files" | "activity", value: boolean) {
     const next = { ...open, [section]: value };
     setOpen(next);
     if (storageKey) window.localStorage.setItem(storageKey, JSON.stringify(next));
@@ -50,6 +60,17 @@ export function ProjectActivityPanel(props: ProjectActivityPanelProps) {
 
   return (
     <aside className="project-activity-panel" aria-label="项目活动与产物">
+      <details className="right-panel-section right-panel-section--current" open={open.current} onToggle={(event) => setSection("current", event.currentTarget.open)}>
+        <summary><ChevronRight size={14} /><span>当前创作</span></summary>
+        <RunWorkTargetPane
+          presentation={props.growthPresentation}
+          workspace={props.workspace}
+          onOpenResource={props.onOpenResource}
+          onOpenDocument={props.onOpenDocument}
+          onOpenChangeSet={props.onOpenChangeSet}
+          onOpenGraph={props.onOpenGraph}
+        />
+      </details>
       <details className="right-panel-section" open={open.files} onToggle={(event) => setSection("files", event.currentTarget.open)}>
         <summary><ChevronRight size={14} /><span>文件夹内容</span></summary>
         <ProjectFilesPanel projectId={props.projectId} workspaceReady={Boolean(props.workspace)} refreshKey={props.refreshKey} />

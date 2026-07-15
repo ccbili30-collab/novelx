@@ -12,6 +12,15 @@ import type { AgentArtifact, SessionMessage, SessionSummary, WorkspaceSnapshot }
 import { PendingChangeSets } from "../change-set/PendingChangeSets";
 import { AgentArtifactList } from "./AgentArtifactList";
 import { AgentMessageContent } from "./AgentMessageContent";
+import { RunActivityTimeline } from "./RunActivityTimeline";
+import {
+  appendGrowthAgentEvent,
+  createGrowthPresentation,
+  isGrowthBoundRun,
+  mergeGrowthEvent,
+  mergeGrowthSnapshot,
+  type GrowthPresentation,
+} from "./growthPresentation";
 import "./agentMessage.css";
 
 interface StewardRuntimePanelProps {
@@ -27,6 +36,7 @@ interface StewardRuntimePanelProps {
   onOpenDocumentReference?(reference: Extract<AgentArtifact, { kind: "document_reference" }>): Promise<void> | void;
   onReadyImage?(image: Extract<AgentArtifact, { kind: "image" }>): Promise<void> | void;
   onActivityChange(activity: { label: string; domains: string[] } | null): void;
+  onGrowthPresentationChange(presentation: GrowthPresentation | null): void;
 }
 
 interface FeedEntry {
@@ -35,6 +45,25 @@ interface FeedEntry {
   text: string;
   outcome?: "completed" | "blocked" | "awaiting_confirmation";
   artifacts: AgentArtifact[];
+}
+
+export interface GrowthRequestToken {
+  generation: number;
+  scopeKey: string | null;
+}
+
+export function advanceGrowthRequestToken(
+  current: GrowthRequestToken,
+  scopeKey: string | null,
+): GrowthRequestToken {
+  return { generation: current.generation + 1, scopeKey };
+}
+
+export function isCurrentGrowthRequest(
+  current: GrowthRequestToken,
+  candidate: GrowthRequestToken,
+): boolean {
+  return current.generation === candidate.generation && current.scopeKey === candidate.scopeKey;
 }
 
 export function StewardRuntimePanel({
@@ -50,8 +79,9 @@ export function StewardRuntimePanel({
   onOpenDocumentReference,
   onReadyImage,
   onActivityChange,
+  onGrowthPresentationChange,
 }: StewardRuntimePanelProps) {
-  const [mode, setMode] = useState<"assist" | "free">("assist");
+  const [mode, setMode] = useState<"assist" | "free" | "growth">("assist");
   const [draft, setDraft] = useState("");
   const [entries, setEntries] = useState<FeedEntry[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -59,17 +89,56 @@ export function StewardRuntimePanel({
   const [activity, setActivity] = useState<string | null>(null);
   const [copiedEntryId, setCopiedEntryId] = useState<FeedEntry["id"] | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [growthPresentation, setGrowthPresentation] = useState<GrowthPresentation | null>(null);
+  const [growthArtifacts, setGrowthArtifacts] = useState<AgentArtifact[]>([]);
   const nextEntryId = useRef(1);
   const terminalRunIds = useRef(new Set<string>());
+  const growthRef = useRef<GrowthPresentation | null>(null);
+  const committedGrowthChangeSets = useRef(new Set<string>());
+
+  const growthStorageKey = projectId && session ? `novelx:growth-goal:${projectId}:${session.id}` : null;
+  const growthRequestToken = useRef<GrowthRequestToken>({ generation: 0, scopeKey: null });
+  if (growthRequestToken.current.scopeKey !== growthStorageKey) {
+    growthRequestToken.current = advanceGrowthRequestToken(growthRequestToken.current, growthStorageKey);
+  }
+
+  function beginGrowthRequest() {
+    const next = advanceGrowthRequestToken(growthRequestToken.current, growthStorageKey);
+    growthRequestToken.current = next;
+    return next;
+  }
+
+  function publishGrowth(next: GrowthPresentation | null) {
+    growthRef.current = next;
+    setGrowthPresentation(next);
+    onGrowthPresentationChange(next);
+  }
+
+  function clearStoredGrowth() {
+    if (growthStorageKey) window.localStorage.removeItem(growthStorageKey);
+    setGrowthArtifacts([]);
+    publishGrowth(null);
+  }
+
+  function addGrowthArtifacts(artifacts: AgentArtifact[]) {
+    if (artifacts.length === 0) return;
+    setGrowthArtifacts((current) => {
+      const seen = new Set(current.map((artifact) => JSON.stringify(artifact)));
+      return [...current, ...artifacts.filter((artifact) => !seen.has(JSON.stringify(artifact)))];
+    });
+  }
 
   useEffect(() => {
     return window.novaxDesktop.agent.subscribe((event) => {
       if (!session || event.sessionId !== session.id) return;
+      const growth = growthRef.current;
+      const isGrowthRun = isGrowthBoundRun(growth, event.runId);
       if (event.type === "run.started") {
         if (!terminalRunIds.current.has(event.runId)) setActiveRunId(event.runId);
         return;
       }
       if (event.type === "run.activity") {
+        if (isGrowthRun && growth) publishGrowth(appendGrowthAgentEvent(growth, event));
         if (event.phase === "started") {
           setActivity(event.label);
           onActivityChange({ label: event.label, domains: event.domains ?? [] });
@@ -84,10 +153,14 @@ export function StewardRuntimePanel({
       }
 
       terminalRunIds.current.add(event.runId);
-      setStarting(false);
       setActiveRunId((current) => current === event.runId ? null : current);
       setActivity(null);
       onActivityChange(null);
+      if (isGrowthRun) {
+        addGrowthArtifacts(event.artifacts);
+        return;
+      }
+      setStarting(false);
       if (event.type === "run.completed") {
         appendEntry({ kind: "assistant", text: event.message, outcome: event.outcome, artifacts: event.artifacts });
         for (const artifact of event.artifacts) {
@@ -103,6 +176,27 @@ export function StewardRuntimePanel({
   }, [session?.id, onActivityChange, onCommittedChangeSet, onReadyImage]);
 
   useEffect(() => {
+    if (!session) return;
+    const subscriptionScopeKey = growthStorageKey;
+    return window.novaxDesktop.growth.subscribe((live) => {
+      const current = growthRef.current;
+      if (growthRequestToken.current.scopeKey !== subscriptionScopeKey
+        || live.sessionId !== session.id || !current || live.event.goalId !== current.goalId) return;
+      const next = mergeGrowthEvent(current, live.event);
+      publishGrowth(next);
+      if (live.event.runId && live.event.durableState === "running" && !terminalRunIds.current.has(live.event.runId)) {
+        setActiveRunId(live.event.runId);
+      }
+      if (live.event.phase === "change_set_committed" && live.event.durableState === "committed"
+        && !committedGrowthChangeSets.current.has(live.event.targetId)) {
+        committedGrowthChangeSets.current.add(live.event.targetId);
+        void onCommittedChangeSet();
+      }
+      void restoreGrowth(current.goalId);
+    });
+  }, [growthStorageKey, session?.id, onCommittedChangeSet]);
+
+  useEffect(() => {
     let cancelled = false;
     setEntries([]);
     setDraft("");
@@ -111,6 +205,11 @@ export function StewardRuntimePanel({
     setActivity(null);
     setCopiedEntryId(null);
     setActionNotice(null);
+    setGrowthArtifacts([]);
+    growthRef.current = null;
+    setGrowthPresentation(null);
+    onGrowthPresentationChange(null);
+    committedGrowthChangeSets.current.clear();
     onActivityChange(null);
     terminalRunIds.current.clear();
     if (session) {
@@ -120,19 +219,75 @@ export function StewardRuntimePanel({
       });
     }
     return () => { cancelled = true; };
-  }, [session?.id, messageRefreshKey, onActivityChange]);
+  }, [projectId, session?.id, messageRefreshKey, onActivityChange, onGrowthPresentationChange]);
+
+  useEffect(() => {
+    if (!growthStorageKey || !projectId || !session) return;
+    const goalId = window.localStorage.getItem(growthStorageKey);
+    if (goalId) void restoreGrowth(goalId);
+  }, [growthStorageKey, projectId, session?.id]);
 
   function appendEntry(entry: Omit<FeedEntry, "id">) {
     setEntries((current) => [...current, { ...entry, id: nextEntryId.current++ }]);
   }
 
+  async function restoreGrowth(goalId: string) {
+    const restoreProjectId = projectId;
+    const restoreSessionId = session?.id;
+    if (!restoreProjectId || !restoreSessionId) return;
+    const request = beginGrowthRequest();
+    try {
+      const snapshot = await window.novaxDesktop.growth.get({ projectId: restoreProjectId, sessionId: restoreSessionId, goalId });
+      if (!isCurrentGrowthRequest(growthRequestToken.current, request)) return;
+      const next = mergeGrowthSnapshot(growthRef.current, snapshot);
+      publishGrowth(next);
+      const runId = snapshot.cycles.find((cycle) => cycle.status === "running")?.runId ?? null;
+      setActiveRunId(runId);
+      setStarting(false);
+    } catch {
+      if (!isCurrentGrowthRequest(growthRequestToken.current, request)) return;
+      clearStoredGrowth();
+      setActiveRunId(null);
+      setStarting(false);
+    }
+  }
+
   async function sendMessage() {
     const userInput = draft.trim();
-    if (!workspace || !projectId || !session || !userInput || starting || activeRunId) return;
+    if (!workspace || !projectId || !session || !userInput || starting || activeRunId || growthPresentation?.running) return;
     setStarting(true);
     setDraft("");
     setActionNotice(null);
     appendEntry({ kind: "user", text: userInput, artifacts: [] });
+    if (mode === "growth") {
+      const startProjectId = projectId;
+      const startSessionId = session.id;
+      const startStorageKey = growthStorageKey;
+      const request = beginGrowthRequest();
+      try {
+        const snapshot = await window.novaxDesktop.growth.start({
+          requestId: crypto.randomUUID(),
+          projectId: startProjectId,
+          sessionId: startSessionId,
+          seed: { kind: "text", text: userInput },
+          initialRuleText: userInput,
+          strategy: "grow_world_story_oc_v1",
+        });
+        if (!isCurrentGrowthRequest(growthRequestToken.current, request)) return;
+        if (startStorageKey) window.localStorage.setItem(startStorageKey, snapshot.goal.id);
+        committedGrowthChangeSets.current.clear();
+        setGrowthArtifacts([]);
+        publishGrowth(createGrowthPresentation(snapshot));
+        const runId = snapshot.cycles.find((cycle) => cycle.status === "running")?.runId ?? null;
+        setActiveRunId(runId);
+        setStarting(false);
+      } catch {
+        if (!isCurrentGrowthRequest(growthRequestToken.current, request)) return;
+        setStarting(false);
+        appendEntry({ kind: "error", text: "生长任务启动失败，未生成任何本地替代结果。", artifacts: [] });
+      }
+      return;
+    }
     try {
       const response = await window.novaxDesktop.agent.start({
         projectId,
@@ -185,7 +340,7 @@ export function StewardRuntimePanel({
     setActionNotice("上一条消息已撤回，可以修改后重新发送。");
   }
 
-  const running = starting || activeRunId !== null;
+  const running = starting || activeRunId !== null || growthPresentation?.running === true;
   const lastUserEntryIndex = findLastUserEntryIndex(entries);
 
   return (
@@ -218,6 +373,12 @@ export function StewardRuntimePanel({
               {entry.outcome === "awaiting_confirmation" ? <small>等待审查</small> : null}
             </article>
           ))}
+          {growthPresentation ? <RunActivityTimeline
+            presentation={growthPresentation}
+            artifacts={growthArtifacts}
+            onOpenChangeSet={onOpenChangeSet}
+            onOpenDocumentReference={onOpenDocumentReference}
+          /> : null}
           {running ? (
             <div className="steward-running" role="status">
               <LoaderCircle size={14} aria-hidden="true" />
@@ -239,6 +400,9 @@ export function StewardRuntimePanel({
         <div className="agent-permission-switch" role="radiogroup" aria-label="大管家提交模式">
           <button type="button" role="radio" aria-checked={mode === "assist"} onClick={() => setMode("assist")} disabled={running}>
             协助
+          </button>
+          <button type="button" role="radio" aria-checked={mode === "growth"} onClick={() => setMode("growth")} disabled={running}>
+            生长
           </button>
           <button type="button" role="radio" aria-checked={mode === "free"} onClick={() => setMode("free")} disabled={running}>
             自由

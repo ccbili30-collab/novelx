@@ -3,6 +3,7 @@ import { BookOpen, Boxes, Download, FileInput, Image, LoaderCircle, MessageSquar
 import type { AgentArtifact, CollaborationListResult, CreativeWorkspaceMutation, HandoffSummary, ProjectAddResult, ProjectSummary, SessionSummary, WorkspaceSnapshot } from "../../shared/ipcContract";
 import type { DesktopUpdateState } from "../../shared/desktopUpdateContract";
 import { StewardRuntimePanel } from "./features/agent/StewardRuntimePanel";
+import type { GrowthPresentation } from "./features/agent/growthPresentation";
 import { resolveAgentScopeResourceIds } from "../../shared/agentScope";
 import { ProjectActivityPanel } from "./features/activity/ProjectActivityPanel";
 import { ChangeSetWorkbench } from "./features/change-set/ChangeSetWorkbench";
@@ -72,6 +73,7 @@ export function App() {
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [initializing, setInitializing] = useState(false);
   const [activity, setActivity] = useState<{ label: string; domains: string[] } | null>(null);
+  const [growthPresentation, setGrowthPresentation] = useState<GrowthPresentation | null>(null);
   const [collaboration, setCollaboration] = useState<CollaborationListResult>({ sharedMemories: [], handoffs: [] });
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [handoffBusy, setHandoffBusy] = useState(false);
@@ -323,6 +325,11 @@ export function App() {
 
   async function openShowcaseDocument(documentId: string, resourceId: string) {
     await selectDocument(documentId, resourceId);
+    setMode("ide");
+  }
+
+  async function openGrowthGraph() {
+    await selectDomain("graph");
     setMode("ide");
   }
 
@@ -581,6 +588,7 @@ export function App() {
         onOpenDocumentReference={openDocumentReference}
         onReadyImage={openReadyImageShowcase}
         onActivityChange={setActivity}
+        onGrowthPresentationChange={setGrowthPresentation}
       />
     </section>
   );
@@ -675,9 +683,13 @@ export function App() {
               workspace={workspace}
               session={activeSession}
               activity={activity}
+              growthPresentation={growthPresentation}
               collaboration={collaboration}
               refreshKey={changeSetRefreshKey}
               onOpenResource={openActivityResource}
+              onOpenDocument={openShowcaseDocument}
+              onOpenChangeSet={openChangeSet}
+              onOpenGraph={openGrowthGraph}
               onViewAll={() => setMode("ide")}
               onCreateHandoff={() => setHandoffOpen(true)}
               onUpdateHandoff={updateHandoff}
