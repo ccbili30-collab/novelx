@@ -217,20 +217,28 @@ const defaultVisualStyle = {
 ## Task 3：三位一体生长前沿与可恢复动态 Cycle 调度
 
 **Files:**
-- Create: `src/agent-worker/growth/growthSeedAnalysis.ts`
 - Create: `src/main/growthFrontierPlanner.ts`
+- Modify: `src/shared/growthContract.ts`
+- Modify: `src/domain/growth/growthRepository.ts`
+- Modify: `src/shared/agentWorkerProtocol.ts`
 - Modify: `src/main/growthCoordinator.ts`
 - Modify: `src/main/growthRunLifecycle.ts`
+- Modify: `src/agent-worker/stewardExecutionStateMachine.ts`
 - Modify: `src/shared/ipcContract.ts`
 - Modify: `src/preload/desktopApi.ts`
 - Modify: `src/main/registerDesktopIpc.ts`
+- Test: `tests/unit/growth-contract.test.ts`
+- Test: `tests/unit/growth-repository.test.ts`
+- Test: `tests/unit/agent-worker-contract.test.ts`
+- Test: `tests/unit/steward-execution-state-machine.test.ts`
 - Test: `tests/unit/growth-coordinator.test.ts`
 - Test: `tests/unit/growth-run-bridge.test.ts`
 - Test: `tests/unit/ipc-contract.test.ts`
+- Test: `tests/unit/workspace-persistence.test.ts`
 
 **Frontier and scheduling rules:**
 
-1. Seed Analysis 只输出严格高层结果：`presentKinds`、`missingKinds`、`evidenceRefs` 和建议 `focusKinds`。它可以识别 world/story/oc/mixed/unknown，但不能提交资源 ID、权限或 Canon 决策。
+1. Task 3 只实现持久 Intent 驱动的 Growth Frontier（生长前沿）与动态 Cycle 路由核心，不单独新增无持久化、无恢复入口的模型 Seed Analysis（种子分析）工具。初始文本种子使用保守的多种类前沿；正式的 `presentKinds`、`missingKinds`、`evidenceRefs` 与候选 `focusKinds` 必须在 Task 4 的 pinned-retrieval Inquiry（固定检查点检索自询）中由模型给出并持久化，不能在 Main 中用关键词猜测。
 2. 世界种子默认先巩固 world，再根据缺口生长 story/oc；故事种子必须先保存故事已有表达，再反推所需 world 与 OC；OC 种子必须先保存角色已有表达，再由角色经历反推 story 冲突和 world 背景。混合种子不得覆盖用户已经给出的事实。
 3. 每轮从最新图谱 coverage、缺失关系和用户规则计算 Growth Frontier；`focusKinds` 可以是一种或多种，不再按 sequence 硬编码阶段。
 4. Planner 不能因为“已有一个 world/story/oc 资源”就停止；它必须读取 Closure State。只有当前 profile 的内容 facets 全部满足，才停止创建内容 Cycle 并等待默认视觉集合完成。
@@ -239,11 +247,12 @@ const defaultVisualStyle = {
 7. 同一边界前追加多条规则时，全部 revision 持久化，但允许一个 revision Cycle 使用最新 revision 合并处理；不得丢失中间审计记录。
 8. revision Cycle 失败时停止后续调度并保留恢复入口；未知结果进入 `reconciliation_required`。
 9. `growth.guide` 回执增加 `nextCycleKind: "revision"` 与预计 `focusKinds`，但不承诺尚未提交的结果。
-10. Task 1 的 `beginCycle` 省略 Intent 回退只是迁移桥。本任务接管 Coordinator 后，所有新 Cycle 必须显式传入持久 Intent，并删除 sequence 1–3 的新 Cycle fallback；旧 v23 行仍只保留查询时 `legacy_v23_projection`，不得回填历史。
+10. Task 1 的 `beginCycle` 省略 Intent 回退只是迁移桥。本任务接管 Coordinator 后，`growthCycleBeginSchema.intent` 对所有新 Cycle 必填，Coordinator、测试和内部调用方必须显式传入持久 Intent，并删除 sequence 1–3 的新 Cycle fallback；旧 v23 行仍只保留查询时 `legacy_v23_projection`，不得回填历史。
 11. 写确定性测试矩阵：world→story/oc、story→world/oc、oc→story/world、mixed seed 保留、unknown seed 澄清/保守生长；另覆盖 C1 中断、初始完成后继续、连续规则、重开、取消、CAS 冲突和 terminal event 精确一次。
 12. 运行定向测试、typecheck、Prompt publication gate。
-13. 如果连续两个 Cycle 没有新增/修订任何 closure facet、没有解决冲突且没有字符/视觉进度，进入 `blocked / GROWTH_CLOSURE_NO_PROGRESS`，显示需要用户指导；不得无限消耗 Provider。
-14. 提交：`feat(growth): plan world story and oc from any seed`。
+13. Worker binding 不再暴露或依赖 sequence 推导的单一 `phase`；它携带 Main 从持久 Intent 投影出的 `kind`、`focusKinds` 与 `resumeFrontier`。状态机只开放当前 Intent 允许的高层 Fragment 路径，保持单 Cycle 最多一个 Change Set、Greenfield create-only 与既有 Gateway 最终权限校验。
+14. Task 3 不输出 Closure（闭环）完成结论。没有 Task 5 的独立 Steward/Checker 接受证据时，Coordinator 只能保持 growing、awaiting-guidance 或安全 blocked；“连续两轮无 closure facet 进展”检测在 Task 5 接入真实 Closure Assessment 后实现。
+15. 提交：`feat(growth): plan world story and oc from any seed`。
 
 ---
 
