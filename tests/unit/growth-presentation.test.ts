@@ -152,6 +152,43 @@ describe("growth presentation", () => {
     expect(appendGrowthAgentEvent(state, unrelated)).toBe(state);
   });
 
+  it("suppresses consecutive duplicate activity while preserving repeated map lifecycle activity after an intervening event", async () => {
+    const { appendGrowthAgentEvent, createGrowthPresentation } = await presentation();
+    let state = createGrowthPresentation(snapshot());
+    const outerGenerating: AgentRunEvent = {
+      type: "run.activity",
+      runId: "run-1",
+      label: "生成世界地图",
+      phase: "started",
+      domains: ["asset"],
+    };
+    const sequence: AgentRunEvent[] = [
+      outerGenerating,
+      outerGenerating,
+      { type: "run.activity", runId: "run-1", label: "世界地图排队中", phase: "started", domains: ["asset"] },
+      outerGenerating,
+      { type: "run.activity", runId: "run-1", label: "世界地图已生成", phase: "completed", domains: ["asset"] },
+      { type: "run.activity", runId: "run-1", label: "生成世界地图", phase: "completed", domains: ["asset"] },
+    ];
+
+    for (const activity of sequence) state = appendGrowthAgentEvent(state, activity);
+
+    expect(state.rows[0]?.activities.map((activity: { label: string }) => activity.label)).toEqual([
+      "生成世界地图",
+      "世界地图排队中",
+      "生成世界地图",
+      "世界地图已生成",
+      "生成世界地图",
+    ]);
+    expect(state.rows[0]?.activities.map((activity: { phase: string }) => activity.phase)).toEqual([
+      "started",
+      "started",
+      "started",
+      "completed",
+      "completed",
+    ]);
+  });
+
   it("makes stale Growth restore successes and rejections inert after scope or newer request wins", async () => {
     const { advanceGrowthRequestToken, isCurrentGrowthRequest } = await steward();
     const oldRestore = advanceGrowthRequestToken({ generation: 0, scopeKey: null }, "novelx:growth-goal:project-a:session-a");

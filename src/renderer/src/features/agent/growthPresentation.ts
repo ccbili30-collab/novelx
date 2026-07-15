@@ -92,7 +92,8 @@ export function mergeGrowthEvent(current: GrowthPresentation, event: GrowthEvent
 export function appendGrowthAgentEvent(current: GrowthPresentation, event: AgentRunEvent): GrowthPresentation {
   if (event.type !== "run.activity" || !isGrowthBoundRun(current, event.runId)) return current;
   const activity: GrowthAgentActivity = { runId: event.runId, label: event.label, phase: event.phase, domains: event.domains ?? [] };
-  if (current.agentActivities.some((item) => activityKey(item) === activityKey(activity))) return current;
+  const previous = current.agentActivities.at(-1);
+  if (previous && activityKey(previous) === activityKey(activity)) return current;
   return derive({ ...current, agentActivities: [...current.agentActivities, activity] });
 }
 
