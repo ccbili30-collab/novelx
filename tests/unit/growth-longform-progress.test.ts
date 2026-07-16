@@ -24,7 +24,7 @@ afterEach(() => {
 describe("GrowthLongformProgressResolver", () => {
   it("resolves the committed outline, completed section evidence, and first pending section", () => {
     const setup = createSetup();
-    addSection(setup, "origin", "第一节正文");
+    addSection(setup, "origin", sectionContent("起源", 5_000));
     addUnrelatedProse(setup, "main-story-prose", setup.mainStoryId);
     addUnrelatedProse(setup, "unrelated-volume-prose", setup.personalStoryId);
 
@@ -46,7 +46,9 @@ describe("GrowthLongformProgressResolver", () => {
         documentVersionId: setup.sectionVersions.get("origin"),
         contentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
         evidenceId: setup.sectionVersions.get("origin"),
+        codePoints: 5_000,
       }],
+      totalCodePoints: 5_000,
       nextSection: { outlineSectionId: "reckoning" },
       complete: false,
     });
@@ -54,11 +56,11 @@ describe("GrowthLongformProgressResolver", () => {
 
   it("uses the pinned checkpoint and reports completion only after every deterministic section document is stable", () => {
     const setup = createSetup();
-    addSection(setup, "origin", "第一节正文");
+    addSection(setup, "origin", sectionContent("起源", 5_000));
     const before = setup.checkpointId;
     const next = new CheckpointRepository(setup.workspace).appendCheckpoint(setup.branchId, "finish longform");
     setup.checkpointId = next;
-    addSection(setup, "reckoning", "第二节正文");
+    addSection(setup, "reckoning", sectionContent("偿还", 5_000));
     const resolver = new GrowthLongformProgressResolver(setup.workspace);
 
     expect(resolver.resolve({ checkpointId: before, focusOcResourceId: setup.ocId })).toMatchObject({
@@ -66,13 +68,23 @@ describe("GrowthLongformProgressResolver", () => {
     });
     expect(resolver.resolve({ checkpointId: next, focusOcResourceId: setup.ocId })).toMatchObject({
       status: "ready", complete: true, nextSection: null,
+      totalCodePoints: 10_000,
       completedSections: [{ outlineSectionId: "origin" }, { outlineSectionId: "reckoning" }],
+    });
+  });
+
+  it("fails closed when a deterministic section document violates its outline length", () => {
+    const setup = createSetup();
+    addSection(setup, "origin", "过短正文");
+
+    expect(resolve(setup)).toMatchObject({
+      status: "blocked", reason: "GROWTH_LONGFORM_SECTION_LENGTH_INVALID",
     });
   });
 
   it("rejects out-of-order sections instead of treating later prose as valid progress", () => {
     const setup = createSetup();
-    addSection(setup, "reckoning", "第二节正文");
+    addSection(setup, "reckoning", sectionContent("偿还", 5_000));
     expect(resolve(setup)).toMatchObject({
       status: "blocked", reason: "GROWTH_LONGFORM_SECTION_ORDER_INVALID",
     });
@@ -92,7 +104,7 @@ describe("GrowthLongformProgressResolver", () => {
       predicate: "closure.oc.binding.personal_story",
       object: { storyResourceId: ambiguous.personalStoryId },
       status: "current",
-      source: { kind: "document_version", ref: ambiguous.outlineVersionId },
+      source: { kind: "evidence_version", ref: ambiguous.outlineVersionId },
     });
     expect(resolve(ambiguous)).toMatchObject({ status: "blocked", reason: "GROWTH_LONGFORM_PERSONAL_STORY_BINDING_AMBIGUOUS" });
 
@@ -124,7 +136,7 @@ describe("GrowthLongformProgressResolver", () => {
       predicate: "closure.oc.binding.personal_story",
       object: { storyResourceId: invalidTarget.mainStoryId },
       status: "current",
-      source: { kind: "document_version", ref: invalidTarget.outlineVersionId },
+      source: { kind: "evidence_version", ref: invalidTarget.outlineVersionId },
     });
     expect(resolve(invalidTarget)).toMatchObject({ status: "blocked", reason: "GROWTH_LONGFORM_PERSONAL_STORY_RESOURCE_INVALID" });
 
@@ -237,7 +249,7 @@ function createSetup(options: {
     new AssertionRepository(workspace).putVersion({
       assertionId: "personal-story-binding", checkpointId, scopeType: "oc", scopeId: ocId,
       subject: ocId, predicate: "closure.oc.binding.personal_story", object: { storyResourceId: personalStoryId },
-      status: "current", source: { kind: "document_version", ref: outlineVersionId },
+      status: "current", source: { kind: "evidence_version", ref: outlineVersionId },
     });
   }
   if (options.bindRelations !== false) {
@@ -306,4 +318,9 @@ function outlineContent(): string {
       },
     ],
   });
+}
+
+function sectionContent(label: string, length: number): string {
+  const content = Array.from({ length }, (_, index) => `${label}${index % 10}`).join("");
+  return Array.from(content).slice(0, length).join("");
 }

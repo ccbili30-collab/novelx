@@ -52,6 +52,7 @@ import {
   type AgentToolInvocationContext,
 } from "./agentProcessSupervisor";
 import { GrowthLongformAuthorityResolver } from "./growth/phases/longform/growthLongformAuthorityResolver";
+import { assertGrowthLongformProposalAllowed } from "./growth/phases/longform/growthLongformProposalPolicy";
 import { GrowthClosureAuthorityResolver } from "./growth/phases/closure/growthClosureAuthorityResolver";
 import { assertGrowthRepairProposalAllowed } from "./growth/phases/closure/growthRepairTargetPolicy";
 import { GrowthRevisionAuthorityResolver } from "./growth/phases/revision/growthRevisionAuthorityResolver";
@@ -121,11 +122,13 @@ export class GrowthRunLifecycle {
           focusKinds: intent.focusKinds,
         })
       : null;
-    const intentAnchors = revisionPrerequisites?.anchors ?? (isClosureEvaluation || isClosureRepair || longformPhase
-      ? []
-      : trustedIntentAnchors(this.workspace, repository, goal, cycle, intent.focusKinds[0]!));
     const priorInquiryAuthority = isClosureEvaluation || isClosureRepair ? [] : trustedPriorInquiryAuthority(repository, goal.id);
     const longformAuthority = longformPhase ? longformResolver.resolveAuthority(goal, cycle, intent, longformPhase) : null;
+    const intentAnchors = revisionPrerequisites?.anchors ?? (isClosureEvaluation || isClosureRepair
+      ? []
+      : longformAuthority
+      ? trustedLongformIntentAnchors(this.workspace, goal, cycle.inputCheckpointId, longformAuthority)
+      : trustedIntentAnchors(this.workspace, repository, goal, cycle, intent.focusKinds[0]!));
     const longformSeedResourceIds = longformAuthority?.phase === "outline"
       ? [longformAuthority.mainStoryResourceId, longformAuthority.worldResourceId, longformAuthority.focusOcResourceId]
       : longformAuthority?.phase === "section" ? [longformAuthority.storyResourceId] : [];
@@ -736,9 +739,16 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     const cycle = this.#requiredCycle();
     if (this.workerBinding.kind === "repair") this.#assertBoundedRepairProposal(cycle, args);
     if (this.workerBinding.kind === "revision") this.#assertBoundedRevisionProposal(args);
+    if (this.workerBinding.longformAuthority) {
+      const receipt = cycle.receiptId ? this.#repository.getReceipt(cycle.receiptId) : null;
+      if (!receipt) throw growthRunError("GROWTH_BINDING_INVALID");
+      assertGrowthLongformProposalAllowed({ binding: this.workerBinding, receipt, proposal: args });
+    }
     const { growthRevisionImpact, ...gatewayArgs } = args;
     this.#proposalExecutionStarted = true;
-    const result = await gateway.proposeChangeSet(gatewayArgs, context);
+    const result = await gateway.proposeChangeSet(gatewayArgs, this.workerBinding.longformAuthority?.phase === "outline"
+      ? { ...context, longformCreateAuthorized: true }
+      : context);
     if (result.mode !== context.mode) throw growthRunError("GROWTH_RUN_FAILED");
     if (result.mode === "free" && result.status === "committed") {
       try {
@@ -1004,6 +1014,27 @@ function nextGrowthEventSequence(repository: GrowthRepository, goalId: string): 
 interface TrustedIntentAnchor {
   resourceId: string;
   title: string;
+}
+
+function trustedLongformIntentAnchors(
+  workspace: WorkspaceDatabase,
+  goal: GrowthGoal,
+  checkpointId: string,
+  authority: NonNullable<GrowthRunBinding["longformAuthority"]>,
+): TrustedIntentAnchor[] {
+  const resourceIds = authority.phase === "outline"
+    ? [authority.mainStoryResourceId, authority.worldResourceId, authority.focusOcResourceId]
+    : [authority.storyResourceId];
+  const visible = new ResourceRepository(workspace).listAtCheckpoint(checkpointId);
+  const byId = new Map(visible.map((resource) => [resource.id, resource]));
+  return uniqueStrings(resourceIds).map((resourceId) => {
+    const resource = byId.get(resourceId);
+    if (!resource || (!goal.authorizedScopeResourceIds.includes(resourceId)
+      && !isDescendantOfAuthorizedScope(resourceId, goal.authorizedScopeResourceIds, visible))) {
+      throw growthRunError("GROWTH_BINDING_INVALID");
+    }
+    return { resourceId, title: resource.title };
+  });
 }
 
 function trustedPriorInquiryAuthority(

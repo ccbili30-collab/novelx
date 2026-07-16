@@ -24,13 +24,13 @@ export type GrowthLongformProgressBlockedReason =
   | "GROWTH_LONGFORM_PERSONAL_STORY_BINDING_SOURCE_INVALID"
   | "GROWTH_LONGFORM_PERSONAL_STORY_RESOURCE_INVALID"
   | "GROWTH_LONGFORM_PERSONAL_STORY_RELATIONS_INVALID"
-  | "GROWTH_LONGFORM_PERSONAL_STORY_RELATIONS_INVALID"
   | "GROWTH_LONGFORM_OUTLINE_DOCUMENT_MISSING"
   | "GROWTH_LONGFORM_OUTLINE_DOCUMENT_AMBIGUOUS"
   | "GROWTH_LONGFORM_OUTLINE_VERSION_MISSING"
   | "GROWTH_LONGFORM_OUTLINE_INVALID"
   | "GROWTH_LONGFORM_OUTLINE_IDENTITY_MISMATCH"
   | "GROWTH_LONGFORM_SECTION_DOCUMENT_INVALID"
+  | "GROWTH_LONGFORM_SECTION_LENGTH_INVALID"
   | "GROWTH_LONGFORM_SECTION_ORDER_INVALID";
 
 export interface GrowthLongformCompletedSection {
@@ -39,6 +39,7 @@ export interface GrowthLongformCompletedSection {
   documentVersionId: string;
   contentSha256: string;
   evidenceId: string;
+  codePoints: number;
 }
 
 export interface GrowthLongformPendingSection {
@@ -75,6 +76,7 @@ export type GrowthLongformProgress =
         sections: PersistedOutline["sections"];
       };
       completedSections: GrowthLongformCompletedSection[];
+      totalCodePoints: number;
       nextSection: GrowthLongformPendingSection | null;
       complete: boolean;
     };
@@ -142,7 +144,10 @@ export class GrowthLongformProgressResolver {
     const outlineRecord = outlines[0]!;
     const outlineVersion = documents.getStableForCreativeDocumentAtCheckpoint(outlineRecord.id, checkpointId);
     if (!outlineVersion) return blocked("GROWTH_LONGFORM_OUTLINE_VERSION_MISSING");
-    if (!bindings[0]!.sources.some((source) => source.kind === "document_version" && source.ref === outlineVersion.id)) {
+    if (!bindings[0]!.sources.some((source) => (
+      (source.kind === "evidence_version" || source.kind === "document_version")
+      && source.ref === outlineVersion.id
+    ))) {
       return blocked("GROWTH_LONGFORM_PERSONAL_STORY_BINDING_SOURCE_INVALID");
     }
 
@@ -173,14 +178,24 @@ export class GrowthLongformProgressResolver {
         continue;
       }
       if (missingPredecessor) return blocked("GROWTH_LONGFORM_SECTION_ORDER_INVALID");
+      const rawCodePoints = Array.from(version.content).length;
+      const semanticCodePoints = Array.from(version.content.trim()).length;
+      if (rawCodePoints !== semanticCodePoints
+        || semanticCodePoints < section.estimatedCodePoints.min
+        || semanticCodePoints > section.estimatedCodePoints.max) {
+        return blocked("GROWTH_LONGFORM_SECTION_LENGTH_INVALID");
+      }
       completedSections.push({
         outlineSectionId: section.localId,
         documentId,
         documentVersionId: version.id,
         contentSha256: version.contentHash,
         evidenceId: version.id,
+        codePoints: semanticCodePoints,
       });
     }
+
+    const totalCodePoints = completedSections.reduce((total, section) => total + section.codePoints, 0);
 
     return {
       status: "ready",
@@ -199,8 +214,9 @@ export class GrowthLongformProgressResolver {
         sections: outline.sections,
       },
       completedSections,
+      totalCodePoints,
       nextSection,
-      complete: nextSection === null,
+      complete: nextSection === null && totalCodePoints >= 10_000,
     };
   }
 }

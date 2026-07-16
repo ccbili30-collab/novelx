@@ -14,10 +14,14 @@ import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspac
 import { AgentProcessSupervisor, type AgentWorkerProcess } from "../../src/main/agentProcessSupervisor";
 import { GrowthCoordinator } from "../../src/main/growthCoordinator";
 import { GrowthRunLifecycle } from "../../src/main/growthRunLifecycle";
+import { assertGrowthLongformProposalAllowed } from "../../src/main/growth/phases/longform/growthLongformProposalPolicy";
 import { planGrowthFrontier } from "../../src/main/growthFrontierPlanner";
 import { WorkspaceSession } from "../../src/main/workspaceIpc";
 import { growthStartRequestSchema } from "../../src/shared/ipcContract";
 import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growthWorldFragment";
+import { compileGrowthLongformOutlineChangeSet } from "../../src/agent-worker/growth/growthLongformOutline";
+import { compileGrowthLongformSectionChangeSet } from "../../src/agent-worker/growth/growthLongformSection";
+import type { GrowthRunBinding } from "../../src/shared/agentWorkerProtocol";
 
 class FakeWorker extends EventEmitter implements AgentWorkerProcess {
   killed = false;
@@ -359,6 +363,94 @@ describe("GrowthCoordinator", () => {
     expect(workers).toHaveLength(4);
     supervisor.cancel(snapshot.cycles[3]!.runId!);
     await vi.waitFor(() => expect(repository.getCycle(cycles[3]!.id)?.status).toBe("cancelled"));
+  });
+
+  it("orchestrates an OC outline, one section per checkpoint, and an independent Closure recheck", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const started = coordinator.start(growthRequest(setup));
+
+    await completeCycle(setup.workspace, workers[0]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    await completeCycle(setup.workspace, workers[1]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(3));
+    await completeCycle(setup.workspace, workers[2]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(4));
+
+    await completeCoordinatorContinueGrowingEvaluation(setup.workspace, workers[3]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(5));
+    expect((await longformBinding(workers[4]!)).longformAuthority).toMatchObject({ phase: "outline" });
+
+    await completeLongformOutlineCycle(setup.workspace, workers[4]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(6));
+    const firstSection = await longformBinding(workers[5]!);
+    expect(firstSection.longformAuthority).toMatchObject({
+      phase: "section", selectedSectionId: "origin", completedSectionIds: [],
+    });
+
+    expect(coordinator.guide({
+      goalId: started.goal.id,
+      expectedRevision: 1,
+      ruleText: "The focus OC must pay a permanent memory cost.",
+      requestId: "b1111111-1111-4111-8111-111111111111",
+    })).toMatchObject({
+      persistedRevision: 2,
+      currentCycleRevision: 1,
+      nextCycleKind: "revision",
+      status: "persisted_pending_boundary",
+    });
+
+    await completeLongformSectionCycle(setup.workspace, workers[5]!, "第一章");
+    await vi.waitFor(() => expect(workers).toHaveLength(7));
+    expect((await longformBinding(workers[6]!))).toMatchObject({ kind: "revision", ruleRevision: 2 });
+    await completeCoordinatorRevisionCycle(setup.workspace, workers[6]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(8));
+
+    await completeCoordinatorContinueGrowingEvaluation(setup.workspace, workers[7]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(9));
+    const secondSection = await longformBinding(workers[8]!);
+    expect(secondSection.ruleRevision).toBe(2);
+    expect(secondSection.longformAuthority).toMatchObject({
+      phase: "section", selectedSectionId: "reckoning", completedSectionIds: ["origin"],
+      priorProseEvidenceIds: [expect.any(String)],
+    });
+
+    await completeLongformSectionCycle(setup.workspace, workers[8]!, "第二章");
+    await vi.waitFor(() => expect(workers).toHaveLength(10));
+
+    const repository = new GrowthRepository(setup.workspace);
+    const cycles = repository.listCycles(started.goal.id);
+    expect(cycles.map((cycle) => cycle.status)).toEqual([
+      "committed", "committed", "committed", "evaluated", "committed",
+      "committed", "committed", "evaluated", "committed", "running",
+    ]);
+    expect(repository.listCycleIntents(started.goal.id).slice(4, 10)).toEqual([
+      expect.objectContaining({ kind: "expand", focusKinds: ["oc"] }),
+      expect.objectContaining({ kind: "expand", focusKinds: ["oc"] }),
+      expect.objectContaining({ kind: "revision" }),
+      expect.objectContaining({ kind: "closure_evaluation", revision: 4 }),
+      expect.objectContaining({ kind: "expand", focusKinds: ["oc"] }),
+      expect.objectContaining({ kind: "closure_evaluation", revision: 5 }),
+    ]);
+    expect(cycles[5]!.inputCheckpointId).toBe(cycles[4]!.outputCheckpointId);
+    expect(cycles[6]!.inputCheckpointId).toBe(cycles[5]!.outputCheckpointId);
+    expect(cycles[7]!.inputCheckpointId).toBe(cycles[6]!.outputCheckpointId);
+    expect(cycles[8]!.inputCheckpointId).toBe(cycles[6]!.outputCheckpointId);
+    expect(cycles[9]!.inputCheckpointId).toBe(cycles[8]!.outputCheckpointId);
+    expect([cycles[4], cycles[5], cycles[6], cycles[8]]
+      .every((cycle) => cycle?.receiptId && cycle.changeSetId && cycle.outputCheckpointId)).toBe(true);
+
+    await sealCoordinatorClosureEvaluation(setup.workspace, workers[9]!, "accepted", "longform-accepted");
+    workers[9]!.receive({
+      type: "run.completed", runId: runId(workers[9]!), outcome: "completed",
+      message: "accepted", changeSetState: "none", artifacts: [],
+    });
+    await vi.waitFor(() => expect(coordinator.get({
+      projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id,
+    }).coordinatorStatus).toBe("completed"));
+    expect(workers).toHaveLength(10);
   });
 
   it("automatically repairs one Checker finding, rechecks the new checkpoint, and completes only after acceptance", async () => {
@@ -1004,6 +1096,295 @@ function requestCoordinatorRetrieval(worker: FakeWorker, runId: string, query: s
       policyVersion: "graph-retrieval-v1",
     },
   });
+}
+
+type LongformBinding = {
+  kind: string;
+  cycleId: string;
+  inputCheckpointId: string;
+  ruleRevision: number;
+  longformAuthority:
+    | {
+        phase: "outline";
+        outlineId: string;
+        mainStoryResourceId: string;
+        worldResourceId: string;
+        focusOcResourceId: string;
+        personalStoryResourceId: string;
+      }
+    | {
+        phase: "section";
+        outlineId: string;
+        storyResourceId: string;
+        outlineDocumentVersionId: string;
+        storyTitle: string;
+        summary: string;
+        sections: Array<{
+          localId: string;
+          title: string;
+          objective: string;
+          evidenceIds: string[];
+          continuityConstraints: string[];
+          estimatedCodePoints: { min: number; max: number };
+        }>;
+        selectedSectionId: string;
+        sectionSortOrder: number;
+        completedSectionIds: string[];
+        priorProseEvidenceIds: string[];
+        priorContentSha256: string[];
+      };
+};
+
+async function longformBinding(worker: FakeWorker): Promise<LongformBinding> {
+  if (worker.sent.length === 0) worker.spawn();
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(1));
+  return (worker.sent[0] as { growthBinding: LongformBinding }).growthBinding;
+}
+
+async function completeCoordinatorContinueGrowingEvaluation(
+  workspace: WorkspaceDatabase,
+  worker: FakeWorker,
+): Promise<void> {
+  if (worker.sent.length === 0) worker.spawn();
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(1));
+  const id = runId(worker);
+  worker.receive({ type: "run.started", runId: id });
+  beginStewardInvocation(workspace, id);
+  requestCoordinatorRetrieval(worker, id, "evaluate missing OC personal story");
+  await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+    ok: true, tool: "retrieve_graph_evidence",
+    result: { closureEvaluation: { deterministicContentReady: false } },
+  }));
+  worker.receive({
+    type: "tool.request", runId: id, requestId: randomUUID(), tool: "submit_closure_self_assessment",
+    args: { decision: "continue_growing", safeSummary: "The OC personal story still needs its longform outline and prose." },
+  });
+  await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+    ok: true, tool: "submit_closure_self_assessment", result: { status: "continue_growing" },
+  }));
+  terminalizeCoordinatorInvocation(
+    workspace,
+    id,
+    `${id}:steward`,
+    createHash("sha256").update(`continue-${id}`, "utf8").digest("hex"),
+  );
+  worker.receive({
+    type: "run.completed", runId: id, outcome: "completed",
+    message: "continue growing", changeSetState: "none", artifacts: [],
+  });
+}
+
+async function completeLongformOutlineCycle(workspace: WorkspaceDatabase, worker: FakeWorker): Promise<void> {
+  const binding = await longformBinding(worker);
+  if (binding.longformAuthority.phase !== "outline") throw new Error("Expected Longform outline authority.");
+  const id = runId(worker);
+  worker.receive({ type: "run.started", runId: id });
+  beginStewardInvocation(workspace, id);
+  requestCoordinatorRetrieval(worker, id, "outline the OC personal story");
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+  const retrieval = (worker.sent.at(-1) as {
+    ok: true;
+    result: { receiptId: string; evidence: Array<{ evidenceId: string }> };
+  }).result;
+  const evidenceIds = retrieval.evidence.map((evidence) => evidence.evidenceId);
+  expect(evidenceIds.length).toBeGreaterThan(0);
+  await submitCoordinatorInquiry(worker, id, evidenceIds, "longform-outline");
+  const args = compileGrowthLongformOutlineChangeSet({
+    storyTitle: "潮痕继承人",
+    summary: "围绕焦点 OC 的选择，展示世界规则如何改变个人命运。",
+    sections: ["origin", "reckoning"].map((localId) => ({
+      localId,
+      title: localId === "origin" ? "潮痕起源" : "偿还之日",
+      objective: localId === "origin" ? "建立角色的历史债务。" : "让角色为旧规则付出最终代价。",
+      evidenceIds: [evidenceIds[0]!],
+      continuityConstraints: ["保持已固定世界与角色身份。"],
+      estimatedCodePoints: { min: 5_000, max: 5_000 },
+    })),
+  }, {
+    outlineId: binding.longformAuthority.outlineId,
+    checkpointId: binding.inputCheckpointId,
+    receiptId: retrieval.receiptId,
+    availableEvidenceIds: evidenceIds,
+    mainStoryResourceId: binding.longformAuthority.mainStoryResourceId,
+    worldResourceId: binding.longformAuthority.worldResourceId,
+    focusOcResourceId: binding.longformAuthority.focusOcResourceId,
+    personalStoryResourceId: binding.longformAuthority.personalStoryResourceId,
+  });
+  const changeSetCount = Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get() as { count: number }).count);
+  const forged = structuredClone(args);
+  const forgedStory = forged.items.find((item) => item.kind === "resource.put");
+  if (!forgedStory || forgedStory.kind !== "resource.put") throw new Error("Expected compiled Longform story resource.");
+  forgedStory.payload.parentId = "forged-parent";
+  const repository = new GrowthRepository(workspace);
+  const cycle = repository.getCycle(binding.cycleId);
+  const receipt = cycle?.receiptId ? repository.getReceipt(cycle.receiptId) : null;
+  if (!receipt) throw new Error("Expected the persisted Longform receipt.");
+  const trustedBinding = (worker.sent[0] as { growthBinding: GrowthRunBinding }).growthBinding;
+  expect(() => assertGrowthLongformProposalAllowed({ binding: trustedBinding, receipt, proposal: forged }))
+    .toThrowError(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
+  expect((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get() as { count: number }).count)
+    .toBe(changeSetCount);
+  assertGrowthLongformProposalAllowed({ binding: trustedBinding, receipt, proposal: args });
+  await proposeCoordinatorChangeSet(worker, id, args);
+}
+
+async function completeLongformSectionCycle(
+  workspace: WorkspaceDatabase,
+  worker: FakeWorker,
+  label: string,
+): Promise<void> {
+  const binding = await longformBinding(worker);
+  if (binding.longformAuthority.phase !== "section") throw new Error("Expected Longform section authority.");
+  const authority = binding.longformAuthority;
+  const id = runId(worker);
+  worker.receive({ type: "run.started", runId: id });
+  beginStewardInvocation(workspace, id);
+  requestCoordinatorRetrieval(worker, id, `write ${authority.selectedSectionId}`);
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+  const retrieval = (worker.sent.at(-1) as {
+    ok: true;
+    result: { receiptId: string; evidence: Array<{ evidenceId: string }> };
+  }).result;
+  const evidenceIds = retrieval.evidence.map((evidence) => evidence.evidenceId);
+  await submitCoordinatorInquiry(worker, id, evidenceIds, `longform-${authority.selectedSectionId}`);
+  const selected = authority.sections.find((section) => section.localId === authority.selectedSectionId);
+  if (!selected) throw new Error("Expected selected Longform section.");
+  const args = compileGrowthLongformSectionChangeSet({
+    outlineSectionId: selected.localId,
+    candidateText: uniqueLongformText(label, 5_000),
+    evidenceIds: selected.evidenceIds,
+  }, {
+    outline: {
+      outlineId: authority.outlineId,
+      checkpointId: binding.inputCheckpointId,
+      receiptId: retrieval.receiptId,
+      storyTitle: authority.storyTitle,
+      summary: authority.summary,
+      sections: authority.sections,
+    },
+    checkpointId: binding.inputCheckpointId,
+    receiptId: retrieval.receiptId,
+    availableEvidenceIds: evidenceIds,
+    priorProseEvidenceIds: authority.priorProseEvidenceIds,
+    completedSectionIds: authority.completedSectionIds,
+    priorContentSha256: authority.priorContentSha256,
+    storyResourceId: authority.storyResourceId,
+    sectionSortOrder: authority.sectionSortOrder,
+  });
+  await proposeCoordinatorChangeSet(worker, id, args);
+}
+
+async function completeCoordinatorRevisionCycle(
+  workspace: WorkspaceDatabase,
+  worker: FakeWorker,
+): Promise<void> {
+  const binding = await longformBinding(worker);
+  expect(binding).toMatchObject({ kind: "revision", ruleRevision: 2 });
+  const id = runId(worker);
+  worker.receive({ type: "run.started", runId: id });
+  beginStewardInvocation(workspace, id);
+  requestCoordinatorRetrieval(worker, id, "apply the new creator rule before continuing longform");
+  await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+    ok: true,
+    tool: "retrieve_graph_evidence",
+    result: { receiptId: expect.any(String), revisionAuthority: { targets: expect.any(Array) } },
+  }));
+  const retrieval = (worker.sent.at(-1) as {
+    ok: true;
+    result: {
+      evidence: Array<{ evidenceId: string }>;
+      revisionAuthority: { targets: Array<{
+        kind: string;
+        evidenceId: string;
+        resourceId?: string;
+        type?: string;
+        objectKind?: string;
+        title?: string;
+        parentId?: string;
+        sortOrder?: number;
+      }> };
+    };
+  }).result;
+  const target = retrieval.revisionAuthority.targets.find((candidate) => candidate.kind === "resource");
+  if (!target?.resourceId || !target.type || !target.objectKind || target.parentId === undefined
+    || target.sortOrder === undefined) {
+    throw new Error("Expected one trusted resource target for the Longform rule revision.");
+  }
+  await submitCoordinatorInquiry(worker, id, [target.evidenceId], "longform_rule_revision");
+  await proposeCoordinatorChangeSet(worker, id, {
+    summary: "Apply the new memory-cost rule before continuing the OC personal story.",
+    growthRevisionImpact: {
+      revisedEvidenceIds: [target.evidenceId],
+      preservedEvidenceIds: [],
+      staleVisualEvidenceIds: [target.evidenceId],
+    },
+    items: [{
+      id: `revision-resource-${id}`,
+      dependsOn: [],
+      kind: "resource.put",
+      payload: {
+        resourceId: target.resourceId,
+        create: false,
+        type: target.type,
+        objectKind: target.objectKind,
+        title: `${target.title ?? "Growth resource"}（规则修订）`,
+        parentId: target.parentId,
+        state: "active",
+        sortOrder: target.sortOrder,
+      },
+    }],
+  });
+}
+
+async function submitCoordinatorInquiry(
+  worker: FakeWorker,
+  runId: string,
+  evidenceIds: string[],
+  prefix: string,
+): Promise<void> {
+  worker.receive({
+    type: "tool.request", runId, requestId: randomUUID(), tool: "submit_growth_inquiry",
+    args: {
+      inquiries: [3, 2, 1].map((priority, index) => ({
+        localId: `${prefix.replace(/[^a-z0-9_]/gu, "_")}_${index}`,
+        question: `Which evidence-grounded consequence matters at priority ${priority}?`,
+        evidenceIds, evidenceState: "known", safeSummary: `Assessing consequence ${index + 1}.`,
+        proposedAction: "Continue one bounded Longform step.", provisionalAssumption: null,
+        priority, requiresCreatorChoice: false,
+      })),
+      selectedLocalId: `${prefix.replace(/[^a-z0-9_]/gu, "_")}_0`, priorTransitions: [],
+    },
+  });
+  await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+    ok: true, tool: "submit_growth_inquiry", result: { status: "selected" },
+  }));
+}
+
+async function proposeCoordinatorChangeSet(
+  worker: FakeWorker,
+  runId: string,
+  args: unknown,
+): Promise<void> {
+  worker.receive({ type: "tool.request", runId, requestId: randomUUID(), tool: "propose_change_set", args });
+  await vi.waitFor(() => {
+    const response = worker.sent.at(-1) as { ok?: boolean; error?: { code?: string } };
+    if (response.ok === false) throw new Error(`Longform proposal failed: ${response.error?.code ?? "unknown"}`);
+    expect(response).toMatchObject({
+      ok: true, tool: "propose_change_set", result: { status: "committed", changeSetId: expect.any(String) },
+    });
+  });
+  worker.receive({
+    type: "run.completed", runId, outcome: "completed",
+    message: "longform committed", changeSetState: "committed", artifacts: [],
+  });
+}
+
+function uniqueLongformText(label: string, length: number): string {
+  const chunks: string[] = [];
+  for (let index = 0; Array.from(chunks.join("")).length < length; index += 1) {
+    chunks.push(`${label}第${index}幕让潮声、港口秩序与人物选择产生新的因果。`);
+  }
+  return Array.from(chunks.join("")).slice(0, length).join("");
 }
 
 async function preparePlannedRepairRecoveryBoundary(

@@ -187,7 +187,7 @@ export function createWorkspaceAgentToolGateway(
       const items = mapProposedItems(args);
       const referencesGreenfieldOutput = items.some((item) => item.kind === "assertion.put"
         && item.payload.evidenceIds.some((evidenceId) => parseGreenfieldDocumentOutputEvidence(evidenceId) !== null));
-      if (context.greenfieldCreateRequested || referencesGreenfieldOutput) {
+      if (context.greenfieldCreateRequested || (referencesGreenfieldOutput && !context.longformCreateAuthorized)) {
         assertGreenfieldCreateOnly(workspace, items, context);
       }
       const service = new ChangeSetService(workspace, policy);

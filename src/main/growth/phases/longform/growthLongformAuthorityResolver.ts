@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { deriveGrowthLongformOutlineDocumentId } from "../../../../agent-worker/growth/growthLongformOutline";
-import { GROWTH_CLOSURE_FACETS, GrowthClosureEvaluator } from "../../../../domain/growth/growthClosureEvaluator";
 import { GrowthLongformProgressResolver } from "../../../../domain/growth/growthLongformProgress";
 import type { GrowthRepository } from "../../../../domain/growth/growthRepository";
 import { CreativeDocumentRepository } from "../../../../domain/workspace/creativeDocumentRepository";
@@ -32,17 +31,17 @@ export class GrowthLongformAuthorityResolver {
       || !revision.focusOcResourceId) {
       throw bindingError();
     }
-    const evaluation = new GrowthClosureEvaluator(this.workspace).evaluate({
+    const progress = new GrowthLongformProgressResolver(this.workspace).resolve({
       checkpointId: cycle.inputCheckpointId,
-      profileKind: profile.profileKind,
-      subjectResourceId: profile.subjectResourceId,
-      componentProfiles: profile.componentProfiles ?? undefined,
       focusOcResourceId: revision.focusOcResourceId,
     });
-    const facetState = new Map(evaluation.facetResults.map((facet) => [facet.facetId, facet.state]));
-    if (facetState.get(GROWTH_CLOSURE_FACETS.oc.personalStoryBinding) === "missing") return "outline";
-    if (facetState.get(GROWTH_CLOSURE_FACETS.oc.personalStory) === "missing") return "section";
-    return null;
+    if (progress.status === "blocked") {
+      if (progress.reason === "GROWTH_LONGFORM_PERSONAL_STORY_BINDING_MISSING") return "outline";
+      throw bindingError();
+    }
+    if (progress.complete) return null;
+    if (progress.nextSection) return "section";
+    throw bindingError();
   }
 
   resolveAuthority(

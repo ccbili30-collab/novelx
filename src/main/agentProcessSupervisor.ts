@@ -82,6 +82,8 @@ export interface AgentToolInvocationContext {
   requestId: string;
   mode: "free" | "assist";
   greenfieldCreateRequested?: boolean;
+  /** Main-only authority set after a Longform proposal is deterministically recompiled. */
+  longformCreateAuthorized?: boolean;
   onImageProgress?: (progress: ImageGenerationProgress) => void;
   signal: AbortSignal;
 }

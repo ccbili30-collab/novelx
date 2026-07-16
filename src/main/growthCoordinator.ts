@@ -27,6 +27,8 @@ import {
   type GrowthStartResponse,
 } from "../shared/ipcContract";
 import { GrowthRunLifecycle } from "./growthRunLifecycle";
+import { GrowthLongformCoordinator } from "./growth/phases/longform/growthLongformCoordinator";
+import { syncClosureProfilesAfterRevision } from "./growth/phases/revision/growthRevisionClosureSync";
 import { estimateRevisionIntent, planGrowthFrontier, type GrowthFocusKind } from "./growthFrontierPlanner";
 import type { AgentProcessSupervisor } from "./agentProcessSupervisor";
 import type { WorkspaceSession } from "./workspaceIpc";
@@ -185,6 +187,23 @@ export class GrowthCoordinator {
       this.#advanceCommittedRepair(input, current, projectedIntent);
       return;
     }
+    if (current?.status === "committed" && projectedIntent?.kind === "revision") {
+      syncClosureProfilesAfterRevision({ repository: input.repository, goal: input.goal, cycle: current, intent: projectedIntent });
+    }
+    if (current?.status === "committed" && projectedIntent) {
+      const longformPlan = new GrowthLongformCoordinator(input.context.workspace, input.repository)
+        .afterCommitted({ goal: input.goal, cycle: current, intent: projectedIntent });
+      if (longformPlan) {
+        const next = this.#createPlannedCycle({
+          goal: input.goal,
+          repository: input.repository,
+          inputCheckpointId: longformPlan.inputCheckpointId,
+          intent: longformPlan.intent,
+        });
+        this.#startPlanned(input, next);
+        return;
+      }
+    }
     const latestIntent = projectedIntent && isContentIntent(projectedIntent) ? projectedIntent : null;
     const decision = planGrowthFrontier({
       seedKinds: seedKinds(input.context, input.goal),
@@ -325,6 +344,36 @@ export class GrowthCoordinator {
       throw coordinatorError("GROWTH_CLOSURE_OUTCOME_MISSING");
     }
     this.#settlePriorRepair(input.repository, input.goal.id, cycle, outcome.decision, outcome.reviewId);
+    if (input.goal.currentRuleRevision > cycle.ruleRevision) {
+      const coverageKinds = formalCoverageKinds(input.context, cycle.inputCheckpointId);
+      const revision = this.#createPlannedCycle({
+        goal: input.goal,
+        repository: input.repository,
+        inputCheckpointId: cycle.inputCheckpointId,
+        intent: {
+          kind: "revision",
+          focusKinds: coverageKinds.length > 0 ? coverageKinds : ["world", "story", "oc"],
+          resumeFrontier: [],
+        },
+      });
+      this.#startPlanned(input, revision);
+      return;
+    }
+    if (input.goal.currentRuleRevision < cycle.ruleRevision) throw coordinatorError("GROWTH_FRONTIER_REVISION_INVALID");
+    if (outcome.decision === "continue_growing") {
+      const longformPlan = new GrowthLongformCoordinator(input.context.workspace, input.repository)
+        .afterEvaluation({ goal: input.goal, cycle, intent, outcome });
+      if (longformPlan) {
+        const next = this.#createPlannedCycle({
+          goal: input.goal,
+          repository: input.repository,
+          inputCheckpointId: longformPlan.inputCheckpointId,
+          intent: longformPlan.intent,
+        });
+        this.#startPlanned(input, next);
+        return;
+      }
+    }
     if (outcome.decision !== "repairs_required") {
       this.#releaseListeners(input.goal.id);
       return;
