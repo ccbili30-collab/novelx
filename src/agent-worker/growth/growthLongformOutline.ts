@@ -27,18 +27,26 @@ const sectionSchema = z.object({
   }
 });
 
-export const growthLongformOutlineSchema = z.object({
+const growthLongformOutlineObjectSchema = z.object({
   storyTitle: safeText(500),
   summary: safeText(2_000),
   sections: z.array(sectionSchema).min(2).max(100),
-}).strict().superRefine((value, context) => {
+}).strict();
+
+function validateOutline(value: { sections: z.infer<typeof sectionSchema>[] }, context: z.RefinementCtx): void {
   if (new Set(value.sections.map((section) => section.localId)).size !== value.sections.length) {
     context.addIssue({ code: "custom", message: "GROWTH_LONGFORM_OUTLINE_DUPLICATE_SECTION" });
   }
   if (value.sections.reduce((total, section) => total + section.estimatedCodePoints.min, 0) < 10_000) {
     context.addIssue({ code: "custom", message: "GROWTH_LONGFORM_OUTLINE_TARGET_TOO_SHORT" });
   }
-});
+}
+
+export const growthLongformOutlineSchema = growthLongformOutlineObjectSchema.superRefine(validateOutline);
+export const growthLongformPersistedOutlineSchema = growthLongformOutlineObjectSchema
+  .extend({ outlineId: identifier })
+  .strict()
+  .superRefine(validateOutline);
 
 const identifierParameters = Type.String({ minLength: 1, maxLength: 240 });
 export const growthLongformOutlineParameters = Type.Object({
@@ -139,7 +147,12 @@ export function compileGrowthLongformOutlineChangeSet(
   const creativeItemId = `${prefix}-creative-document`;
   const documentItemId = `${prefix}-document`;
   const assertionItemId = `${prefix}-personal-story-binding`;
-  const content = JSON.stringify({ storyTitle: outline.storyTitle, summary: outline.summary, sections: outline.sections });
+  const content = JSON.stringify({
+    outlineId: outline.outlineId,
+    storyTitle: outline.storyTitle,
+    summary: outline.summary,
+    sections: outline.sections,
+  });
   return proposeChangeSetArgsSchema.parse({
     summary: outline.summary,
     items: [

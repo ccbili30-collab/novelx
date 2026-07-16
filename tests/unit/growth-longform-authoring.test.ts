@@ -58,7 +58,7 @@ describe("Growth longform authoring", () => {
       expect.objectContaining({ payload: expect.objectContaining({ relationKind: "uses_oc", sourceResourceId: "story-personal-1", targetResourceId: "oc-focus-1" }) }),
     ]));
     const document = proposal.items.find((item) => item.kind === "document.put")!;
-    expect(JSON.parse(document.payload.content)).toEqual(validOutlineInput);
+    expect(JSON.parse(document.payload.content)).toEqual({ outlineId: "outline-1", ...validOutlineInput });
     expect(proposal.items.find((item) => item.kind === "assertion.put")).toMatchObject({
       payload: {
         scopeId: "oc-focus-1",
