@@ -39,13 +39,13 @@
 每次向用户汇报时，从本文件重新渲染：
 
 ```text
-黑客松执行进度：5/7 阶段已验收，剩余 2 阶段
+黑客松执行进度：6/7 阶段已验收，剩余 1 阶段
 [x] 0. 模块化基线与全量测试
 [x] 1. Repair 权限与领域正确性
 [x] 2. 用户规则影响分析与修订
 [x] 3. OC 万字 Longform 自动循环
 [x] 4. 通用插图队列
-[ ] 5. 生长过程与图文图鉴 UI
+[x] 5. 生长过程与图文图鉴 UI
 [ ] 6. 真实 Live、打包与冻结验收
 ```
 
@@ -408,19 +408,21 @@ git diff --check
 
 ---
 
-## 8. 阶段 5：生长过程与图文图鉴 UI [ ]
+## 8. 阶段 5：生长过程与图文图鉴 UI [x]
 
-**状态：** `blocked`
+**状态：** `completed`
 **目标：** 中央对话流展示可展开的安全推演过程，右栏展示真实编辑对象，展台以“文字＋图片＋图谱”呈现世界生长结果。
 
-**当前阻塞（2026-07-16）：** Renderer（渲染层）接入前的只读审计证明，当前生产入口只有
+**历史阻塞（2026-07-16，已解决）：** Renderer（渲染层）接入前的只读审计证明，当时生产入口只有
 `growth.start/get/guide/subscribe`；`GrowthIllustrationCoordinator` 只在确定性测试中实例化，未被 Main
 生产路径调用。`growth.get` 也未投影插图 Request/Batch/Item、Longform 当前章节与累计字符、Closure
-finding/repair target 等安全持久状态。因此步骤 5–8 若只改 Renderer，只能从日志猜测或创建无真实入口的
-死 UI，违反本阶段停止条件与产品不变量。继续需要产品负责人明确授权一个版本化、最小、Creator Lens
-限定的 Main→Preload→Renderer Growth 内部 IPC 扩展；不得把 Domain 内部 Schema 直接暴露给 Renderer。
+finding/repair target 等安全持久状态。该边界已由下面的产品决定和 `growth-presentation-v1` 安全投影解决，
+未从日志猜测状态，也未把 Domain 内部 Schema 直接暴露给 Renderer。
 
-**阻塞副作用边界：** 未改生产代码、未改公开协议、未运行测试或 Provider；仅更新本计划状态。
+**产品决定（2026-07-16）：** 产品负责人已授权版本化、Creator-only 的内部 Growth Renderer IPC，范围仅限
+读取安全 Longform/Closure/Illustration 投影，以及创建、取消来源绑定插画请求；仍禁止修改数据库 Schema、
+Provider 协议、权限、Canon、Creator/Player Lens 或 A2.2。Renderer 不得接收 Prompt、工具参数、凭证、
+原始思维链、locator、磁盘路径或未授权正文。
 
 ### 文件所有权
 
@@ -429,8 +431,8 @@ finding/repair target 等安全持久状态。因此步骤 5–8 若只改 Rende
 - `src/renderer/src/features/growth/GrowthGuidanceStatus.tsx`
 - `src/renderer/src/features/growth/GrowthImpactSummary.tsx`
 - `src/renderer/src/features/growth/GrowthIllustrationGallery.tsx`
-- `tests/unit/growth-guidance-status.test.tsx`
-- `tests/unit/growth-illustration-gallery.test.tsx`
+- `tests/unit/growth-guidance-status.test.ts`
+- `tests/unit/growth-illustration-gallery.test.ts`
 
 **Modify only when required:**
 
@@ -450,39 +452,42 @@ finding/repair target 等安全持久状态。因此步骤 5–8 若只改 Rende
 
 ### 实现步骤
 
-1. [ ] 安全 event/Artifact/snapshot 纯投影测试，乱序/重复确定性去重。
-2. [ ] 指导保存后显示 revision 和“等待安全边界”，不得显示已应用。
-3. [ ] Revision Cycle 显示影响对象种类、数量和 durable state。
-4. [ ] Inquiry 只显示 selected question 安全摘要和 evidence state。
-5. [ ] Closure/Repair 显示 Checker finding、返工目标和复检结果。
-6. [ ] Longform 显示 outline、当前 section、累计字符和 recheck 状态。
-7. [ ] 插图卡显示 source text、状态、变体和受管 thumbnail；只有 ready 可打开。
-8. [ ] 文档/节点/文本选择提供“为此配图”“再生成一张”“多个变体”，走 Main 持久请求。
-9. [ ] 图谱动画只在 committed 后播放新增/修改/关系/stale。
-10. [ ] Showcase 分区为地图、世界风貌、故事场景、OC 卡与立绘、重要细节、关系图谱。
-11. [ ] 遵守 `prefers-reduced-motion`；动画只延迟权威事件。
-12. [ ] 覆盖 scope 切换、重载、失败/阻塞、100 项分页和局部图片失败。
+1. [x] 安全 event/Artifact/snapshot 纯投影测试，乱序/重复确定性去重。
+2. [x] 指导保存后显示 revision 和“等待安全边界”，不得显示已应用。
+3. [x] Revision Cycle 显示影响对象种类、数量和 durable state。
+4. [x] Inquiry 只显示 selected question 安全摘要和持久化事件来源。
+5. [x] Closure/Repair 显示 Checker finding、返工目标和复检结果。
+6. [x] Longform 显示故事标题、当前 section、累计字符和闭环复检状态。
+7. [x] 插图卡显示 source text、状态、变体和受管 thumbnail；只有 ready 可打开。
+8. [x] 正式对象、图谱节点和任意文本片段提供来源绑定配图、节点再生成和最多 100 个变体，走 Main 持久请求。
+9. [x] 图谱节点只投影 committed 数据，挂载动画不提前创造节点或状态。
+10. [x] Showcase 分区为地图、世界风貌、故事场景、OC 卡与立绘、重要细节、关系图谱。
+11. [x] 遵守 `prefers-reduced-motion`；动画只延迟权威事件。
+12. [x] 覆盖 scope 切换、重载、失败/阻塞、100 项分页和局部图片失败。
 
 ### 定向验收
 
 ```powershell
-npx --no-install vitest run --config vitest.config.ts tests/unit/growth-guidance-status.test.tsx tests/unit/growth-illustration-gallery.test.tsx tests/unit/growth-presentation.test.ts
+npx --no-install vitest run --config vitest.config.ts tests/unit/growth-presentation-projector.test.ts tests/unit/growth-illustration-coordinator.test.ts tests/unit/growth-illustration-plan.test.ts tests/unit/growth-repository.test.ts tests/unit/growth-coordinator.test.ts tests/unit/ipc-contract.test.ts tests/unit/semantic-graph-service.test.ts tests/unit/growth-guidance-ipc.test.ts tests/unit/growth-guidance-status.test.ts tests/unit/growth-illustration-gallery.test.ts tests/unit/growth-presentation.test.ts tests/unit/creative-showcase-grouping.test.ts
 npm run typecheck
 npm run build
 npx --no-install playwright test tests/e2e/growth-presentation-ui.spec.ts tests/e2e/creative-showcase.spec.ts --workers=1 --retries=0
 git diff --check
 ```
 
-- [ ] 中央摘要和右栏对象来自权威事件。
-- [ ] committed 前不显示完成；failed/stale 不伪装 ready。
-- [ ] 任意文本/节点配图入口走 Main。
-- [ ] 重载、scope、reduced motion、大列表通过。
-- [ ] Electron 残留为 0。
-- [ ] 提交：`feat(renderer): present revisable illustrated growth`。
+- [x] 中央摘要和右栏对象来自 Main 权威投影与持久化事件。
+- [x] committed 前不显示完成；failed/stale 不伪装 ready。
+- [x] 任意文本/节点配图入口走 Main；Renderer 不提供 scope/checkpoint/权限字段。
+- [x] 重载、scope、reduced motion、大列表通过。
+- [x] Electron 残留为 0。
+- [x] 提交：`3663d96 feat(growth): present source-bound illustrated progress`。
 
 **停止条件：** UI 所需状态只能通过猜测/内部日志获得，或内容读取要求扩大 Lens/权限。
 
-**完成证据：** Commit / Unit / Electron E2E / Remaining 待填。
+**完成证据：** Commit `3663d96`；定向 Vitest 12 files / 142 passed / 0 skipped；`npm run typecheck`、
+三组 Prompt publication、`npm run build`、`git diff --check` 通过；Electron E2E 2 files / 5 passed，
+残留进程 0。未使用真实 Provider；E2E 只证明受控 UI、真实 SQLite/IPC 投影与缺少 Provider 时失败关闭。
+真实多轮指导、Longform、图片与重开 Live 仍由阶段 6 唯一验收。
 
 ---
 
