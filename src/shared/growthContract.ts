@@ -5,7 +5,7 @@ const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const timestampSchema = z.iso.datetime({ offset: true });
 
 export const growthContractVersion = "1.0.0" as const;
-export const growthCapabilityVersion = "hackathon-growth-dynamic-v2" as const;
+export const growthCapabilityVersion = "hackathon-growth-inquiry-v3" as const;
 
 export const growthGoalStatusSchema = z.enum([
   "active", "completed", "blocked", "cancelled", "reconciliation_required",
@@ -328,6 +328,28 @@ export const growthInquiryQuestionCreateSchema = z.object({
   evidenceRanks: z.array(z.number().int().min(1).max(100_000)).max(100),
 }).strict().superRefine(refineInquiryQuestion);
 
+export const growthInquiryCloseReasonSchema = z.enum(["invalidated_by_evidence", "duplicate", "superseded"]);
+
+export const growthInquiryPriorTransitionSealSchema = z.discriminatedUnion("phase", [
+  z.object({
+    inquiryId: idSchema,
+    expectedSequence: z.number().int().min(1).max(1_000_000),
+    phase: z.literal("promoted"),
+    successorInquiryId: idSchema,
+  }).strict(),
+  z.object({
+    inquiryId: idSchema,
+    expectedSequence: z.number().int().min(1).max(1_000_000),
+    phase: z.literal("answered"),
+  }).strict(),
+  z.object({
+    inquiryId: idSchema,
+    expectedSequence: z.number().int().min(1).max(1_000_000),
+    phase: z.literal("closed"),
+    reason: growthInquiryCloseReasonSchema,
+  }).strict(),
+]);
+
 const refineInquiryBatchDecision = (value: {
   selectedInquiryId: string | null;
   creatorChoiceRequiredInquiryId: string | null;
@@ -358,8 +380,9 @@ const refineInquiryBatchDecision = (value: {
   }
   const frontier = selected ?? creatorChoice;
   const highestPriority = Math.max(...value.questions.map((question) => question.priority));
-  if (frontier && frontier.priority !== highestPriority) {
-    context.addIssue({ code: "custom", message: "The chosen Inquiry must have the highest priority." });
+  if (value.questions.filter((question) => question.priority === highestPriority).length !== 1
+    || (frontier && frontier.priority !== highestPriority)) {
+    context.addIssue({ code: "custom", message: "The chosen Inquiry must have the unique highest priority." });
   }
 };
 
@@ -370,9 +393,17 @@ export const growthInquiryBatchSealSchema = z.object({
   selectedInquiryId: idSchema.nullable(),
   creatorChoiceRequiredInquiryId: idSchema.nullable(),
   questions: z.array(growthInquiryQuestionCreateSchema).min(3).max(7),
+  priorTransitions: z.array(growthInquiryPriorTransitionSealSchema).max(100).optional(),
 }).strict().superRefine((value, context) => {
   uniqueValues(value.questions.map((question) => question.id), context, "questions");
   uniqueValues(value.questions.map((question) => question.fingerprint), context, "questions");
+  uniqueValues((value.priorTransitions ?? []).map((transition) => transition.inquiryId), context, "priorTransitions");
+  const inquiryIds = new Set(value.questions.map((question) => question.id));
+  for (const transition of value.priorTransitions ?? []) {
+    if (transition.phase === "promoted" && !inquiryIds.has(transition.successorInquiryId)) {
+      context.addIssue({ code: "custom", path: ["priorTransitions"], message: "Promoted Inquiry successor must belong to the sealed Batch." });
+    }
+  }
   refineInquiryBatchDecision(value, context);
 });
 
@@ -451,7 +482,6 @@ export const growthInquiryBatchSchema = z.discriminatedUnion("contractVersion", 
 export const growthInquiryLifecyclePhaseSchema = z.enum([
   "backlog", "selected", "creator_choice_required", "creator_answered", "promoted", "answered", "closed",
 ]);
-export const growthInquiryCloseReasonSchema = z.enum(["invalidated_by_evidence", "duplicate", "superseded"]);
 
 const inquiryLifecycleAppendShape = {
   inquiryId: idSchema,

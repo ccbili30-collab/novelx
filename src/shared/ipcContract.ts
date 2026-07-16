@@ -1251,7 +1251,7 @@ export const agentRunCancelRequestSchema = z.object({
   runId: z.string().min(1).max(120),
 }).strict();
 
-export const growthStrategySchema = z.literal("grow_world_story_oc_dynamic_v2");
+export const growthStrategySchema = z.literal("grow_world_story_oc_inquiry_v3");
 
 export const growthStartRequestSchema = z.object({
   requestId: z.uuid(),
@@ -1332,6 +1332,11 @@ export const growthInquiryPublicEventSchema = z.object({
   }
 });
 
+export const growthProjectedEventSchema = z.union([
+  growthPublicEventSchema,
+  growthInquiryPublicEventSchema,
+]);
+
 const growthPublicSnapshotSchema = z.object({
   capabilityVersion: z.literal(growthCapabilityVersion),
   strategy: growthStrategySchema,
@@ -1341,7 +1346,7 @@ const growthPublicSnapshotSchema = z.object({
   activeCycleRuleRevision: z.number().int().min(1).max(1_000_000).nullable().optional(),
   guidanceStatus: z.enum(["none", "persisted_pending_boundary"]).optional(),
   cycles: z.array(growthPublicCycleSchema).max(100),
-  events: z.array(growthPublicEventSchema).max(100),
+  events: z.array(growthProjectedEventSchema).max(100),
 }).strict();
 
 export const growthStartResponseSchema = growthPublicSnapshotSchema;
@@ -1363,7 +1368,7 @@ export const growthGuideResponseSchema = z.object({
 export const growthLiveEventSchema = z.object({
   sessionId: opaqueIdSchema,
   strategy: growthStrategySchema,
-  event: growthPublicEventSchema,
+  event: growthProjectedEventSchema,
 }).strict();
 
 export const publicErrorCodeSchema = z.enum([

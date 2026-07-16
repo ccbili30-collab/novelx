@@ -14,6 +14,7 @@ import {
   proposeChangeSetResultSchema,
   retrieveGraphEvidenceResultSchema,
   growthRetrieveGraphEvidenceResultSchema,
+  submitGrowthInquiryResultSchema,
   generateImageResultSchema,
   type AgentToolName,
   type AgentWorkerToolRequest,
@@ -32,6 +33,8 @@ import {
   type RetrieveGraphEvidenceResult,
   type GrowthRetrieveGraphEvidenceArgs,
   type GrowthRetrieveGraphEvidenceResult,
+  type SubmitGrowthInquiryArgs,
+  type SubmitGrowthInquiryResult,
   type GenerateImageArgs,
   type GenerateImageResult,
 } from "../../shared/agentWorkerProtocol";
@@ -71,6 +74,7 @@ export class AgentWorkerToolBridge {
     args: GrowthRetrieveGraphEvidenceArgs,
     signal?: AbortSignal,
   ): Promise<GrowthRetrieveGraphEvidenceResult>;
+  invoke(runId: string, tool: "submit_growth_inquiry", args: SubmitGrowthInquiryArgs, signal?: AbortSignal): Promise<SubmitGrowthInquiryResult>;
   invoke(
     runId: string,
     tool: "inspect_project_files",
@@ -94,9 +98,9 @@ export class AgentWorkerToolBridge {
   invoke(
     runId: string,
     tool: AgentToolName,
-    args: RetrieveGraphEvidenceArgs | GrowthRetrieveGraphEvidenceArgs | InspectProjectFilesArgs | ListProjectDirectoryArgs | StatProjectFileArgs | GlobProjectFilesArgs | SearchProjectFilesArgs | ReadProjectFileArgs | SaveTaskNoteArgs | ListTaskNotesArgs | ProposeChangeSetArgs | GenerateImageArgs,
+    args: RetrieveGraphEvidenceArgs | GrowthRetrieveGraphEvidenceArgs | SubmitGrowthInquiryArgs | InspectProjectFilesArgs | ListProjectDirectoryArgs | StatProjectFileArgs | GlobProjectFilesArgs | SearchProjectFilesArgs | ReadProjectFileArgs | SaveTaskNoteArgs | ListTaskNotesArgs | ProposeChangeSetArgs | GenerateImageArgs,
     signal?: AbortSignal,
-  ): Promise<RetrieveGraphEvidenceResult | GrowthRetrieveGraphEvidenceResult | InspectProjectFilesResult | ListProjectDirectoryResult | StatProjectFileResult | GlobProjectFilesResult | SearchProjectFilesResult | ReadProjectFileResult | SaveTaskNoteResult | ListTaskNotesResult | ProposeChangeSetResult | GenerateImageResult> {
+  ): Promise<RetrieveGraphEvidenceResult | GrowthRetrieveGraphEvidenceResult | SubmitGrowthInquiryResult | InspectProjectFilesResult | ListProjectDirectoryResult | StatProjectFileResult | GlobProjectFilesResult | SearchProjectFilesResult | ReadProjectFileResult | SaveTaskNoteResult | ListTaskNotesResult | ProposeChangeSetResult | GenerateImageResult> {
     if (signal?.aborted) return Promise.reject(toolBridgeError("AGENT_RUN_CANCELLED", "Agent run was cancelled."));
     const request = agentWorkerToolRequestSchema.parse({
       type: "tool.request",
@@ -152,6 +156,7 @@ export class AgentWorkerToolBridge {
       return true;
     }
     const resultSchema = response.tool === "retrieve_graph_evidence" ? z.union([retrieveGraphEvidenceResultSchema, growthRetrieveGraphEvidenceResultSchema])
+      : response.tool === "submit_growth_inquiry" ? submitGrowthInquiryResultSchema
       : response.tool === "inspect_project_files" ? inspectProjectFilesResultSchema
         : response.tool === "list_project_directory" ? listProjectDirectoryResultSchema
           : response.tool === "stat_project_file" ? statProjectFileResultSchema

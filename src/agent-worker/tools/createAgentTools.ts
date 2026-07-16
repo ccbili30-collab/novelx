@@ -1,6 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "../growth/growthWorldFragment";
+import { growthInquiryBriefParameters, growthInquiryBriefSchema } from "../growth/growthInquiryBrief";
 import {
   proposeChangeSetArgsSchema,
   proposeChangeSetResultSchema,
@@ -26,6 +27,7 @@ import {
   growthRetrieveGraphEvidenceResultSchema,
   generateImageArgsSchema,
   generateImageResultSchema,
+  submitGrowthInquiryResultSchema,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
   type InspectProjectFilesArgs,
@@ -51,6 +53,8 @@ import {
   type GrowthRunBinding,
   type GenerateImageArgs,
   type GenerateImageResult,
+  type SubmitGrowthInquiryArgs,
+  type SubmitGrowthInquiryResult,
 } from "../../shared/agentWorkerProtocol";
 
 const identifier = Type.String({ minLength: 1, maxLength: 240 });
@@ -275,6 +279,7 @@ export interface AgentToolExecutor {
   saveTaskNote(args: SaveTaskNoteArgs, signal?: AbortSignal): Promise<SaveTaskNoteResult>;
   listTaskNotes(args: ListTaskNotesArgs, signal?: AbortSignal): Promise<ListTaskNotesResult>;
   generateImage(args: GenerateImageArgs, signal?: AbortSignal): Promise<GenerateImageResult>;
+  submitGrowthInquiry?(args: SubmitGrowthInquiryArgs, signal?: AbortSignal): Promise<SubmitGrowthInquiryResult>;
   proposeChangeSet(args: ProposeChangeSetArgs, signal?: AbortSignal): Promise<ProposeChangeSetResult>;
 }
 
@@ -298,11 +303,34 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
           type: "text",
           text: JSON.stringify({
             result,
+            priorInquiries: options.growthBinding?.priorInquiries ?? [],
             novaxInstruction: options.growthBinding
-              ? options.growthBinding.kind === "expand" && options.growthBinding.focusKinds[0] === "world" && options.growthBinding.greenfieldCreateAuthorized
-                ? "The Growth Receipt is recorded. Empty evidence is expected for authorized Greenfield creation. Create from the locked seed and rules: the required next tool is propose_change_set with one high-level world Fragment. Do not block solely because retrieval is empty."
-                : "This pinned Growth receipt is recorded. Do not repeat the retrieval. If evidence is sufficient, call propose_change_set."
+              ? "This pinned Growth Receipt is recorded. Do not repeat retrieval. Submit exactly one 3-7 item Growth Inquiry Brief next. Cite only returned evidence IDs; use the trusted priorInquiries local IDs only for explicit allowlisted transitions."
               : "Do not repeat the same retrieval. If the user requested a Change Set and evidence is sufficient, call propose_change_set. If the evidence conflicts or the user requested validation, call checker. Otherwise submit the final structured result.",
+          }),
+        }],
+        details: result,
+      };
+    },
+  };
+
+  const submitInquiry: AgentTool<typeof growthInquiryBriefParameters> = {
+    name: "submit_growth_inquiry",
+    label: "提交证据化自询",
+    description: "Submit one authority-free 3-7 item Inquiry Brief after pinned retrieval. Ask about causal consequences and cross-node impact, not what extra setting can be added. Use only local IDs and returned evidence IDs. Do not submit Batch, Inquiry, Receipt, rank, checkpoint, scope, rule, fingerprint, or lifecycle authority fields.",
+    parameters: growthInquiryBriefParameters,
+    execute: async (_toolCallId, params, signal) => {
+      const args = growthInquiryBriefSchema.parse(params);
+      if (!executor.submitGrowthInquiry) throw Object.assign(new Error("Growth Inquiry executor is required."), { code: "GROWTH_INQUIRY_REQUIRED" });
+      const result = submitGrowthInquiryResultSchema.parse(await executor.submitGrowthInquiry(args, signal));
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            result,
+            novaxInstruction: result.status === "creator_choice_required"
+              ? "The Inquiry is durably blocked for a creator choice. Do not call Writer, propose_change_set, or generate_image. Submit a blocked final result using user_confirmation_required."
+              : "The selected Inquiry is durable. Continue with the one remaining trusted Growth content path; do not repeat retrieval or Inquiry submission.",
           }),
         }],
         details: result,
@@ -467,7 +495,7 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
     },
   };
 
-  return [retrieve, listDirectory, statFile, globFiles, searchFiles, readFile, saveNote, listNotes, inspectFiles, generateImage, propose];
+  return [retrieve, ...(options.growthBinding ? [submitInquiry] : []), listDirectory, statFile, globFiles, searchFiles, readFile, saveNote, listNotes, inspectFiles, generateImage, propose];
 }
 
 function fileToolResult<T>(result: T, novaxInstruction: string) {

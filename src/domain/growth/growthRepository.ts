@@ -64,6 +64,16 @@ import {
 
 type Row = Record<string, SQLOutputValue>;
 
+export interface GrowthPriorInquiryContext {
+  inquiryId: string;
+  question: string;
+  evidenceState: "known" | "conflicted" | "unknown";
+  safeSummary: string;
+  priority: number;
+  lifecycleSequence: number;
+  lifecyclePhase: "backlog" | "selected" | "creator_answered";
+}
+
 export class GrowthRepository {
   constructor(readonly workspace: WorkspaceDatabase) {}
 
@@ -324,6 +334,35 @@ export class GrowthRepository {
     }
   }
 
+  listUnresolvedInquiryContexts(goalId: string): GrowthPriorInquiryContext[] {
+    this.#requiredGoal(goalId);
+    const rows = this.workspace.db.prepare(`
+      SELECT inquiries.id, inquiries.question, inquiries.evidence_state, inquiries.safe_summary,
+        inquiries.priority, cycles.sequence AS cycle_sequence, inquiries.ordinal
+      FROM growth_inquiries inquiries
+      JOIN growth_inquiry_batches batches ON batches.id = inquiries.batch_id
+      JOIN growth_inquiry_batch_contracts contracts ON contracts.batch_id = batches.id
+      JOIN growth_cycles cycles ON cycles.id = batches.cycle_id
+      WHERE cycles.goal_id = ? AND contracts.contract_version = 'v25'
+      ORDER BY cycles.sequence, inquiries.ordinal
+    `).all(goalId) as Row[];
+    return rows.flatMap((row): GrowthPriorInquiryContext[] => {
+      const inquiryId = readString(row, "id");
+      const lifecycle = this.listInquiryLifecycle(inquiryId);
+      const last = lifecycle.at(-1);
+      if (!last || !["backlog", "selected", "creator_answered"].includes(last.phase)) return [];
+      return [{
+        inquiryId,
+        question: readString(row, "question"),
+        evidenceState: readString(row, "evidence_state") as GrowthPriorInquiryContext["evidenceState"],
+        safeSummary: readString(row, "safe_summary"),
+        priority: readNumber(row, "priority"),
+        lifecycleSequence: last.sequence,
+        lifecyclePhase: last.phase as GrowthPriorInquiryContext["lifecyclePhase"],
+      }];
+    });
+  }
+
   sealInquiryBatch(input: unknown): GrowthInquiryBatch {
     const value = growthInquiryBatchSealSchema.parse(input);
     const payloadHash = canonicalAuditHash(value);
@@ -355,6 +394,8 @@ export class GrowthRepository {
           `).get(receipt.id, rank)) throw growthError("GROWTH_INQUIRY_EVIDENCE_RANK_INVALID");
         }
       }
+      this.#assertInquiryNotStalled(cycle, receipt, value);
+      this.#assertInquiryNotDuplicate(cycle, receipt, value);
       const sealedAt = new Date().toISOString();
       const creatorChoiceBlocked = value.creatorChoiceRequiredInquiryId !== null;
       this.workspace.db.prepare(`
@@ -412,6 +453,57 @@ export class GrowthRepository {
         ) VALUES (?, 'v25', ?)
       `).run(value.id, value.creatorChoiceRequiredInquiryId);
 
+      for (const transition of value.priorTransitions ?? []) {
+        const context = this.#requiredInquiryContext(transition.inquiryId);
+        if (context.contractVersion !== "v25" || context.goalId !== cycle.goalId) {
+          throw growthError("GROWTH_INQUIRY_LIFECYCLE_SOURCE_INVALID");
+        }
+        const sourceCycle = this.#requiredCycle(context.cycleId);
+        if (sourceCycle.sequence >= cycle.sequence || sourceCycle.id === cycle.id
+          || context.receiptId === receipt.id || context.checkpointId === cycle.inputCheckpointId) {
+          throw growthError("GROWTH_INQUIRY_NEW_EVIDENCE_REQUIRED");
+        }
+        const lifecycle = this.listInquiryLifecycle(transition.inquiryId);
+        const last = lifecycle.at(-1);
+        if (!last || last.sequence !== transition.expectedSequence) {
+          throw growthError("GROWTH_INQUIRY_LIFECYCLE_CAS_MISMATCH");
+        }
+        if (["promoted", "answered", "closed"].includes(last.phase)) {
+          throw growthError("GROWTH_INQUIRY_LIFECYCLE_TERMINAL");
+        }
+        if (last.phase === "creator_choice_required") {
+          throw growthError("GROWTH_INQUIRY_CREATOR_ANSWER_REQUIRED");
+        }
+        const successorInquiryId = transition.phase === "promoted" ? transition.successorInquiryId : null;
+        if (successorInquiryId !== null) {
+          const successor = this.#requiredInquiryContext(successorInquiryId);
+          if (successor.contractVersion !== "v25" || successor.goalId !== cycle.goalId || successor.cycleId !== cycle.id) {
+            throw growthError("GROWTH_INQUIRY_SUCCESSOR_INVALID");
+          }
+        }
+        const transitionPayload = {
+          ...transition,
+          sourceCycleId: cycle.id,
+          sourceReceiptId: receipt.id,
+          sourceCheckpointId: cycle.inputCheckpointId,
+          sourceRuleRevision: cycle.ruleRevision,
+        };
+        const transitionKey = `growth-inquiry-transition:${canonicalAuditHash({
+          batchId: value.id,
+          inquiryId: transition.inquiryId,
+          phase: transition.phase,
+        })}`;
+        this.workspace.db.prepare(`
+          INSERT INTO growth_inquiry_lifecycle (
+            batch_id, inquiry_id, sequence, phase, idempotency_key, payload_hash,
+            source_cycle_id, source_receipt_id, source_checkpoint_id, source_rule_revision,
+            successor_inquiry_id, answer_rule_revision, close_reason, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        `).run(context.batchId, transition.inquiryId, last.sequence + 1, transition.phase, transitionKey,
+          canonicalAuditHash(transitionPayload), cycle.id, receipt.id, cycle.inputCheckpointId, cycle.ruleRevision,
+          successorInquiryId, transition.phase === "closed" ? transition.reason : null, sealedAt);
+      }
+
       const frontierInquiryId = value.creatorChoiceRequiredInquiryId ?? value.selectedInquiryId!;
       const frontier = value.questions.find((question) => question.id === frontierInquiryId);
       if (!frontier) throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
@@ -450,7 +542,20 @@ export class GrowthRepository {
       this.workspace.db.exec("COMMIT");
       return this.getInquiryBatch(value.id) ?? fail("GROWTH_DATA_INVALID");
     } catch (error) {
-      this.workspace.db.exec("ROLLBACK");
+      if (readErrorCode(error) === "GROWTH_INQUIRY_STALLED") {
+        const cycle = this.#requiredCycle(value.cycleId);
+        const now = new Date().toISOString();
+        this.workspace.db.prepare(`
+          UPDATE growth_cycles
+          SET status = 'blocked', failure_code = 'GROWTH_INQUIRY_STALLED', updated_at = ?, terminal_at = ?
+          WHERE id = ? AND status = 'running'
+        `).run(now, now, cycle.id);
+        this.workspace.db.prepare("UPDATE growth_goals SET status = 'blocked', updated_at = ? WHERE id = ?")
+          .run(now, cycle.goalId);
+        this.workspace.db.exec("COMMIT");
+      } else {
+        this.workspace.db.exec("ROLLBACK");
+      }
       throw error;
     }
   }
@@ -1454,6 +1559,127 @@ export class GrowthRepository {
     }
   }
 
+  #assertInquiryNotStalled(
+    cycle: GrowthCycle,
+    receipt: GrowthRetrievalReceipt,
+    value: ReturnType<typeof growthInquiryBatchSealSchema.parse>,
+  ): void {
+    if (cycle.sequence < 2) return;
+    const frontierId = value.selectedInquiryId ?? value.creatorChoiceRequiredInquiryId;
+    const frontier = value.questions.find((question) => question.id === frontierId);
+    if (!frontier) throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+    const prior = this.workspace.db.prepare(`
+      SELECT batches.id AS batch_id, batches.sealed_at, inquiries.id AS inquiry_id,
+        inquiries.fingerprint, inquiries.evidence_state
+      FROM growth_cycles cycles
+      JOIN growth_inquiry_batches batches ON batches.cycle_id = cycles.id
+      JOIN growth_inquiry_batch_contracts contracts ON contracts.batch_id = batches.id
+      JOIN growth_inquiries inquiries ON inquiries.id = batches.selected_inquiry_id
+      WHERE cycles.goal_id = ? AND cycles.sequence = ?
+        AND contracts.contract_version = 'v25' AND batches.status = 'sealed'
+    `).get(cycle.goalId, cycle.sequence - 1) as Row | undefined;
+    if (!prior || readString(prior, "fingerprint") !== frontier.fingerprint
+      || readString(prior, "evidence_state") !== frontier.evidenceState) return;
+    const priorEvidence = (this.workspace.db.prepare(`
+      SELECT evidence.rank, links.target_kind, links.target_id, links.target_version_id
+      FROM growth_inquiry_evidence_links evidence
+      JOIN growth_retrieval_receipt_links links
+        ON links.receipt_id = evidence.receipt_id AND links.rank = evidence.rank
+      WHERE evidence.batch_id = ? AND evidence.inquiry_id = ?
+      ORDER BY evidence.rank
+    `).all(readString(prior, "batch_id"), readString(prior, "inquiry_id")) as Row[]).map((row) => ({
+      rank: readNumber(row, "rank"),
+      targetKind: readString(row, "target_kind"),
+      targetId: readString(row, "target_id"),
+      targetVersionId: readNullableString(row, "target_version_id"),
+    }));
+    const receiptLinks = new Map(receipt.links.map((link) => [link.rank, link]));
+    const currentEvidence = [...frontier.evidenceRanks].sort((left, right) => left - right).map((rank) => {
+      const link = receiptLinks.get(rank);
+      if (!link) throw growthError("GROWTH_INQUIRY_EVIDENCE_RANK_INVALID");
+      return { rank, targetKind: link.targetKind, targetId: link.targetId, targetVersionId: link.targetVersionId };
+    });
+    if (canonicalAuditHash(priorEvidence) !== canonicalAuditHash(currentEvidence)) return;
+    const priorClosure = this.#closureFacetEvidenceSignature(cycle.goalId, readString(prior, "sealed_at"));
+    const currentClosure = this.#closureFacetEvidenceSignature(cycle.goalId, new Date().toISOString());
+    if (priorClosure === currentClosure) throw growthError("GROWTH_INQUIRY_STALLED");
+  }
+
+  #assertInquiryNotDuplicate(
+    cycle: GrowthCycle,
+    receipt: GrowthRetrievalReceipt,
+    value: ReturnType<typeof growthInquiryBatchSealSchema.parse>,
+  ): void {
+    if (cycle.sequence < 2) return;
+    const existing = this.workspace.db.prepare(`
+      SELECT inquiries.batch_id, inquiries.id AS inquiry_id, inquiries.fingerprint, cycles.sequence, lifecycle.phase
+      FROM growth_inquiries inquiries
+      JOIN growth_inquiry_batches batches ON batches.id = inquiries.batch_id
+      JOIN growth_inquiry_batch_contracts contracts ON contracts.batch_id = batches.id
+      JOIN growth_cycles cycles ON cycles.id = batches.cycle_id
+      JOIN growth_inquiry_lifecycle lifecycle ON lifecycle.inquiry_id = inquiries.id
+      WHERE cycles.goal_id = ? AND cycles.id <> ? AND contracts.contract_version = 'v25'
+        AND lifecycle.sequence = (
+          SELECT MAX(candidate.sequence) FROM growth_inquiry_lifecycle candidate
+          WHERE candidate.inquiry_id = inquiries.id
+        )
+        AND (cycles.sequence = ? OR lifecycle.phase IN ('backlog', 'selected', 'creator_answered'))
+    `).all(cycle.goalId, cycle.id, cycle.sequence - 1) as Row[];
+    const receiptLinks = new Map(receipt.links.map((link) => [link.rank, link]));
+    const duplicated = value.questions.some((question) => {
+      const currentIdentity = [...question.evidenceRanks].sort((left, right) => left - right).map((rank) => {
+        const link = receiptLinks.get(rank);
+        if (!link) throw growthError("GROWTH_INQUIRY_EVIDENCE_RANK_INVALID");
+        return { rank, targetKind: link.targetKind, targetId: link.targetId, targetVersionId: link.targetVersionId };
+      });
+      return existing.some((row) => {
+        if (readString(row, "fingerprint") !== question.fingerprint) return false;
+        const priorIdentity = (this.workspace.db.prepare(`
+          SELECT evidence.rank, links.target_kind, links.target_id, links.target_version_id
+          FROM growth_inquiry_evidence_links evidence
+          JOIN growth_retrieval_receipt_links links
+            ON links.receipt_id = evidence.receipt_id AND links.rank = evidence.rank
+          WHERE evidence.batch_id = ? AND evidence.inquiry_id = ?
+          ORDER BY evidence.rank
+        `).all(readString(row, "batch_id"), readString(row, "inquiry_id")) as Row[]).map((linkRow) => ({
+          rank: readNumber(linkRow, "rank"),
+          targetKind: readString(linkRow, "target_kind"),
+          targetId: readString(linkRow, "target_id"),
+          targetVersionId: readNullableString(linkRow, "target_version_id"),
+        }));
+        return canonicalAuditHash(priorIdentity) === canonicalAuditHash(currentIdentity);
+      });
+    });
+    if (duplicated) {
+      throw growthError("GROWTH_INQUIRY_DUPLICATE");
+    }
+  }
+
+  #closureFacetEvidenceSignature(goalId: string, cutoff: string): string {
+    const facets = this.workspace.db.prepare(`
+      SELECT profiles.id AS profile_id, revisions.revision, revisions.epoch,
+        revisions.checkpoint_id, revisions.rule_revision, facets.facet_id,
+        facets.facet_kind, facets.required, facets.ordinal
+      FROM growth_closure_profiles profiles
+      JOIN growth_closure_profile_revisions revisions ON revisions.profile_id = profiles.id
+      JOIN growth_closure_facets facets
+        ON facets.profile_id = revisions.profile_id AND facets.revision = revisions.revision
+      WHERE profiles.goal_id = ? AND revisions.created_at <= ?
+      ORDER BY profiles.id, revisions.revision, facets.ordinal
+    `).all(goalId, cutoff) as Row[];
+    const findings = this.workspace.db.prepare(`
+      SELECT profiles.id AS profile_id, reviews.revision, reviews.id AS review_id,
+        reviews.checker_decision, findings.facet_id, findings.state,
+        findings.receipt_id, findings.rank, findings.ordinal
+      FROM growth_closure_profiles profiles
+      JOIN growth_closure_reviews reviews ON reviews.profile_id = profiles.id
+      LEFT JOIN growth_closure_review_findings findings ON findings.review_id = reviews.id
+      WHERE profiles.goal_id = ? AND reviews.created_at <= ?
+      ORDER BY profiles.id, reviews.revision, reviews.created_at, reviews.id, findings.ordinal
+    `).all(goalId, cutoff) as Row[];
+    return canonicalAuditHash({ facets, findings });
+  }
+
   #requiredInquiryContext(inquiryId: string): {
     batchId: string;
     cycleId: string;
@@ -1915,6 +2141,12 @@ function deriveIllustrationAggregateStatus(statuses: readonly string[]): "planne
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function readErrorCode(value: unknown): string | null {
+  return value && typeof value === "object" && "code" in value && typeof value.code === "string"
+    ? value.code
+    : null;
 }
 
 function receiptOutput(value: GrowthRetrievalReceiptCreate, createdAt: string): GrowthRetrievalReceipt {

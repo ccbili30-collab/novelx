@@ -157,7 +157,7 @@ export function resolveLongReadMaxChars(contextWindow: number): number {
 
 function attachPublicTrace(
   cause: unknown,
-  executions: Array<{ tool: "retrieve_graph_evidence" | "inspect_project_files" | "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "save_task_note" | "list_task_notes" | "generate_image" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
+  executions: Array<{ tool: "retrieve_graph_evidence" | "submit_growth_inquiry" | "inspect_project_files" | "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "save_task_note" | "list_task_notes" | "generate_image" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
 ): unknown {
   if (!cause || typeof cause !== "object") return cause;
   return Object.assign(cause, { publicToolOutcomes: executions.map((execution) => ({ ...execution })) });

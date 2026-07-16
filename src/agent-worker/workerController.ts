@@ -90,7 +90,7 @@ export async function handleAgentWorkerCommand(
         if (projected.type === "text.delta") return;
         if ([
           "retrieve_graph_evidence", "inspect_project_files", "list_project_directory", "stat_project_file",
-          "glob_project_files", "search_project_files", "read_project_file", "save_task_note", "list_task_notes", "generate_image", "propose_change_set",
+          "submit_growth_inquiry", "glob_project_files", "search_project_files", "read_project_file", "save_task_note", "list_task_notes", "generate_image", "propose_change_set",
         ].includes(projected.tool)) return;
         emit({
           type: "run.activity",

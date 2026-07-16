@@ -566,7 +566,7 @@ function growthRequest(setup: ReturnType<typeof createSetup>, overrides: Partial
 }> = {}) {
   return {
     requestId: "11111111-1111-4111-8111-111111111111", projectId: setup.projectId, sessionId: setup.sessionId,
-    seed: { kind: "text" as const, text: "A user seed." }, initialRuleText: "Keep sources.", strategy: "grow_world_story_oc_dynamic_v2" as const,
+    seed: { kind: "text" as const, text: "A user seed." }, initialRuleText: "Keep sources.", strategy: "grow_world_story_oc_inquiry_v3" as const,
     ...overrides,
   };
 }
@@ -598,6 +598,34 @@ async function commitCycleWithoutRunTerminal(workspace: WorkspaceDatabase, worke
     expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
   } });
   await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+  const retrievalResponse = worker.sent[1] as {
+    ok: true;
+    result: { evidence: Array<{ evidenceId: string }> };
+  };
+  const evidenceIds = retrievalResponse.result.evidence.map((evidence) => evidence.evidenceId);
+  const evidenceState = evidenceIds.length > 0 ? "known" as const : "unknown" as const;
+  worker.receive({
+    type: "tool.request",
+    runId: id,
+    requestId: randomUUID(),
+    tool: "submit_growth_inquiry",
+    args: {
+      inquiries: [3, 2, 1].map((priority, index) => ({
+        localId: `question_${index + 1}`,
+        question: `Which ${focus} consequence should cycle ${command.growthBinding.cycleId} pursue at priority ${priority}?`,
+        evidenceIds,
+        evidenceState,
+        safeSummary: `Evaluating ${focus} consequence ${index + 1}.`,
+        proposedAction: `Apply bounded ${focus} consequence ${index + 1}.`,
+        provisionalAssumption: evidenceState === "unknown" ? `Assume bounded ${focus} continuity.` : null,
+        priority,
+        requiresCreatorChoice: false,
+      })),
+      selectedLocalId: "question_1",
+      priorTransitions: [],
+    },
+  });
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(3));
   const roots = new ResourceRepository(workspace).listCurrent().filter((resource) => resource.objectKind === "domain_root");
   const scopeId = roots.find((resource) => resource.type === focus)!.id;
   const items = focus === "world"
@@ -629,7 +657,7 @@ async function commitCycleWithoutRunTerminal(workspace: WorkspaceDatabase, worke
   worker.receive({ type: "tool.request", runId: id, requestId: randomUUID(), tool: "propose_change_set", args: {
     summary: "Growth change", items,
   } });
-  await vi.waitFor(() => expect(worker.sent).toHaveLength(3));
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(4));
 }
 
 function runId(worker: FakeWorker): string {
@@ -646,7 +674,7 @@ function beginStewardInvocation(workspace: WorkspaceDatabase, runId: string): vo
     agentProfileId: "novax.steward", agentProfileVersion: "1.12.0", agentProfileSha256: hash,
     providerId: "provider", requestedModelId: "model", providerConfigSha256: hash,
     toolPolicyId: "novax.steward.tools", toolPolicyVersion: "1.0.0", toolPolicySha256: hash,
-    authorizedTools: ["retrieve_graph_evidence", "propose_change_set"], handoffContractId: null,
+    authorizedTools: ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"], handoffContractId: null,
     handoffVersion: null, handoffPayloadSha256: null, inputSha256: hash,
   });
 }

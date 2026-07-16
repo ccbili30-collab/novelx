@@ -14,6 +14,7 @@ describe("Agent Worker tool bridge", () => {
         args as RetrieveGraphEvidenceArgs,
         signal,
       ),
+      submitGrowthInquiry: (args, signal) => bridge.invoke("run-1", "submit_growth_inquiry", args, signal),
       inspectProjectFiles: (args, signal) => bridge.invoke(
         "run-1",
         "inspect_project_files",
@@ -37,12 +38,13 @@ describe("Agent Worker tool bridge", () => {
     }, {
       growthBinding: {
         capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], inputCheckpointId: "checkpoint-1",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [],
       },
     });
 
     expect(tools.map((tool) => tool.name)).toEqual([
       "retrieve_graph_evidence",
+      "submit_growth_inquiry",
       "list_project_directory",
       "stat_project_file",
       "glob_project_files",
@@ -97,6 +99,32 @@ describe("Agent Worker tool bridge", () => {
       },
     })).toBe(true);
     await expect(resultPromise).rejects.toMatchObject({ code: "AGENT_TOOL_PROTOCOL_FAILED" });
+  });
+
+  it("correlates a Growth Inquiry without exposing trusted identities", async () => {
+    let sent: AgentWorkerToolRequest | undefined;
+    const bridge = new AgentWorkerToolBridge((request) => { sent = request; return true; });
+    const pending = bridge.invoke("run-inquiry", "submit_growth_inquiry", {
+      inquiries: [3, 2, 1].map((priority, index) => ({
+        localId: `question_${index + 1}`,
+        question: `What follows at priority ${priority}?`,
+        evidenceIds: ["evidence-1"],
+        evidenceState: "known" as const,
+        safeSummary: `Evaluating consequence ${index + 1}.`,
+        proposedAction: `Apply consequence ${index + 1}.`,
+        provisionalAssumption: null,
+        priority,
+        requiresCreatorChoice: false,
+      })),
+      selectedLocalId: "question_1",
+      priorTransitions: [],
+    });
+    expect(sent).toMatchObject({ runId: "run-inquiry", tool: "submit_growth_inquiry" });
+    expect(bridge.handleResponse({
+      type: "tool.response", runId: "run-inquiry", requestId: sent!.requestId, ok: true,
+      tool: "submit_growth_inquiry", result: { status: "selected", safeSummary: "正在推演。" },
+    })).toBe(true);
+    await expect(pending).resolves.toEqual({ status: "selected", safeSummary: "正在推演。" });
   });
 
   it("cleans up pending calls on cancellation and timeout", async () => {

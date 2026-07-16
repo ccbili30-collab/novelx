@@ -23,8 +23,8 @@ const cycleTwo = "cycle-2";
 
 function snapshot(overrides: Partial<GrowthStartResponse> = {}): GrowthStartResponse {
   return {
-    capabilityVersion: "hackathon-growth-dynamic-v2",
-    strategy: "grow_world_story_oc_dynamic_v2",
+    capabilityVersion: "hackathon-growth-inquiry-v3",
+    strategy: "grow_world_story_oc_inquiry_v3",
     coordinatorStatus: "running",
     goal: { id: goalId, status: "active", currentCycleSequence: 1 },
     cycles: [
@@ -34,7 +34,7 @@ function snapshot(overrides: Partial<GrowthStartResponse> = {}): GrowthStartResp
     ],
     events: [event({ cycleId: cycleOne, sequence: 1, phase: "run_attached", durableState: "running", runId: "run-1" })],
     ...overrides,
-  };
+  } as GrowthStartResponse;
 }
 
 function event(overrides: Partial<GrowthStartResponse["events"][number]> = {}): GrowthStartResponse["events"][number] {
@@ -51,7 +51,7 @@ function event(overrides: Partial<GrowthStartResponse["events"][number]> = {}): 
     targetVersionId: null,
     contentRef: null,
     ...overrides,
-  };
+  } as GrowthStartResponse["events"][number];
 }
 
 function worldMapArtifact(
@@ -221,6 +221,31 @@ describe("growth presentation", () => {
     expect(planned.rows[0]?.summary).not.toBe("已提交");
     expect(receipt.rows[0]?.summary).not.toBe("已提交");
     expect(receipt.rows[0]?.durableState).toBe("running");
+  });
+
+  it("renders Inquiry phases from safeSummary without projecting hidden reasoning fields", async () => {
+    const { createGrowthPresentation, growthEventSummary } = await presentation();
+    const selected = event({
+      phase: "inquiry_selected", durableState: "running", targetKind: "inquiry", targetId: "inquiry-1",
+      safeSummary: "港口制度可能改变航线。", contentRef: null,
+    });
+    const choice = event({
+      sequence: 3, phase: "creator_choice_required", durableState: "blocked", targetKind: "inquiry", targetId: "inquiry-2",
+      safeSummary: "是否保留港口自治需要你的决定。", contentRef: null,
+    });
+    const state = createGrowthPresentation(snapshot({
+      coordinatorStatus: "blocked",
+      goal: { id: goalId, status: "blocked", currentCycleSequence: 1 },
+      cycles: [{ id: cycleOne, sequence: 1, runId: "run-1", status: "blocked" }],
+      events: [selected, choice],
+    }));
+
+    expect(growthEventSummary(selected)).toBe("正在推演：港口制度可能改变航线。");
+    expect(growthEventSummary(choice)).toBe("需要你的取舍：是否保留港口自治需要你的决定。");
+    expect(state.rows[0]?.summary).toBe("需要你的取舍：是否保留港口自治需要你的决定。");
+    expect(JSON.stringify(state)).not.toContain("proposedAction");
+    expect(JSON.stringify(state)).not.toContain("provisionalAssumption");
+    expect(JSON.stringify(state)).not.toContain("fingerprint");
   });
 
   it("binds a Run immediately from an authoritative run_attached event before the cycle snapshot refreshes", async () => {

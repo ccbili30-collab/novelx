@@ -8,6 +8,16 @@ const requestIdSchema = z.string().uuid();
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const jsonValueSchema = z.json();
 const jsonObjectSchema = z.record(z.string().min(1).max(240), jsonValueSchema);
+const localInquiryIdSchema = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
+
+export const growthPriorInquiryContextSchema = z.object({
+  localId: localInquiryIdSchema,
+  question: z.string().trim().min(1).max(2_000),
+  evidenceState: z.enum(["known", "conflicted", "unknown"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  priority: z.number().finite().min(0).max(1_000_000),
+  lifecyclePhase: z.enum(["backlog", "selected", "creator_answered"]),
+}).strict();
 
 export const retrieveGraphEvidenceArgsSchema = z.object({
   scopeResourceIds: z.array(identifierSchema).min(1).max(100),
@@ -26,6 +36,7 @@ export const growthRunBindingSchema = z.object({
   seedResourceIds: z.array(identifierSchema).max(100),
   domainRootResourceIds: z.object({ world: identifierSchema, oc: identifierSchema, story: identifierSchema }).strict(),
   greenfieldCreateAuthorized: z.boolean(),
+  priorInquiries: z.array(growthPriorInquiryContextSchema).max(100),
 }).strict().superRefine((value, context) => {
   if (new Set(value.authorizedScopeResourceIds).size !== value.authorizedScopeResourceIds.length) {
     context.addIssue({ code: "custom", path: ["authorizedScopeResourceIds"], message: "Growth binding scopes must be unique." });
@@ -36,11 +47,47 @@ export const growthRunBindingSchema = z.object({
   if (new Set(value.focusKinds).size !== value.focusKinds.length || new Set(value.resumeFrontier).size !== value.resumeFrontier.length) {
     context.addIssue({ code: "custom", path: ["focusKinds"], message: "Growth intent kinds must be unique." });
   }
+  if (new Set(value.priorInquiries.map((inquiry) => inquiry.localId)).size !== value.priorInquiries.length) {
+    context.addIssue({ code: "custom", path: ["priorInquiries"], message: "Prior Inquiry local IDs must be unique." });
+  }
   const roots = Object.values(value.domainRootResourceIds);
   if (new Set(roots).size !== roots.length || roots.some((root) => !value.authorizedScopeResourceIds.includes(root))) {
     context.addIssue({ code: "custom", path: ["domainRootResourceIds"], message: "Growth domain roots must be unique authorized scopes." });
   }
 });
+
+const submitGrowthInquiryQuestionSchema = z.object({
+  localId: localInquiryIdSchema,
+  question: z.string().trim().min(1).max(2_000),
+  evidenceIds: z.array(identifierSchema).max(100),
+  evidenceState: z.enum(["known", "conflicted", "unknown"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  proposedAction: z.string().trim().min(1).max(2_000),
+  provisionalAssumption: z.string().trim().min(1).max(2_000).nullable(),
+  priority: z.number().finite().min(0).max(1_000_000),
+  requiresCreatorChoice: z.boolean(),
+}).strict();
+
+const submitGrowthInquiryPriorTransitionSchema = z.discriminatedUnion("phase", [
+  z.object({ priorLocalId: localInquiryIdSchema, phase: z.literal("promoted"), successorLocalId: localInquiryIdSchema }).strict(),
+  z.object({ priorLocalId: localInquiryIdSchema, phase: z.literal("answered") }).strict(),
+  z.object({
+    priorLocalId: localInquiryIdSchema,
+    phase: z.literal("closed"),
+    reason: z.enum(["invalidated_by_evidence", "duplicate", "superseded"]),
+  }).strict(),
+]);
+
+export const submitGrowthInquiryArgsSchema = z.object({
+  inquiries: z.array(submitGrowthInquiryQuestionSchema).min(3).max(7),
+  selectedLocalId: localInquiryIdSchema.nullable(),
+  priorTransitions: z.array(submitGrowthInquiryPriorTransitionSchema).max(100),
+}).strict();
+
+export const submitGrowthInquiryResultSchema = z.object({
+  status: z.enum(["selected", "creator_choice_required"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+}).strict();
 
 export const growthRetrieveGraphEvidenceArgsSchema = z.object({
   variant: z.literal("growth_v1"),
@@ -631,6 +678,7 @@ export const generateImageResultSchema = z.object({
 
 export const agentToolNameSchema = z.enum([
   "retrieve_graph_evidence",
+  "submit_growth_inquiry",
   "list_project_directory",
   "stat_project_file",
   "glob_project_files",
@@ -711,6 +759,13 @@ export const agentWorkerToolRequestSchema = z.discriminatedUnion("tool", [
     type: z.literal("tool.request"),
     runId: z.string().min(1).max(120),
     requestId: requestIdSchema,
+    tool: z.literal("submit_growth_inquiry"),
+    args: submitGrowthInquiryArgsSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("tool.request"),
+    runId: z.string().min(1).max(120),
+    requestId: requestIdSchema,
     tool: z.literal("inspect_project_files"),
     args: inspectProjectFilesArgsSchema,
   }).strict(),
@@ -762,6 +817,9 @@ export const agentToolInternalErrorCodeSchema = z.enum([
   "GROWTH_RETRIEVAL_INPUT_INVALID",
   "GROWTH_PERSISTENCE_FAILED",
   "GROWTH_RETRIEVAL_REQUIRED",
+  "GROWTH_INQUIRY_REQUIRED",
+  "GROWTH_INQUIRY_INVALID",
+  "GROWTH_INQUIRY_STALLED",
   "GROWTH_RECONCILIATION_REQUIRED",
   "GROWTH_RUN_FAILED",
   "GREENFIELD_CREATE_EXPLICIT_FREE_REQUIRED",
@@ -819,6 +877,14 @@ const agentWorkerToolSuccessResponseSchema = z.discriminatedUnion("tool", [
     ok: z.literal(true),
     tool: z.literal("retrieve_graph_evidence"),
     result: z.union([retrieveGraphEvidenceResultSchema, growthRetrieveGraphEvidenceResultSchema]),
+  }).strict(),
+  z.object({
+    type: z.literal("tool.response"),
+    runId: z.string().min(1).max(120),
+    requestId: requestIdSchema,
+    ok: z.literal(true),
+    tool: z.literal("submit_growth_inquiry"),
+    result: submitGrowthInquiryResultSchema,
   }).strict(),
   z.object({
     type: z.literal("tool.response"),
@@ -1003,6 +1069,8 @@ export type RetrieveGraphEvidenceResult = z.infer<typeof retrieveGraphEvidenceRe
 export type GrowthRunBinding = z.infer<typeof growthRunBindingSchema>;
 export type GrowthRetrieveGraphEvidenceArgs = z.infer<typeof growthRetrieveGraphEvidenceArgsSchema>;
 export type GrowthRetrieveGraphEvidenceResult = z.infer<typeof growthRetrieveGraphEvidenceResultSchema>;
+export type SubmitGrowthInquiryArgs = z.infer<typeof submitGrowthInquiryArgsSchema>;
+export type SubmitGrowthInquiryResult = z.infer<typeof submitGrowthInquiryResultSchema>;
 export type GrowthIllustrationPlan = z.infer<typeof growthIllustrationPlanSchema>;
 export type AgentRetrieveGraphEvidenceArgs = z.infer<typeof agentRetrieveGraphEvidenceArgsSchema>;
 export type InspectProjectFilesArgs = z.infer<typeof inspectProjectFilesArgsSchema>;

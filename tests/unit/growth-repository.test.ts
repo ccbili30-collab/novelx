@@ -578,6 +578,157 @@ describe("GrowthRepository", () => {
     })).toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_LIFECYCLE_TERMINAL" }));
   });
 
+  it("seals explicit prior Inquiry transitions in the same transaction as the successor batch", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
+    repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [receiptLink(setup)] }));
+    repository.sealInquiryBatch(inquiryBatchInput(cycle.id));
+    const changeSet = committedChangeSet(setup.workspace, "atomic-inquiry-output", "atomic inquiry output");
+    const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: changeSet.id });
+    const nextCycle = repository.beginCycle({
+      id: "cycle-atomic", goalId: goal.id, idempotencyKey: "cycle-atomic-key", inputCheckpointId: committed.outputCheckpointId,
+      ruleRevision: 1, intent: cycleIntent(),
+    });
+    const nextRun = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
+    repository.attachRun({ cycleId: nextCycle.id, runId: nextRun.runId });
+    repository.recordReceipt(receiptInput(setup, nextCycle.id, nextRun, {
+      id: "receipt-atomic", checkpointId: committed.outputCheckpointId, links: [receiptLink(setup)],
+    }));
+    const nextInput = {
+      ...inquiryBatchInput(nextCycle.id, "-atomic"),
+      priorTransitions: [
+        { inquiryId: "question-1", expectedSequence: 1, phase: "answered" as const },
+        { inquiryId: "question-2", expectedSequence: 1, phase: "promoted" as const, successorInquiryId: "question-atomic-1" },
+        { inquiryId: "question-3", expectedSequence: 1, phase: "closed" as const, reason: "superseded" as const },
+      ],
+    };
+    setup.workspace.db.exec(`
+      CREATE TRIGGER reject_atomic_inquiry_event_source
+      BEFORE INSERT ON growth_inquiry_event_sources
+      BEGIN SELECT RAISE(ABORT, 'forced atomic Inquiry failure'); END;
+    `);
+
+    expect(() => repository.sealInquiryBatch(nextInput)).toThrow("forced atomic Inquiry failure");
+    expect(repository.getInquiryBatch(nextInput.id)).toBeNull();
+    for (const inquiryId of ["question-1", "question-2", "question-3"]) {
+      expect(repository.listInquiryLifecycle(inquiryId)).toHaveLength(1);
+    }
+
+    setup.workspace.db.exec("DROP TRIGGER reject_atomic_inquiry_event_source");
+    expect(repository.sealInquiryBatch(nextInput)).toMatchObject({ id: nextInput.id, selectedInquiryId: "question-atomic-1" });
+    expect(repository.listInquiryLifecycle("question-1").map((entry) => entry.phase)).toEqual(["selected", "answered"]);
+    expect(repository.listInquiryLifecycle("question-2")).toMatchObject([
+      { phase: "backlog" },
+      { phase: "promoted", successorInquiryId: "question-atomic-1", sourceCycleId: nextCycle.id },
+    ]);
+    expect(repository.listInquiryLifecycle("question-3")).toMatchObject([
+      { phase: "backlog" },
+      { phase: "closed", closeReason: "superseded", sourceCycleId: nextCycle.id },
+    ]);
+  });
+
+  it("blocks a consecutive identical Inquiry frontier only when evidence and closure signatures are unchanged", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
+    repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [receiptLink(setup)] }));
+    repository.sealInquiryBatch(inquiryBatchInput(cycle.id));
+    const changeSet = committedChangeSet(setup.workspace, "stalled-inquiry-output", "stalled inquiry output");
+    const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: changeSet.id });
+    const nextCycle = repository.beginCycle({
+      id: "cycle-stalled", goalId: goal.id, idempotencyKey: "cycle-stalled-key", inputCheckpointId: committed.outputCheckpointId,
+      ruleRevision: 1, intent: cycleIntent(),
+    });
+    const nextRun = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
+    repository.attachRun({ cycleId: nextCycle.id, runId: nextRun.runId });
+    repository.recordReceipt(receiptInput(setup, nextCycle.id, nextRun, {
+      id: "receipt-stalled", checkpointId: committed.outputCheckpointId, links: [receiptLink(setup)],
+    }));
+    const candidate = inquiryBatchInput(nextCycle.id, "-stalled");
+    const identical = {
+      ...candidate,
+      questions: candidate.questions.map((question, index) => index === 0
+        ? { ...question, fingerprint: "1".repeat(64) }
+        : question),
+    };
+
+    expect(() => repository.sealInquiryBatch(identical))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_STALLED" }));
+    expect(repository.getInquiryBatch(identical.id)).toBeNull();
+    expect(repository.getCycle(nextCycle.id)).toMatchObject({ status: "blocked", failureCode: "GROWTH_INQUIRY_STALLED" });
+    expect(repository.getGoal(goal.id)).toMatchObject({ status: "blocked" });
+  });
+
+  it("rejects another unresolved or immediately prior fingerprint after the stalled frontier check", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
+    repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [receiptLink(setup)] }));
+    repository.sealInquiryBatch(inquiryBatchInput(cycle.id));
+    const changeSet = committedChangeSet(setup.workspace, "duplicate-inquiry-output", "duplicate inquiry output");
+    const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: changeSet.id });
+    const nextCycle = repository.beginCycle({
+      id: "cycle-duplicate", goalId: goal.id, idempotencyKey: "cycle-duplicate-key", inputCheckpointId: committed.outputCheckpointId,
+      ruleRevision: 1, intent: cycleIntent(),
+    });
+    const nextRun = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
+    repository.attachRun({ cycleId: nextCycle.id, runId: nextRun.runId });
+    repository.recordReceipt(receiptInput(setup, nextCycle.id, nextRun, {
+      id: "receipt-duplicate", checkpointId: committed.outputCheckpointId, links: [receiptLink(setup)],
+    }));
+    const candidate = inquiryBatchInput(nextCycle.id, "-duplicate");
+    const duplicatedBacklog = {
+      ...candidate,
+      questions: candidate.questions.map((question, index) => index === 1
+        ? { ...question, fingerprint: "2".repeat(64) }
+        : question),
+    };
+
+    expect(() => repository.sealInquiryBatch(duplicatedBacklog))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_DUPLICATE" }));
+    expect(repository.getInquiryBatch(duplicatedBacklog.id)).toBeNull();
+    expect(repository.getCycle(nextCycle.id)).toMatchObject({ status: "running", failureCode: null });
+  });
+
+  it("does not treat the same local rank as duplicate or stalled when the new Receipt resolves to another target", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
+    repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [receiptLink(setup)] }));
+    repository.sealInquiryBatch(inquiryBatchInput(cycle.id));
+    const changeSet = committedChangeSet(setup.workspace, "different-rank-target", "different rank target");
+    const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: changeSet.id });
+    const other = new ResourceRepository(setup.workspace).putRevisionWithReceipt({
+      resourceId: "world.other", create: true, checkpointId: committed.outputCheckpointId!, type: "world", objectKind: "world",
+      title: "Other world", parentId: setup.scopeId, state: "active", sortOrder: 1,
+    });
+    const nextCycle = repository.beginCycle({
+      id: "cycle-other-target", goalId: goal.id, idempotencyKey: "cycle-other-target-key", inputCheckpointId: committed.outputCheckpointId,
+      ruleRevision: 1, intent: cycleIntent(),
+    });
+    const nextRun = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
+    repository.attachRun({ cycleId: nextCycle.id, runId: nextRun.runId });
+    repository.recordReceipt(receiptInput(setup, nextCycle.id, nextRun, {
+      id: "receipt-other-target", checkpointId: committed.outputCheckpointId,
+      links: [{
+        ...receiptLink(setup), rank: 1, targetId: "world.other", targetVersionId: other.revisionId,
+      }],
+    }));
+    const candidate = inquiryBatchInput(nextCycle.id, "-other-target");
+    const sameLocalFingerprint = {
+      ...candidate,
+      questions: candidate.questions.map((question, index) => index === 0
+        ? { ...question, fingerprint: "1".repeat(64) }
+        : question),
+    };
+
+    expect(repository.sealInquiryBatch(sameLocalFingerprint)).toMatchObject({
+      id: sameLocalFingerprint.id, selectedInquiryId: "question-other-target-1",
+    });
+    expect(repository.getCycle(nextCycle.id)).toMatchObject({ status: "running", failureCode: null });
+  });
+
   it("keeps Steward and Checker assessments invocation-bound and reopens accepted closure through a new revision", () => {
     const setup = createSetup();
     let repository = new GrowthRepository(setup.workspace);

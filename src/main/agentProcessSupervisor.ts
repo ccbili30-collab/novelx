@@ -19,6 +19,7 @@ import {
   readProjectFileResultSchema,
   retrieveGraphEvidenceResultSchema,
   growthRetrieveGraphEvidenceResultSchema,
+  submitGrowthInquiryResultSchema,
   searchProjectFilesResultSchema,
   statProjectFileResultSchema,
   saveTaskNoteResultSchema,
@@ -52,6 +53,8 @@ import {
   type RetrieveGraphEvidenceResult,
   type AgentRetrieveGraphEvidenceArgs,
   type GrowthRetrieveGraphEvidenceResult,
+  type SubmitGrowthInquiryArgs,
+  type SubmitGrowthInquiryResult,
   type GrowthRunBinding,
   type GenerateImageArgs,
   type GenerateImageResult,
@@ -105,6 +108,10 @@ export interface GrowthAgentToolGateway extends Omit<AgentToolGateway, "retrieve
     args: AgentRetrieveGraphEvidenceArgs,
     context: AgentToolInvocationContext,
   ): Promise<RetrieveGraphEvidenceResult | GrowthRetrieveGraphEvidenceResult>;
+  submitGrowthInquiry(
+    args: SubmitGrowthInquiryArgs,
+    context: AgentToolInvocationContext,
+  ): Promise<SubmitGrowthInquiryResult>;
 }
 
 /** Internal Main-only binding hook. It is never populated from Renderer or model tool arguments. */
@@ -485,6 +492,10 @@ export class AgentProcessSupervisor {
     const operation: Promise<unknown> = (async () => {
       switch (request.tool) {
         case "retrieve_graph_evidence": return await run.gateway!.retrieveGraphEvidence(request.args, context);
+        case "submit_growth_inquiry": {
+          if (!run.internalBinding) throw Object.assign(new Error("Growth Inquiry requires an internal binding."), { code: "GROWTH_BINDING_INVALID" });
+          return await run.gateway!.submitGrowthInquiry(request.args, context);
+        }
         case "inspect_project_files": return await run.gateway!.inspectProjectFiles(request.args, context);
         case "list_project_directory": return await run.gateway!.listProjectDirectory(request.args, context);
         case "stat_project_file": return await run.gateway!.statProjectFile(request.args, context);
@@ -554,6 +565,43 @@ export class AgentProcessSupervisor {
           domains: "variant" in parsed.data && parsed.data.variant === "growth_v1"
             ? ["graph"]
             : uniqueDomains(["graph", ...(parsed.data as z.infer<typeof retrieveGraphEvidenceResultSchema>).scopes.map((scope) => scope.type)]),
+        });
+        return;
+      }
+      if (request.tool === "submit_growth_inquiry") {
+        const parsed = submitGrowthInquiryResultSchema.safeParse(result);
+        if (!parsed.success) {
+          if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+          this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
+          return;
+        }
+        try {
+          run.audit.appendToolTerminal({
+            runId,
+            invocationId: stewardInvocationId(runId),
+            toolInvocationId: request.requestId,
+            eventType: "succeeded",
+            errorCode: null,
+            resultSha256: canonicalAuditHash(parsed.data),
+          });
+        } catch {
+          this.#failAudit(runId);
+          return;
+        }
+        this.#sendToolSuccess(run, {
+          type: "tool.response",
+          runId,
+          requestId: request.requestId,
+          ok: true,
+          tool: request.tool,
+          result: parsed.data,
+        });
+        run.emit({
+          type: "run.activity",
+          runId,
+          label: parsed.data.status === "creator_choice_required" ? "需要你的取舍" : "正在推演",
+          phase: "completed",
+          domains: ["graph"],
         });
         return;
       }
@@ -997,6 +1045,7 @@ type ActivityDomain = "world" | "oc" | "story" | "graph" | "timeline" | "asset";
 function toolPresentation(request: AgentWorkerToolRequest): { label: string; domains?: ActivityDomain[] } {
   if (isProjectFileTool(request.tool)) return { label: "检查项目文件" };
   if (request.tool === "retrieve_graph_evidence") return { label: "检索项目事实", domains: ["graph"] };
+  if (request.tool === "submit_growth_inquiry") return { label: "证据化自询", domains: ["graph"] };
   if (request.tool === "inspect_project_files") return { label: "检查项目文件" };
   if (request.tool === "generate_image") {
     const image = generateImageArgsSchema.safeParse(request.args);
@@ -1170,6 +1219,9 @@ const TOOL_ERROR_MESSAGES = {
   GROWTH_RETRIEVAL_INPUT_INVALID: "Growth retrieval input or budgets are invalid.",
   GROWTH_PERSISTENCE_FAILED: "Growth retrieval evidence could not be persisted.",
   GROWTH_RETRIEVAL_REQUIRED: "A recorded Growth retrieval is required before proposing changes.",
+  GROWTH_INQUIRY_REQUIRED: "A durable Growth Inquiry is required before downstream work.",
+  GROWTH_INQUIRY_INVALID: "The Growth Inquiry is invalid.",
+  GROWTH_INQUIRY_STALLED: "The Growth Inquiry made no evidence-backed progress.",
   GROWTH_RECONCILIATION_REQUIRED: "The Growth Change Set outcome requires reconciliation.",
   GROWTH_RUN_FAILED: "The Growth Cycle run failed before a committed Change Set.",
   GREENFIELD_CREATE_EXPLICIT_FREE_REQUIRED: "Greenfield creation requires trusted Free authorization.",

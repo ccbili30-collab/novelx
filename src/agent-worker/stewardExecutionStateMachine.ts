@@ -14,6 +14,7 @@ import {
   type TrustedGrowthWorldMapSources,
 } from "./growth/growthWorldMapBrief";
 import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "./growth/growthWorldFragment";
+import { growthInquiryBriefSchema } from "./growth/growthInquiryBrief";
 import {
   isExplicitGreenfieldFreeCreateRequest,
   inspectProjectFilesResultSchema,
@@ -29,11 +30,13 @@ import {
   growthRetrieveGraphEvidenceResultSchema,
   generateImageArgsSchema,
   generateImageResultSchema,
+  submitGrowthInquiryResultSchema,
   type GrowthRunBinding,
 } from "../shared/agentWorkerProtocol";
 
 const operationalToolNames = [
   "retrieve_graph_evidence",
+  "submit_growth_inquiry",
   "inspect_project_files",
   "list_project_directory",
   "stat_project_file",
@@ -49,7 +52,7 @@ const operationalToolNames = [
 ] as const;
 
 type OperationalToolName = (typeof operationalToolNames)[number];
-type BlockReason = "missing_source" | "major_conflict" | "tool_failed";
+type BlockReason = "missing_source" | "major_conflict" | "tool_failed" | "user_confirmation_required";
 
 const greenfieldCorrectionCodes = new Set([
   "GROWTH_FRAGMENT_INVALID",
@@ -163,10 +166,10 @@ function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
     objective: "change_set",
     scopeResourceIds: [...binding.authorizedScopeResourceIds],
     steps: focus === "world"
-      ? ["retrieve_graph_evidence", "propose_change_set", "generate_image"]
+      ? ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set", "generate_image"]
       : focus === "oc"
-      ? ["retrieve_graph_evidence", "propose_change_set"]
-      : ["retrieve_graph_evidence", "writer", "propose_change_set"],
+      ? ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"]
+      : ["retrieve_graph_evidence", "submit_growth_inquiry", "writer", "propose_change_set"],
   };
 }
 
@@ -254,6 +257,8 @@ export function createStewardExecutionStateMachine(input: {
   const allowedEvidenceIds = new Set<string>();
   let proposedChangeSet: z.infer<typeof proposeChangeSetResultSchema> | null = null;
   let growthReceiptRecorded = false;
+  let growthInquirySelected = false;
+  let growthPostInquiryMissingSource = false;
   const growthWorldsByEvidenceId = new Map<string, string>();
   const growthStoriesByEvidenceId = new Map<string, string>();
   let trustedStoryWorld: TrustedStoryWorldEvidence | null = null;
@@ -377,14 +382,14 @@ export function createStewardExecutionStateMachine(input: {
         const details = readToolDetails(result);
         applySuccessfulResult(name, details, compiledParams);
         if (plan?.objective !== "inspect_files") nextStepIndex += 1;
-        executions.push({ tool: name, status: "succeeded", details });
+        if (name !== "submit_growth_inquiry") executions.push({ tool: name, status: "succeeded", details });
         const nextTool = requiredNextTool();
-        const instruction = name === "retrieve_graph_evidence" && growthFocus(input.growthBinding) === "oc" && nextTool === "propose_change_set"
+        const instruction = name === "submit_growth_inquiry" && growthFocus(input.growthBinding) === "oc" && nextTool === "propose_change_set"
           ? "The pinned Growth Receipt contains one trusted formal story. Create the required high-level OC Fragment now; do not repeat retrieval or supply low-level identifiers."
           : undefined;
         return appendRequiredNextTool(result, nextTool, instruction);
       } catch (error) {
-        executions.push({ tool: name, status: "failed", details: null });
+        if (name !== "submit_growth_inquiry") executions.push({ tool: name, status: "failed", details: null });
         if (isGreenfieldProposalCorrection(input.growthBinding, name, error)) {
           greenfieldProposalCorrectionAttempts += 1;
           if (greenfieldProposalCorrectionAttempts <= 2) throw error;
@@ -542,6 +547,14 @@ export function createStewardExecutionStateMachine(input: {
     if (name === "propose_change_set" && input.growthBinding && !growthReceiptRecorded) {
       throw stateError("STEWARD_GROWTH_RECEIPT_REQUIRED");
     }
+    if (name === "submit_growth_inquiry") {
+      if (!input.growthBinding || !growthReceiptRecorded || !growthInquiryBriefSchema.safeParse(params).success) {
+        throw stateError("STEWARD_GROWTH_INQUIRY_REQUIRED");
+      }
+    }
+    if (["writer", "propose_change_set", "generate_image"].includes(name) && input.growthBinding && !growthInquirySelected) {
+      throw stateError("STEWARD_GROWTH_INQUIRY_REQUIRED");
+    }
     if (name === "writer" && growthFocus(input.growthBinding) === "story" && !trustedStoryWorld) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");
     if (name === "propose_change_set" && growthFocus(input.growthBinding) === "story" && !writerCandidate) throw stateError("STEWARD_STORY_WRITER_REQUIRED");
     if (name === "propose_change_set" && growthFocus(input.growthBinding) === "oc" && !trustedOcStory) throw stateError("STEWARD_OC_STORY_REQUIRED");
@@ -628,18 +641,18 @@ export function createStewardExecutionStateMachine(input: {
             .filter((evidence): evidence is Extract<typeof evidence, { kind: "resource" }> => evidence.kind === "resource" && evidence.resource.type === "world" && evidence.resource.objectKind === "world")
             .map((evidence) => ({ evidenceId: evidence.evidenceId, resourceId: evidence.resource.resourceId, label: evidence.label, excerpt: evidence.excerpt }))
             .filter((world, index, all) => all.findIndex((candidate) => candidate.resourceId === world.resourceId) === index);
-          if (worlds.length !== 1) { blockReason = "missing_source"; return; }
-          trustedStoryWorld = worlds[0]!;
+          if (worlds.length !== 1) { growthPostInquiryMissingSource = true; }
+          else trustedStoryWorld = worlds[0]!;
         }
         if (growthFocus(input.growthBinding) === "oc") {
           const stories = [...growthStoriesByEvidenceId.entries()]
             .map(([evidenceId, resourceId]) => ({ evidenceId, resourceId }))
             .filter((story, index, all) => all.findIndex((candidate) => candidate.resourceId === story.resourceId) === index);
-          if (stories.length !== 1) { blockReason = "missing_source"; return; }
-          trustedOcStory = stories[0]!;
+          if (stories.length !== 1) { growthPostInquiryMissingSource = true; }
+          else trustedOcStory = stories[0]!;
         }
         if (retrieval.data.evidence.length === 0 && !input.growthBinding.greenfieldCreateAuthorized) {
-          blockReason = "missing_source";
+          growthPostInquiryMissingSource = true;
         }
         return;
       }
@@ -670,6 +683,18 @@ export function createStewardExecutionStateMachine(input: {
         return;
       }
       if (containsStructuralConflict(retrieval.data.assertions)) insertRequiredChecker();
+      return;
+    }
+    if (name === "submit_growth_inquiry") {
+      const inquiry = submitGrowthInquiryResultSchema.safeParse(details);
+      if (!inquiry.success) throw stateError("STEWARD_TOOL_RESULT_INVALID");
+      if (inquiry.data.status === "creator_choice_required") {
+        blockReason = "user_confirmation_required";
+      } else if (growthPostInquiryMissingSource) {
+        blockReason = "missing_source";
+      } else {
+        growthInquirySelected = true;
+      }
       return;
     }
     if (name === "inspect_project_files") {

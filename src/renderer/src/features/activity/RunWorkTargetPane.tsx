@@ -13,7 +13,7 @@ export function RunWorkTargetPane(props: {
 }) {
   const current = props.presentation?.current ?? null;
   const event = current?.events.at(-1) ?? null;
-  const reference = event?.contentRef ?? (event ? {
+  const reference = event?.targetKind === "inquiry" ? null : event?.contentRef ?? (event ? {
     kind: event.targetKind,
     targetId: event.targetId,
     targetVersionId: event.targetVersionId,
@@ -49,7 +49,7 @@ export function RunWorkTargetPane(props: {
               {reference?.targetVersionId ? <small>版本引用可用</small> : null}
               <button type="button" onClick={() => void target.open()}>打开</button>
             </div>
-          ) : event ? <p className="run-work-target-pane__unresolved">当前目标尚未出现在工作区投影中。</p> : null}
+          ) : event && event.targetKind !== "inquiry" ? <p className="run-work-target-pane__unresolved">当前目标尚未出现在工作区投影中。</p> : null}
           {uniqueDomains.length ? <div className="run-work-target-pane__domains" aria-label="当前领域">{uniqueDomains.map((domain) => <span key={domain}>{domainLabel(domain)}</span>)}</div> : null}
           {worldMapArtifact ? <section className="run-work-target-pane__world-map" data-status={worldMapArtifact.status} aria-label="世界地图产物">
             {worldMap.canPreview ? <img src={worldMapArtifact.thumbnailUrl ?? undefined} alt={`${worldMapArtifact.title}缩略图`} />
@@ -84,7 +84,9 @@ export function RunWorkTargetPane(props: {
   }
 }
 
-function phaseLabel(phase: "cycle_planned" | "run_attached" | "receipt_recorded" | "change_set_committed" | "cycle_terminal" | undefined, state: string | undefined): string {
+function phaseLabel(phase: GrowthPresentation["events"][number]["phase"] | undefined, state: string | undefined): string {
+  if (phase === "inquiry_selected") return "正在推演";
+  if (phase === "creator_choice_required") return "需要你的取舍";
   if (state === "committed") return "已提交";
   if (state === "blocked") return "已阻塞";
   if (state === "failed") return "已失败";

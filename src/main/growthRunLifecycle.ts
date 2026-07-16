@@ -1,4 +1,6 @@
 import type { AgentRunEvent, AgentRunStartRequest } from "../shared/ipcContract";
+import { createHash } from "node:crypto";
+import { canonicalAuditHash } from "../domain/audit/canonicalAuditHash";
 import {
   growthCapabilityVersion,
   type GrowthCycle,
@@ -16,8 +18,14 @@ import {
   type GrowthRetrieveGraphEvidenceResult,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
+  submitGrowthInquiryArgsSchema,
+  submitGrowthInquiryResultSchema,
+  type SubmitGrowthInquiryArgs,
+  type SubmitGrowthInquiryResult,
+  type GenerateImageArgs,
+  type GenerateImageResult,
 } from "../shared/agentWorkerProtocol";
-import { GrowthRepository } from "../domain/growth/growthRepository";
+import { GrowthRepository, type GrowthPriorInquiryContext } from "../domain/growth/growthRepository";
 import { GraphRetrievalService } from "../domain/retrieval/graphRetrievalService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import { DocumentRepository } from "../domain/workspace/documentRepository";
@@ -85,6 +93,7 @@ export class GrowthRunLifecycle {
       throw growthRunError("GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED");
     }
     const intentAnchors = trustedIntentAnchors(this.workspace, repository, goal, cycle, intent.focusKinds[0]!);
+    const priorInquiryAuthority = trustedPriorInquiryAuthority(repository, goal.id);
     const binding = growthRunBindingSchema.parse({
       capabilityVersion: growthCapabilityVersion,
       goalId: goal.id,
@@ -101,8 +110,9 @@ export class GrowthRunLifecycle {
         && cycle.sequence === 1
         && intent.focusKinds[0] === "world"
         && isGreenfieldWorkspaceEmpty(this.workspace),
+      priorInquiries: priorInquiryAuthority.map(({ inquiryId: _inquiryId, lifecycleSequence: _sequence, ...inquiry }) => inquiry),
     });
-    const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent, intentAnchors);
+    const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent, intentAnchors, priorInquiryAuthority);
     return this.supervisor.start(
       { ...input.request, scopeResourceIds: binding.authorizedScopeResourceIds },
       input.emit,
@@ -155,6 +165,11 @@ class BoundGrowthRun implements AgentRunInternalBinding {
   #runId: string | null = null;
   #mode: "free" | "assist" | null = null;
   #receiptRecorded = false;
+  #inquirySelected = false;
+  #proposalExecutionStarted = false;
+  #imageExecutionStarted = false;
+  readonly #evidenceRanks = new Map<string, number>();
+  readonly #priorInquiries = new Map<string, GrowthPriorInquiryContext>();
 
   constructor(
     workspace: WorkspaceDatabase,
@@ -162,9 +177,11 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     readonly branchId: string,
     readonly onPersistedEvent: ((event: GrowthEvent) => void) | undefined,
     readonly intentAnchors: TrustedIntentAnchor[],
+    priorInquiryAuthority: Array<GrowthPriorInquiryContext & { localId: string }>,
   ) {
     this.#repository = new GrowthRepository(workspace);
     this.#graph = new GraphRetrievalService(workspace);
+    for (const inquiry of priorInquiryAuthority) this.#priorInquiries.set(inquiry.localId, inquiry);
   }
 
   readonly #graph: GraphRetrievalService;
@@ -185,7 +202,9 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     return {
       ...input.gateway,
       retrieveGraphEvidence: (args, context) => this.#retrieve(args, context),
+      submitGrowthInquiry: (args, context) => this.#submitInquiry(args, context),
       proposeChangeSet: (args, context) => this.#propose(input.gateway, args, context),
+      generateImage: (args, context) => this.#generate(input.gateway, args, context),
     };
   }
 
@@ -241,6 +260,14 @@ class BoundGrowthRun implements AgentRunInternalBinding {
       throw growthRunError("GROWTH_PERSISTENCE_FAILED");
     }
     this.#receiptRecorded = true;
+    const projectedEvidence = result.hits.map((hit) => projectEvidence(hit));
+    if (projectedEvidence.length !== receipt.links.length
+      || new Set(projectedEvidence.map((evidence) => evidence.evidenceId)).size !== projectedEvidence.length
+      || projectedEvidence.some((evidence, index) => evidence.evidenceId !== receipt.links[index]?.targetVersionId)) {
+      this.#terminalizeKnownFailure("GROWTH_INQUIRY_EVIDENCE_MAPPING_INVALID");
+      throw growthRunError("GROWTH_INQUIRY_INVALID");
+    }
+    projectedEvidence.forEach((evidence, index) => this.#evidenceRanks.set(evidence.evidenceId, receipt.links[index]!.rank));
     const cycle = this.#requiredCycle();
     try {
       this.#appendEvent(cycle, "receipt_recorded", "Growth 检索凭证已持久化。", receipt.links[0]?.targetKind, receipt.links[0]?.targetId, receipt.links[0]?.targetVersionId);
@@ -251,7 +278,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     return growthRetrieveGraphEvidenceResultSchema.parse({
       variant: "growth_v1",
       receiptRecorded: true,
-      evidence: result.hits.map((hit) => projectEvidence(hit)),
+      evidence: projectedEvidence,
       coverage: {
         state: result.diagnostics.coverage,
         searchedScopeCount: result.effectiveScopeResourceIds.length,
@@ -265,8 +292,58 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     });
   }
 
+  async #submitInquiry(args: SubmitGrowthInquiryArgs, context: AgentToolInvocationContext): Promise<SubmitGrowthInquiryResult> {
+    if (!this.#runMatches(context) || !this.#receiptRecorded) {
+      throw growthRunError("GROWTH_INQUIRY_REQUIRED");
+    }
+    const parsed = submitGrowthInquiryArgsSchema.safeParse(args);
+    if (!parsed.success) throw growthRunError("GROWTH_INQUIRY_INVALID");
+    const cycle = this.#requiredInquiryCycle();
+    let trusted;
+    try {
+      trusted = compileTrustedInquirySeal(parsed.data, cycle, this.#evidenceRanks, this.#priorInquiries);
+    } catch {
+      this.#terminalizeKnownFailure("GROWTH_INQUIRY_INVALID");
+      throw growthRunError("GROWTH_INQUIRY_INVALID");
+    }
+    let batch;
+    let existingBatch;
+    try {
+      existingBatch = this.#repository.getInquiryBatch(trusted.id);
+      batch = this.#repository.sealInquiryBatch(trusted);
+    } catch (error) {
+      if (readErrorCode(error) !== "GROWTH_INQUIRY_STALLED") {
+        this.#terminalizeKnownFailure("GROWTH_INQUIRY_INVALID");
+        throw growthRunError("GROWTH_INQUIRY_INVALID");
+      }
+      throw growthRunError("GROWTH_INQUIRY_STALLED");
+    }
+    if (batch.contractVersion !== "v25") throw growthRunError("GROWTH_INQUIRY_INVALID");
+    const frontierInquiryId = batch.creatorChoiceRequiredInquiryId ?? batch.selectedInquiryId;
+    const frontier = batch.questions.find((question) => question.id === frontierInquiryId);
+    const event = this.#repository.listEvents(cycle.goalId).find((candidate) => (
+      candidate.cycleId === cycle.id
+      && candidate.targetKind === "inquiry"
+      && candidate.targetId === frontierInquiryId
+      && (candidate.phase === "inquiry_selected" || candidate.phase === "creator_choice_required")
+    ));
+    if (!frontier || !event || event.safeSummary !== frontier.safeSummary) {
+      this.#terminalizeReconciliation();
+      throw growthRunError("GROWTH_RECONCILIATION_REQUIRED");
+    }
+    if (!existingBatch) notifyPersistedEvent(this.onPersistedEvent, event);
+    if (batch.selectedInquiryId !== null) this.#inquirySelected = true;
+    return submitGrowthInquiryResultSchema.parse({
+      status: batch.creatorChoiceRequiredInquiryId === null ? "selected" : "creator_choice_required",
+      safeSummary: frontier.safeSummary,
+    });
+  }
+
   async #propose(gateway: AgentToolGateway, args: ProposeChangeSetArgs, context: AgentToolInvocationContext): Promise<ProposeChangeSetResult> {
-    if (!this.#runMatches(context) || !this.#receiptRecorded) throw growthRunError("GROWTH_RETRIEVAL_REQUIRED");
+    if (!this.#runMatches(context) || !this.#receiptRecorded || !this.#inquirySelected) throw growthRunError("GROWTH_INQUIRY_REQUIRED");
+    if (this.#proposalExecutionStarted) throw growthRunError("GROWTH_RUN_FAILED");
+    this.#requiredCycle();
+    this.#proposalExecutionStarted = true;
     const result = await gateway.proposeChangeSet(args, context);
     if (result.mode !== context.mode) throw growthRunError("GROWTH_RUN_FAILED");
     if (result.mode === "free" && result.status === "committed") {
@@ -279,6 +356,26 @@ class BoundGrowthRun implements AgentRunInternalBinding {
       }
     }
     return result;
+  }
+
+  async #generate(gateway: AgentToolGateway, args: GenerateImageArgs, context: AgentToolInvocationContext): Promise<GenerateImageResult> {
+    if (!this.#runMatches(context) || !this.#receiptRecorded || !this.#inquirySelected) {
+      throw growthRunError("GROWTH_INQUIRY_REQUIRED");
+    }
+    if (this.#imageExecutionStarted) throw growthRunError("GROWTH_RUN_FAILED");
+    const cycle = this.#repository.getCycle(this.workerBinding.cycleId);
+    if (this.workerBinding.focusKinds.length !== 1
+      || this.workerBinding.focusKinds[0] !== "world"
+      || args.purpose !== "world_map"
+      || !cycle
+      || cycle.runId !== this.#runId
+      || cycle.status !== "committed"
+      || cycle.changeSetId === null
+      || cycle.outputCheckpointId === null) {
+      throw growthRunError("GROWTH_BINDING_INVALID");
+    }
+    this.#imageExecutionStarted = true;
+    return gateway.generateImage(args, context);
   }
 
   #terminalizeReconciliation(): void {
@@ -319,6 +416,14 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     const cycle = this.#repository.getCycle(this.workerBinding.cycleId);
     if (!cycle || cycle.runId !== this.#runId || cycle.status !== "running") throw growthRunError("GROWTH_BINDING_INVALID");
     return cycle;
+  }
+
+  #requiredInquiryCycle(): GrowthCycle {
+    const cycle = this.#repository.getCycle(this.workerBinding.cycleId);
+    if (!cycle || cycle.runId !== this.#runId) throw growthRunError("GROWTH_BINDING_INVALID");
+    if (cycle.status === "running") return cycle;
+    if (cycle.status === "blocked" && cycle.failureCode === "GROWTH_CREATOR_CHOICE_REQUIRED") return cycle;
+    throw growthRunError("GROWTH_BINDING_INVALID");
   }
 
   #appendEvent(
@@ -388,6 +493,10 @@ function repairTerminalEvent(repository: GrowthRepository, goal: GrowthGoal, cyc
   if (cycle.status !== "blocked" && cycle.status !== "failed" && cycle.status !== "cancelled" && cycle.status !== "reconciliation_required") {
     throw growthRunError("GROWTH_BINDING_INVALID");
   }
+  if (cycle.status === "blocked" && cycle.failureCode === "GROWTH_CREATOR_CHOICE_REQUIRED"
+    && repository.listEvents(goal.id).some((event) => event.cycleId === cycle.id && event.phase === "creator_choice_required")) {
+    return null;
+  }
   if (repository.listEvents(goal.id).some((event) => event.cycleId === cycle.id && event.phase === "cycle_terminal")) return null;
   return repository.appendEvent({
     goalId: goal.id, cycleId: cycle.id, runId: cycle.runId,
@@ -427,6 +536,107 @@ function nextGrowthEventSequence(repository: GrowthRepository, goalId: string): 
 interface TrustedIntentAnchor {
   resourceId: string;
   title: string;
+}
+
+function trustedPriorInquiryAuthority(
+  repository: GrowthRepository,
+  goalId: string,
+): Array<GrowthPriorInquiryContext & { localId: string }> {
+  const prior = repository.listUnresolvedInquiryContexts(goalId);
+  if (prior.length > 100) throw growthRunError("GROWTH_BINDING_INVALID");
+  return prior.map((inquiry, index) => ({ ...inquiry, localId: `prior_${index + 1}` }));
+}
+
+function compileTrustedInquirySeal(
+  brief: SubmitGrowthInquiryArgs,
+  cycle: GrowthCycle,
+  evidenceRanks: ReadonlyMap<string, number>,
+  priorInquiries: ReadonlyMap<string, GrowthPriorInquiryContext>,
+) {
+  const localIds = new Set<string>();
+  const formalIds = new Map<string, string>();
+  const questions = brief.inquiries.map((inquiry, index) => {
+    if (localIds.has(inquiry.localId) || new Set(inquiry.evidenceIds).size !== inquiry.evidenceIds.length) {
+      throw growthRunError("GROWTH_INQUIRY_INVALID");
+    }
+    localIds.add(inquiry.localId);
+    const ranks = inquiry.evidenceIds.map((evidenceId) => {
+      const rank = evidenceRanks.get(evidenceId);
+      if (rank === undefined) throw growthRunError("GROWTH_INQUIRY_INVALID");
+      return rank;
+    }).sort((left, right) => left - right);
+    if (inquiry.evidenceState !== "unknown" && ranks.length === 0) throw growthRunError("GROWTH_INQUIRY_INVALID");
+    if (inquiry.evidenceState === "unknown" && !inquiry.requiresCreatorChoice && inquiry.provisionalAssumption === null) {
+      throw growthRunError("GROWTH_INQUIRY_INVALID");
+    }
+    const id = `growth-inquiry:${sha256(`${cycle.id}:${index + 1}`).slice(0, 40)}`;
+    formalIds.set(inquiry.localId, id);
+    const question = normalizeInquiryText(inquiry.question);
+    return {
+      id,
+      question,
+      evidenceState: inquiry.evidenceState,
+      safeSummary: normalizeInquiryText(inquiry.safeSummary),
+      proposedAction: normalizeInquiryText(inquiry.proposedAction),
+      provisionalAssumption: inquiry.provisionalAssumption === null ? null : normalizeInquiryText(inquiry.provisionalAssumption),
+      requiresCreatorChoice: inquiry.requiresCreatorChoice,
+      priority: inquiry.priority,
+      fingerprint: canonicalAuditHash({ question, ranks, ruleRevision: cycle.ruleRevision }),
+      evidenceRanks: ranks,
+    };
+  });
+  if (new Set(questions.map((question) => question.fingerprint)).size !== questions.length) {
+    throw growthRunError("GROWTH_INQUIRY_INVALID");
+  }
+  const highestPriority = Math.max(...questions.map((question) => question.priority));
+  if (questions.filter((question) => question.priority === highestPriority).length !== 1) {
+    throw growthRunError("GROWTH_INQUIRY_INVALID");
+  }
+  const choiceQuestions = questions.filter((question) => question.requiresCreatorChoice);
+  const selectedInquiryId = brief.selectedLocalId === null ? null : formalIds.get(brief.selectedLocalId) ?? null;
+  const selected = questions.find((question) => question.id === selectedInquiryId);
+  let creatorChoiceRequiredInquiryId: string | null = null;
+  if (brief.selectedLocalId === null) {
+    if (choiceQuestions.length !== 1 || choiceQuestions[0]!.priority !== highestPriority) throw growthRunError("GROWTH_INQUIRY_INVALID");
+    creatorChoiceRequiredInquiryId = choiceQuestions[0]!.id;
+  } else if (!selected || selected.priority !== highestPriority || choiceQuestions.length !== 0) {
+    throw growthRunError("GROWTH_INQUIRY_INVALID");
+  }
+  const transitioned = new Set<string>();
+  const priorTransitions = brief.priorTransitions.map((transition) => {
+    const prior = priorInquiries.get(transition.priorLocalId);
+    if (!prior || transitioned.has(prior.inquiryId)) throw growthRunError("GROWTH_INQUIRY_INVALID");
+    transitioned.add(prior.inquiryId);
+    if (transition.phase === "promoted") {
+      const successorInquiryId = formalIds.get(transition.successorLocalId);
+      if (!successorInquiryId) throw growthRunError("GROWTH_INQUIRY_INVALID");
+      return { inquiryId: prior.inquiryId, expectedSequence: prior.lifecycleSequence, phase: transition.phase, successorInquiryId } as const;
+    }
+    return transition.phase === "closed"
+      ? { inquiryId: prior.inquiryId, expectedSequence: prior.lifecycleSequence, phase: transition.phase, reason: transition.reason } as const
+      : { inquiryId: prior.inquiryId, expectedSequence: prior.lifecycleSequence, phase: transition.phase } as const;
+  });
+  return {
+    id: `growth-inquiry-batch:${sha256(cycle.id).slice(0, 40)}`,
+    cycleId: cycle.id,
+    idempotencyKey: `growth-inquiry-seal:${sha256(cycle.id).slice(0, 40)}`,
+    selectedInquiryId,
+    creatorChoiceRequiredInquiryId,
+    questions,
+    priorTransitions,
+  };
+}
+
+function normalizeInquiryText(value: string): string {
+  return value.normalize("NFC").trim().replace(/\s+/gu, " ");
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function readErrorCode(value: unknown): string | null {
+  return value && typeof value === "object" && "code" in value && typeof value.code === "string" ? value.code : null;
 }
 
 /**
@@ -545,6 +755,6 @@ function sameStrings(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function growthRunError(code: "GROWTH_BINDING_INVALID" | "GROWTH_RETRIEVAL_INPUT_INVALID" | "GROWTH_PERSISTENCE_FAILED" | "GROWTH_RETRIEVAL_REQUIRED" | "GROWTH_RECONCILIATION_REQUIRED" | "GROWTH_RUN_FAILED" | "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED"): Error & { code: string } {
+function growthRunError(code: "GROWTH_BINDING_INVALID" | "GROWTH_RETRIEVAL_INPUT_INVALID" | "GROWTH_PERSISTENCE_FAILED" | "GROWTH_RETRIEVAL_REQUIRED" | "GROWTH_INQUIRY_REQUIRED" | "GROWTH_INQUIRY_INVALID" | "GROWTH_INQUIRY_STALLED" | "GROWTH_RECONCILIATION_REQUIRED" | "GROWTH_RUN_FAILED" | "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED"): Error & { code: string } {
   return Object.assign(new Error("Growth Run bridge failed."), { code });
 }

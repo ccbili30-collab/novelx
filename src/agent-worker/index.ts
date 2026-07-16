@@ -3,6 +3,7 @@ import {
   agentWorkerRunStartCommandSchema,
   type GrowthRetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceArgs,
+  type SubmitGrowthInquiryArgs,
 } from "../shared/agentWorkerProtocol";
 import { verifyPromptRegistry } from "./promptRegistry";
 import { playerWorkerTurnStartCommandSchema } from "../shared/playerWorkerProtocol";
@@ -76,6 +77,12 @@ process.on("message", (payload: unknown) => {
         retrieveGraphEvidence: (args, signal) => command.growthBinding
           ? toolBridge.invoke(command.runId, "retrieve_graph_evidence", args as GrowthRetrieveGraphEvidenceArgs, signal)
           : toolBridge.invoke(command.runId, "retrieve_graph_evidence", args as RetrieveGraphEvidenceArgs, signal),
+        submitGrowthInquiry: (args, signal) => toolBridge.invoke(
+          command.runId,
+          "submit_growth_inquiry",
+          args as SubmitGrowthInquiryArgs,
+          signal,
+        ),
         inspectProjectFiles: (args, signal) => toolBridge.invoke(
           command.runId,
           "inspect_project_files",

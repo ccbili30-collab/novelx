@@ -792,7 +792,7 @@ function assertPublicGrowth(
     expect(committedIndex).toBeGreaterThanOrEqual(0);
     expect(events.slice(0, committedIndex).some((event) => event.durableState === "committed")).toBe(false);
   }
-  expect(growthEvents.every((event) => event.strategy === "grow_world_story_oc_dynamic_v2")).toBe(true);
+  expect(growthEvents.every((event) => event.strategy === "grow_world_story_oc_inquiry_v3")).toBe(true);
   expect(agentEvents.filter((event) => event.type === "run.completed").length).toBeGreaterThanOrEqual(3);
   const worldRunId = snapshot.cycles[0]!.runId!;
   const mapActivities = agentEvents.filter((event): event is Extract<AgentRunEvent, { type: "run.activity" }> => event.runId === worldRunId && event.type === "run.activity")

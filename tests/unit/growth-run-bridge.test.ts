@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChangeSetPolicyEvaluator } from "../../src/domain/changeSet/changeSetService";
 import { AgentAuditRepository } from "../../src/domain/audit/agentAuditRepository";
+import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { CreativeRelationRepository } from "../../src/domain/workspace/creativeRelationRepository";
@@ -330,6 +331,26 @@ describe("Growth Run bridge", () => {
     expect(retrievalResponse.result.evidence.map((evidence) => evidence.evidenceId))
       .toEqual(repository.getReceipt(receiptId)!.links.map((link) => link.targetVersionId));
 
+    await requestSelectedInquiry(worker, runId);
+    expect(worker.sent[3]).toMatchObject({
+      type: "tool.response", ok: true, tool: "submit_growth_inquiry",
+      result: { status: "selected", safeSummary: "Evaluating trusted consequence 1." },
+    });
+    const batchRow = setup.workspace.db.prepare("SELECT id FROM growth_inquiry_batches WHERE cycle_id = ?").get(setup.cycleId) as { id: string };
+    const inquiryBatch = repository.getInquiryBatch(batchRow.id)!;
+    expect(inquiryBatch.questions).toHaveLength(3);
+    expect(inquiryBatch.questions[0]!.evidenceLinks.map((link) => link.rank))
+      .toEqual(repository.getReceipt(receiptId)!.links.map((link) => link.rank));
+    expect(inquiryBatch.questions[0]!.fingerprint).toBe(canonicalAuditHash({
+      question: `Which trusted consequence should run ${runId} pursue at priority 3?`,
+      ranks: repository.getReceipt(receiptId)!.links.map((link) => link.rank),
+      ruleRevision: 1,
+    }));
+    expect(repository.listEvents(setup.goalId).at(-1)).toMatchObject({
+      phase: "inquiry_selected", targetKind: "inquiry", targetId: inquiryBatch.selectedInquiryId,
+      safeSummary: "Evaluating trusted consequence 1.",
+    });
+
     worker.receive({
       type: "tool.request", runId, requestId: "33333333-3333-4333-8333-333333333333", tool: "propose_change_set",
       args: {
@@ -340,14 +361,14 @@ describe("Growth Run bridge", () => {
         }],
       },
     });
-    await vi.waitFor(() => expect(worker.sent).toHaveLength(4));
-    expect(worker.sent[3]).toMatchObject({ type: "tool.response", ok: true, tool: "propose_change_set", result: { status: "committed", mode: "free" } });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(5));
+    expect(worker.sent[4]).toMatchObject({ type: "tool.response", ok: true, tool: "propose_change_set", result: { status: "committed", mode: "free" } });
     const committed = repository.getCycle(setup.cycleId);
     expect(committed).toMatchObject({ status: "committed", runId, receiptId: expect.any(String), changeSetId: expect.any(String), outputCheckpointId: expect.any(String) });
-    expect(repository.listEvents(setup.goalId).map((event) => event.phase)).toEqual(["run_attached", "receipt_recorded", "change_set_committed"]);
+    expect(repository.listEvents(setup.goalId).map((event) => event.phase)).toEqual(["run_attached", "receipt_recorded", "inquiry_selected", "change_set_committed"]);
     setup.workspace.db.prepare("DELETE FROM growth_events WHERE goal_id = ? AND cycle_id = ? AND phase = 'change_set_committed'").run(setup.goalId, setup.cycleId);
     expect(lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: setup.cycleId }).status).toBe("committed");
-    expect(repository.listEvents(setup.goalId).map((event) => event.phase)).toEqual(["run_attached", "receipt_recorded", "change_set_committed"]);
+    expect(repository.listEvents(setup.goalId).map((event) => event.phase)).toEqual(["run_attached", "receipt_recorded", "inquiry_selected", "change_set_committed"]);
 
     worker.receive({ type: "run.completed", runId, outcome: "completed", message: "已保存。", changeSetState: "committed", artifacts: [] });
     await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "run.completed", runId })));
@@ -370,6 +391,201 @@ describe("Growth Run bridge", () => {
     })).toThrowError(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
     expect(spawnWorker).not.toHaveBeenCalled();
     expect(new GrowthRepository(setup.workspace).getCycle(setup.cycleId)).toMatchObject({ status: "planned", runId: null });
+  });
+
+  it("durably blocks creator-choice Inquiry before any Change Set or image side effect", async () => {
+    const setup = createSetup();
+    const worker = new FakeWorker();
+    const proposeChangeSet = vi.fn();
+    const generateImage = vi.fn();
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker, undefined, {
+      proposeChangeSet,
+      generateImage,
+    }));
+    const runId = lifecycle.start({
+      goalId: setup.goalId,
+      cycleId: setup.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "需要取舍的增长", mode: "free" },
+      emit: () => undefined,
+    });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, randomUUID());
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+    const sourceVersionId = (worker.sent[1] as { result: { evidence: Array<{ evidenceId: string }> } }).result.evidence[0]!.evidenceId;
+
+    await requestSelectedInquiry(worker, runId, true);
+    await requestSelectedInquiry(worker, runId, true);
+
+    const repository = new GrowthRepository(setup.workspace);
+    expect(repository.getCycle(setup.cycleId)).toMatchObject({ status: "blocked", failureCode: "GROWTH_CREATOR_CHOICE_REQUIRED", changeSetId: null });
+    expect(repository.listEvents(setup.goalId).at(-1)).toMatchObject({
+      phase: "creator_choice_required", durableState: "blocked", targetKind: "inquiry",
+      safeSummary: "Evaluating trusted consequence 1.",
+    });
+    expect(repository.listEvents(setup.goalId).filter((event) => event.phase === "creator_choice_required")).toHaveLength(1);
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_inquiry_batches").get()).toMatchObject({ count: 1 });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toMatchObject({ count: 0 });
+
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "propose_change_set",
+      args: {
+        summary: "must not run",
+        items: [{
+          id: "must-not-run", dependsOn: [], kind: "resource.put",
+          payload: { resourceId: "must.not.run", create: true, type: "world", objectKind: "world", title: "must not run", parentId: setup.scopeId, state: "active", sortOrder: 0 },
+        }],
+      },
+    });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(5));
+    expect(worker.sent[4]).toMatchObject({ ok: false, error: { code: "GROWTH_INQUIRY_REQUIRED" } });
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "generate_image",
+      args: {
+        title: "must not run", purpose: "world_map", prompt: "must not run",
+        sourceResourceIds: [setup.scopeId], sourceVersionIds: [sourceVersionId], idempotencyKey: "must-not-run",
+      },
+    });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(6));
+    expect(worker.sent[5]).toMatchObject({ ok: false, error: { code: "GROWTH_INQUIRY_REQUIRED" } });
+    expect(proposeChangeSet).not.toHaveBeenCalled();
+    expect(generateImage).not.toHaveBeenCalled();
+    worker.receive({ type: "run.completed", runId, outcome: "blocked", message: "等待创作者取舍。", changeSetState: "none", artifacts: [] });
+    await vi.waitFor(() => expect(repository.listEvents(setup.goalId).at(-1)?.phase).toBe("creator_choice_required"));
+    expect(repository.listEvents(setup.goalId).some((event) => event.phase === "cycle_terminal")).toBe(false);
+    expect(lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: setup.cycleId })).toMatchObject({
+      status: "blocked", failureCode: "GROWTH_CREATOR_CHOICE_REQUIRED",
+    });
+    expect(repository.listEvents(setup.goalId).filter((event) => event.phase === "creator_choice_required")).toHaveLength(1);
+  });
+
+  it("replays an identical Inquiry in the same Run without duplicating durable or published effects", async () => {
+    const setup = createSetup();
+    const worker = new FakeWorker();
+    const supervisor = createSupervisor(setup, worker);
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, supervisor);
+    const publishedInquiryPhases: string[] = [];
+    const runId = lifecycle.start({
+      goalId: setup.goalId,
+      cycleId: setup.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "重放 Inquiry", mode: "free" },
+      emit: () => undefined,
+      onPersistedEvent: (event) => {
+        if (event.phase === "inquiry_selected" || event.phase === "creator_choice_required") publishedInquiryPhases.push(event.phase);
+      },
+    });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, randomUUID());
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+
+    const args = await requestSelectedInquiry(worker, runId);
+    await requestSelectedInquiry(worker, runId);
+
+    const repository = new GrowthRepository(setup.workspace);
+    expect(worker.sent[2]).toMatchObject({ ok: true, result: { status: "selected" } });
+    expect(worker.sent[3]).toMatchObject({ ok: true, result: (worker.sent[2] as { result: unknown }).result });
+    expect(repository.getCycle(setup.cycleId)).toMatchObject({ status: "running", failureCode: null });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_inquiry_batches").get()).toMatchObject({ count: 1 });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_inquiry_lifecycle").get()).toMatchObject({ count: 3 });
+    expect(repository.listEvents(setup.goalId).filter((event) => event.phase === "inquiry_selected")).toHaveLength(1);
+    expect(publishedInquiryPhases).toEqual(["inquiry_selected"]);
+
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "submit_growth_inquiry",
+      args: {
+        ...args,
+        inquiries: args.inquiries.map((inquiry, index) => index === 0
+          ? { ...inquiry, safeSummary: "A different replay payload." }
+          : inquiry),
+      },
+    });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(5));
+    expect(worker.sent[4]).toMatchObject({ ok: false, error: { code: "GROWTH_INQUIRY_INVALID" } });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_inquiry_batches").get()).toMatchObject({ count: 1 });
+    expect(repository.listEvents(setup.goalId).filter((event) => event.phase === "inquiry_selected")).toHaveLength(1);
+  });
+
+  it("allows only one in-flight Change Set executor call and never retries it after failure", async () => {
+    const setup = createSetup();
+    const worker = new FakeWorker();
+    const proposal = deferred<never>();
+    const proposeChangeSet = vi.fn(() => proposal.promise);
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker, undefined, { proposeChangeSet }));
+    const runId = lifecycle.start({
+      goalId: setup.goalId, cycleId: setup.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "并发提交", mode: "assist" }, emit: () => undefined,
+    });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, randomUUID());
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+    await requestSelectedInquiry(worker, runId);
+    const proposalArgs = {
+      summary: "one shot",
+      items: [{
+        id: "pending-document", dependsOn: [], kind: "document.put" as const,
+        payload: { resourceId: setup.scopeId, content: "pending" },
+      }],
+    };
+    const firstId = randomUUID();
+    const secondId = randomUUID();
+    worker.receive({ type: "tool.request", runId, requestId: firstId, tool: "propose_change_set", args: proposalArgs });
+    worker.receive({ type: "tool.request", runId, requestId: secondId, tool: "propose_change_set", args: proposalArgs });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    proposal.reject(Object.assign(new Error("apply failed"), { code: "CHANGE_SET_APPLY_FAILED" }));
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(5));
+    expect(proposeChangeSet).toHaveBeenCalledTimes(1);
+    expect(worker.sent.find((message) => (message as { requestId?: string }).requestId === secondId))
+      .toMatchObject({ ok: false, error: { code: "GROWTH_RUN_FAILED" } });
+    worker.receive({ type: "tool.request", runId, requestId: randomUUID(), tool: "propose_change_set", args: proposalArgs });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(6));
+    expect(proposeChangeSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows only one world-map executor call after commit and never retries it after failure", async () => {
+    const setup = createSetup();
+    const worker = new FakeWorker();
+    const image = deferred<never>();
+    const generateImage = vi.fn(() => image.promise);
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker, undefined, { generateImage }));
+    const runId = lifecycle.start({
+      goalId: setup.goalId, cycleId: setup.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "唯一地图", mode: "free" }, emit: () => undefined,
+    });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, randomUUID());
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+    await requestSelectedInquiry(worker, runId);
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "propose_change_set",
+      args: {
+        summary: "commit before map",
+        items: [{
+          id: "map-world", dependsOn: [], kind: "resource.put",
+          payload: { resourceId: "world.map", create: true, type: "world", objectKind: "world", title: "Map world", parentId: setup.scopeId, state: "active", sortOrder: 0 },
+        }],
+      },
+    });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(4));
+    const imageArgs = {
+      title: "World map", purpose: "world_map" as const, prompt: "A bounded world map.",
+      sourceResourceIds: [setup.scopeId], sourceVersionIds: ["committed-version"], idempotencyKey: "one-map",
+    };
+    const firstId = randomUUID();
+    const secondId = randomUUID();
+    worker.receive({ type: "tool.request", runId, requestId: firstId, tool: "generate_image", args: imageArgs });
+    worker.receive({ type: "tool.request", runId, requestId: secondId, tool: "generate_image", args: imageArgs });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    image.reject(Object.assign(new Error("image failed"), { code: "IMAGE_GENERATION_FAILED" }));
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(6));
+    expect(generateImage).toHaveBeenCalledTimes(1);
+    expect(worker.sent.find((message) => (message as { requestId?: string }).requestId === secondId))
+      .toMatchObject({ ok: false, error: { code: "GROWTH_RUN_FAILED" } });
+    worker.receive({ type: "tool.request", runId, requestId: randomUUID(), tool: "generate_image", args: imageArgs });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(7));
+    expect(generateImage).toHaveBeenCalledTimes(1);
   });
 
   it("compensates an attach event failure before any Worker can spawn", async () => {
@@ -626,13 +842,14 @@ describe("Growth Run bridge", () => {
     });
     await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
     expect(worker.sent[1]).toMatchObject({ type: "tool.response", ok: true, result: { variant: "growth_v1", receiptRecorded: true } });
+    await requestSelectedInquiry(worker, runId);
     worker.receive({
       type: "tool.request", runId, requestId: "55555555-5555-4555-8555-555555555555", tool: "propose_change_set",
       args: { summary: "候选设定", items: [{ id: "pending-document", dependsOn: [], kind: "document.put", payload: { resourceId: setup.scopeId, content: "待确认的候选。" } }] },
     });
-    await vi.waitFor(() => expect(worker.sent).toHaveLength(3));
-    if (!(worker.sent[2] as { ok?: boolean }).ok) throw new Error(JSON.stringify(worker.sent[2]));
-    expect(worker.sent[2]).toMatchObject({ type: "tool.response", ok: true, result: { status: "pending" } });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(4));
+    if (!(worker.sent[3] as { ok?: boolean }).ok) throw new Error(JSON.stringify(worker.sent[3]));
+    expect(worker.sent[3]).toMatchObject({ type: "tool.response", ok: true, result: { status: "pending" } });
     worker.receive({ type: "run.completed", runId, outcome: "awaiting_confirmation", message: "等待确认。", changeSetState: "pending_review", artifacts: [] });
     await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).getCycle(setup.cycleId)?.status).toBe("blocked"));
     expect(new GrowthRepository(setup.workspace).getCycle(setup.cycleId)).toMatchObject({ changeSetId: null, outputCheckpointId: null, failureCode: "GROWTH_CHANGE_SET_NOT_COMMITTED" });
@@ -717,7 +934,7 @@ function beginStewardInvocation(workspace: WorkspaceDatabase, runId: string): vo
     agentProfileId: "novax.steward", agentProfileVersion: "1.12.0", agentProfileSha256: hash,
     providerId: "provider", requestedModelId: "model", providerConfigSha256: hash,
     toolPolicyId: "novax.steward.tools", toolPolicyVersion: "1.0.0", toolPolicySha256: hash,
-    authorizedTools: ["retrieve_graph_evidence", "propose_change_set"],
+    authorizedTools: ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set", "generate_image"],
     handoffContractId: null, handoffVersion: null, handoffPayloadSha256: null, inputSha256: hash,
   });
 }
@@ -754,6 +971,53 @@ function requestGrowthRetrieval(worker: FakeWorker, runId: string, requestId: st
   });
 }
 
+async function requestSelectedInquiry(worker: FakeWorker, runId: string, creatorChoice = false) {
+  const before = worker.sent.length;
+  const retrieval = [...worker.sent].reverse().find((message) => {
+    const candidate = message as { ok?: boolean; tool?: string; result?: { evidence?: unknown } };
+    return candidate.ok === true && candidate.tool === "retrieve_graph_evidence" && Array.isArray(candidate.result?.evidence);
+  }) as { ok: true; result: { evidence: Array<{ evidenceId: string }> } } | undefined;
+  if (!retrieval?.ok || !retrieval.result?.evidence) throw new Error("Growth retrieval response is required before Inquiry.");
+  const evidenceIds = retrieval.result.evidence.map((evidence) => evidence.evidenceId);
+  const evidenceState = evidenceIds.length > 0 ? "known" as const : "unknown" as const;
+  const args = {
+    inquiries: [3, 2, 1].map((priority, index) => ({
+      localId: `question_${index + 1}`,
+      question: `Which trusted consequence should run ${runId} pursue at priority ${priority}?`,
+      evidenceIds,
+      evidenceState,
+      safeSummary: `Evaluating trusted consequence ${index + 1}.`,
+      proposedAction: `Apply bounded consequence ${index + 1}.`,
+      provisionalAssumption: evidenceState === "unknown" && !(creatorChoice && index === 0) ? "Assume bounded continuity." : null,
+      priority,
+      requiresCreatorChoice: creatorChoice && index === 0,
+    })),
+    selectedLocalId: creatorChoice ? null : "question_1",
+    priorTransitions: [],
+  };
+  worker.receive({
+    type: "tool.request",
+    runId,
+    requestId: randomUUID(),
+    tool: "submit_growth_inquiry",
+    args,
+  });
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(before + 1));
+  const response = worker.sent.at(-1) as { ok?: boolean };
+  if (!response.ok) throw new Error(`Growth Inquiry did not seal: ${JSON.stringify(response)}`);
+  return args;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 async function commitPriorResourceCycle(
   setup: ReturnType<typeof createSetup>,
   cycleId: string,
@@ -772,6 +1036,7 @@ async function commitPriorResourceCycle(
   beginStewardInvocation(setup.workspace, runId);
   requestGrowthRetrieval(worker, runId, randomUUID());
   await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+  await requestSelectedInquiry(worker, runId);
   worker.receive({
     type: "tool.request", runId, requestId: randomUUID(), tool: "propose_change_set",
     args: {
@@ -782,8 +1047,8 @@ async function commitPriorResourceCycle(
       }],
     },
   });
-  await vi.waitFor(() => expect(worker.sent).toHaveLength(3));
-  const response = worker.sent[2] as { ok: boolean; result?: { changeSetId?: string } };
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(4));
+  const response = worker.sent[3] as { ok: boolean; result?: { changeSetId?: string } };
   if (!response.ok || !response.result?.changeSetId) throw new Error("anchor Change Set did not commit");
   const committed = new GrowthRepository(setup.workspace).getCycle(cycleId);
   if (!committed?.outputCheckpointId || !committed.changeSetId) throw new Error("anchor Cycle did not bind a committed Change Set");

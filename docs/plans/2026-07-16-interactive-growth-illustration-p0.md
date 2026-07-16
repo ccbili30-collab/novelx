@@ -338,6 +338,8 @@ interface GrowthInquiryBrief {
 15. 运行相关定向 Vitest、typecheck、Prompt publication gate；本批不调用真实 Provider。
 16. 提交：`feat(growth): ground self inquiry in graph evidence`。
 
+**Implementation status (2026-07-16):** Task 4A 的 SQLite v25/Inquiry 生命周期与 Task 4B 的 dynamic-v3 Worker→Main→Renderer 运行链已实现。定向验收为 11 个 Vitest 文件 207/207 通过，typecheck、Prompt publication gate 与 diff check 通过；未运行 Provider、Playwright、生产构建或全量测试。已实现顺序门禁、Receipt rank/ID/fingerprint 权威编译、Batch+旧 Inquiry 迁移原子提交、Creator Choice 零创作副作用、同 Run 精确重放、Change Set/地图 one-shot 门禁、原地打转阻断和仅 `safeSummary` 的 Inquiry UI 投影。未完成的下一个入口是 Task 5 Closure Evaluator；Creator Choice 回答后的真正内容修订仍在 Task 6，不得把 `creator_answered` 冒充为已应用规则。
+
 ---
 
 ## Task 5：Closure Evaluator 与万字长文分段写作

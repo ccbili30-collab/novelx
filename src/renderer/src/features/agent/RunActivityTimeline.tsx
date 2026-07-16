@@ -1,6 +1,6 @@
 import type { AgentArtifact } from "../../../../shared/ipcContract";
 import { AgentArtifactList } from "./AgentArtifactList";
-import type { GrowthPresentation } from "./growthPresentation";
+import { growthEventSummary, type GrowthPresentation } from "./growthPresentation";
 
 export function RunActivityTimeline(props: {
   presentation: GrowthPresentation;
@@ -23,7 +23,7 @@ export function RunActivityTimeline(props: {
               <span>{row.summary}</span>
             </summary>
             <div className="growth-timeline__details">
-              {row.events.map((event) => <p key={`${event.cycleId}-${event.sequence}`}>{event.safeSummary}</p>)}
+              {row.events.map((event) => <p key={`${event.cycleId}-${event.sequence}`}>{growthEventSummary(event)}</p>)}
               {row.activities.map((activity, index) => <p key={`${activity.runId}-${index}`}>{activity.label}</p>)}
               {row.events.length === 0 && row.activities.length === 0 ? <p>等待 Main 安排此轮。</p> : null}
             </div>

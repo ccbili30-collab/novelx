@@ -44,7 +44,7 @@ interface GrowthAdvanceRequest {
   seed: GrowthStartRequest["seed"];
 }
 
-const strategy = "grow_world_story_oc_dynamic_v2" as const;
+const strategy = "grow_world_story_oc_inquiry_v3" as const;
 interface DeliveryRoute {
   growth?: (event: GrowthLiveEvent) => void;
   agent?: (event: AgentRunEvent) => void;
@@ -397,7 +397,7 @@ function projectEvent(event: GrowthEvent) {
 }
 function stagePrompt(sequence: number, intent: GrowthCycleIntent, seed: GrowthStartRequest["seed"], initialRuleText: string): string {
   const seedText = seed.kind === "text" ? `\n用户种子：${seed.text}` : "\n用户种子已保存为授权资料；先检索后创作。";
-  return `Growth 策略 ${strategy}，第 ${sequence} 个 Cycle。锁定规则：${initialRuleText}\n持久 Intent：${intent.kind}；有序 focus：${intent.focusKinds.join("、")}；后续 frontier：${intent.resumeFrontier.join("、") || "等待闭环证据"}。先使用 growth_v1 检索证据；本 Cycle 至多经一个现有 Change Set 持久化模型生成的内容。${seedText}`;
+  return `Growth 策略 ${strategy}，第 ${sequence} 个 Cycle。锁定规则：${initialRuleText}\n持久 Intent：${intent.kind}；有序 focus：${intent.focusKinds.join("、")}；后续 frontier：${intent.resumeFrontier.join("、") || "等待闭环证据"}。先使用 growth_v1 检索证据，再提交一次 3–7 条证据化自询；只有 durable selected 后，本 Cycle 才可经一个现有 Change Set 持久化模型生成内容。需要创作者取舍时必须零 Change Set 并安全阻塞。${seedText}`;
 }
 function coordinatorStatus(
   repository: GrowthRepository,

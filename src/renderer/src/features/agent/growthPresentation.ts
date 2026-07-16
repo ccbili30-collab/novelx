@@ -144,6 +144,12 @@ export function mergeGrowthEvent(current: GrowthPresentation, event: GrowthEvent
   return derive({ ...current, events: uniqueEvents([...current.events, event]) });
 }
 
+export function growthEventSummary(event: GrowthEvent): string {
+  if (event.phase === "inquiry_selected") return `正在推演：${event.safeSummary}`;
+  if (event.phase === "creator_choice_required") return `需要你的取舍：${event.safeSummary}`;
+  return event.safeSummary;
+}
+
 export function appendGrowthAgentEvent(current: GrowthPresentation, event: AgentRunEvent): GrowthPresentation {
   if (event.type !== "run.activity" || !isGrowthBoundRun(current, event.runId)) return current;
   const activity: GrowthAgentActivity = { runId: event.runId, label: event.label, phase: event.phase, domains: event.domains ?? [] };
@@ -228,7 +234,7 @@ function derive(input: Omit<GrowthPresentation, "rows" | "current" | "running" |
       sequence: cycle.sequence,
       runId: cycle.runId,
       durableState,
-      summary: latest?.durableState === "committed" ? "已提交" : latest?.safeSummary ?? cycleSummary(cycle.status),
+      summary: latest?.durableState === "committed" ? "已提交" : latest ? growthEventSummary(latest) : cycleSummary(cycle.status),
       events,
       activities,
     } satisfies GrowthTimelineRow;

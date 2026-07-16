@@ -6,9 +6,12 @@ import { growthIllustrationPlanParameters } from "../../src/agent-worker/growth/
 import type { PublishedPrompt } from "../../src/agent-worker/promptRegistry";
 import {
   agentWorkerToolResponseSchema,
+  agentWorkerToolRequestSchema,
   growthIllustrationPlanSchema,
   growthRetrieveGraphEvidenceResultSchema,
   growthRunBindingSchema,
+  submitGrowthInquiryArgsSchema,
+  submitGrowthInquiryResultSchema,
 } from "../../src/shared/agentWorkerProtocol";
 import { agentRunEventSchema } from "../../src/shared/ipcContract";
 
@@ -17,10 +20,11 @@ const auditRecorder = { record: async () => undefined };
 describe("agent worker fail-closed contract", () => {
   it("requires a bounded unique trusted seed set in the internal Growth binding", () => {
     const binding = {
-      capabilityVersion: "hackathon-growth-dynamic-v2", goalId: "goal-1", cycleId: "cycle-1",
+      capabilityVersion: "hackathon-growth-inquiry-v3", goalId: "goal-1", cycleId: "cycle-1",
       inputCheckpointId: "checkpoint-1", ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
       kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], seedResourceIds: ["seed-resource"],
       domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
+      priorInquiries: [],
     };
     expect(growthRunBindingSchema.parse(binding)).toEqual(binding);
     expect(growthRunBindingSchema.safeParse({ ...binding, seedResourceIds: ["seed-resource", "seed-resource"] }).success).toBe(false);
@@ -30,6 +34,49 @@ describe("agent worker fail-closed contract", () => {
     expect(growthRunBindingSchema.safeParse(({ ...binding, kind: undefined }) as unknown).success).toBe(false);
     expect(growthRunBindingSchema.safeParse({ ...binding, focusKinds: ["world", "world"] }).success).toBe(false);
     expect(growthRunBindingSchema.safeParse({ ...binding, rendererRequestedAuthority: true }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, capabilityVersion: "hackathon-growth-dynamic-v2" }).success).toBe(false);
+    const priorInquiry = {
+      localId: "prior_1", question: "What remains unresolved?", evidenceState: "unknown" as const,
+      safeSummary: "An unresolved consequence remains.", priority: 2, lifecyclePhase: "backlog" as const,
+    };
+    expect(growthRunBindingSchema.safeParse({ ...binding, priorInquiries: [priorInquiry] }).success).toBe(true);
+    expect(growthRunBindingSchema.safeParse({
+      ...binding, priorInquiries: [{ ...priorInquiry, inquiryId: "formal-inquiry-id", lifecycleSequence: 1, fingerprint: "a".repeat(64) }],
+    }).success).toBe(false);
+  });
+
+  it("keeps submit_growth_inquiry strict, authority-free, and safe on response", () => {
+    const inquiry = (localId: string, priority: number) => ({
+      localId,
+      question: `What follows from ${localId}?`,
+      evidenceIds: ["evidence-1"],
+      evidenceState: "known" as const,
+      safeSummary: `Evaluating ${localId}.`,
+      proposedAction: `Apply ${localId}.`,
+      provisionalAssumption: null,
+      priority,
+      requiresCreatorChoice: false,
+    });
+    const args = {
+      inquiries: [inquiry("one", 3), inquiry("two", 2), inquiry("three", 1)],
+      selectedLocalId: "one",
+      priorTransitions: [],
+    };
+    expect(submitGrowthInquiryArgsSchema.parse(args)).toEqual(args);
+    expect(agentWorkerToolRequestSchema.safeParse({
+      type: "tool.request", runId: "run-1", requestId: "11111111-1111-4111-8111-111111111111",
+      tool: "submit_growth_inquiry", args,
+    }).success).toBe(true);
+    for (const forbidden of ["batchId", "inquiryId", "fingerprint", "rank", "goalId", "cycleId", "checkpointId", "ruleRevision", "receiptId"]) {
+      expect(submitGrowthInquiryArgsSchema.safeParse({
+        ...args,
+        inquiries: [{ ...args.inquiries[0], [forbidden]: "forged" }, ...args.inquiries.slice(1)],
+      }).success, forbidden).toBe(false);
+    }
+    expect(submitGrowthInquiryResultSchema.parse({ status: "selected", safeSummary: "正在推演。" }))
+      .toEqual({ status: "selected", safeSummary: "正在推演。" });
+    expect(submitGrowthInquiryResultSchema.safeParse({ status: "selected", safeSummary: "正在推演。", inquiryId: "hidden" }).success)
+      .toBe(false);
   });
 
   it("keeps only allowlisted Change Set policy and domain errors in strict Worker failure responses", () => {
