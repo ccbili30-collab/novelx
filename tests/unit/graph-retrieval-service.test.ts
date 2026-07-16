@@ -80,6 +80,20 @@ describe("GraphRetrievalService", () => {
       .toEqual(result.hits.map((hit) => [hit.rank, hit.targetKind, hit.targetId, hit.targetVersionId]));
   });
 
+  it("retains a Main-pinned target version without relying on model query wording", () => {
+    const setup = createSetup();
+    const result = new GraphRetrievalService(setup.workspace).retrieve(request(setup, {
+      query: "query-that-does-not-describe-the-document", aliases: [], maxHops: 0, resultBudget: 1,
+      requiredTargetVersionIds: [setup.documentVersionId],
+    }));
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]).toMatchObject({ targetKind: "document", targetVersionId: setup.documentVersionId });
+    expect(result.receipt.links[0]).toMatchObject({ targetKind: "document", targetVersionId: setup.documentVersionId });
+    expect(() => new GraphRetrievalService(setup.workspace).retrieve(request(setup, {
+      requiredTargetVersionIds: ["not-visible-version"],
+    }))).toThrowError(expect.objectContaining({ code: "GRAPH_RETRIEVAL_REQUIRED_RESOURCE_INVALID" }));
+  });
+
   it("rejects Main-required resources that are not seed-visible or do not fit the result budget", () => {
     const setup = createSetup();
     const service = new GraphRetrievalService(setup.workspace);

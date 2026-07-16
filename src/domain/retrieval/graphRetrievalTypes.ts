@@ -16,6 +16,8 @@ export const graphRetrievalRequestSchema = z.object({
   seedResourceIds: z.array(idSchema).max(100).default([]),
   /** Main-authoritative resources that must be retained as evidence hits. */
   requiredResourceIds: z.array(idSchema).max(100).default([]),
+  /** Main-authoritative pinned versions that must be retained as evidence hits. */
+  requiredTargetVersionIds: z.array(idSchema).max(100).default([]),
   query: z.string().trim().min(1).max(12_000),
   aliases: z.array(z.string().trim().min(1).max(240)).max(100).default([]),
   validTime: timeFilterSchema.nullable().default(null),
@@ -36,6 +38,9 @@ export const graphRetrievalRequestSchema = z.object({
   }
   if (new Set(value.requiredResourceIds).size !== value.requiredResourceIds.length) {
     context.addIssue({ code: "custom", path: ["requiredResourceIds"], message: "Required resource IDs must be unique." });
+  }
+  if (new Set(value.requiredTargetVersionIds).size !== value.requiredTargetVersionIds.length) {
+    context.addIssue({ code: "custom", path: ["requiredTargetVersionIds"], message: "Required target version IDs must be unique." });
   }
 });
 

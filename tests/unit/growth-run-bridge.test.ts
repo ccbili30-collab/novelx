@@ -8,6 +8,7 @@ import type { ChangeSetPolicyEvaluator } from "../../src/domain/changeSet/change
 import { AgentAuditRepository } from "../../src/domain/audit/agentAuditRepository";
 import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
+import { GROWTH_CLOSURE_FACETS } from "../../src/domain/growth/growthClosureEvaluator";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { CreativeRelationRepository } from "../../src/domain/workspace/creativeRelationRepository";
 import { CreativeDocumentRepository } from "../../src/domain/workspace/creativeDocumentRepository";
@@ -160,7 +161,7 @@ describe("Growth Run bridge", () => {
     expect(growth.listEvents(setup.goalId).filter((event) => event.cycleId === revision.id && event.phase === "cycle_terminal")).toHaveLength(1);
   });
 
-  it("fails closed for an unintegrated Closure evaluation intent before Worker spawn", async () => {
+  it("records a missing deterministic Closure facet as a durable continue-growing evaluation", async () => {
     const setup = createSetup();
     const prior = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "closure-world");
     const growth = new GrowthRepository(setup.workspace);
@@ -168,30 +169,178 @@ describe("Growth Run bridge", () => {
       id: "closure-profile", idempotencyKey: "closure-profile-key", goalId: setup.goalId,
       profileKind: "world_birth", subjectResourceId: null, componentProfiles: [], focusOcResourceId: null,
       contractGeneration: "v26", checkpointId: prior.outputCheckpointId, ruleRevision: 1,
-      facets: [{ id: "history", kind: "content", required: true }],
+      facets: [{ id: GROWTH_CLOSURE_FACETS.world.setting, kind: "content", required: true }],
     });
     const evaluation = growth.beginCycle({
       id: "closure-evaluation-cycle", goalId: setup.goalId, idempotencyKey: "closure-evaluation-cycle-key",
       inputCheckpointId: prior.outputCheckpointId, ruleRevision: 1,
       intent: { kind: "closure_evaluation", profileId: profile.id, revision: 1, checkpointId: prior.outputCheckpointId },
     });
-    const spawn = vi.fn(() => new FakeWorker());
-    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
-
-    expect(() => lifecycle.start({
+    const worker = new FakeWorker();
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker));
+    const runId = lifecycle.start({
       goalId: setup.goalId, cycleId: evaluation.id,
       request: { projectId: "project-1", sessionId: "closure-evaluation", userInput: "evaluate closure", mode: "free" },
       emit: () => undefined,
-    })).toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED" }));
-    expect(spawn).not.toHaveBeenCalled();
-    expect(growth.getCycle(evaluation.id)).toMatchObject({
-      status: "blocked", runId: null, receiptId: null, changeSetId: null,
-      failureCode: "GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED",
     });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, randomUUID(), "closure-world", 20);
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+      ok: true, tool: "retrieve_graph_evidence",
+      result: { closureEvaluation: { deterministicContentReady: false } },
+    }));
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "submit_closure_self_assessment",
+      args: { decision: "continue_growing", safeSummary: "The setting facet is still missing." },
+    });
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+      ok: true, tool: "submit_closure_self_assessment", result: { status: "continue_growing" },
+    }));
+    terminalizeInvocation(setup.workspace, runId, `${runId}:steward`, "steward-output");
+    worker.receive({ type: "run.completed", runId, outcome: "completed", message: "evaluated", changeSetState: "none", artifacts: [] });
+
+    await vi.waitFor(() => expect(growth.getCycle(evaluation.id)).toMatchObject({
+      status: "evaluated", runId, receiptId: expect.any(String), changeSetId: null,
+      outputCheckpointId: null, failureCode: null,
+    }));
+    expect(setup.workspace.db.prepare("SELECT decision FROM growth_closure_evaluation_outcomes WHERE cycle_id = ?").get(evaluation.id))
+      .toEqual({ decision: "continue_growing" });
+    expect(setup.workspace.db.prepare("SELECT role, decision FROM growth_closure_assessments WHERE cycle_id = ?").all(evaluation.id))
+      .toEqual([{ role: "steward", decision: "continue_growing" }]);
+    expect(growth.listEvents(setup.goalId).filter((event) => event.cycleId === evaluation.id && event.phase === "cycle_evaluated"))
+      .toHaveLength(1);
+    setup.workspace.db.prepare("DELETE FROM growth_events WHERE cycle_id = ? AND phase = 'cycle_evaluated'").run(evaluation.id);
     lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: evaluation.id });
-    expect(growth.listEvents(setup.goalId).filter((event) => (
-      event.cycleId === evaluation.id && event.phase === "cycle_terminal"
-    ))).toHaveLength(1);
+    lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: evaluation.id });
+    expect(growth.listEvents(setup.goalId).filter((event) => event.cycleId === evaluation.id && event.phase === "cycle_evaluated"))
+      .toHaveLength(1);
+  });
+
+  it("seals an accepted Closure outcome from distinct Steward and Checker invocation terminals", async () => {
+    const setup = createSetup();
+    const prior = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "closure-ready-world");
+    const { growth, evaluation } = createClosureEvaluation(setup, prior.outputCheckpointId, GROWTH_CLOSURE_FACETS.world.resource, "ready");
+    const worker = new FakeWorker();
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker));
+    const runId = lifecycle.start({
+      goalId: setup.goalId, cycleId: evaluation.id,
+      request: { projectId: "project-1", sessionId: "closure-ready", userInput: "evaluate closure", mode: "free" }, emit: () => undefined,
+    });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, randomUUID(), "unrelated-model-wording", 20);
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+      ok: true, result: { closureEvaluation: { deterministicContentReady: true } },
+    }));
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "submit_closure_self_assessment",
+      args: { decision: "ready_for_checker", safeSummary: "Pinned structure is ready for independent review." },
+    });
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+      ok: true, result: { status: "checker_required", deterministicContentReady: true },
+    }));
+    const checkerInvocationId = beginCheckerInvocation(setup.workspace, runId);
+    terminalizeInvocation(setup.workspace, runId, checkerInvocationId, "checker-output");
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "submit_closure_checker_review",
+      args: { decision: "accepted", adverseFindings: [] },
+    });
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+      ok: true, result: { status: "recorded", decision: "accepted" },
+    }));
+    terminalizeInvocation(setup.workspace, runId, `${runId}:steward`, "steward-output");
+    worker.receive({ type: "run.completed", runId, outcome: "completed", message: "evaluated", changeSetState: "none", artifacts: [] });
+
+    await vi.waitFor(() => expect(growth.getCycle(evaluation.id)?.status).toBe("evaluated"));
+    expect(setup.workspace.db.prepare("SELECT decision FROM growth_closure_evaluation_outcomes WHERE cycle_id = ?").get(evaluation.id))
+      .toEqual({ decision: "accepted" });
+    expect(setup.workspace.db.prepare("SELECT role, agent_invocation_id, output_sha256 FROM growth_closure_assessments WHERE cycle_id = ? ORDER BY role").all(evaluation.id))
+      .toEqual([
+        { role: "checker", agent_invocation_id: checkerInvocationId, output_sha256: hashText("checker-output") },
+        { role: "steward", agent_invocation_id: `${runId}:steward`, output_sha256: hashText("steward-output") },
+      ]);
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_closure_reviews").get()).toEqual({ count: 1 });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toEqual({ count: 1 });
+  });
+
+  it("marks a partially persisted Closure evaluation for reconciliation instead of fabricating an outcome", async () => {
+    const setup = createSetup();
+    const prior = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "closure-reconcile-world");
+    const { growth, evaluation } = createClosureEvaluation(setup, prior.outputCheckpointId, GROWTH_CLOSURE_FACETS.world.resource, "reconcile");
+    const worker = new FakeWorker();
+    const runId = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker)).start({
+      goalId: setup.goalId, cycleId: evaluation.id,
+      request: { projectId: "project-1", sessionId: "closure-reconcile", userInput: "evaluate closure", mode: "free" }, emit: () => undefined,
+    });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, randomUUID(), "closure-reconcile-world", 20);
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({ ok: true }));
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "submit_closure_self_assessment",
+      args: { decision: "ready_for_checker", safeSummary: "Ready." },
+    });
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({ ok: true, result: { status: "checker_required" } }));
+    const checkerInvocationId = beginCheckerInvocation(setup.workspace, runId);
+    terminalizeInvocation(setup.workspace, runId, checkerInvocationId, "checker-reconcile-output");
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "submit_closure_checker_review",
+      args: { decision: "accepted", adverseFindings: [] },
+    });
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({ ok: true, result: { status: "recorded" } }));
+    terminalizeInvocation(setup.workspace, runId, `${runId}:steward`, "steward-reconcile-output");
+    setup.workspace.db.exec(`
+      CREATE TEMP TRIGGER reject_runtime_closure_review BEFORE INSERT ON growth_closure_reviews
+      BEGIN SELECT RAISE(ABORT, 'injected closure review failure'); END;
+    `);
+    worker.receive({ type: "run.completed", runId, outcome: "completed", message: "evaluated", changeSetState: "none", artifacts: [] });
+
+    await vi.waitFor(() => expect(growth.getCycle(evaluation.id)).toMatchObject({
+      status: "reconciliation_required", failureCode: "GROWTH_CLOSURE_OUTCOME_UNKNOWN",
+      changeSetId: null, outputCheckpointId: null,
+    }));
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_closure_assessments WHERE cycle_id = ?").get(evaluation.id))
+      .toEqual({ count: 2 });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_closure_reviews").get()).toEqual({ count: 0 });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_closure_evaluation_outcomes").get()).toEqual({ count: 0 });
+    expect(growth.listEvents(setup.goalId).filter((event) => event.cycleId === evaluation.id && event.phase === "cycle_terminal"))
+      .toHaveLength(1);
+  });
+
+  it("rejects Checker findings that cite evidence outside the pinned Closure projection", async () => {
+    const setup = createSetup();
+    const prior = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "closure-forged-world");
+    const { evaluation } = createClosureEvaluation(setup, prior.outputCheckpointId, GROWTH_CLOSURE_FACETS.world.resource, "forged");
+    const worker = new FakeWorker();
+    const supervisor = createSupervisor(setup, worker);
+    const runId = new GrowthRunLifecycle(setup.workspace, supervisor).start({
+      goalId: setup.goalId, cycleId: evaluation.id,
+      request: { projectId: "project-1", sessionId: "closure-forged", userInput: "evaluate closure", mode: "free" }, emit: () => undefined,
+    });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, randomUUID(), "closure-forged-world", 20);
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({ ok: true }));
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "submit_closure_self_assessment",
+      args: { decision: "ready_for_checker", safeSummary: "Ready." },
+    });
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({ ok: true, result: { status: "checker_required" } }));
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "submit_closure_checker_review",
+      args: { decision: "blocked", adverseFindings: [{
+        localId: "forged", severity: "blocking", category: "scope_violation", evidenceIds: ["not-pinned"],
+        safeSummary: "Forged evidence.", repairObjective: "Do not trust this finding.",
+      }] },
+    });
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+      ok: false, error: { code: "GROWTH_CLOSURE_SUBMISSION_INVALID" },
+    }));
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_closure_assessments WHERE cycle_id = ?").get(evaluation.id))
+      .toEqual({ count: 0 });
+    supervisor.cancel(runId);
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).getCycle(evaluation.id)?.status).toBe("cancelled"));
   });
 
   it("pins a source-document seed to its owning resource without exposing source content", async () => {
@@ -906,6 +1055,37 @@ function createSetup(focusKinds: Array<"world" | "story" | "oc"> = ["world"]) {
   return { workspace, goalId: goal.id, cycleId: cycle.id, scopeId, authorizedScopeResourceIds };
 }
 
+function createClosureEvaluation(
+  setup: ReturnType<typeof createSetup>,
+  checkpointId: string,
+  facetId: string,
+  suffix: string,
+) {
+  const growth = new GrowthRepository(setup.workspace);
+  const profile = growth.createClosureProfile({
+    id: `closure-profile-${suffix}`,
+    idempotencyKey: `closure-profile-${suffix}-key`,
+    goalId: setup.goalId,
+    profileKind: "world_birth",
+    subjectResourceId: null,
+    componentProfiles: [],
+    focusOcResourceId: null,
+    contractGeneration: "v26",
+    checkpointId,
+    ruleRevision: 1,
+    facets: [{ id: facetId, kind: "content", required: true }],
+  });
+  const evaluation = growth.beginCycle({
+    id: `closure-evaluation-${suffix}`,
+    goalId: setup.goalId,
+    idempotencyKey: `closure-evaluation-${suffix}-key`,
+    inputCheckpointId: checkpointId,
+    ruleRevision: 1,
+    intent: { kind: "closure_evaluation", profileId: profile.id, revision: 1, checkpointId },
+  });
+  return { growth, profile, evaluation };
+}
+
 function createSourceDocumentSetup() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-growth-source-seed-"));
   workspace = openWorkspace(root);
@@ -971,6 +1151,54 @@ function beginStewardInvocation(workspace: WorkspaceDatabase, runId: string): vo
     authorizedTools: ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set", "generate_image"],
     handoffContractId: null, handoffVersion: null, handoffPayloadSha256: null, inputSha256: hash,
   });
+}
+
+function beginCheckerInvocation(workspace: WorkspaceDatabase, runId: string): string {
+  const hash = "b".repeat(64);
+  const invocationId = `${runId}:checker`;
+  new AgentAuditRepository(workspace).beginInvocation({
+    invocationId, runId, parentInvocationId: `${runId}:steward`, role: "checker",
+    promptId: "novax.checker", promptVersion: "1.9.0", promptSha256: hash,
+    agentProfileId: "novax.checker", agentProfileVersion: "1.9.0", agentProfileSha256: hash,
+    providerId: "provider", requestedModelId: "model", providerConfigSha256: hash,
+    toolPolicyId: "novax.checker.tools", toolPolicyVersion: "1.0.0", toolPolicySha256: hash,
+    authorizedTools: [], handoffContractId: "novax.closure-review", handoffVersion: "1.0.0", handoffPayloadSha256: hash,
+    inputSha256: hash,
+  });
+  return invocationId;
+}
+
+function terminalizeInvocation(
+  workspace: WorkspaceDatabase,
+  runId: string,
+  invocationId: string,
+  output: string,
+): void {
+  new AgentAuditRepository(workspace).appendInvocationTerminal({
+    runId,
+    invocationId,
+    eventType: "completed",
+    errorCode: null,
+    actualProviderId: "provider",
+    actualModelId: "model",
+    responseIdSha256: hashText(`${output}:response`),
+    stopReason: "stop",
+    inputTokens: 10,
+    outputTokens: 10,
+    totalTokens: 20,
+    contextPolicyVersion: "test",
+    maxChargedInputBytes: 100,
+    configuredContextWindow: 1000,
+    safetyReserve: 100,
+    outputReserve: 100,
+    correctionAttempts: 0,
+    structuredSubmissionCount: 1,
+    outputSha256: hashText(output),
+  });
+}
+
+function hashText(value: string): string {
+  return canonicalAuditHash({ value });
 }
 
 function seedRelationEvidence(workspace: WorkspaceDatabase, worldRootId: string): { sourceResourceId: string; targetResourceId: string } {
