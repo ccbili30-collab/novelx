@@ -1,5 +1,7 @@
 # Interactive Growth And Illustration P0 Implementation Plan
 
+> **执行状态已迁移：** 本文保留产品需求、联合决策与历史设计。自 2026-07-16 起，当前阶段、复选框、验收门和提交证据以 `docs/plans/2026-07-16-hackathon-interactive-growth-completion.md` 为唯一权威；禁止根据本文中的历史 Implementation status 推断当前完成度。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 将当前固定的 `world → story → oc` 三轮 Growth 升级为世界、故事、OC 任一内容都可作为种子并互相正推/逆推、可反复接受用户指导、在安全 Cycle 边界修订受影响内容，并为图谱节点或任意文本描述生成来源绑定的“图片＋文字”真实创作闭环。
