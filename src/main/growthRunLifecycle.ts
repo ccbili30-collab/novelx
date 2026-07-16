@@ -118,11 +118,11 @@ export class GrowthRunLifecycle {
     const repairAuthority = isClosureRepair
       ? trustedClosureRepairAuthority(repository, goal, cycle, intent)
       : null;
-    const intentAnchors = isClosureEvaluation || isClosureRepair
+    const longformPhase = trustedLongformPhase(this.workspace, repository, goal, cycle, intent);
+    const intentAnchors = isClosureEvaluation || isClosureRepair || longformPhase
       ? []
       : trustedIntentAnchors(this.workspace, repository, goal, cycle, intent.focusKinds[0]!);
     const priorInquiryAuthority = isClosureEvaluation || isClosureRepair ? [] : trustedPriorInquiryAuthority(repository, goal.id);
-    const longformPhase = trustedLongformPhase(this.workspace, repository, goal, cycle, intent);
     const longformAuthority = longformPhase
       ? trustedLongformAuthority(this.workspace, repository, goal, cycle, intent, longformPhase)
       : null;
