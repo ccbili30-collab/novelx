@@ -37,7 +37,6 @@ import {
 } from "../shared/agentWorkerProtocol";
 import { GrowthRepository, type GrowthPriorInquiryContext } from "../domain/growth/growthRepository";
 import { GROWTH_CLOSURE_FACETS, GrowthClosureEvaluator } from "../domain/growth/growthClosureEvaluator";
-import { GrowthLongformProgressResolver } from "../domain/growth/growthLongformProgress";
 import { GraphRetrievalService } from "../domain/retrieval/graphRetrievalService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import { DocumentRepository } from "../domain/workspace/documentRepository";
@@ -48,7 +47,6 @@ import { ResourceRepository } from "../domain/workspace/resourceRepository";
 import { AssertionRepository } from "../domain/graph/assertionRepository";
 import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeSetPolicy";
 import { ChangeSetRepository } from "../domain/changeSet/changeSetRepository";
-import { deriveGrowthLongformOutlineDocumentId } from "../agent-worker/growth/growthLongformOutline";
 import type { WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
 import {
   AgentProcessSupervisor,
@@ -57,6 +55,7 @@ import {
   type AgentToolGateway,
   type AgentToolInvocationContext,
 } from "./agentProcessSupervisor";
+import { GrowthLongformAuthorityResolver } from "./growth/phases/longform/growthLongformAuthorityResolver";
 
 export interface GrowthRunLifecycleStart {
   goalId: string;
@@ -118,14 +117,13 @@ export class GrowthRunLifecycle {
     const repairAuthority = isClosureRepair
       ? trustedClosureRepairAuthority(repository, goal, cycle, intent)
       : null;
-    const longformPhase = trustedLongformPhase(this.workspace, repository, goal, cycle, intent);
+    const longformResolver = new GrowthLongformAuthorityResolver(this.workspace, repository);
+    const longformPhase = longformResolver.resolvePhase(goal, cycle, intent);
     const intentAnchors = isClosureEvaluation || isClosureRepair || longformPhase
       ? []
       : trustedIntentAnchors(this.workspace, repository, goal, cycle, intent.focusKinds[0]!);
     const priorInquiryAuthority = isClosureEvaluation || isClosureRepair ? [] : trustedPriorInquiryAuthority(repository, goal.id);
-    const longformAuthority = longformPhase
-      ? trustedLongformAuthority(this.workspace, repository, goal, cycle, intent, longformPhase)
-      : null;
+    const longformAuthority = longformPhase ? longformResolver.resolveAuthority(goal, cycle, intent, longformPhase) : null;
     const longformSeedResourceIds = longformAuthority?.phase === "outline"
       ? [longformAuthority.mainStoryResourceId, longformAuthority.worldResourceId, longformAuthority.focusOcResourceId]
       : longformAuthority?.phase === "section" ? [longformAuthority.storyResourceId] : [];
@@ -995,120 +993,6 @@ function nextGrowthEventSequence(repository: GrowthRepository, goalId: string): 
 interface TrustedIntentAnchor {
   resourceId: string;
   title: string;
-}
-
-function trustedLongformPhase(
-  workspace: WorkspaceDatabase,
-  repository: GrowthRepository,
-  goal: GrowthGoal,
-  cycle: GrowthCycle,
-  intent: GrowthCycleIntent,
-): "outline" | "section" | null {
-  if (intent.kind !== "expand" || intent.focusKinds.length !== 1 || intent.focusKinds[0] !== "oc") return null;
-  const profiles = repository.listClosureStates(goal.id)
-    .map((state) => repository.getClosureProfile(state.profileId))
-    .filter((profile) => profile?.contractGeneration === "v26" && profile.profileKind === "mixed_birth"
-      && profile.componentProfiles?.includes("oc_saga"));
-  if (profiles.length === 0) return null;
-  if (profiles.length !== 1) throw growthRunError("GROWTH_BINDING_INVALID");
-  const profile = profiles[0]!;
-  const revision = repository.getClosureRevision(profile.id, profile.currentRevision);
-  if (!revision || revision.checkpointId !== cycle.inputCheckpointId || revision.ruleRevision !== cycle.ruleRevision
-    || !revision.focusOcResourceId) {
-    throw growthRunError("GROWTH_BINDING_INVALID");
-  }
-  const evaluation = new GrowthClosureEvaluator(workspace).evaluate({
-    checkpointId: cycle.inputCheckpointId,
-    profileKind: profile.profileKind,
-    subjectResourceId: profile.subjectResourceId,
-    componentProfiles: profile.componentProfiles ?? undefined,
-    focusOcResourceId: revision.focusOcResourceId,
-  });
-  const facetState = new Map(evaluation.facetResults.map((facet) => [facet.facetId, facet.state]));
-  if (facetState.get(GROWTH_CLOSURE_FACETS.oc.personalStoryBinding) === "missing") return "outline";
-  if (facetState.get(GROWTH_CLOSURE_FACETS.oc.personalStory) === "missing") return "section";
-  return null;
-}
-
-function trustedLongformAuthority(
-  workspace: WorkspaceDatabase,
-  repository: GrowthRepository,
-  goal: GrowthGoal,
-  cycle: GrowthCycle,
-  intent: GrowthCycleIntent,
-  phase: "outline" | "section",
-): NonNullable<GrowthRunBinding["longformAuthority"]> {
-  if (intent.kind !== "expand" || intent.focusKinds.length !== 1 || intent.focusKinds[0] !== "oc") {
-    throw growthRunError("GROWTH_BINDING_INVALID");
-  }
-  const resources = new ResourceRepository(workspace).listAtCheckpoint(cycle.inputCheckpointId);
-  const worlds = resources.filter((resource) => resource.type === "world" && resource.objectKind === "world");
-  const mainStories = resources.filter((resource) => resource.type === "story" && resource.objectKind === "story");
-  const ocs = resources.filter((resource) => resource.type === "oc" && resource.objectKind === "oc");
-  const profileFocusIds = uniqueStrings(repository.listClosureStates(goal.id).flatMap((state) => {
-    const profile = repository.getClosureProfile(state.profileId);
-    if (!profile || profile.contractGeneration !== "v26" || profile.profileKind !== "mixed_birth"
-      || !profile.componentProfiles?.includes("oc_saga")) return [];
-    const revision = repository.getClosureRevision(profile.id, profile.currentRevision);
-    return revision?.checkpointId === cycle.inputCheckpointId && revision.ruleRevision === cycle.ruleRevision
-      && revision.focusOcResourceId ? [revision.focusOcResourceId] : [];
-  }));
-  const focusOcResourceId = profileFocusIds.length === 1 ? profileFocusIds[0]! : null;
-  const focusOc = focusOcResourceId ? ocs.find((resource) => resource.id === focusOcResourceId) : null;
-  if (worlds.length !== 1 || mainStories.length !== 1 || !focusOc) throw growthRunError("GROWTH_BINDING_INVALID");
-
-  const worldResourceId = worlds[0]!.id;
-  const mainStoryResourceId = mainStories[0]!.id;
-  const identity = createHash("sha256")
-    .update(`${goal.id}:${mainStoryResourceId}:${focusOc.id}`, "utf8")
-    .digest("hex").slice(0, 32);
-  const personalStoryResourceId = `growth-longform-story-${identity}`;
-  const outlineId = `growth-longform-${identity}`;
-  const outlineDocumentId = deriveGrowthLongformOutlineDocumentId(personalStoryResourceId, outlineId);
-  const documents = new CreativeDocumentRepository(workspace);
-
-  if (phase === "outline") {
-    if (resources.some((resource) => resource.id === personalStoryResourceId)
-      || documents.listAtCheckpoint(cycle.inputCheckpointId).some((document) => document.id === outlineDocumentId)) {
-      throw growthRunError("GROWTH_BINDING_INVALID");
-    }
-    return {
-      phase,
-      outlineId,
-      mainStoryResourceId,
-      worldResourceId,
-      focusOcResourceId: focusOc.id,
-      personalStoryResourceId,
-    };
-  }
-
-  const progress = new GrowthLongformProgressResolver(workspace).resolve({
-    checkpointId: cycle.inputCheckpointId,
-    focusOcResourceId: focusOc.id,
-  });
-  if (progress.status !== "ready" || progress.complete || !progress.nextSection
-    || progress.mainStoryResourceId !== mainStoryResourceId
-    || progress.worldResourceId !== worldResourceId
-    || progress.personalStoryResourceId !== personalStoryResourceId
-    || progress.outline.outlineId !== outlineId
-    || progress.outline.documentId !== outlineDocumentId) {
-    throw growthRunError("GROWTH_BINDING_INVALID");
-  }
-
-  return {
-    phase,
-    outlineId,
-    storyResourceId: personalStoryResourceId,
-    outlineDocumentVersionId: progress.outline.documentVersionId,
-    storyTitle: progress.outline.storyTitle,
-    summary: progress.outline.summary,
-    sections: progress.outline.sections,
-    selectedSectionId: progress.nextSection.outlineSectionId,
-    sectionSortOrder: progress.completedSections.length + 1,
-    completedSectionIds: progress.completedSections.map((item) => item.outlineSectionId),
-    priorProseEvidenceIds: progress.completedSections.map((item) => item.documentVersionId),
-    priorContentSha256: progress.completedSections.map((item) => item.contentSha256),
-  } as NonNullable<GrowthRunBinding["longformAuthority"]>;
 }
 
 function trustedClosureAuthority(
