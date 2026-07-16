@@ -450,6 +450,25 @@ describe("Growth Run bridge", () => {
     await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({
       ok: true, result: { evidence: [expect.objectContaining({ evidenceId: targetEvidenceId })] },
     }));
+    const changeSetsBeforeRejectedProposal = setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get();
+    repairWorker.receive({
+      type: "tool.request", runId: repairRunId, requestId: randomUUID(), tool: "propose_change_set",
+      args: {
+        summary: "Attempt to mutate an unrelated resource.",
+        items: [{
+          id: "repair-unrelated-root", dependsOn: [], kind: "resource.put",
+          payload: {
+            resourceId: setup.scopeId, create: false, type: "world", objectKind: "domain_root",
+            title: "Forbidden unrelated change", parentId: null, state: "active", sortOrder: 0,
+          },
+        }],
+      },
+    });
+    await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({
+      ok: false, error: { code: "GROWTH_BINDING_INVALID" },
+    }));
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get())
+      .toEqual(changeSetsBeforeRejectedProposal);
     repairWorker.receive({
       type: "tool.request", runId: repairRunId, requestId: randomUUID(), tool: "propose_change_set",
       args: {

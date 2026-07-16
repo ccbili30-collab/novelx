@@ -40,6 +40,7 @@ import { GrowthClosureEvaluator } from "../domain/growth/growthClosureEvaluator"
 import { GraphRetrievalService } from "../domain/retrieval/graphRetrievalService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import { DocumentRepository } from "../domain/workspace/documentRepository";
+import { CreativeDocumentRepository } from "../domain/workspace/creativeDocumentRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
 import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeSetPolicy";
 import { ChangeSetRepository } from "../domain/changeSet/changeSetRepository";
@@ -671,7 +672,8 @@ class BoundGrowthRun implements AgentRunInternalBinding {
       throw growthRunError(contentInquiryRequired ? "GROWTH_INQUIRY_REQUIRED" : "GROWTH_BINDING_INVALID");
     }
     if (this.#proposalExecutionStarted) throw growthRunError("GROWTH_RUN_FAILED");
-    this.#requiredCycle();
+    const cycle = this.#requiredCycle();
+    if (this.workerBinding.kind === "repair") this.#assertBoundedRepairProposal(cycle, args);
     this.#proposalExecutionStarted = true;
     const result = await gateway.proposeChangeSet(args, context);
     if (result.mode !== context.mode) throw growthRunError("GROWTH_RUN_FAILED");
@@ -685,6 +687,55 @@ class BoundGrowthRun implements AgentRunInternalBinding {
       }
     }
     return result;
+  }
+
+  #assertBoundedRepairProposal(cycle: GrowthCycle, args: ProposeChangeSetArgs): void {
+    const repair = this.workerBinding.closureRepair;
+    const receipt = cycle.receiptId ? this.#repository.getReceipt(cycle.receiptId) : null;
+    if (!repair || !receipt) throw growthRunError("GROWTH_BINDING_INVALID");
+    const requiredVersions = new Set(repair.targetEvidenceIds);
+    const targets = receipt.links.filter((link) => requiredVersions.has(link.targetVersionId));
+    if (targets.length !== requiredVersions.size) throw growthRunError("GROWTH_BINDING_INVALID");
+
+    const resourceIds = new Set(targets.filter((link) => link.targetKind === "resource").map((link) => link.targetId));
+    const documentIds = new Set(targets.filter((link) => link.targetKind === "document").map((link) => link.targetId));
+    const assertionIds = new Set(targets.filter((link) => link.targetKind === "assertion").map((link) => link.targetId));
+    const relationIds = new Set(targets.filter((link) => link.targetKind === "relation").map((link) => link.targetId));
+    const documentOwners = new Map(new CreativeDocumentRepository(this.#workspace)
+      .listAtCheckpoint(cycle.inputCheckpointId)
+      .filter((document) => documentIds.has(document.id))
+      .map((document) => [document.id, document.resourceId]));
+
+    const inBounds = args.items.every((item) => {
+      switch (item.kind) {
+        case "resource.put":
+          return !item.payload.create && resourceIds.has(item.payload.resourceId);
+        case "creative_document.put": {
+          const selectedOwner = documentOwners.get(item.payload.documentId);
+          if (selectedOwner) {
+            return !item.payload.create && selectedOwner === item.payload.resourceId;
+          }
+          return resourceIds.has(item.payload.resourceId);
+        }
+        case "document.put": {
+          if (!item.payload.creativeDocumentId) return resourceIds.has(item.payload.resourceId);
+          const selectedOwner = documentOwners.get(item.payload.creativeDocumentId);
+          return selectedOwner
+            ? selectedOwner === item.payload.resourceId
+            : resourceIds.has(item.payload.resourceId);
+        }
+        case "assertion.put":
+          return assertionIds.has(item.payload.assertionId) || resourceIds.has(item.payload.scopeId);
+        case "creative_relation.put":
+          return !item.payload.create && relationIds.has(item.payload.relationId);
+        case "constraint_profile.put":
+          return item.payload.scopeResourceId !== null && resourceIds.has(item.payload.scopeResourceId);
+        case "project_file.put":
+        case "project_file.delete":
+          return false;
+      }
+    });
+    if (!inBounds) throw growthRunError("GROWTH_BINDING_INVALID");
   }
 
   async #generate(gateway: AgentToolGateway, args: GenerateImageArgs, context: AgentToolInvocationContext): Promise<GenerateImageResult> {

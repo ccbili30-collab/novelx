@@ -322,7 +322,7 @@ export class GrowthCoordinator {
     if (intent.kind !== "closure_evaluation" || intent.profileId !== outcome.profileId || intent.revision !== outcome.revision) {
       throw coordinatorError("GROWTH_CLOSURE_OUTCOME_MISSING");
     }
-    this.#settlePriorRepair(input.repository, input.goal.id, cycle, outcome.decision);
+    this.#settlePriorRepair(input.repository, input.goal.id, cycle, outcome.decision, outcome.reviewId);
     if (outcome.decision !== "repairs_required") {
       this.#releaseListeners(input.goal.id);
       return;
@@ -376,6 +376,7 @@ export class GrowthCoordinator {
     goalId: string,
     evaluationCycle: GrowthCycle,
     decision: "continue_growing" | "accepted" | "repairs_required" | "blocked",
+    reviewId: string | null,
   ): void {
     const prior = repository.listCycles(goalId).find((candidate) => candidate.sequence === evaluationCycle.sequence - 1);
     if (!prior || repository.getCycleIntent(prior.id).kind !== "repair") return;
@@ -387,7 +388,16 @@ export class GrowthCoordinator {
       repository.markClosureRepairResolution(lineage.id, "resolved");
       return;
     }
-    if (lineage.resolutionState === "planned") repository.markClosureRepairResolution(lineage.id, "no_progress");
+    if (lineage.resolutionState !== "planned") return;
+    if (decision === "repairs_required") {
+      const review = reviewId ? repository.getClosureReviewV4(reviewId) : null;
+      if (!review) throw coordinatorError("GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID");
+      const originalFindingStillPresent = review.adverseFindings
+        .some((finding) => finding.fingerprint === lineage.selectedFindingFingerprint);
+      repository.markClosureRepairResolution(lineage.id, originalFindingStillPresent ? "no_progress" : "committed");
+      return;
+    }
+    repository.markClosureRepairResolution(lineage.id, "no_progress");
   }
 
   #appendTerminalEvent(
@@ -415,6 +425,31 @@ export class GrowthCoordinator {
     const lifecycle = new GrowthRunLifecycle(input.context.workspace, this.supervisor);
     const pinnedRule = input.repository.getRuleRevision(input.goal.id, cycle.ruleRevision);
     const intent = input.repository.getCycleIntent(cycle.id);
+    if (intent.kind === "repair") {
+      const lineage = input.repository.getClosureRepairLineageForCycle(cycle.id);
+      const lineageMatches = lineage
+        && lineage.profileId === intent.profileId
+        && lineage.revision === intent.revision
+        && lineage.originalReviewId === intent.originalReviewId
+        && lineage.selectedFindingId === intent.selectedFindingId
+        && lineage.selectedFindingFingerprint === intent.selectedFindingFingerprint;
+      if (!lineageMatches || !lineage || !["planned", "stalled"].includes(lineage.resolutionState)) {
+        const failed = input.repository.terminalizeCycle({
+          cycleId: cycle.id, status: "failed", failureCode: "GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID",
+        });
+        this.#appendTerminalEvent(input, failed, "Closure repair lineage is missing or invalid; the Run was not started.");
+        this.#releaseListeners(input.goal.id);
+        return;
+      }
+      if (lineage.resolutionState === "stalled") {
+        const blocked = input.repository.terminalizeCycle({
+          cycleId: cycle.id, status: "blocked", failureCode: "GROWTH_CLOSURE_REPAIR_STALLED",
+        });
+        this.#appendTerminalEvent(input, blocked, "Closure repair remains stalled; the Run was not restarted.");
+        this.#releaseListeners(input.goal.id);
+        return;
+      }
+    }
     const repairBrief = intent.kind === "repair" ? requiredRepairBrief(input.repository, intent) : null;
     const runId = lifecycle.start({
       goalId: input.goal.id,

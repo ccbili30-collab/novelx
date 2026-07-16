@@ -447,6 +447,67 @@ describe("GrowthCoordinator", () => {
     expect(workers).toHaveLength(6);
   });
 
+  it("fails closed when a planned repair is recovered without durable lineage", async () => {
+    const setup = createSetup();
+    const originalWorkers: FakeWorker[] = [];
+    const originalSupervisor = createSupervisor(setup, originalWorkers);
+    const original = new GrowthCoordinator(setup.session, setup.application, originalSupervisor);
+    const boundary = await preparePlannedRepairRecoveryBoundary(setup, original, originalWorkers, "missing-lineage");
+    originalSupervisor.dispose();
+
+    const reopenedWorkers: FakeWorker[] = [];
+    const reopened = new GrowthCoordinator(setup.session, setup.application, createSupervisor(setup, reopenedWorkers));
+    const snapshot = reopened.get({
+      projectId: setup.projectId, sessionId: setup.sessionId, goalId: boundary.goalId,
+    });
+    expect(snapshot.cycles.at(-1)).toMatchObject({
+      id: boundary.repairCycle.id, status: "failed", runId: null,
+    });
+    expect(boundary.repository.getCycle(boundary.repairCycle.id)?.failureCode)
+      .toBe("GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID");
+    expect(reopenedWorkers).toHaveLength(0);
+    originalWorkers[3]!.receive({
+      type: "run.completed", runId: runId(originalWorkers[3]!), outcome: "completed",
+      message: "release missing-lineage crash boundary", changeSetState: "none", artifacts: [],
+    });
+  });
+
+  it("blocks a planned repair recovered after its durable lineage became stalled", async () => {
+    const setup = createSetup();
+    const originalWorkers: FakeWorker[] = [];
+    const originalSupervisor = createSupervisor(setup, originalWorkers);
+    const original = new GrowthCoordinator(setup.session, setup.application, originalSupervisor);
+    const boundary = await preparePlannedRepairRecoveryBoundary(setup, original, originalWorkers, "stalled-lineage");
+    const lineage = boundary.repository.createClosureRepairLineage({
+      id: "lineage-stalled-recovery", profileId: boundary.evaluation.review.profileId,
+      revision: boundary.evaluation.review.revision, originalReviewId: boundary.evaluation.review.id,
+      selectedFindingId: boundary.evaluation.finding!.id,
+      selectedFindingFingerprint: boundary.evaluation.finding!.fingerprint,
+      repairCycleId: boundary.repairCycle.id, backlogFindingIds: [],
+      idempotencyKey: "lineage-stalled-recovery-key",
+    });
+    setup.workspace.db.prepare(`
+      UPDATE growth_closure_repair_lineage SET resolution_state = 'stalled' WHERE id = ?
+    `).run(lineage.id);
+    originalSupervisor.dispose();
+
+    const reopenedWorkers: FakeWorker[] = [];
+    const reopened = new GrowthCoordinator(setup.session, setup.application, createSupervisor(setup, reopenedWorkers));
+    const snapshot = reopened.get({
+      projectId: setup.projectId, sessionId: setup.sessionId, goalId: boundary.goalId,
+    });
+    expect(snapshot.cycles.at(-1)).toMatchObject({
+      id: boundary.repairCycle.id, status: "blocked", runId: null,
+    });
+    expect(boundary.repository.getCycle(boundary.repairCycle.id)?.failureCode)
+      .toBe("GROWTH_CLOSURE_REPAIR_STALLED");
+    expect(reopenedWorkers).toHaveLength(0);
+    originalWorkers[3]!.receive({
+      type: "run.completed", runId: runId(originalWorkers[3]!), outcome: "completed",
+      message: "release stalled-lineage crash boundary", changeSetState: "none", artifacts: [],
+    });
+  });
+
   it("stops without another Worker when the same Checker finding survives the repair recheck", async () => {
     const setup = createSetup();
     const workers: FakeWorker[] = [];
@@ -489,6 +550,56 @@ describe("GrowthCoordinator", () => {
       .filter((lineage) => lineage !== null);
     expect(lineages.map((lineage) => lineage.resolutionState)).toEqual(["no_progress", "stalled"]);
     expect(workers).toHaveLength(6);
+  });
+
+  it("treats a replacement Checker finding as progress and starts one newly bounded repair", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const started = coordinator.start(growthRequest(setup));
+
+    await completeCycle(setup.workspace, workers[0]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    await completeCycle(setup.workspace, workers[1]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(3));
+    await completeCycle(setup.workspace, workers[2]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(4));
+    await sealCoordinatorClosureEvaluation(
+      setup.workspace, workers[3]!, "repairs_required", "replacement-before", "a".repeat(64),
+    );
+    workers[3]!.receive({
+      type: "run.completed", runId: runId(workers[3]!), outcome: "completed",
+      message: "first repair required", changeSetState: "none", artifacts: [],
+    });
+    await vi.waitFor(() => expect(workers).toHaveLength(5));
+    await completeCoordinatorRepair(setup.workspace, workers[4]!, setup.scopeId, "The Reviewed Tidemark");
+    await vi.waitFor(() => expect(workers).toHaveLength(6));
+
+    await sealCoordinatorClosureEvaluation(
+      setup.workspace, workers[5]!, "repairs_required", "replacement-after", "b".repeat(64),
+    );
+    workers[5]!.receive({
+      type: "run.completed", runId: runId(workers[5]!), outcome: "completed",
+      message: "a different finding remains", changeSetState: "none", artifacts: [],
+    });
+    await vi.waitFor(() => expect(workers).toHaveLength(7));
+
+    const repository = new GrowthRepository(setup.workspace);
+    const lineages = repository.listCycles(started.goal.id)
+      .map((cycle) => repository.getClosureRepairLineageForCycle(cycle.id))
+      .filter((lineage) => lineage !== null);
+    expect(lineages.map((lineage) => lineage.resolutionState)).toEqual(["committed", "planned"]);
+    expect(lineages.map((lineage) => lineage.selectedFindingFingerprint)).toEqual(["a".repeat(64), "b".repeat(64)]);
+    expect(repository.getClosureRepairStallState(
+      lineages[1]!.profileId, lineages[1]!.revision, lineages[1]!.selectedFindingFingerprint,
+    )).toMatchObject({ stalled: false, sameFingerprintAttempts: 1, noProgressAttempts: 0 });
+    expect(repository.getClosureRepairStallState(
+      lineages[0]!.profileId, lineages[1]!.revision, lineages[0]!.selectedFindingFingerprint,
+    )).toMatchObject({ stalled: false, sameFingerprintAttempts: 0, noProgressAttempts: 0 });
+    workers[6]!.spawn();
+    await vi.waitFor(() => expect(workers[6]!.sent).toHaveLength(1));
+    supervisor.cancel(runId(workers[6]!));
   });
 
   it("stops after a failed Cycle and recovers a running Cycle to reconciliation", async () => {
@@ -872,6 +983,37 @@ function requestCoordinatorRetrieval(worker: FakeWorker, runId: string, query: s
   });
 }
 
+async function preparePlannedRepairRecoveryBoundary(
+  setup: ReturnType<typeof createSetup>,
+  coordinator: GrowthCoordinator,
+  workers: FakeWorker[],
+  suffix: string,
+) {
+  const started = coordinator.start(growthRequest(setup));
+  await completeCycle(setup.workspace, workers[0]!);
+  await vi.waitFor(() => expect(workers).toHaveLength(2));
+  await completeCycle(setup.workspace, workers[1]!);
+  await vi.waitFor(() => expect(workers).toHaveLength(3));
+  await completeCycle(setup.workspace, workers[2]!);
+  await vi.waitFor(() => expect(workers).toHaveLength(4));
+  const evaluation = await sealCoordinatorClosureEvaluation(
+    setup.workspace, workers[3]!, "repairs_required", suffix,
+  );
+  const repository = new GrowthRepository(setup.workspace);
+  const evaluationCycle = repository.listCycles(started.goal.id).at(-1)!;
+  const repairCycle = repository.beginCycle({
+    id: `repair-recovery-${suffix}`, goalId: started.goal.id,
+    idempotencyKey: `repair-recovery-${suffix}-key`,
+    inputCheckpointId: evaluationCycle.inputCheckpointId, ruleRevision: evaluationCycle.ruleRevision,
+    intent: {
+      kind: "repair", profileId: evaluation.review.profileId, revision: evaluation.review.revision,
+      originalReviewId: evaluation.review.id, selectedFindingId: evaluation.finding!.id,
+      selectedFindingFingerprint: evaluation.finding!.fingerprint,
+    },
+  });
+  return { goalId: started.goal.id, repository, evaluation, repairCycle };
+}
+
 async function completeCoordinatorRepair(
   workspace: WorkspaceDatabase,
   worker: FakeWorker,
@@ -920,6 +1062,7 @@ async function sealCoordinatorClosureEvaluation(
   worker: FakeWorker,
   decision: "accepted" | "repairs_required",
   suffix: string,
+  findingFingerprint = "f".repeat(64),
 ) {
   if (worker.sent.length === 0) worker.spawn();
   await vi.waitFor(() => expect(worker.sent).toHaveLength(1));
@@ -941,7 +1084,14 @@ async function sealCoordinatorClosureEvaluation(
   const cycle = repository.getCycle(command.growthBinding.cycleId)!;
   const receipt = repository.getReceipt(cycle.receiptId!)!;
   expect(receipt.links.length).toBeGreaterThan(0);
-  const targetEvidenceId = receipt.links[0]!.targetVersionId;
+  const worldResourceIds = new Set(new ResourceRepository(workspace).listAtCheckpoint(cycle.inputCheckpointId)
+    .filter((resource) => resource.objectKind === "world")
+    .map((resource) => resource.id));
+  const repairTarget = receipt.links.find((link) => (
+    link.targetKind === "resource" && worldResourceIds.has(link.targetId)
+  ));
+  if (!repairTarget) throw new Error("Expected a pinned formal world repair target.");
+  const targetEvidenceId = repairTarget.targetVersionId;
   const profile = repository.getClosureProfile(command.growthBinding.closureProfile.profileId)!;
   const revision = repository.getClosureRevision(profile.id, command.growthBinding.closureProfile.revision)!;
   const stewardOutputHash = createHash("sha256").update(`steward-${suffix}`, "utf8").digest("hex");
@@ -954,9 +1104,9 @@ async function sealCoordinatorClosureEvaluation(
     evidence: [{ receiptId: receipt.id, rank: 1 }],
   }));
   const finding = decision === "repairs_required" ? {
-    id: `finding-${suffix}`, fingerprint: "f".repeat(64), severity: "major" as const,
+    id: `finding-${suffix}`, fingerprint: findingFingerprint, severity: "major" as const,
     category: "world_consistency" as const,
-    targetEvidence: [{ receiptId: receipt.id, rank: 1 }],
+    targetEvidence: [{ receiptId: receipt.id, rank: repairTarget.rank }],
     safeSummary: "The reviewed world identity is too generic.",
     repairObjective: "Give the existing world a distinctive title without changing unrelated nodes.",
   } : null;

@@ -1331,22 +1331,27 @@ export class GrowthRepository {
   } {
     const closureRevision = this.getClosureRevision(profileId, revision);
     if (!closureRevision) throw growthError("GROWTH_CLOSURE_REVISION_NOT_FOUND");
-    const same = this.workspace.db.prepare(`
-      SELECT COUNT(*) AS count FROM growth_closure_repair_lineage lineage
+    const rows = this.workspace.db.prepare(`
+      SELECT lineage.selected_finding_fingerprint AS fingerprint, lineage.resolution_state AS resolution_state
+      FROM growth_closure_repair_lineage lineage
       JOIN growth_cycles cycles ON cycles.id = lineage.repair_cycle_id
-      WHERE lineage.profile_id = ? AND lineage.revision <= ?
-        AND lineage.selected_finding_fingerprint = ? AND cycles.rule_revision = ?
-    `).get(profileId, revision, fingerprint, closureRevision.ruleRevision) as { count: number };
-    const noProgress = this.workspace.db.prepare(`
-      SELECT COUNT(*) AS count FROM growth_closure_repair_lineage lineage
-      JOIN growth_cycles cycles ON cycles.id = lineage.repair_cycle_id
-      WHERE lineage.profile_id = ? AND lineage.revision <= ?
-        AND lineage.resolution_state IN ('no_progress', 'stalled') AND cycles.rule_revision = ?
-    `).get(profileId, revision, closureRevision.ruleRevision) as { count: number };
+      WHERE lineage.profile_id = ? AND lineage.revision <= ? AND cycles.rule_revision = ?
+      ORDER BY cycles.sequence, lineage.created_at, lineage.id
+    `).all(profileId, revision, closureRevision.ruleRevision) as Array<{ fingerprint: string; resolution_state: string }>;
+    let sameFingerprintAttempts = 0;
+    for (let index = rows.length - 1; index >= 0 && rows[index]!.fingerprint === fingerprint; index -= 1) {
+      sameFingerprintAttempts += 1;
+    }
+    let noProgressAttempts = 0;
+    for (let index = rows.length - 1;
+      index >= 0 && ["no_progress", "stalled"].includes(rows[index]!.resolution_state);
+      index -= 1) {
+      noProgressAttempts += 1;
+    }
     return {
-      stalled: same.count >= 2 || noProgress.count >= 2,
-      sameFingerprintAttempts: same.count,
-      noProgressAttempts: noProgress.count,
+      stalled: sameFingerprintAttempts >= 2 || noProgressAttempts >= 2,
+      sameFingerprintAttempts,
+      noProgressAttempts,
     };
   }
 
