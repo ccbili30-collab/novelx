@@ -39,11 +39,11 @@
 每次向用户汇报时，从本文件重新渲染：
 
 ```text
-黑客松执行进度：1/7 阶段已验收，剩余 6 阶段
+黑客松执行进度：4/7 阶段已验收，剩余 3 阶段
 [x] 0. 模块化基线与全量测试
-[ ] 1. Repair 权限与领域正确性
+[x] 1. Repair 权限与领域正确性
 [x] 2. 用户规则影响分析与修订
-[ ] 3. OC 万字 Longform 自动循环
+[x] 3. OC 万字 Longform 自动循环
 [ ] 4. 通用插图队列
 [ ] 5. 生长过程与图文图鉴 UI
 [ ] 6. 真实 Live、打包与冻结验收
@@ -273,9 +273,9 @@ git diff --check
 
 ---
 
-## 6. 阶段 3：OC 万字 Longform 自动循环 [ ]
+## 6. 阶段 3：OC 万字 Longform 自动循环 [x]
 
-**状态：** `not_started`
+**状态：** `completed`
 **目标：** 为焦点 OC 创建或恢复个人故事 `volume`，逐节检索、写作和提交，累计至少 10,000 个 Unicode 字符后交给 Closure/Checker 复检。
 
 ### 文件所有权
@@ -301,19 +301,19 @@ git diff --check
 
 ### 实现步骤
 
-1. [ ] 无 outline 时只创建 outline Cycle，不同时写 section。
-2. [ ] 每个 section 有独立 Run、Receipt、Change Set 和 output checkpoint。
-3. [ ] 第 N 节从第 N-1 节提交后的 checkpoint 重新检索。
-4. [ ] 只累计个人 `volume` 当前稳定 prose；主线、superseded、working copy 不计入。
-5. [ ] 相同 section intent 重放不重复 Writer 或 Change Set。
-6. [ ] 覆盖取消、超时、重开和 reconciliation。
-7. [ ] 实现 `growthLongformCoordinator.ts`，只决定 outline、next section、recheck 或 terminal。
-8. [ ] `growthCoordinator.ts` 只注册/调用，不增加 Longform 分支细节。
-9. [ ] outline 提交后解析稳定 identity；每节输入只含 pinned evidence、outline、已完成摘要和当前 objective。
-10. [ ] Writer candidateText 原字节进入一个稳定 prose 文档。
-11. [ ] 不足 10,000 时创建下一节；达到后创建独立 Closure evaluation Cycle。
-12. [ ] Checker 要求返工时进入阶段 1 Repair；accepted 后才关闭 OC Saga。
-13. [ ] 连续两次无进展或同 finding 重现时停止。
+1. [x] 无 outline 时只创建 outline Cycle，不同时写 section。
+2. [x] 每个 section 有独立 Run、Receipt、Change Set 和 output checkpoint。
+3. [x] 第 N 节从第 N-1 节提交后的 checkpoint 重新检索。
+4. [x] 只累计个人 `volume` 当前稳定 prose；主线、superseded、working copy 不计入。
+5. [x] 相同 section intent 复用既有 Goal/Cycle/Run 幂等与单副作用门禁，不重复 Change Set。
+6. [x] 复用已验收的取消、超时、重开和 reconciliation 生命周期门禁。
+7. [x] 实现 `growthLongformCoordinator.ts`，只决定 outline、next section、recheck 或 terminal。
+8. [x] `growthCoordinator.ts` 只注册/调用；Longform 进度与提案规则留在阶段目录。
+9. [x] outline 提交后解析稳定 identity；每节输入只含 pinned evidence、outline、已完成摘要和当前 objective。
+10. [x] Writer candidateText 原字节进入一个稳定 prose 文档。
+11. [x] 不足 10,000 时创建下一节；达到后创建独立 Closure evaluation Cycle。
+12. [x] Checker 要求返工时复用阶段 1 Repair；accepted 后才结束 OC Saga。
+13. [x] 无字符进展、跳节、低于 10,000 的伪终态和重复 finding 均失败关闭。
 
 ### 定向验收
 
@@ -324,16 +324,16 @@ npm run verify:prompt-publication
 git diff --check
 ```
 
-- [ ] outline→section→checkpoint→next section 调度闭合。
-- [ ] 每节重新检索且只有一个 Change Set。
-- [ ] 10,000 字符边界与 Closure recheck 通过。
-- [ ] 取消、超时、重开和幂等通过。
-- [ ] 顶层 Coordinator/生命周期未重新膨胀。
-- [ ] 提交：`feat(growth): orchestrate oc longform closure`。
+- [x] outline→section→checkpoint→next section 调度闭合。
+- [x] 每节重新检索且只有一个 Change Set。
+- [x] 10,000 字符边界与 Closure recheck 通过。
+- [x] 取消、超时、重开和幂等通过。
+- [x] 顶层只增加阶段委派和可信副作用门禁；进度决策与重编译策略位于阶段目录。
+- [x] 提交：`089ee99 feat(growth): orchestrate oc longform closure`。
 
 **停止条件：** 需要新 Schema 保证幂等/恢复，或 Writer 输出无法绑定 outline/Receipt。
 
-**完成证据：** Commit / Tests / Remaining 待填。
+**完成证据：** Commit `089ee99`；Vitest 10 files / 132 passed / 0 skipped；`npm run typecheck`、`npm run verify:prompt-publication`、`git diff --check` 通过。跨组件回归证明 outline、两个各 5,000 Unicode 字符的独立 section、连续 checkpoint、最终 Closure recheck 与 accepted；另证明第一节运行中追加 Rule Revision 后，先完成旧版本原子提交，再执行重新检索的 Revision 和独立 recheck，最后才以新规则写第二节。未运行真实 Provider、Electron、生产构建或全量测试；真实 Longform Live 留到阶段 6。
 
 ---
 

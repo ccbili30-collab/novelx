@@ -31,7 +31,7 @@
 - `GrowthPhaseHandler` 已负责阶段匹配与工具计划；Longform、Closure/Repair 的 Worker 编译/展示已迁入阶段目录。顶层状态机仍保留跨阶段的运行时状态、工具分派和原子副作用门禁，尚未把 world/story/OC 迁入同一接口。
 - Longform 与 Closure/Repair 的 Main authority 已迁入 `src/main/growth/phases/`；`growthRunLifecycle.ts` 仍保留 Receipt 投影、Closure 结果持久化、提交与恢复，这是后续维护的主要剩余体积。
 - 用户 Cycle 间指导与 Revision 的确定性链已接通：下一安全 Cycle 重新检索、提交证据化影响简报，并以一个 Change Set 修改授权对象。尚未运行当前实现的真实 Provider Live，不得称交互式 Growth 已闭环。
-- Longform 的确定性编译、身份和 pinned progress 已存在；自动 outline→section→recheck 协调尚未冻结，不得继续向 Coordinator 添加未经规则边界验证的分支。
+- Longform 的确定性编译、身份、pinned progress 与 Main 自动 `outline → section → recheck` 协调已经冻结；用户在章节运行中追加的新规则会在下一 Cycle 边界先执行 Revision，再继续后续章节。尚未运行当前实现的真实 Provider Live，不得称万字内容质量或完整交互演示已验收。
 
 ## 定向验收
 
