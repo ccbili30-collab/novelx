@@ -63,6 +63,31 @@ export class CreativeRelationRepository {
     return rows.map(mapRelation);
   }
 
+  listAtCheckpoint(checkpointId: string): CreativeRelationRecord[] {
+    requireRow(this.workspace.db.prepare("SELECT id FROM checkpoints WHERE id = ?").get(checkpointId), "CHECKPOINT_NOT_FOUND");
+    const rows = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+        SELECT ?, 0
+        UNION ALL
+        SELECT checkpoints.parent_checkpoint_id, ancestry.depth + 1
+        FROM checkpoints JOIN ancestry ON checkpoints.id = ancestry.checkpoint_id
+        WHERE checkpoints.parent_checkpoint_id IS NOT NULL
+      ), ranked AS (
+        SELECT versions.*, ancestry.depth,
+          ROW_NUMBER() OVER (PARTITION BY versions.relation_id ORDER BY ancestry.depth ASC) AS revision_rank
+        FROM creative_relation_versions versions
+        JOIN ancestry ON ancestry.checkpoint_id = versions.created_checkpoint_id
+      )
+      SELECT relation_id AS id, kind, source_resource_id, target_resource_id
+      FROM ranked
+      WHERE revision_rank = 1 AND state = 'active'
+      ORDER BY CASE kind
+        WHEN 'uses_world' THEN 1 WHEN 'uses_oc' THEN 2 WHEN 'variant_of' THEN 3 ELSE 4 END,
+        source_resource_id, target_resource_id, relation_id
+    `).all(checkpointId);
+    return rows.map(mapRelation);
+  }
+
   getCurrent(relationId: string, branchId = this.#checkpoints.getActiveBranch().id): CreativeRelationRecord | null {
     return this.listCurrent(branchId).find((relation) => relation.id === relationId) ?? null;
   }

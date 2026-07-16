@@ -360,7 +360,7 @@ export function StewardRuntimePanel({
           sessionId: startSessionId,
           seed: { kind: "text", text: userInput },
           initialRuleText: userInput,
-          strategy: "grow_world_story_oc_inquiry_v3",
+          strategy: "grow_world_story_oc_closure_v4",
         });
         if (!isCurrentGrowthRequest(growthLoadRequestToken.current, request)) return;
         if (startStorageKey) window.localStorage.setItem(startStorageKey, snapshot.goal.id);

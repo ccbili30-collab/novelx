@@ -1,6 +1,6 @@
 import type {
   GrowthClosureState,
-  GrowthCycleIntent,
+  GrowthContentCycleIntent,
 } from "../shared/growthContract";
 
 export type GrowthFocusKind = "world" | "story" | "oc";
@@ -8,7 +8,7 @@ export type GrowthFocusKind = "world" | "story" | "oc";
 export interface GrowthFrontierCycleState {
   ruleRevision: number;
   status: "committed";
-  intent: Pick<GrowthCycleIntent, "kind" | "focusKinds" | "resumeFrontier">;
+  intent: Pick<GrowthContentCycleIntent, "kind" | "focusKinds" | "resumeFrontier">;
 }
 
 export interface GrowthFrontierPlannerInput {
@@ -58,7 +58,7 @@ export function planGrowthFrontier(input: GrowthFrontierPlannerInput): GrowthFro
 }
 
 export function estimateRevisionIntent(input: {
-  currentIntent: Pick<GrowthCycleIntent, "focusKinds" | "resumeFrontier">;
+  currentIntent: Pick<GrowthContentCycleIntent, "focusKinds" | "resumeFrontier">;
   formalCoverageKinds: GrowthFocusKind[];
 }): { kind: "revision"; focusKinds: GrowthFocusKind[]; resumeFrontier: GrowthFocusKind[] } {
   const focusKinds = orderedUnique([...input.currentIntent.focusKinds, ...input.formalCoverageKinds]);

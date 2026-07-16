@@ -23,8 +23,8 @@ const cycleTwo = "cycle-2";
 
 function snapshot(overrides: Partial<GrowthStartResponse> = {}): GrowthStartResponse {
   return {
-    capabilityVersion: "hackathon-growth-inquiry-v3",
-    strategy: "grow_world_story_oc_inquiry_v3",
+    capabilityVersion: "hackathon-growth-closure-v4",
+    strategy: "grow_world_story_oc_closure_v4",
     coordinatorStatus: "running",
     goal: { id: goalId, status: "active", currentCycleSequence: 1 },
     cycles: [

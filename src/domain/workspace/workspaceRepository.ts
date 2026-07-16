@@ -246,7 +246,11 @@ function migrate(db: DatabaseSync): void {
     migrateGrowthInquiryV25Schema(db);
     schema = { version: 25 };
   }
-  if (schema.version !== 25) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 25) {
+    migrateGrowthClosureV26Schema(db);
+    schema = { version: 26 };
+  }
+  if (schema.version !== 26) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -1012,6 +1016,245 @@ function migrateGrowthInquiryV25Schema(db: DatabaseSync): void {
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
+  }
+}
+
+function migrateGrowthClosureV26Schema(db: DatabaseSync): void {
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      ALTER TABLE growth_closure_profiles
+        ADD COLUMN contract_generation TEXT NOT NULL DEFAULT 'legacy_pre_v26'
+          CHECK (contract_generation IN ('legacy_pre_v26', 'v26'));
+      ALTER TABLE growth_closure_profiles ADD COLUMN focus_oc_resource_id TEXT REFERENCES resources(id);
+      ALTER TABLE growth_closure_profile_revisions
+        ADD COLUMN contract_generation TEXT NOT NULL DEFAULT 'legacy_pre_v26'
+          CHECK (contract_generation IN ('legacy_pre_v26', 'v26'));
+      ALTER TABLE growth_closure_profile_revisions ADD COLUMN focus_oc_resource_id TEXT REFERENCES resources(id);
+      ALTER TABLE growth_closure_assessments
+        ADD COLUMN contract_generation TEXT NOT NULL DEFAULT 'legacy_pre_v26'
+          CHECK (contract_generation IN ('legacy_pre_v26', 'v26'));
+      ALTER TABLE growth_closure_reviews
+        ADD COLUMN contract_generation TEXT NOT NULL DEFAULT 'legacy_pre_v26'
+          CHECK (contract_generation IN ('legacy_pre_v26', 'v26'));
+
+      CREATE TABLE growth_closure_profile_components (
+        profile_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        component_profile TEXT NOT NULL CHECK (component_profile IN ('world_birth', 'oc_saga', 'story_universe')),
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 2),
+        PRIMARY KEY (profile_id, revision, component_profile),
+        UNIQUE (profile_id, revision, ordinal),
+        FOREIGN KEY (profile_id, revision)
+          REFERENCES growth_closure_profile_revisions(profile_id, revision) ON DELETE CASCADE
+      );
+      CREATE TABLE growth_closure_facet_results (
+        assessment_id TEXT NOT NULL REFERENCES growth_closure_assessments(id) ON DELETE CASCADE,
+        profile_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        facet_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('satisfied', 'missing', 'conflicted', 'blocked')),
+        coverage TEXT NOT NULL CHECK (coverage IN ('complete', 'partial', 'unknown')),
+        safe_summary TEXT NOT NULL CHECK (length(trim(safe_summary)) > 0),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (assessment_id, facet_id),
+        UNIQUE (assessment_id, ordinal),
+        FOREIGN KEY (profile_id, revision, facet_id)
+          REFERENCES growth_closure_facets(profile_id, revision, facet_id)
+      );
+      CREATE TABLE growth_closure_facet_result_evidence (
+        assessment_id TEXT NOT NULL,
+        facet_id TEXT NOT NULL,
+        receipt_id TEXT NOT NULL,
+        rank INTEGER NOT NULL CHECK (rank >= 1),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (assessment_id, facet_id, receipt_id, rank),
+        UNIQUE (assessment_id, facet_id, ordinal),
+        FOREIGN KEY (assessment_id, facet_id)
+          REFERENCES growth_closure_facet_results(assessment_id, facet_id) ON DELETE CASCADE,
+        FOREIGN KEY (receipt_id, rank) REFERENCES growth_retrieval_receipt_links(receipt_id, rank)
+      );
+      CREATE TABLE growth_closure_adverse_findings (
+        id TEXT PRIMARY KEY,
+        assessment_id TEXT NOT NULL REFERENCES growth_closure_assessments(id) ON DELETE CASCADE,
+        fingerprint TEXT NOT NULL CHECK (length(fingerprint) = 64),
+        severity TEXT NOT NULL CHECK (severity IN ('minor', 'major', 'blocking')),
+        category TEXT NOT NULL CHECK (category IN (
+          'world_consistency', 'story_consistency', 'character_consistency', 'causality', 'continuity',
+          'evidence_gap', 'scope_violation', 'creator_choice_required'
+        )),
+        safe_summary TEXT NOT NULL CHECK (length(trim(safe_summary)) > 0),
+        repair_objective TEXT NOT NULL CHECK (length(trim(repair_objective)) > 0),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        UNIQUE (assessment_id, fingerprint),
+        UNIQUE (assessment_id, ordinal)
+      );
+      CREATE TABLE growth_closure_adverse_finding_evidence (
+        finding_id TEXT NOT NULL REFERENCES growth_closure_adverse_findings(id) ON DELETE CASCADE,
+        receipt_id TEXT NOT NULL,
+        rank INTEGER NOT NULL CHECK (rank >= 1),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (finding_id, receipt_id, rank),
+        UNIQUE (finding_id, ordinal),
+        FOREIGN KEY (receipt_id, rank) REFERENCES growth_retrieval_receipt_links(receipt_id, rank)
+      );
+
+      CREATE TABLE growth_closure_evaluation_outcomes (
+        id TEXT PRIMARY KEY,
+        cycle_id TEXT NOT NULL UNIQUE REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        profile_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        receipt_id TEXT NOT NULL REFERENCES growth_retrieval_receipts(id),
+        steward_assessment_id TEXT NOT NULL REFERENCES growth_closure_assessments(id),
+        checker_assessment_id TEXT REFERENCES growth_closure_assessments(id),
+        review_id TEXT REFERENCES growth_closure_reviews(id),
+        decision TEXT NOT NULL CHECK (decision IN ('continue_growing', 'accepted', 'repairs_required', 'blocked')),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (profile_id, revision) REFERENCES growth_closure_profile_revisions(profile_id, revision),
+        CHECK (
+          (decision = 'continue_growing' AND checker_assessment_id IS NULL AND review_id IS NULL)
+          OR (decision IN ('accepted', 'repairs_required', 'blocked') AND checker_assessment_id IS NOT NULL AND review_id IS NOT NULL)
+        )
+      );
+      CREATE TABLE growth_closure_repair_lineage (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        original_review_id TEXT NOT NULL REFERENCES growth_closure_reviews(id),
+        selected_finding_id TEXT NOT NULL REFERENCES growth_closure_adverse_findings(id),
+        selected_finding_fingerprint TEXT NOT NULL CHECK (length(selected_finding_fingerprint) = 64),
+        repair_cycle_id TEXT NOT NULL UNIQUE REFERENCES growth_cycles(id),
+        resolution_state TEXT NOT NULL CHECK (resolution_state IN ('planned', 'committed', 'resolved', 'no_progress', 'stalled')),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (profile_id, revision) REFERENCES growth_closure_profile_revisions(profile_id, revision)
+      );
+      CREATE TABLE growth_closure_repair_backlog (
+        lineage_id TEXT NOT NULL REFERENCES growth_closure_repair_lineage(id) ON DELETE CASCADE,
+        finding_id TEXT NOT NULL REFERENCES growth_closure_adverse_findings(id),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (lineage_id, finding_id),
+        UNIQUE (lineage_id, ordinal)
+      );
+
+      CREATE TABLE growth_cycles_v26 (
+        id TEXT PRIMARY KEY,
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        input_checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+        run_id TEXT UNIQUE REFERENCES agent_runs(id),
+        receipt_id TEXT UNIQUE REFERENCES growth_retrieval_receipts(id),
+        change_set_id TEXT UNIQUE REFERENCES change_sets(id),
+        output_checkpoint_id TEXT REFERENCES checkpoints(id),
+        status TEXT NOT NULL CHECK (status IN ('planned', 'running', 'committed', 'evaluated', 'blocked', 'failed', 'cancelled', 'reconciliation_required')),
+        failure_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        terminal_at TEXT,
+        UNIQUE (goal_id, sequence),
+        FOREIGN KEY (goal_id, rule_revision) REFERENCES growth_goal_rule_revisions(goal_id, revision),
+        CHECK (
+          (status = 'planned' AND run_id IS NULL AND receipt_id IS NULL AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NULL AND terminal_at IS NULL)
+          OR (status = 'running' AND run_id IS NOT NULL AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NULL AND terminal_at IS NULL)
+          OR (status = 'committed' AND run_id IS NOT NULL AND receipt_id IS NOT NULL AND change_set_id IS NOT NULL AND output_checkpoint_id IS NOT NULL AND failure_code IS NULL AND terminal_at IS NOT NULL)
+          OR (status = 'evaluated' AND run_id IS NOT NULL AND receipt_id IS NOT NULL AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NULL AND terminal_at IS NOT NULL)
+          OR (status IN ('blocked', 'failed', 'cancelled', 'reconciliation_required') AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NOT NULL AND terminal_at IS NOT NULL)
+        )
+      );
+      INSERT INTO growth_cycles_v26 SELECT * FROM growth_cycles;
+      DROP TABLE growth_cycles;
+      ALTER TABLE growth_cycles_v26 RENAME TO growth_cycles;
+      CREATE INDEX growth_cycles_goal_status_idx ON growth_cycles(goal_id, status, sequence);
+      CREATE UNIQUE INDEX growth_cycles_one_open_goal_idx
+        ON growth_cycles(goal_id) WHERE status IN ('planned', 'running');
+      CREATE UNIQUE INDEX growth_cycles_id_rule_idx ON growth_cycles(id, rule_revision);
+      CREATE UNIQUE INDEX growth_cycles_inquiry_source_idx
+        ON growth_cycles(id, receipt_id, input_checkpoint_id, rule_revision);
+
+      CREATE TABLE growth_cycle_intents_v26 (
+        cycle_id TEXT PRIMARY KEY REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('expand', 'revision', 'closure_evaluation', 'repair')),
+        contract_generation TEXT NOT NULL CHECK (contract_generation IN ('persisted_v24', 'persisted_v26')),
+        profile_id TEXT,
+        revision INTEGER,
+        checkpoint_id TEXT,
+        original_review_id TEXT,
+        selected_finding_id TEXT,
+        selected_finding_fingerprint TEXT,
+        created_at TEXT NOT NULL,
+        CHECK (
+          (kind IN ('expand', 'revision') AND profile_id IS NULL AND revision IS NULL AND checkpoint_id IS NULL
+            AND original_review_id IS NULL AND selected_finding_id IS NULL AND selected_finding_fingerprint IS NULL)
+          OR (kind = 'closure_evaluation' AND profile_id IS NOT NULL AND revision IS NOT NULL AND checkpoint_id IS NOT NULL
+            AND original_review_id IS NULL AND selected_finding_id IS NULL AND selected_finding_fingerprint IS NULL)
+          OR (kind = 'repair' AND profile_id IS NOT NULL AND revision IS NOT NULL AND checkpoint_id IS NULL
+            AND original_review_id IS NOT NULL AND selected_finding_id IS NOT NULL AND length(selected_finding_fingerprint) = 64)
+        )
+      );
+      INSERT INTO growth_cycle_intents_v26 (
+        cycle_id, kind, contract_generation, profile_id, revision, checkpoint_id, original_review_id,
+        selected_finding_id, selected_finding_fingerprint, created_at
+      ) SELECT cycle_id, kind, 'persisted_v24', NULL, NULL, NULL, NULL, NULL, NULL, created_at FROM growth_cycle_intents;
+      DROP TABLE growth_cycle_intents;
+      ALTER TABLE growth_cycle_intents_v26 RENAME TO growth_cycle_intents;
+
+      CREATE TABLE growth_events_v26 (
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        cycle_id TEXT NOT NULL REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        run_id TEXT REFERENCES agent_runs(id),
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        safe_summary TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK (phase IN (
+          'goal_created', 'rule_appended', 'cycle_planned', 'run_attached', 'receipt_recorded',
+          'inquiry_selected', 'creator_choice_required', 'change_set_committed', 'cycle_evaluated', 'cycle_terminal'
+        )),
+        target_kind TEXT NOT NULL CHECK (target_kind IN (
+          'document', 'resource', 'assertion', 'relation', 'image', 'change_set', 'inquiry', 'closure_evaluation'
+        )),
+        target_id TEXT NOT NULL,
+        target_version_id TEXT,
+        durable_state TEXT NOT NULL CHECK (durable_state IN ('planned', 'running', 'committed', 'evaluated', 'blocked', 'failed', 'cancelled', 'reconciliation_required')),
+        content_ref_kind TEXT CHECK (content_ref_kind IN ('document', 'resource', 'assertion', 'relation', 'image', 'change_set')),
+        content_ref_id TEXT,
+        content_ref_version_id TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (goal_id, sequence),
+        CHECK (
+          (content_ref_kind IS NULL AND content_ref_id IS NULL AND content_ref_version_id IS NULL)
+          OR (content_ref_kind IS NOT NULL AND content_ref_id IS NOT NULL AND content_ref_version_id IS NOT NULL)
+        ),
+        CHECK (durable_state <> 'committed' OR phase = 'change_set_committed'),
+        CHECK (durable_state <> 'evaluated' OR phase = 'cycle_evaluated'),
+        CHECK (phase <> 'change_set_committed' OR target_kind = 'change_set'),
+        CHECK (phase <> 'cycle_evaluated' OR (target_kind = 'closure_evaluation' AND target_version_id IS NULL AND content_ref_kind IS NULL))
+      );
+      INSERT INTO growth_events_v26 SELECT * FROM growth_events;
+      DROP TABLE growth_events;
+      ALTER TABLE growth_events_v26 RENAME TO growth_events;
+      CREATE INDEX growth_events_cycle_idx ON growth_events(cycle_id, sequence);
+
+      UPDATE schema_meta SET version = 26 WHERE singleton = 1;
+    `);
+    const foreignKeyViolations = db.prepare("PRAGMA foreign_key_check").all();
+    if (foreignKeyViolations.length > 0) throw new Error("Growth Closure v26 migration produced foreign key violations.");
+    const integrity = db.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
+    if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok") {
+      throw new Error("Growth Closure v26 migration failed integrity check.");
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
   }
 }
 

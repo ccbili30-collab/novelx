@@ -16,6 +16,7 @@ import {
   growthGetRequestSchema,
   growthGuideRequestSchema,
   growthGuideResponseSchema,
+  growthClosureEvaluationPublicEventSchema,
   growthInquiryPublicEventSchema,
   growthLiveEventSchema,
   growthStartResponseSchema,
@@ -36,7 +37,7 @@ describe("desktop IPC contract", () => {
   it("admits only bounded Growth start/get input and safe persisted event projections", () => {
     const start = {
       requestId: "11111111-1111-4111-8111-111111111111", projectId: "project-1", sessionId: "session-1",
-      seed: { kind: "text", text: "A seed." }, initialRuleText: "Keep sources.", strategy: "grow_world_story_oc_inquiry_v3",
+      seed: { kind: "text", text: "A seed." }, initialRuleText: "Keep sources.", strategy: "grow_world_story_oc_closure_v4",
     };
     expect(growthStartRequestSchema.parse(start)).toEqual(start);
     for (const field of ["goalId", "cycleId", "runId", "branchId", "checkpointId", "lens", "authorizedScopeResourceIds", "apiKey"]) {
@@ -58,7 +59,7 @@ describe("desktop IPC contract", () => {
       status: "persisted_pending_boundary",
     }).status).toBe("persisted_pending_boundary");
     const event = {
-      sessionId: "session-1", strategy: "grow_world_story_oc_inquiry_v3",
+      sessionId: "session-1", strategy: "grow_world_story_oc_closure_v4",
       event: { goalId: "goal-1", cycleId: "cycle-1", runId: "run-1", sequence: 1, phase: "run_attached", durableState: "running", safeSummary: "Run attached.", targetKind: "resource", targetId: "world-root", targetVersionId: null, contentRef: null },
     };
     expect(growthLiveEventSchema.parse(event)).toEqual(event);
@@ -96,12 +97,26 @@ describe("desktop IPC contract", () => {
         ...event, event: { ...inquirySelected, [field]: "unsafe" },
       }).success, field).toBe(false);
     }
+    const evaluated = {
+      goalId: "goal-1", cycleId: "cycle-evaluation", runId: "run-evaluation", sequence: 8,
+      phase: "cycle_evaluated", durableState: "evaluated", safeSummary: "Closure evaluation recorded.",
+      targetKind: "closure_evaluation", targetId: "outcome-1", targetVersionId: null, contentRef: null,
+    } as const;
+    expect(growthClosureEvaluationPublicEventSchema.parse(evaluated)).toEqual(evaluated);
+    expect(growthLiveEventSchema.safeParse({ ...event, event: evaluated }).success).toBe(true);
+    expect(growthClosureEvaluationPublicEventSchema.safeParse({
+      ...evaluated, contentRef: { kind: "resource", targetId: "world", targetVersionId: "v1" },
+    }).success).toBe(false);
     expect(growthStartResponseSchema.safeParse({
-      capabilityVersion: "hackathon-growth-inquiry-v3", strategy: "grow_world_story_oc_inquiry_v3", coordinatorStatus: "awaiting_guidance",
+      capabilityVersion: "hackathon-growth-closure-v4", strategy: "grow_world_story_oc_closure_v4", coordinatorStatus: "awaiting_guidance",
       goal: { id: "goal-1", status: "active", currentCycleSequence: 3 },
-      cycles: Array.from({ length: 4 }, (_, index) => ({ id: `cycle-${index}`, sequence: index + 1, runId: null, status: "committed" })),
+      cycles: [
+        ...Array.from({ length: 3 }, (_, index) => ({ id: `cycle-${index}`, sequence: index + 1, runId: null, status: "committed" as const })),
+        { id: "cycle-evaluation", sequence: 4, runId: "run-evaluation", status: "evaluated" as const },
+      ],
       events: [],
     }).success).toBe(true);
+    expect(growthStartRequestSchema.safeParse({ ...start, strategy: "grow_world_story_oc_inquiry_v3" }).success).toBe(false);
   });
 
   it("projects world_map as a first-class managed image purpose", () => {

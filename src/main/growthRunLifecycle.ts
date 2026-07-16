@@ -81,6 +81,14 @@ export class GrowthRunLifecycle {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
     const intent = repository.getCycleIntent(cycle.id);
+    if (intent.kind === "closure_evaluation" || intent.kind === "repair") {
+      const terminal = repository.terminalizeCycle({
+        cycleId: cycle.id, status: "blocked", failureCode: "GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED",
+      });
+      const event = repairTerminalEvent(repository, goal, terminal, "Closure evaluation/repair 执行路径尚未接入，已安全阻塞。");
+      if (event) notifyPersistedEvent(input.onPersistedEvent, event);
+      throw growthRunError("GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED");
+    }
     if (intent.kind === "expand" && intent.focusKinds.length !== 1) {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
@@ -133,6 +141,11 @@ export class GrowthRunLifecycle {
     if (cycle.status === "committed") {
       const event = repairTerminalEvent(repository, goal, cycle);
       if (event) notifyPersistedEvent(input.onPersistedEvent, event);
+      return cycle;
+    }
+    if (cycle.status === "evaluated") {
+      const event = repository.repairClosureEvaluationEvent(cycle.id);
+      notifyPersistedEvent(input.onPersistedEvent, event);
       return cycle;
     }
     if (cycle.status === "running") {
@@ -755,6 +768,6 @@ function sameStrings(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function growthRunError(code: "GROWTH_BINDING_INVALID" | "GROWTH_RETRIEVAL_INPUT_INVALID" | "GROWTH_PERSISTENCE_FAILED" | "GROWTH_RETRIEVAL_REQUIRED" | "GROWTH_INQUIRY_REQUIRED" | "GROWTH_INQUIRY_INVALID" | "GROWTH_INQUIRY_STALLED" | "GROWTH_RECONCILIATION_REQUIRED" | "GROWTH_RUN_FAILED" | "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED"): Error & { code: string } {
+function growthRunError(code: "GROWTH_BINDING_INVALID" | "GROWTH_RETRIEVAL_INPUT_INVALID" | "GROWTH_PERSISTENCE_FAILED" | "GROWTH_RETRIEVAL_REQUIRED" | "GROWTH_INQUIRY_REQUIRED" | "GROWTH_INQUIRY_INVALID" | "GROWTH_INQUIRY_STALLED" | "GROWTH_RECONCILIATION_REQUIRED" | "GROWTH_RUN_FAILED" | "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED" | "GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED"): Error & { code: string } {
   return Object.assign(new Error("Growth Run bridge failed."), { code });
 }

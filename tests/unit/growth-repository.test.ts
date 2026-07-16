@@ -352,7 +352,7 @@ describe("GrowthRepository", () => {
       ruleRevision: 1, intent: cycleIntent(),
     });
     expect(repository.getCycleIntent(cycle.id)).toEqual({
-      cycleId: cycle.id, kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], provenance: "persisted_v24",
+      cycleId: cycle.id, kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], provenance: "persisted_v26",
     });
     setup.workspace.db.prepare("DELETE FROM growth_cycle_intents WHERE cycle_id = ?").run(cycle.id);
     expect(() => repository.getCycleIntent(cycle.id))
@@ -729,80 +729,110 @@ describe("GrowthRepository", () => {
     expect(repository.getCycle(nextCycle.id)).toMatchObject({ status: "running", failureCode: null });
   });
 
-  it("keeps Steward and Checker assessments invocation-bound and reopens accepted closure through a new revision", () => {
+  it("keeps v4 Steward and Checker submissions invocation-bound and reopens accepted closure through a new revision", () => {
     const setup = createSetup();
     let repository = new GrowthRepository(setup.workspace);
     const { goal, cycle, run } = runningCycle(repository, setup);
     const oldReceipt = repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [receiptLink(setup)] }));
     const changeSet = committedChangeSet(setup.workspace, "closure-output", "closure output");
     const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: changeSet.id });
+    const profileInput = {
+      id: "profile-world", idempotencyKey: "profile-world-key", goalId: goal.id, profileKind: "world_birth",
+      subjectResourceId: null, componentProfiles: [], focusOcResourceId: null, contractGeneration: "v26",
+      checkpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      facets: [{ id: "history", kind: "content", required: true }, { id: "map", kind: "visual", required: true }],
+    } as const;
+    const profile = repository.createClosureProfile(profileInput);
     const evaluationCycle = repository.beginCycle({
       id: "cycle-evaluation", goalId: goal.id, idempotencyKey: "cycle-evaluation-key",
-      inputCheckpointId: committed.outputCheckpointId, ruleRevision: 1, intent: cycleIntent(),
+      inputCheckpointId: committed.outputCheckpointId, ruleRevision: 1,
+      intent: { kind: "closure_evaluation", profileId: profile.id, revision: 1, checkpointId: committed.outputCheckpointId! },
     });
     const evaluationRun = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
     repository.attachRun({ cycleId: evaluationCycle.id, runId: evaluationRun.runId });
     const receipt = repository.recordReceipt(receiptInput(setup, evaluationCycle.id, evaluationRun, {
       id: "receipt-evaluation", checkpointId: committed.outputCheckpointId, links: [receiptLink(setup)],
     }));
-    const profileInput = {
-      id: "profile-world", idempotencyKey: "profile-world-key", goalId: goal.id, profileKind: "world_birth",
-      subjectResourceId: null, checkpointId: committed.outputCheckpointId!, ruleRevision: 1,
-      facets: [{ id: "history", kind: "content", required: true }, { id: "map", kind: "visual", required: true }],
-    } as const;
-    const profile = repository.createClosureProfile(profileInput);
     const stewardHash = "c".repeat(64);
     seedInvocationTerminal(setup.workspace, evaluationRun.runId, evaluationRun.invocationId, stewardHash);
     const checker = seedCheckerInvocation(setup.workspace, evaluationRun.runId, evaluationRun.invocationId, "d".repeat(64));
-    const stewardAssessmentInput = {
+    const facetResults = [
+      { facetId: "history", state: "satisfied" as const, coverage: "complete" as const,
+        safeSummary: "History is continuous.", evidence: [{ receiptId: receipt.id, rank: 1 }] },
+      { facetId: "map", state: "satisfied" as const, coverage: "complete" as const,
+        safeSummary: "Map source is pinned.", evidence: [{ receiptId: receipt.id, rank: 1 }] },
+    ];
+    const stewardSubmissionInput = {
       id: "assessment-steward", profileId: profile.id, revision: 1, role: "steward", decision: "ready_for_checker",
       cycleId: evaluationCycle.id, checkpointId: committed.outputCheckpointId!, ruleRevision: 1, receiptId: receipt.id,
       agentInvocationId: evaluationRun.invocationId, outputSha256: stewardHash, idempotencyKey: "assessment-steward-key",
+      facetResults,
     } as const;
-    expect(() => repository.appendClosureAssessment({
-      ...stewardAssessmentInput, id: "assessment-old-receipt", receiptId: oldReceipt.id,
+    expect(() => repository.appendClosureStewardSubmission({
+      ...stewardSubmissionInput, id: "assessment-old-receipt", receiptId: oldReceipt.id,
       idempotencyKey: "assessment-old-receipt-key",
     })).toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_ASSESSMENT_REFERENCE_MISMATCH" }));
-    const stewardAssessment = repository.appendClosureAssessment(stewardAssessmentInput);
-    expect(repository.appendClosureAssessment(stewardAssessmentInput)).toEqual(stewardAssessment);
-    expect(() => repository.appendClosureAssessment({
+    const stewardAssessment = repository.appendClosureStewardSubmission(stewardSubmissionInput);
+    expect(repository.appendClosureStewardSubmission(stewardSubmissionInput)).toEqual(stewardAssessment);
+    expect(() => repository.appendClosureCheckerSubmission({
       id: "assessment-wrong-role", profileId: profile.id, revision: 1, role: "checker", decision: "accepted",
       cycleId: evaluationCycle.id, checkpointId: committed.outputCheckpointId, ruleRevision: 1, receiptId: receipt.id,
       agentInvocationId: evaluationRun.invocationId, outputSha256: stewardHash, idempotencyKey: "assessment-wrong-role-key",
+      adverseFindings: [],
     })).toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_INVOCATION_MISMATCH" }));
-    const checkerAssessmentInput = {
+    const checkerSubmissionInput = {
       id: "assessment-checker", profileId: profile.id, revision: 1, role: "checker", decision: "accepted",
       cycleId: evaluationCycle.id, checkpointId: committed.outputCheckpointId!, ruleRevision: 1, receiptId: receipt.id,
       agentInvocationId: checker.invocationId, outputSha256: checker.outputSha256, idempotencyKey: "assessment-checker-key",
+      adverseFindings: [],
     } as const;
-    const checkerAssessment = repository.appendClosureAssessment(checkerAssessmentInput);
+    const checkerAssessment = repository.appendClosureCheckerSubmission(checkerSubmissionInput);
     const reviewInput = {
       id: "review-accepted", profileId: profile.id, revision: 1, stewardAssessmentId: stewardAssessment.id,
       checkerAssessmentId: checkerAssessment.id, idempotencyKey: "review-accepted-key",
-      findings: [{ facetId: "history", state: "satisfied" as const, safeSummary: "History is continuous.", evidence: { receiptId: receipt.id, rank: 1 } }],
+      facetResults, adverseFindings: [],
     };
     setup.workspace.db.exec(`
-      CREATE TEMP TRIGGER reject_growth_closure_finding BEFORE INSERT ON growth_closure_review_findings
+      CREATE TEMP TRIGGER reject_growth_closure_review BEFORE INSERT ON growth_closure_reviews
       BEGIN SELECT RAISE(ABORT, 'closure interrupted'); END;
     `);
-    expect(() => repository.sealClosureReview({
+    expect(() => repository.sealClosureReviewV4({
       ...reviewInput, id: "review-rollback", idempotencyKey: "review-rollback-key",
     })).toThrow();
     expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_closure_reviews").get()).toEqual({ count: 0 });
-    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_closure_review_findings").get()).toEqual({ count: 0 });
     expect(repository.getClosureState(profile.id)).toMatchObject({ contentState: "growing", missingFacetIds: ["history"] });
-    setup.workspace.db.exec("DROP TRIGGER reject_growth_closure_finding");
-    const review = repository.sealClosureReview(reviewInput);
-    expect(repository.sealClosureReview(reviewInput)).toEqual(review);
+    setup.workspace.db.exec("DROP TRIGGER reject_growth_closure_review");
+    const review = repository.sealClosureReviewV4(reviewInput);
+    expect(repository.sealClosureReviewV4(reviewInput)).toEqual(review);
+    expect(repository.getClosureState(profile.id)).toMatchObject({
+      contentState: "growing",
+      satisfiedFacetIds: [],
+      missingFacetIds: ["history"],
+    });
+    const outcomeInput = {
+      id: "outcome-accepted", cycleId: evaluationCycle.id, profileId: profile.id, revision: 1, receiptId: receipt.id,
+      stewardAssessmentId: stewardAssessment.id, checkerAssessmentId: checkerAssessment.id, reviewId: review.id,
+      decision: "accepted", idempotencyKey: "outcome-accepted-key",
+    } as const;
+    const outcome = repository.sealClosureEvaluationOutcome(outcomeInput);
+    const { facetResults: _facetResults, ...legacyAssessmentInput } = stewardSubmissionInput;
+    expect(() => repository.appendClosureAssessment(legacyAssessmentInput))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_LEGACY_WRITE_FORBIDDEN" }));
+    expect(() => repository.sealClosureReview({
+      id: "legacy-review", profileId: profile.id, revision: 1, stewardAssessmentId: stewardAssessment.id,
+      checkerAssessmentId: checkerAssessment.id, idempotencyKey: "legacy-review-key",
+      findings: [{ facetId: "history", state: "satisfied", safeSummary: "Legacy result.", evidence: { receiptId: receipt.id, rank: 1 } }],
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_LEGACY_WRITE_FORBIDDEN" }));
 
     workspace?.close();
     workspace = openWorkspace(root!);
     setup.workspace = workspace;
     repository = new GrowthRepository(workspace);
     expect(repository.createClosureProfile(profileInput)).toEqual(profile);
-    expect(repository.appendClosureAssessment(stewardAssessmentInput)).toEqual(stewardAssessment);
-    expect(repository.appendClosureAssessment(checkerAssessmentInput)).toEqual(checkerAssessment);
-    expect(repository.sealClosureReview(reviewInput)).toEqual(review);
+    expect(repository.appendClosureStewardSubmission(stewardSubmissionInput)).toEqual(stewardAssessment);
+    expect(repository.appendClosureCheckerSubmission(checkerSubmissionInput)).toEqual(checkerAssessment);
+    expect(repository.sealClosureReviewV4(reviewInput)).toEqual(review);
+    expect(repository.sealClosureEvaluationOutcome(outcomeInput)).toEqual(outcome);
     expect(repository.getClosureState(profile.id)).toMatchObject({ contentState: "closed", visualState: "planning", revision: 1 });
 
     const visualRequest = repository.createIllustrationRequest({
@@ -821,14 +851,342 @@ describe("GrowthRepository", () => {
     expect(repository.getClosureState(profile.id)).toMatchObject({ contentState: "closed", visualState: "planning" });
 
     repository.appendRule({ goalId: goal.id, expectedRevision: 1, ruleText: "reopen history", sourceMessageId: "closure-rule-2" });
+    expect(() => repository.appendClosureRevision({
+      profileId: profile.id, expectedRevision: 1, idempotencyKey: "profile-world-invalid-revision-2",
+      checkpointId: committed.outputCheckpointId, ruleRevision: 2,
+      componentProfiles: ["world_birth"], focusOcResourceId: null, contractGeneration: "v26",
+      facets: [{ id: "history", kind: "content", required: true }],
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_REVISION_SHAPE_INVALID" }));
+    expect(repository.getClosureProfile(profile.id)).toMatchObject({ currentRevision: 1, currentEpoch: 1 });
+    expect(repository.getClosureRevision(profile.id, 2)).toBeNull();
     const revision = repository.appendClosureRevision({
       profileId: profile.id, expectedRevision: 1, idempotencyKey: "profile-world-revision-2",
       checkpointId: committed.outputCheckpointId, ruleRevision: 2,
+      componentProfiles: [], focusOcResourceId: null, contractGeneration: "v26",
       facets: [{ id: "history", kind: "content", required: true }, { id: "map", kind: "visual", required: true }],
     });
     expect(revision).toMatchObject({ revision: 2, epoch: 2 });
     expect(repository.getClosureState(profile.id)).toMatchObject({ contentState: "growing", revision: 2, missingFacetIds: ["history"] });
-    expect(repository.getClosureReview(review.id)).toEqual(review);
+    expect(repository.getClosureReview(review.id)).toBeNull();
+    expect(repository.getClosureReviewV4(review.id)).toEqual(review);
+  });
+
+  it("persists typed v4 Closure evaluation and terminalizes the evaluation Cycle atomically without content output", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run: contentRun } = runningCycle(repository, setup);
+    repository.recordReceipt(receiptInput(setup, cycle.id, contentRun, { id: "receipt-v4-content", links: [receiptLink(setup)] }));
+    const contentChangeSet = committedChangeSet(setup.workspace, "v4-closure-base", "v4 closure base");
+    const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: contentChangeSet.id });
+    const profile = repository.createClosureProfile({
+      id: "profile-v4", idempotencyKey: "profile-v4-key", goalId: goal.id, profileKind: "world_birth",
+      subjectResourceId: null, componentProfiles: [], focusOcResourceId: null, contractGeneration: "v26",
+      checkpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      facets: [{ id: "history", kind: "content", required: true }],
+    });
+    const evaluationCycle = repository.beginCycle({
+      id: "cycle-v4-evaluation", goalId: goal.id, idempotencyKey: "cycle-v4-evaluation-key",
+      inputCheckpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      intent: { kind: "closure_evaluation", profileId: profile.id, revision: 1, checkpointId: committed.outputCheckpointId! },
+    });
+    const run = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
+    repository.attachRun({ cycleId: evaluationCycle.id, runId: run.runId });
+    const receipt = repository.recordReceipt(receiptInput(setup, evaluationCycle.id, run, {
+      id: "receipt-v4-evaluation", checkpointId: committed.outputCheckpointId!, links: [receiptLink(setup)],
+    }));
+    const stewardHash = "a".repeat(64);
+    seedInvocationTerminal(setup.workspace, run.runId, run.invocationId, stewardHash);
+    const checker = seedCheckerInvocation(setup.workspace, run.runId, run.invocationId, "b".repeat(64));
+    const steward = repository.appendClosureStewardSubmission({
+      id: "submission-v4-steward", profileId: profile.id, revision: 1, role: "steward", decision: "ready_for_checker",
+      cycleId: evaluationCycle.id, checkpointId: committed.outputCheckpointId!, ruleRevision: 1, receiptId: receipt.id,
+      agentInvocationId: run.invocationId, outputSha256: stewardHash, idempotencyKey: "submission-v4-steward-key",
+      facetResults: [{ facetId: "history", state: "satisfied", coverage: "complete", safeSummary: "History is evidenced.", evidence: [{ receiptId: receipt.id, rank: 1 }] }],
+    });
+    const checkerSubmission = repository.appendClosureCheckerSubmission({
+      id: "submission-v4-checker", profileId: profile.id, revision: 1, role: "checker", decision: "accepted",
+      cycleId: evaluationCycle.id, checkpointId: committed.outputCheckpointId!, ruleRevision: 1, receiptId: receipt.id,
+      agentInvocationId: checker.invocationId, outputSha256: checker.outputSha256, idempotencyKey: "submission-v4-checker-key",
+      adverseFindings: [],
+    });
+    const review = repository.sealClosureReviewV4({
+      id: "review-v4", profileId: profile.id, revision: 1, stewardAssessmentId: steward.id,
+      checkerAssessmentId: checkerSubmission.id, idempotencyKey: "review-v4-key",
+      facetResults: [{ facetId: "history", state: "satisfied", coverage: "complete", safeSummary: "History is evidenced.", evidence: [{ receiptId: receipt.id, rank: 1 }] }],
+      adverseFindings: [],
+    });
+    const outcomeInput = {
+      id: "outcome-v4", cycleId: evaluationCycle.id, profileId: profile.id, revision: 1, receiptId: receipt.id,
+      stewardAssessmentId: steward.id, checkerAssessmentId: checkerSubmission.id, reviewId: review.id,
+      decision: "accepted", idempotencyKey: "outcome-v4-key",
+    } as const;
+    const outcome = repository.sealClosureEvaluationOutcome(outcomeInput);
+
+    expect(repository.sealClosureEvaluationOutcome(outcomeInput)).toEqual(outcome);
+    expect(repository.getCycle(evaluationCycle.id)).toMatchObject({
+      status: "evaluated", receiptId: receipt.id, changeSetId: null, outputCheckpointId: null, failureCode: null,
+    });
+    expect(repository.listEvents(goal.id).slice(-1)).toMatchObject([{
+      cycleId: evaluationCycle.id, phase: "cycle_evaluated", targetKind: "closure_evaluation",
+      targetId: outcome.id, durableState: "evaluated", contentRef: null,
+    }]);
+
+    setup.workspace.db.prepare("DELETE FROM growth_events WHERE goal_id = ? AND phase = 'cycle_evaluated'").run(goal.id);
+    expect(repository.repairClosureEvaluationEvent(evaluationCycle.id)).toMatchObject({
+      phase: "cycle_evaluated", targetId: outcome.id,
+    });
+    expect(repository.repairClosureEvaluationEvent(evaluationCycle.id)).toEqual(repository.listEvents(goal.id).at(-1));
+  });
+
+  it("persists one selected repair finding, leaves the rest in backlog, rejects blocked reviews and stalls a repeated fingerprint", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run: contentRun } = runningCycle(repository, setup);
+    repository.recordReceipt(receiptInput(setup, cycle.id, contentRun, { id: "receipt-repair-content", links: [receiptLink(setup)] }));
+    const contentChangeSet = committedChangeSet(setup.workspace, "repair-base", "repair base");
+    const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: contentChangeSet.id });
+    const repairProfile = repository.createClosureProfile({
+      id: "profile-repair", idempotencyKey: "profile-repair-key", goalId: goal.id, profileKind: "world_birth",
+      subjectResourceId: null, componentProfiles: [], focusOcResourceId: null, contractGeneration: "v26",
+      checkpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      facets: [{ id: "history", kind: "content", required: true }],
+    });
+    const blockedProfile = repository.createClosureProfile({
+      id: "profile-blocked", idempotencyKey: "profile-blocked-key", goalId: goal.id, profileKind: "world_birth",
+      subjectResourceId: null, componentProfiles: [], focusOcResourceId: null, contractGeneration: "v26",
+      checkpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      facets: [{ id: "history", kind: "content", required: true }],
+    });
+    const selectedFinding = {
+      id: "finding-selected", fingerprint: "1".repeat(64), severity: "major" as const, category: "causality" as const,
+      targetEvidence: [{ receiptId: "placeholder", rank: 1 }], safeSummary: "History contradicts its cause.",
+      repairObjective: "Repair the causal transition without changing the creator rule.",
+    };
+    const backlogFinding = {
+      id: "finding-backlog", fingerprint: "2".repeat(64), severity: "minor" as const, category: "continuity" as const,
+      targetEvidence: [{ receiptId: "placeholder", rank: 1 }], safeSummary: "A minor date remains unclear.",
+      repairObjective: "Clarify the date after the blocking repair.",
+    };
+    const repairEvaluation = completeClosureEvaluation(repository, setup, {
+      goalId: goal.id, profileId: repairProfile.id, checkpointId: committed.outputCheckpointId!, suffix: "repair",
+      checkerDecision: "repairs_required", adverseFindings: [selectedFinding, backlogFinding],
+    });
+    const blockingFinding = {
+      id: "finding-blocking", fingerprint: "3".repeat(64), severity: "blocking" as const,
+      category: "creator_choice_required" as const, targetEvidence: [{ receiptId: "placeholder", rank: 1 }],
+      safeSummary: "Creator intent is required.", repairObjective: "Ask the creator before changing canon.",
+    };
+    const blockedEvaluation = completeClosureEvaluation(repository, setup, {
+      goalId: goal.id, profileId: blockedProfile.id, checkpointId: committed.outputCheckpointId!, suffix: "blocked",
+      checkerDecision: "blocked", adverseFindings: [blockingFinding],
+    });
+    expect(() => repository.beginCycle({
+      id: "cycle-blocked-repair", goalId: goal.id, idempotencyKey: "cycle-blocked-repair-key",
+      inputCheckpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      intent: {
+        kind: "repair", profileId: blockedProfile.id, revision: 1, originalReviewId: blockedEvaluation.review.id,
+        selectedFindingId: blockingFinding.id, selectedFindingFingerprint: blockingFinding.fingerprint,
+      },
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_REPAIR_INTENT_INVALID" }));
+
+    const firstRepairCycle = repository.beginCycle({
+      id: "cycle-repair-first", goalId: goal.id, idempotencyKey: "cycle-repair-first-key",
+      inputCheckpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      intent: {
+        kind: "repair", profileId: repairProfile.id, revision: 1, originalReviewId: repairEvaluation.review.id,
+        selectedFindingId: selectedFinding.id, selectedFindingFingerprint: selectedFinding.fingerprint,
+      },
+    });
+    const firstLineageInput = {
+      id: "lineage-first", profileId: repairProfile.id, revision: 1, originalReviewId: repairEvaluation.review.id,
+      selectedFindingId: selectedFinding.id, selectedFindingFingerprint: selectedFinding.fingerprint,
+      repairCycleId: firstRepairCycle.id, backlogFindingIds: [backlogFinding.id], idempotencyKey: "lineage-first-key",
+    } as const;
+    const firstLineage = repository.createClosureRepairLineage(firstLineageInput);
+    expect(firstLineage).toMatchObject({ resolutionState: "planned", backlogFindingIds: [backlogFinding.id] });
+    expect(repository.createClosureRepairLineage(firstLineageInput)).toEqual(firstLineage);
+    expect(() => repository.markClosureRepairResolution(firstLineage.id, "committed"))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_REPAIR_CYCLE_NOT_COMMITTED" }));
+    const firstRepairRun = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
+    repository.attachRun({ cycleId: firstRepairCycle.id, runId: firstRepairRun.runId });
+    repository.recordReceipt(receiptInput(setup, firstRepairCycle.id, firstRepairRun, {
+      id: "receipt-repair-first", checkpointId: committed.outputCheckpointId!, links: [receiptLink(setup)],
+    }));
+    const repairChangeSet = committedChangeSet(setup.workspace, "repair-first", "repair first");
+    const firstRepairCommitted = repository.attachCommittedChangeSet({ cycleId: firstRepairCycle.id, changeSetId: repairChangeSet.id });
+    const committedLineage = repository.markClosureRepairResolution(firstLineage.id, "committed");
+    expect(committedLineage).toMatchObject({ resolutionState: "committed" });
+    expect(repository.markClosureRepairResolution(firstLineage.id, "committed")).toEqual(committedLineage);
+    expect(() => repository.markClosureRepairResolution(firstLineage.id, "no_progress"))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_REPAIR_TRANSITION_INVALID" }));
+
+    const secondRepairCycle = repository.beginCycle({
+      id: "cycle-repair-second", goalId: goal.id, idempotencyKey: "cycle-repair-second-key",
+      inputCheckpointId: firstRepairCommitted.outputCheckpointId!, ruleRevision: 1,
+      intent: {
+        kind: "repair", profileId: repairProfile.id, revision: 1, originalReviewId: repairEvaluation.review.id,
+        selectedFindingId: selectedFinding.id, selectedFindingFingerprint: selectedFinding.fingerprint,
+      },
+    });
+    const secondLineage = repository.createClosureRepairLineage({
+      id: "lineage-second", profileId: repairProfile.id, revision: 1, originalReviewId: repairEvaluation.review.id,
+      selectedFindingId: selectedFinding.id, selectedFindingFingerprint: selectedFinding.fingerprint,
+      repairCycleId: secondRepairCycle.id, backlogFindingIds: [backlogFinding.id], idempotencyKey: "lineage-second-key",
+    });
+    expect(secondLineage).toMatchObject({ resolutionState: "stalled", backlogFindingIds: [backlogFinding.id] });
+    expect(repository.getClosureRepairStallState(repairProfile.id, 1, selectedFinding.fingerprint)).toEqual({
+      stalled: true, sameFingerprintAttempts: 2, noProgressAttempts: 1,
+    });
+    expect(() => repository.markClosureRepairResolution(secondLineage.id, "committed"))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_REPAIR_TRANSITION_INVALID" }));
+  });
+
+  it("stalls after two committed repair Cycles make no progress on different findings", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run: contentRun } = runningCycle(repository, setup);
+    repository.recordReceipt(receiptInput(setup, cycle.id, contentRun, { id: "receipt-no-progress-content", links: [receiptLink(setup)] }));
+    const contentChangeSet = committedChangeSet(setup.workspace, "no-progress-base", "no progress base");
+    const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: contentChangeSet.id });
+    const profile = repository.createClosureProfile({
+      id: "profile-no-progress", idempotencyKey: "profile-no-progress-key", goalId: goal.id, profileKind: "world_birth",
+      subjectResourceId: null, componentProfiles: [], focusOcResourceId: null, contractGeneration: "v26",
+      checkpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      facets: [{ id: "history", kind: "content", required: true }],
+    });
+    const firstFinding = {
+      id: "finding-no-progress-first", fingerprint: "4".repeat(64), severity: "major" as const, category: "causality" as const,
+      targetEvidence: [{ receiptId: "placeholder", rank: 1 }], safeSummary: "The first cause is unresolved.",
+      repairObjective: "Repair the first causal gap.",
+    };
+    const secondFinding = {
+      id: "finding-no-progress-second", fingerprint: "5".repeat(64), severity: "major" as const, category: "continuity" as const,
+      targetEvidence: [{ receiptId: "placeholder", rank: 1 }], safeSummary: "The second transition is unresolved.",
+      repairObjective: "Repair the second continuity gap.",
+    };
+    const evaluation = completeClosureEvaluation(repository, setup, {
+      goalId: goal.id, profileId: profile.id, checkpointId: committed.outputCheckpointId!, suffix: "no-progress",
+      checkerDecision: "repairs_required", adverseFindings: [firstFinding, secondFinding],
+    });
+
+    const firstCycle = repository.beginCycle({
+      id: "cycle-no-progress-first", goalId: goal.id, idempotencyKey: "cycle-no-progress-first-key",
+      inputCheckpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      intent: {
+        kind: "repair", profileId: profile.id, revision: 1, originalReviewId: evaluation.review.id,
+        selectedFindingId: firstFinding.id, selectedFindingFingerprint: firstFinding.fingerprint,
+      },
+    });
+    const firstLineage = repository.createClosureRepairLineage({
+      id: "lineage-no-progress-first", profileId: profile.id, revision: 1, originalReviewId: evaluation.review.id,
+      selectedFindingId: firstFinding.id, selectedFindingFingerprint: firstFinding.fingerprint,
+      repairCycleId: firstCycle.id, backlogFindingIds: [secondFinding.id], idempotencyKey: "lineage-no-progress-first-key",
+    });
+    const firstRun = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
+    repository.attachRun({ cycleId: firstCycle.id, runId: firstRun.runId });
+    repository.recordReceipt(receiptInput(setup, firstCycle.id, firstRun, {
+      id: "receipt-no-progress-first", checkpointId: committed.outputCheckpointId!, links: [receiptLink(setup)],
+    }));
+    const firstChangeSet = committedChangeSet(setup.workspace, "no-progress-first", "no progress first");
+    const firstCommitted = repository.attachCommittedChangeSet({ cycleId: firstCycle.id, changeSetId: firstChangeSet.id });
+    const firstNoProgress = repository.markClosureRepairResolution(firstLineage.id, "no_progress");
+    expect(firstNoProgress).toMatchObject({ resolutionState: "no_progress" });
+    expect(repository.markClosureRepairResolution(firstLineage.id, "no_progress")).toEqual(firstNoProgress);
+    expect(() => repository.markClosureRepairResolution(firstLineage.id, "committed"))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_REPAIR_TRANSITION_INVALID" }));
+
+    const secondCycle = repository.beginCycle({
+      id: "cycle-no-progress-second", goalId: goal.id, idempotencyKey: "cycle-no-progress-second-key",
+      inputCheckpointId: firstCommitted.outputCheckpointId!, ruleRevision: 1,
+      intent: {
+        kind: "repair", profileId: profile.id, revision: 1, originalReviewId: evaluation.review.id,
+        selectedFindingId: secondFinding.id, selectedFindingFingerprint: secondFinding.fingerprint,
+      },
+    });
+    const secondLineage = repository.createClosureRepairLineage({
+      id: "lineage-no-progress-second", profileId: profile.id, revision: 1, originalReviewId: evaluation.review.id,
+      selectedFindingId: secondFinding.id, selectedFindingFingerprint: secondFinding.fingerprint,
+      repairCycleId: secondCycle.id, backlogFindingIds: [firstFinding.id], idempotencyKey: "lineage-no-progress-second-key",
+    });
+    expect(secondLineage.resolutionState).toBe("planned");
+    const secondRun = seedRun(setup.workspace, setup.branchId, firstCommitted.outputCheckpointId!);
+    repository.attachRun({ cycleId: secondCycle.id, runId: secondRun.runId });
+    repository.recordReceipt(receiptInput(setup, secondCycle.id, secondRun, {
+      id: "receipt-no-progress-second", checkpointId: firstCommitted.outputCheckpointId!, links: [receiptLink(setup)],
+    }));
+    const secondChangeSet = committedChangeSet(setup.workspace, "no-progress-second", "no progress second");
+    repository.attachCommittedChangeSet({ cycleId: secondCycle.id, changeSetId: secondChangeSet.id });
+    const secondNoProgress = repository.markClosureRepairResolution(secondLineage.id, "no_progress");
+    expect(secondNoProgress).toMatchObject({ resolutionState: "stalled" });
+    expect(repository.markClosureRepairResolution(secondLineage.id, "no_progress")).toEqual(secondNoProgress);
+    expect(repository.getClosureRepairStallState(profile.id, 1, secondFinding.fingerprint)).toEqual({
+      stalled: true, sameFingerprintAttempts: 1, noProgressAttempts: 2,
+    });
+  });
+
+  it("resolves a committed repair only after a later accepted Closure revision evaluates its output checkpoint", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run: contentRun } = runningCycle(repository, setup);
+    repository.recordReceipt(receiptInput(setup, cycle.id, contentRun, {
+      id: "receipt-repair-resolution-content", links: [receiptLink(setup)],
+    }));
+    const contentChangeSet = committedChangeSet(setup.workspace, "repair-resolution-base", "repair resolution base");
+    const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: contentChangeSet.id });
+    const profile = repository.createClosureProfile({
+      id: "profile-repair-resolution", idempotencyKey: "profile-repair-resolution-key", goalId: goal.id,
+      profileKind: "world_birth", subjectResourceId: null, componentProfiles: [], focusOcResourceId: null,
+      contractGeneration: "v26", checkpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      facets: [{ id: "history", kind: "content", required: true }],
+    });
+    const finding = {
+      id: "finding-repair-resolution", fingerprint: "6".repeat(64), severity: "major" as const,
+      category: "causality" as const, targetEvidence: [{ receiptId: "placeholder", rank: 1 }],
+      safeSummary: "One consequence is unsupported.", repairObjective: "Add the missing causal bridge.",
+    };
+    const evaluation = completeClosureEvaluation(repository, setup, {
+      goalId: goal.id, profileId: profile.id, checkpointId: committed.outputCheckpointId!, suffix: "repair-resolution-before",
+      checkerDecision: "repairs_required", adverseFindings: [finding],
+    });
+    const repairCycle = repository.beginCycle({
+      id: "cycle-repair-resolution", goalId: goal.id, idempotencyKey: "cycle-repair-resolution-key",
+      inputCheckpointId: committed.outputCheckpointId!, ruleRevision: 1,
+      intent: {
+        kind: "repair", profileId: profile.id, revision: 1, originalReviewId: evaluation.review.id,
+        selectedFindingId: finding.id, selectedFindingFingerprint: finding.fingerprint,
+      },
+    });
+    const lineage = repository.createClosureRepairLineage({
+      id: "lineage-repair-resolution", profileId: profile.id, revision: 1, originalReviewId: evaluation.review.id,
+      selectedFindingId: finding.id, selectedFindingFingerprint: finding.fingerprint,
+      repairCycleId: repairCycle.id, backlogFindingIds: [], idempotencyKey: "lineage-repair-resolution-key",
+    });
+    const repairRun = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
+    repository.attachRun({ cycleId: repairCycle.id, runId: repairRun.runId });
+    repository.recordReceipt(receiptInput(setup, repairCycle.id, repairRun, {
+      id: "receipt-repair-resolution", checkpointId: committed.outputCheckpointId!, links: [receiptLink(setup)],
+    }));
+    const repairChangeSet = committedChangeSet(setup.workspace, "repair-resolution", "repair resolution");
+    const repairCommitted = repository.attachCommittedChangeSet({ cycleId: repairCycle.id, changeSetId: repairChangeSet.id });
+    const committedLineage = repository.markClosureRepairResolution(lineage.id, "committed");
+    expect(() => repository.markClosureRepairResolution(lineage.id, "resolved"))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_REPAIR_RESOLUTION_UNPROVEN" }));
+
+    const revision = repository.appendClosureRevision({
+      profileId: profile.id, expectedRevision: 1, idempotencyKey: "profile-repair-resolution-revision-2",
+      checkpointId: repairCommitted.outputCheckpointId!, ruleRevision: 1,
+      componentProfiles: [], focusOcResourceId: null, contractGeneration: "v26",
+      facets: [{ id: "history", kind: "content", required: true }],
+    });
+    completeClosureEvaluation(repository, setup, {
+      goalId: goal.id, profileId: profile.id, revision: revision.revision,
+      checkpointId: repairCommitted.outputCheckpointId!, suffix: "repair-resolution-after",
+      checkerDecision: "accepted", adverseFindings: [],
+    });
+    const resolved = repository.markClosureRepairResolution(lineage.id, "resolved");
+    expect(resolved).toMatchObject({ resolutionState: "resolved" });
+    expect(repository.markClosureRepairResolution(lineage.id, "resolved")).toEqual(resolved);
+    expect(committedLineage.resolutionState).toBe("committed");
   });
 
   it("persists unlimited batched illustration items, immutable snapshots, stale reopening and outcome unknown", () => {
@@ -1033,6 +1391,77 @@ function seedRun(workspace: WorkspaceDatabase, branchId: string, checkpointId: s
   workspace.db.prepare("INSERT INTO agent_tool_invocations (id, run_id, invocation_id, tool_name, arguments_sha256, created_at) VALUES (?, ?, ?, 'retrieve_graph_evidence', ?, ?)")
     .run(toolInvocationId, runId, invocationId, hash, now);
   return { runId, invocationId, toolInvocationId };
+}
+
+function completeClosureEvaluation(
+  repository: GrowthRepository,
+  setup: ReturnType<typeof createSetup>,
+  input: {
+    goalId: string;
+    profileId: string;
+    revision?: number;
+    checkpointId: string;
+    suffix: string;
+    checkerDecision: "accepted" | "repairs_required" | "blocked";
+    adverseFindings: Array<{
+      id: string;
+      fingerprint: string;
+      severity: "minor" | "major" | "blocking";
+      category: "world_consistency" | "story_consistency" | "character_consistency" | "causality" | "continuity"
+        | "evidence_gap" | "scope_violation" | "creator_choice_required";
+      targetEvidence: Array<{ receiptId: string; rank: number }>;
+      safeSummary: string;
+      repairObjective: string;
+    }>;
+  },
+) {
+  const revision = input.revision ?? 1;
+  const cycle = repository.beginCycle({
+    id: `cycle-evaluation-${input.suffix}`, goalId: input.goalId,
+    idempotencyKey: `cycle-evaluation-${input.suffix}-key`, inputCheckpointId: input.checkpointId, ruleRevision: 1,
+    intent: { kind: "closure_evaluation", profileId: input.profileId, revision, checkpointId: input.checkpointId },
+  });
+  const run = seedRun(setup.workspace, setup.branchId, input.checkpointId);
+  repository.attachRun({ cycleId: cycle.id, runId: run.runId });
+  const receipt = repository.recordReceipt(receiptInput(setup, cycle.id, run, {
+    id: `receipt-evaluation-${input.suffix}`, checkpointId: input.checkpointId, links: [receiptLink(setup)],
+  }));
+  const stewardHash = hashText(`steward-${input.suffix}`);
+  seedInvocationTerminal(setup.workspace, run.runId, run.invocationId, stewardHash);
+  const checker = seedCheckerInvocation(setup.workspace, run.runId, run.invocationId, hashText(`checker-${input.suffix}`));
+  const facetResults = [{
+    facetId: "history",
+    state: input.checkerDecision === "accepted" ? "satisfied" as const
+      : input.checkerDecision === "blocked" ? "blocked" as const : "missing" as const,
+    coverage: input.checkerDecision === "accepted" ? "complete" as const : "partial" as const,
+    safeSummary: input.checkerDecision === "accepted" ? "History is now coherent." : "History still requires resolution.",
+    evidence: [{ receiptId: receipt.id, rank: 1 }],
+  }];
+  const adverseFindings = input.adverseFindings.map((finding) => ({
+    ...finding, targetEvidence: finding.targetEvidence.map((link) => ({ ...link, receiptId: receipt.id })),
+  }));
+  const steward = repository.appendClosureStewardSubmission({
+    id: `submission-steward-${input.suffix}`, profileId: input.profileId, revision, role: "steward",
+    decision: "ready_for_checker", cycleId: cycle.id, checkpointId: input.checkpointId, ruleRevision: 1,
+    receiptId: receipt.id, agentInvocationId: run.invocationId, outputSha256: stewardHash,
+    idempotencyKey: `submission-steward-${input.suffix}-key`, facetResults,
+  });
+  const checkerSubmission = repository.appendClosureCheckerSubmission({
+    id: `submission-checker-${input.suffix}`, profileId: input.profileId, revision, role: "checker",
+    decision: input.checkerDecision, cycleId: cycle.id, checkpointId: input.checkpointId, ruleRevision: 1,
+    receiptId: receipt.id, agentInvocationId: checker.invocationId, outputSha256: checker.outputSha256,
+    idempotencyKey: `submission-checker-${input.suffix}-key`, adverseFindings,
+  });
+  const review = repository.sealClosureReviewV4({
+    id: `review-${input.suffix}`, profileId: input.profileId, revision, stewardAssessmentId: steward.id,
+    checkerAssessmentId: checkerSubmission.id, idempotencyKey: `review-${input.suffix}-key`, facetResults, adverseFindings,
+  });
+  const outcome = repository.sealClosureEvaluationOutcome({
+    id: `outcome-${input.suffix}`, cycleId: cycle.id, profileId: input.profileId, revision, receiptId: receipt.id,
+    stewardAssessmentId: steward.id, checkerAssessmentId: checkerSubmission.id, reviewId: review.id,
+    decision: input.checkerDecision, idempotencyKey: `outcome-${input.suffix}-key`,
+  });
+  return { cycle, receipt, steward, checkerSubmission, review, outcome };
 }
 
 function inquiryBatchInput(cycleId: string, suffix = "") {

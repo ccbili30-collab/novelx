@@ -103,6 +103,39 @@ describe("creative relation repository", () => {
         .toThrowError(expect.objectContaining({ code: "RELATION_DUPLICATE" }));
     });
   });
+
+  it("lists the active relation projection at one pinned checkpoint and fails closed for an unknown checkpoint", () => {
+    const workspace = createWorkspace();
+    const resources = new ResourceRepository(workspace);
+    const relations = new CreativeRelationRepository(workspace);
+    const changes = new ChangeSetRepository(workspace);
+    const rootsByDomain = new Map(resources.listCurrent().map((resource) => [resource.type, resource]));
+    let worldId = "";
+    let storyId = "";
+    let relationId = "";
+
+    const objects = changes.propose({ idempotencyKey: "pinned-relation-objects", mode: "free", summary: "create pinned relation objects" });
+    const objectCheckpoint = changes.commit(objects.id, "create pinned relation objects", (checkpointId) => {
+      worldId = resources.putRevision({ checkpointId, type: "world", objectKind: "world", title: "Pinned world", parentId: rootsByDomain.get("world")!.id, state: "active" });
+      storyId = resources.putRevision({ checkpointId, type: "story", objectKind: "story", title: "Pinned story", parentId: rootsByDomain.get("story")!.id, state: "active" });
+    });
+    const add = changes.propose({ idempotencyKey: "pinned-relation-add", mode: "free", summary: "add pinned relation" });
+    const relationCheckpoint = changes.commit(add.id, "add pinned relation", (checkpointId) => {
+      relationId = relations.putRevision({ checkpointId, kind: "uses_world", sourceResourceId: storyId, targetResourceId: worldId, state: "active" });
+    });
+    const remove = changes.propose({ idempotencyKey: "pinned-relation-remove", mode: "free", summary: "remove pinned relation" });
+    changes.commit(remove.id, "remove pinned relation", (checkpointId) => {
+      relations.putRevision({ relationId, checkpointId, kind: "uses_world", sourceResourceId: storyId, targetResourceId: worldId, state: "deleted" });
+    });
+
+    expect(relations.listAtCheckpoint(objectCheckpoint)).toEqual([]);
+    expect(relations.listAtCheckpoint(relationCheckpoint)).toEqual([{
+      id: relationId, kind: "uses_world", sourceResourceId: storyId, targetResourceId: worldId,
+    }]);
+    expect(relations.listCurrent()).toEqual([]);
+    expect(() => relations.listAtCheckpoint("unknown-checkpoint"))
+      .toThrowError(expect.objectContaining({ code: "CHECKPOINT_NOT_FOUND" }));
+  });
 });
 
 function createWorkspace(): WorkspaceDatabase {

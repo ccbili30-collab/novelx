@@ -22,14 +22,14 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates schema 25 creative, audit, import, image, and strict Growth Inquiry persistence storage", () => {
+  it("creates schema 26 creative, audit, import, image, Inquiry and Closure evaluation storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 25 });
+      .toEqual({ version: 26 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
@@ -86,6 +86,14 @@ describe("local workspace persistence", () => {
       "growth_closure_assessments",
       "growth_closure_reviews",
       "growth_closure_review_findings",
+      "growth_closure_profile_components",
+      "growth_closure_facet_results",
+      "growth_closure_facet_result_evidence",
+      "growth_closure_adverse_findings",
+      "growth_closure_adverse_finding_evidence",
+      "growth_closure_evaluation_outcomes",
+      "growth_closure_repair_lineage",
+      "growth_closure_repair_backlog",
       "growth_illustration_requests",
       "growth_illustration_request_batches",
       "growth_illustration_items",
@@ -217,7 +225,7 @@ describe("local workspace persistence", () => {
     workspace = openWorkspace(root);
     opened.push(workspace);
 
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 25 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
     expect(workspace.db.prepare("SELECT purpose, request_sha256 FROM image_generation_jobs WHERE id = 'job-v23'").get())
       .toEqual({ purpose: "world_map", request_sha256: hash });
     expect(workspace.db.prepare("SELECT sha256 FROM image_assets WHERE id = 'asset-v23'").get()).toEqual({ sha256: hash });
@@ -261,7 +269,7 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 25 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
     expect(workspace.db.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all()).toEqual(eventBefore);
     expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_events").get()).toEqual(eventCountBefore);
     expect(workspace.db.prepare("PRAGMA table_info(growth_events)").all()).toEqual(columnsBefore);
@@ -271,8 +279,14 @@ describe("local workspace persistence", () => {
       SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'growth_events'
     `).get() as { sql: string }).sql;
     expect(normalizeSql(eventSqlAfter)
+      .replace('CREATE TABLE "growth_events"', "CREATE TABLE growth_events")
       .replace(", 'inquiry_selected', 'creator_choice_required'", "")
-      .replace(", 'inquiry'", ""))
+      .replace(", 'cycle_evaluated'", "")
+      .replace(", 'inquiry'", "")
+      .replace(", 'closure_evaluation'", "")
+      .replace(", 'evaluated'", "")
+      .replace(", CHECK (durable_state <> 'evaluated' OR phase = 'cycle_evaluated')", "")
+      .replace(", CHECK (phase <> 'cycle_evaluated' OR (target_kind = 'closure_evaluation' AND target_version_id IS NULL AND content_ref_kind IS NULL))", ""))
       .toBe(normalizeSql(eventSqlBefore));
     expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(workspace.db.prepare("SELECT payload_hash FROM growth_inquiry_batches WHERE id = ?").get(fixture.batchId))
@@ -329,8 +343,127 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 25 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
     expect(workspace.db.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all()).toEqual(eventBefore);
+    expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("migrates v25 Growth rows to v26 without fabricating Closure v4 authority and reopens idempotently", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-26-growth-"));
+    roots.push(root);
+    let workspace = openWorkspace(root);
+    opened.push(workspace);
+    seedLegacyV24Growth(workspace);
+    seedLegacyV25Closure(workspace);
+    downgradeToSchema25(workspace);
+
+    const cycleBefore = workspace.db.prepare(`
+      SELECT id, goal_id, sequence, idempotency_key, payload_hash, input_checkpoint_id, rule_revision,
+        run_id, receipt_id, change_set_id, output_checkpoint_id, status, failure_code, created_at, updated_at, terminal_at
+      FROM growth_cycles ORDER BY goal_id, sequence
+    `).all();
+    const eventBefore = workspace.db.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all();
+    const intentBefore = workspace.db.prepare("SELECT cycle_id, kind, created_at FROM growth_cycle_intents ORDER BY cycle_id").all();
+    const profileBefore = workspace.db.prepare(`
+      SELECT id, idempotency_key, payload_hash, goal_id, profile_kind, subject_resource_id,
+        current_revision, current_epoch, created_at, updated_at
+      FROM growth_closure_profiles ORDER BY id
+    `).all();
+    const revisionBefore = workspace.db.prepare(`
+      SELECT profile_id, revision, epoch, checkpoint_id, rule_revision, idempotency_key, payload_hash, created_at
+      FROM growth_closure_profile_revisions ORDER BY profile_id, revision
+    `).all();
+    const cycleIndexesBefore = workspace.db.prepare("PRAGMA index_list(growth_cycles)").all();
+    const cycleForeignKeysBefore = workspace.db.prepare("PRAGMA foreign_key_list(growth_cycles)").all();
+    const eventForeignKeysBefore = workspace.db.prepare("PRAGMA foreign_key_list(growth_events)").all();
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(workspace.db.prepare(`
+      SELECT id, goal_id, sequence, idempotency_key, payload_hash, input_checkpoint_id, rule_revision,
+        run_id, receipt_id, change_set_id, output_checkpoint_id, status, failure_code, created_at, updated_at, terminal_at
+      FROM growth_cycles ORDER BY goal_id, sequence
+    `).all()).toEqual(cycleBefore);
+    expect(workspace.db.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all()).toEqual(eventBefore);
+    expect(workspace.db.prepare(`
+      SELECT cycle_id, kind, created_at FROM growth_cycle_intents ORDER BY cycle_id
+    `).all()).toEqual(intentBefore);
+    expect(workspace.db.prepare(`
+      SELECT id, idempotency_key, payload_hash, goal_id, profile_kind, subject_resource_id,
+        current_revision, current_epoch, created_at, updated_at
+      FROM growth_closure_profiles ORDER BY id
+    `).all()).toEqual(profileBefore);
+    expect(workspace.db.prepare(`
+      SELECT profile_id, revision, epoch, checkpoint_id, rule_revision, idempotency_key, payload_hash, created_at
+      FROM growth_closure_profile_revisions ORDER BY profile_id, revision
+    `).all()).toEqual(revisionBefore);
+    expect(workspace.db.prepare("PRAGMA index_list(growth_cycles)").all()).toEqual(cycleIndexesBefore);
+    expect(workspace.db.prepare("PRAGMA foreign_key_list(growth_cycles)").all()).toEqual(cycleForeignKeysBefore);
+    expect(workspace.db.prepare("PRAGMA foreign_key_list(growth_events)").all()).toEqual(eventForeignKeysBefore);
+    expect(new GrowthRepository(workspace).getCycleIntent("legacy-v24-cycle")).toMatchObject({
+      kind: "expand", provenance: "persisted_v24", focusKinds: ["world"], resumeFrontier: ["story", "oc"],
+    });
+    expect(new GrowthRepository(workspace).getClosureProfile("legacy-v25-profile")).toMatchObject({
+      contractGeneration: "legacy_pre_v26", componentProfiles: null, focusOcResourceId: null,
+    });
+    expect(new GrowthRepository(workspace).getClosureRevision("legacy-v25-profile", 1)).toMatchObject({
+      contractGeneration: "legacy_pre_v26", componentProfiles: null, focusOcResourceId: null,
+    });
+    expect(new GrowthRepository(workspace).getClosureState("legacy-v25-profile")).toMatchObject({
+      contentState: "growing", satisfiedFacetIds: [], missingFacetIds: ["history"],
+    });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_closure_evaluation_outcomes").get()).toEqual({ count: 0 });
+    expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(workspace.db.prepare("PRAGMA integrity_check").all()).toEqual([{ integrity_check: "ok" }]);
+
+    const tableCount = workspace.db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'").get();
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'").get()).toEqual(tableCount);
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_closure_profile_components").get()).toEqual({ count: 0 });
+    expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("rolls back the whole v25 to v26 migration after a mid-transaction collision", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-26-rollback-"));
+    roots.push(root);
+    let workspace = openWorkspace(root);
+    opened.push(workspace);
+    seedLegacyV24Growth(workspace);
+    seedLegacyV25Closure(workspace);
+    downgradeToSchema25(workspace);
+    const cycleBefore = workspace.db.prepare("SELECT * FROM growth_cycles ORDER BY goal_id, sequence").all();
+    const eventBefore = workspace.db.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all();
+    const intentBefore = workspace.db.prepare("SELECT * FROM growth_cycle_intents ORDER BY cycle_id").all();
+    workspace.db.exec("CREATE TABLE growth_closure_profile_components (sentinel TEXT NOT NULL)");
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+
+    expect(() => openWorkspace(root)).toThrow();
+    const direct = new DatabaseSync(path.join(root, ".novax", "workspace.db"));
+    direct.exec("PRAGMA foreign_keys = ON");
+    expect(direct.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 25 });
+    expect(direct.prepare("SELECT * FROM growth_cycles ORDER BY goal_id, sequence").all()).toEqual(cycleBefore);
+    expect(direct.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all()).toEqual(eventBefore);
+    expect(direct.prepare("SELECT * FROM growth_cycle_intents ORDER BY cycle_id").all()).toEqual(intentBefore);
+    expect(direct.prepare("PRAGMA table_info(growth_closure_profiles)").all())
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ name: "contract_generation" })]));
+    expect((direct.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'growth_cycles'").get() as { sql: string }).sql)
+      .not.toContain("evaluated");
+    expect(direct.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(direct.prepare("PRAGMA integrity_check").all()).toEqual([{ integrity_check: "ok" }]);
+    direct.exec("DROP TABLE growth_closure_profile_components");
+    direct.close();
+
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(new GrowthRepository(workspace).getCycleIntent("legacy-v24-cycle")).toMatchObject({ provenance: "persisted_v24" });
     expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
@@ -655,7 +788,80 @@ function seedGrowthRunForMigration(workspace: WorkspaceDatabase, branchId: strin
   return { runId, toolInvocationId };
 }
 
+function seedLegacyV25Closure(workspace: WorkspaceDatabase): void {
+  const goal = new GrowthRepository(workspace).getGoal("legacy-v24-goal")!;
+  const checkpointId = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+  const now = new Date().toISOString();
+  const payloadHash = "e".repeat(64);
+  workspace.db.prepare(`
+    INSERT INTO growth_closure_profiles (
+      id, idempotency_key, payload_hash, goal_id, profile_kind, subject_resource_id,
+      current_revision, current_epoch, created_at, updated_at, contract_generation, focus_oc_resource_id
+    ) VALUES ('legacy-v25-profile', 'legacy-v25-profile-key', ?, ?, 'world_birth', NULL, 1, 1, ?, ?, 'v26', NULL)
+  `).run(payloadHash, goal.id, now, now);
+  workspace.db.prepare(`
+    INSERT INTO growth_closure_profile_revisions (
+      profile_id, revision, epoch, checkpoint_id, rule_revision, idempotency_key, payload_hash,
+      created_at, contract_generation, focus_oc_resource_id
+    ) VALUES ('legacy-v25-profile', 1, 1, ?, 1, 'legacy-v25-revision-key', ?, ?, 'v26', NULL)
+  `).run(checkpointId, payloadHash, now);
+  workspace.db.prepare(`
+    INSERT INTO growth_closure_facets (
+      profile_id, revision, facet_id, facet_kind, required, ordinal
+    ) VALUES ('legacy-v25-profile', 1, 'history', 'content', 1, 0)
+  `).run();
+  const cycle = workspace.db.prepare(`
+    SELECT run_id, receipt_id FROM growth_cycles WHERE id = 'legacy-v24-cycle'
+  `).get() as { run_id: string; receipt_id: string };
+  const stewardInvocation = workspace.db.prepare(`
+    SELECT id FROM agent_invocations WHERE run_id = ? AND role = 'steward' ORDER BY created_at, id LIMIT 1
+  `).get(cycle.run_id) as { id: string };
+  const checkerInvocationId = randomUUID();
+  const outputHash = "f".repeat(64);
+  workspace.db.prepare(`
+    INSERT INTO agent_invocations (
+      id, run_id, parent_invocation_id, role, prompt_id, prompt_version, prompt_sha256,
+      agent_profile_id, agent_profile_version, agent_profile_sha256, provider_id, requested_model_id,
+      provider_config_sha256, tool_policy_id, tool_policy_version, tool_policy_sha256,
+      authorized_tools_json, handoff_contract_id, handoff_version, handoff_payload_sha256, input_sha256, created_at
+    )
+    SELECT ?, run_id, id, 'checker', 'checker', prompt_version, prompt_sha256,
+      'checker-profile', agent_profile_version, agent_profile_sha256, provider_id, requested_model_id,
+      provider_config_sha256, tool_policy_id, tool_policy_version, tool_policy_sha256,
+      authorized_tools_json, 'legacy-checker-handoff', '1.0.0', ?, input_sha256, ?
+    FROM agent_invocations WHERE id = ?
+  `).run(checkerInvocationId, outputHash, now, stewardInvocation.id);
+  const insertAssessment = workspace.db.prepare(`
+    INSERT INTO growth_closure_assessments (
+      id, profile_id, revision, role, decision, cycle_id, checkpoint_id, rule_revision, receipt_id,
+      agent_invocation_id, output_sha256, idempotency_key, payload_hash, created_at, contract_generation
+    ) VALUES (?, 'legacy-v25-profile', 1, ?, ?, 'legacy-v24-cycle', ?, 1, ?, ?, ?, ?, ?, ?, 'v26')
+  `);
+  insertAssessment.run("legacy-v25-steward", "steward", "ready_for_checker", checkpointId, cycle.receipt_id,
+    stewardInvocation.id, outputHash, "legacy-v25-steward-key", "a".repeat(64), now);
+  insertAssessment.run("legacy-v25-checker", "checker", "accepted", checkpointId, cycle.receipt_id,
+    checkerInvocationId, outputHash, "legacy-v25-checker-key", "b".repeat(64), now);
+  workspace.db.prepare(`
+    INSERT INTO growth_closure_reviews (
+      id, profile_id, revision, steward_assessment_id, checker_assessment_id, checker_decision,
+      idempotency_key, payload_hash, created_at, contract_generation
+    ) VALUES (
+      'legacy-v25-review', 'legacy-v25-profile', 1, 'legacy-v25-steward', 'legacy-v25-checker', 'accepted',
+      'legacy-v25-review-key', ?, ?, 'v26'
+    )
+  `).run("c".repeat(64), now);
+  workspace.db.prepare(`
+    INSERT INTO growth_closure_review_findings (
+      review_id, profile_id, revision, facet_id, state, safe_summary, receipt_id, rank, ordinal
+    ) VALUES (
+      'legacy-v25-review', 'legacy-v25-profile', 1, 'history', 'satisfied',
+      'Legacy accepted review.', ?, 1, 0
+    )
+  `).run(cycle.receipt_id);
+}
+
 function downgradeToSchema24(workspace: WorkspaceDatabase): void {
+  downgradeToSchema25(workspace);
   workspace.db.exec("BEGIN IMMEDIATE");
   try {
     workspace.db.exec(`
@@ -706,5 +912,102 @@ function downgradeToSchema24(workspace: WorkspaceDatabase): void {
   } catch (error) {
     workspace.db.exec("ROLLBACK");
     throw error;
+  }
+}
+
+function downgradeToSchema25(workspace: WorkspaceDatabase): void {
+  workspace.db.exec("PRAGMA foreign_keys = OFF");
+  workspace.db.exec("BEGIN IMMEDIATE");
+  try {
+    workspace.db.exec(`
+      DROP TABLE growth_closure_repair_backlog;
+      DROP TABLE growth_closure_repair_lineage;
+      DROP TABLE growth_closure_evaluation_outcomes;
+      DROP TABLE growth_closure_adverse_finding_evidence;
+      DROP TABLE growth_closure_adverse_findings;
+      DROP TABLE growth_closure_facet_result_evidence;
+      DROP TABLE growth_closure_facet_results;
+      DROP TABLE growth_closure_profile_components;
+
+      ALTER TABLE growth_closure_profiles DROP COLUMN focus_oc_resource_id;
+      ALTER TABLE growth_closure_profiles DROP COLUMN contract_generation;
+      ALTER TABLE growth_closure_profile_revisions DROP COLUMN focus_oc_resource_id;
+      ALTER TABLE growth_closure_profile_revisions DROP COLUMN contract_generation;
+      ALTER TABLE growth_closure_assessments DROP COLUMN contract_generation;
+      ALTER TABLE growth_closure_reviews DROP COLUMN contract_generation;
+
+      CREATE TABLE growth_cycles_v25_test (
+        id TEXT PRIMARY KEY,
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        input_checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+        run_id TEXT UNIQUE REFERENCES agent_runs(id),
+        receipt_id TEXT UNIQUE REFERENCES growth_retrieval_receipts(id),
+        change_set_id TEXT UNIQUE REFERENCES change_sets(id),
+        output_checkpoint_id TEXT REFERENCES checkpoints(id),
+        status TEXT NOT NULL CHECK (status IN ('planned', 'running', 'committed', 'blocked', 'failed', 'cancelled', 'reconciliation_required')),
+        failure_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, terminal_at TEXT,
+        UNIQUE (goal_id, sequence),
+        FOREIGN KEY (goal_id, rule_revision) REFERENCES growth_goal_rule_revisions(goal_id, revision),
+        CHECK (
+          (status = 'planned' AND run_id IS NULL AND receipt_id IS NULL AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NULL AND terminal_at IS NULL)
+          OR (status = 'running' AND run_id IS NOT NULL AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NULL AND terminal_at IS NULL)
+          OR (status = 'committed' AND run_id IS NOT NULL AND receipt_id IS NOT NULL AND change_set_id IS NOT NULL AND output_checkpoint_id IS NOT NULL AND failure_code IS NULL AND terminal_at IS NOT NULL)
+          OR (status IN ('blocked', 'failed', 'cancelled', 'reconciliation_required') AND change_set_id IS NULL AND output_checkpoint_id IS NULL AND failure_code IS NOT NULL AND terminal_at IS NOT NULL)
+        )
+      );
+      INSERT INTO growth_cycles_v25_test SELECT * FROM growth_cycles;
+      DROP TABLE growth_cycles;
+      ALTER TABLE growth_cycles_v25_test RENAME TO growth_cycles;
+      CREATE INDEX growth_cycles_goal_status_idx ON growth_cycles(goal_id, status, sequence);
+      CREATE UNIQUE INDEX growth_cycles_one_open_goal_idx ON growth_cycles(goal_id) WHERE status IN ('planned', 'running');
+      CREATE UNIQUE INDEX growth_cycles_id_rule_idx ON growth_cycles(id, rule_revision);
+      CREATE UNIQUE INDEX growth_cycles_inquiry_source_idx ON growth_cycles(id, receipt_id, input_checkpoint_id, rule_revision);
+
+      CREATE TABLE growth_cycle_intents_v25_test (
+        cycle_id TEXT PRIMARY KEY REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('expand', 'revision')),
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO growth_cycle_intents_v25_test (cycle_id, kind, created_at)
+        SELECT cycle_id, kind, created_at FROM growth_cycle_intents;
+      DROP TABLE growth_cycle_intents;
+      ALTER TABLE growth_cycle_intents_v25_test RENAME TO growth_cycle_intents;
+
+      CREATE TABLE growth_events_v25_test (
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        cycle_id TEXT NOT NULL REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        run_id TEXT REFERENCES agent_runs(id), sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        safe_summary TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK (phase IN (
+          'goal_created', 'rule_appended', 'cycle_planned', 'run_attached', 'receipt_recorded',
+          'inquiry_selected', 'creator_choice_required', 'change_set_committed', 'cycle_terminal'
+        )),
+        target_kind TEXT NOT NULL CHECK (target_kind IN ('document', 'resource', 'assertion', 'relation', 'image', 'change_set', 'inquiry')),
+        target_id TEXT NOT NULL, target_version_id TEXT,
+        durable_state TEXT NOT NULL CHECK (durable_state IN ('planned', 'running', 'committed', 'blocked', 'failed', 'cancelled', 'reconciliation_required')),
+        content_ref_kind TEXT CHECK (content_ref_kind IN ('document', 'resource', 'assertion', 'relation', 'image', 'change_set')),
+        content_ref_id TEXT, content_ref_version_id TEXT, created_at TEXT NOT NULL,
+        PRIMARY KEY (goal_id, sequence),
+        CHECK ((content_ref_kind IS NULL AND content_ref_id IS NULL AND content_ref_version_id IS NULL)
+          OR (content_ref_kind IS NOT NULL AND content_ref_id IS NOT NULL AND content_ref_version_id IS NOT NULL)),
+        CHECK (durable_state <> 'committed' OR phase = 'change_set_committed'),
+        CHECK (phase <> 'change_set_committed' OR target_kind = 'change_set')
+      );
+      INSERT INTO growth_events_v25_test SELECT * FROM growth_events;
+      DROP TABLE growth_events;
+      ALTER TABLE growth_events_v25_test RENAME TO growth_events;
+      CREATE INDEX growth_events_cycle_idx ON growth_events(cycle_id, sequence);
+      UPDATE schema_meta SET version = 25 WHERE singleton = 1;
+    `);
+    workspace.db.exec("COMMIT");
+  } catch (error) {
+    workspace.db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    workspace.db.exec("PRAGMA foreign_keys = ON");
   }
 }

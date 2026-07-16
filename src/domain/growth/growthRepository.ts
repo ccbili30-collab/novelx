@@ -28,6 +28,13 @@ import {
   growthClosureRevisionSchema,
   growthClosureReviewSchema,
   growthClosureReviewSealSchema,
+  growthClosureStewardSubmissionSchema,
+  growthClosureCheckerSubmissionSchema,
+  growthClosureReviewV4SealSchema,
+  growthClosureEvaluationOutcomeSealSchema,
+  growthClosureEvaluationOutcomeSchema,
+  growthClosureRepairLineageCreateSchema,
+  growthClosureRepairLineageSchema,
   growthClosureStateSchema,
   growthIllustrationBatchSchema,
   growthIllustrationBatchSealSchema,
@@ -54,6 +61,12 @@ import {
   type GrowthClosureRevision,
   type GrowthClosureReview,
   type GrowthClosureState,
+  type GrowthClosureStewardSubmission,
+  type GrowthClosureCheckerSubmission,
+  type GrowthClosureEvaluationOutcome,
+  type GrowthClosureRepairLineage,
+  type GrowthClosureFacetResult,
+  type GrowthClosureAdverseFinding,
   type GrowthIllustrationBatch,
   type GrowthIllustrationItem,
   type GrowthIllustrationRequest,
@@ -63,6 +76,12 @@ import {
 } from "../../shared/growthContract";
 
 type Row = Record<string, SQLOutputValue>;
+type ClosureAssessmentRowInput = {
+  id: string; profileId: string; revision: number; role: "steward" | "checker";
+  decision: "continue_growing" | "ready_for_checker" | "accepted" | "repairs_required" | "blocked";
+  cycleId: string; checkpointId: string; ruleRevision: number; receiptId: string;
+  agentInvocationId: string; outputSha256: string; idempotencyKey: string;
+};
 
 export interface GrowthPriorInquiryContext {
   inquiryId: string;
@@ -172,7 +191,7 @@ export class GrowthRepository {
 
   getCycleIntent(cycleId: string): GrowthCycleIntent {
     const cycle = this.#requiredCycle(cycleId);
-    const row = this.workspace.db.prepare("SELECT kind FROM growth_cycle_intents WHERE cycle_id = ?").get(cycleId) as Row | undefined;
+    const row = this.workspace.db.prepare("SELECT * FROM growth_cycle_intents WHERE cycle_id = ?").get(cycleId) as Row | undefined;
     if (!row) {
       const legacyPayloadHash = canonicalAuditHash({
         id: cycle.id,
@@ -186,6 +205,17 @@ export class GrowthRepository {
       if (!stored || readString(stored, "payload_hash") !== legacyPayloadHash) throw growthError("GROWTH_CYCLE_INTENT_REQUIRED");
       return legacyCycleIntent(cycle);
     }
+    const kind = readString(row, "kind");
+    if (kind === "closure_evaluation") return growthCycleIntentSchema.parse({
+      cycleId, kind, provenance: readString(row, "contract_generation"), profileId: readString(row, "profile_id"),
+      revision: readNumber(row, "revision"), checkpointId: readString(row, "checkpoint_id"),
+    });
+    if (kind === "repair") return growthCycleIntentSchema.parse({
+      cycleId, kind, provenance: readString(row, "contract_generation"), profileId: readString(row, "profile_id"),
+      revision: readNumber(row, "revision"), originalReviewId: readString(row, "original_review_id"),
+      selectedFindingId: readString(row, "selected_finding_id"),
+      selectedFindingFingerprint: readString(row, "selected_finding_fingerprint"),
+    });
     const focusKinds = (this.workspace.db.prepare(`
       SELECT focus_kind FROM growth_cycle_intent_focuses WHERE cycle_id = ? ORDER BY ordinal
     `).all(cycleId) as Array<{ focus_kind: string }>).map((entry) => entry.focus_kind);
@@ -193,7 +223,7 @@ export class GrowthRepository {
       SELECT frontier_kind FROM growth_cycle_intent_frontier WHERE cycle_id = ? ORDER BY ordinal
     `).all(cycleId) as Array<{ frontier_kind: string }>).map((entry) => entry.frontier_kind);
     return growthCycleIntentSchema.parse({
-      cycleId, kind: readString(row, "kind"), focusKinds, resumeFrontier, provenance: "persisted_v24",
+      cycleId, kind, focusKinds, resumeFrontier, provenance: readString(row, "contract_generation"),
     });
   }
 
@@ -708,7 +738,10 @@ export class GrowthRepository {
 
   getClosureProfile(profileId: string): GrowthClosureProfile | null {
     const row = this.workspace.db.prepare("SELECT * FROM growth_closure_profiles WHERE id = ?").get(profileId) as Row | undefined;
-    return row ? mapClosureProfile(row) : null;
+    if (!row) return null;
+    const generation = readString(row, "contract_generation");
+    const components = generation === "v26" ? this.#closureComponents(profileId, readNumber(row, "current_revision")) : null;
+    return mapClosureProfile(row, components);
   }
 
   getClosureRevision(profileId: string, revision: number): GrowthClosureRevision | null {
@@ -722,9 +755,13 @@ export class GrowthRepository {
     `).all(profileId, revision) as Array<{ facet_id: string; facet_kind: string; required: number }>).map((facet) => ({
       id: facet.facet_id, kind: facet.facet_kind, required: facet.required === 1,
     }));
+    const generation = readString(row, "contract_generation");
     return growthClosureRevisionSchema.parse({
       profileId, revision: readNumber(row, "revision"), epoch: readNumber(row, "epoch"),
       checkpointId: readString(row, "checkpoint_id"), ruleRevision: readNumber(row, "rule_revision"),
+      contractGeneration: generation,
+      componentProfiles: generation === "v26" ? this.#closureComponents(profileId, revision) : null,
+      focusOcResourceId: generation === "v26" ? readNullableString(row, "focus_oc_resource_id") : null,
       facets, createdAt: readString(row, "created_at"),
     });
   }
@@ -748,21 +785,25 @@ export class GrowthRepository {
       }
       this.#assertClosureRevisionAuthority(value.goalId, value.checkpointId, value.ruleRevision);
       if (value.profileKind === "oc_saga") this.#assertOcSubject(value.subjectResourceId!, value.checkpointId);
+      if (value.focusOcResourceId) this.#assertOcSubject(value.focusOcResourceId, value.checkpointId);
       const now = new Date().toISOString();
       this.workspace.db.prepare(`
         INSERT INTO growth_closure_profiles (
           id, idempotency_key, payload_hash, goal_id, profile_kind, subject_resource_id,
-          current_revision, current_epoch, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
-      `).run(value.id, value.idempotencyKey, payloadHash, value.goalId, value.profileKind, value.subjectResourceId, now, now);
+          current_revision, current_epoch, created_at, updated_at, contract_generation, focus_oc_resource_id
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?, 'v26', ?)
+      `).run(value.id, value.idempotencyKey, payloadHash, value.goalId, value.profileKind, value.subjectResourceId, now, now, value.focusOcResourceId);
       this.workspace.db.prepare(`
         INSERT INTO growth_closure_profile_revisions (
-          profile_id, revision, epoch, checkpoint_id, rule_revision, idempotency_key, payload_hash, created_at
-        ) VALUES (?, 1, 1, ?, ?, ?, ?, ?)
+          profile_id, revision, epoch, checkpoint_id, rule_revision, idempotency_key, payload_hash, created_at,
+          contract_generation, focus_oc_resource_id
+        ) VALUES (?, 1, 1, ?, ?, ?, ?, ?, 'v26', ?)
       `).run(value.id, value.checkpointId, value.ruleRevision,
         canonicalAuditHash({ profileId: value.id, revision: 1, idempotencyKey: value.idempotencyKey }),
-        canonicalAuditHash({ checkpointId: value.checkpointId, ruleRevision: value.ruleRevision, facets: value.facets }), now);
+        canonicalAuditHash({ checkpointId: value.checkpointId, ruleRevision: value.ruleRevision, facets: value.facets,
+          componentProfiles: value.componentProfiles, focusOcResourceId: value.focusOcResourceId }), now, value.focusOcResourceId);
       this.#insertClosureFacets(value.id, 1, value.facets);
+      this.#insertClosureComponents(value.id, 1, value.componentProfiles);
       this.workspace.db.exec("COMMIT");
       return this.getClosureProfile(value.id) ?? fail("GROWTH_DATA_INVALID");
     } catch (error) {
@@ -789,22 +830,29 @@ export class GrowthRepository {
       const profile = this.getClosureProfile(value.profileId);
       if (!profile) throw growthError("GROWTH_CLOSURE_PROFILE_NOT_FOUND");
       if (profile.currentRevision !== value.expectedRevision) throw growthError("GROWTH_CLOSURE_REVISION_MISMATCH");
+      this.#assertClosureRevisionShape(profile.profileKind, value.componentProfiles, value.focusOcResourceId);
       this.#assertClosureRevisionAuthority(profile.goalId, value.checkpointId, value.ruleRevision);
       if (profile.profileKind === "oc_saga") this.#assertOcSubject(profile.subjectResourceId!, value.checkpointId);
+      if (value.focusOcResourceId) this.#assertOcSubject(value.focusOcResourceId, value.checkpointId);
       const revision = profile.currentRevision + 1;
       const epoch = profile.currentEpoch + 1;
       const now = new Date().toISOString();
       this.workspace.db.prepare(`
         INSERT INTO growth_closure_profile_revisions (
-          profile_id, revision, epoch, checkpoint_id, rule_revision, idempotency_key, payload_hash, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(profile.id, revision, epoch, value.checkpointId, value.ruleRevision, value.idempotencyKey, payloadHash, now);
+          profile_id, revision, epoch, checkpoint_id, rule_revision, idempotency_key, payload_hash, created_at,
+          contract_generation, focus_oc_resource_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'v26', ?)
+      `).run(profile.id, revision, epoch, value.checkpointId, value.ruleRevision, value.idempotencyKey, payloadHash, now, value.focusOcResourceId);
       this.#insertClosureFacets(profile.id, revision, value.facets);
+      this.#insertClosureComponents(profile.id, revision, value.componentProfiles);
       this.workspace.db.prepare(`
-        UPDATE growth_closure_profiles SET current_revision = ?, current_epoch = ?, updated_at = ? WHERE id = ?
-      `).run(revision, epoch, now, profile.id);
+        UPDATE growth_closure_profiles
+        SET current_revision = ?, current_epoch = ?, updated_at = ?, contract_generation = 'v26', focus_oc_resource_id = ?
+        WHERE id = ?
+      `).run(revision, epoch, now, value.focusOcResourceId, profile.id);
+      const output = this.getClosureRevision(profile.id, revision) ?? fail("GROWTH_DATA_INVALID");
       this.workspace.db.exec("COMMIT");
-      return this.getClosureRevision(profile.id, revision) ?? fail("GROWTH_DATA_INVALID");
+      return output;
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
       throw error;
@@ -817,65 +865,473 @@ export class GrowthRepository {
   }
 
   appendClosureAssessment(input: unknown): GrowthClosureAssessment {
-    const value = growthClosureAssessmentAppendSchema.parse(input);
+    growthClosureAssessmentAppendSchema.parse(input);
+    throw growthError("GROWTH_CLOSURE_LEGACY_WRITE_FORBIDDEN");
+  }
+
+  appendClosureStewardSubmission(
+    input: unknown,
+  ): GrowthClosureAssessment & { facetResults: GrowthClosureFacetResult[] } {
+    const value = growthClosureStewardSubmissionSchema.parse(input);
     const payloadHash = canonicalAuditHash(value);
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
-      const replay = this.workspace.db.prepare("SELECT id, payload_hash FROM growth_closure_assessments WHERE idempotency_key = ?")
-        .get(value.idempotencyKey) as { id: string; payload_hash: string } | undefined;
-      if (replay) {
-        if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_CLOSURE_ASSESSMENT_REPLAY_MISMATCH");
-        const assessment = this.getClosureAssessment(replay.id);
-        if (!assessment) throw growthError("GROWTH_DATA_INVALID");
-        this.workspace.db.exec("COMMIT");
-        return assessment;
+      const assessment = this.#appendClosureAssessmentRow(value, payloadHash, "v26");
+      const existing = this.workspace.db.prepare(`
+        SELECT COUNT(*) AS count FROM growth_closure_facet_results WHERE assessment_id = ?
+      `).get(assessment.id) as { count: number };
+      if (existing.count === 0) {
+        const revision = this.getClosureRevision(value.profileId, value.revision) ?? fail("GROWTH_CLOSURE_REVISION_NOT_FOUND");
+        const facetIds = new Set(revision.facets.map((facet) => facet.id));
+        if (value.facetResults.some((result) => !facetIds.has(result.facetId)
+          || result.evidence.some((link) => link.receiptId !== value.receiptId))) {
+          throw growthError("GROWTH_CLOSURE_FACET_RESULT_REFERENCE_MISMATCH");
+        }
+        const insertResult = this.workspace.db.prepare(`
+          INSERT INTO growth_closure_facet_results (
+            assessment_id, profile_id, revision, facet_id, state, coverage, safe_summary, ordinal
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const insertEvidence = this.workspace.db.prepare(`
+          INSERT INTO growth_closure_facet_result_evidence (
+            assessment_id, facet_id, receipt_id, rank, ordinal
+          ) VALUES (?, ?, ?, ?, ?)
+        `);
+        value.facetResults.forEach((result, ordinal) => {
+          insertResult.run(assessment.id, value.profileId, value.revision, result.facetId,
+            result.state, result.coverage, result.safeSummary, ordinal);
+          result.evidence.forEach((link, evidenceOrdinal) => insertEvidence.run(
+            assessment.id, result.facetId, link.receiptId, link.rank, evidenceOrdinal,
+          ));
+        });
       }
-      if (this.workspace.db.prepare("SELECT 1 FROM growth_closure_assessments WHERE id = ?").get(value.id)) {
-        throw growthError("GROWTH_CLOSURE_ASSESSMENT_ID_CONFLICT");
+      const output = this.getClosureStewardSubmission(assessment.id) ?? fail("GROWTH_DATA_INVALID");
+      if (canonicalAuditHash({ ...assessmentInputFromOutput(output), facetResults: output.facetResults }) !== payloadHash) {
+        throw growthError("GROWTH_CLOSURE_ASSESSMENT_REPLAY_MISMATCH");
       }
-      const profile = this.getClosureProfile(value.profileId);
-      const revision = this.getClosureRevision(value.profileId, value.revision);
-      if (!profile || !revision) throw growthError("GROWTH_CLOSURE_REVISION_NOT_FOUND");
-      const cycle = this.#requiredCycle(value.cycleId);
-      const receipt = this.getReceipt(value.receiptId);
-      if (cycle.goalId !== profile.goalId || cycle.status !== "running" || !cycle.runId
-        || cycle.inputCheckpointId !== value.checkpointId || cycle.ruleRevision !== value.ruleRevision
-        || cycle.receiptId !== value.receiptId || !receipt || receipt.cycleId !== cycle.id
-        || receipt.runId !== cycle.runId || receipt.checkpointId !== cycle.inputCheckpointId
-        || receipt.checkpointId !== revision.checkpointId || receipt.checkpointId !== value.checkpointId
-        || revision.ruleRevision !== value.ruleRevision) {
-        throw growthError("GROWTH_CLOSURE_ASSESSMENT_REFERENCE_MISMATCH");
-      }
-      const invocation = this.workspace.db.prepare(`
-        SELECT invocations.role, invocations.run_id, events.run_id AS event_run_id,
-          events.event_type, events.output_sha256, events.error_code
-        FROM agent_invocations invocations
-        JOIN agent_audit_events events ON events.invocation_id = invocations.id
-        WHERE invocations.id = ? AND events.entity_type = 'invocation' AND events.terminal = 1
-      `).get(value.agentInvocationId) as Row | undefined;
-      if (!invocation || readString(invocation, "role") !== value.role || readString(invocation, "run_id") !== cycle.runId
-        || readString(invocation, "event_run_id") !== cycle.runId || readString(invocation, "event_type") !== "completed"
-        || readNullableString(invocation, "error_code") !== null || readNullableString(invocation, "output_sha256") !== value.outputSha256) {
-        throw growthError("GROWTH_CLOSURE_INVOCATION_MISMATCH");
-      }
-      const now = new Date().toISOString();
-      this.workspace.db.prepare(`
-        INSERT INTO growth_closure_assessments (
-          id, profile_id, revision, role, decision, cycle_id, checkpoint_id, rule_revision, receipt_id,
-          agent_invocation_id, output_sha256, idempotency_key, payload_hash, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(value.id, value.profileId, value.revision, value.role, value.decision, value.cycleId, value.checkpointId,
-        value.ruleRevision, value.receiptId, value.agentInvocationId, value.outputSha256, value.idempotencyKey, payloadHash, now);
       this.workspace.db.exec("COMMIT");
-      return this.getClosureAssessment(value.id) ?? fail("GROWTH_DATA_INVALID");
+      return output;
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
       throw error;
     }
   }
 
+  getClosureStewardSubmission(
+    assessmentId: string,
+  ): (GrowthClosureAssessment & { facetResults: GrowthClosureFacetResult[] }) | null {
+    const assessment = this.getClosureAssessment(assessmentId);
+    if (!assessment || assessment.role !== "steward") return null;
+    const facetResults = (this.workspace.db.prepare(`
+      SELECT * FROM growth_closure_facet_results WHERE assessment_id = ? ORDER BY ordinal
+    `).all(assessmentId) as Row[]).map((row) => ({
+      facetId: readString(row, "facet_id"), state: readString(row, "state"), coverage: readString(row, "coverage"),
+      safeSummary: readString(row, "safe_summary"),
+      evidence: (this.workspace.db.prepare(`
+        SELECT receipt_id, rank FROM growth_closure_facet_result_evidence
+        WHERE assessment_id = ? AND facet_id = ? ORDER BY ordinal
+      `).all(assessmentId, readString(row, "facet_id")) as Array<{ receipt_id: string; rank: number }>)
+        .map((link) => ({ receiptId: link.receipt_id, rank: link.rank })),
+    })) as GrowthClosureFacetResult[];
+    return { ...assessment, facetResults };
+  }
+
+  appendClosureCheckerSubmission(
+    input: unknown,
+  ): GrowthClosureAssessment & { adverseFindings: GrowthClosureAdverseFinding[] } {
+    const value = growthClosureCheckerSubmissionSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const assessment = this.#appendClosureAssessmentRow(value, payloadHash, "v26");
+      const existing = this.workspace.db.prepare(`
+        SELECT COUNT(*) AS count FROM growth_closure_adverse_findings WHERE assessment_id = ?
+      `).get(assessment.id) as { count: number };
+      if (existing.count === 0 && value.adverseFindings.length > 0) {
+        if (value.adverseFindings.some((finding) => finding.targetEvidence.some((link) => link.receiptId !== value.receiptId))) {
+          throw growthError("GROWTH_CLOSURE_FINDING_REFERENCE_MISMATCH");
+        }
+        const insertFinding = this.workspace.db.prepare(`
+          INSERT INTO growth_closure_adverse_findings (
+            id, assessment_id, fingerprint, severity, category, safe_summary, repair_objective, ordinal
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const insertEvidence = this.workspace.db.prepare(`
+          INSERT INTO growth_closure_adverse_finding_evidence (finding_id, receipt_id, rank, ordinal)
+          VALUES (?, ?, ?, ?)
+        `);
+        value.adverseFindings.forEach((finding, ordinal) => {
+          insertFinding.run(finding.id, assessment.id, finding.fingerprint, finding.severity, finding.category,
+            finding.safeSummary, finding.repairObjective, ordinal);
+          finding.targetEvidence.forEach((link, evidenceOrdinal) => insertEvidence.run(
+            finding.id, link.receiptId, link.rank, evidenceOrdinal,
+          ));
+        });
+      }
+      const output = this.getClosureCheckerSubmission(assessment.id) ?? fail("GROWTH_DATA_INVALID");
+      if (canonicalAuditHash({ ...assessmentInputFromOutput(output), adverseFindings: output.adverseFindings }) !== payloadHash) {
+        throw growthError("GROWTH_CLOSURE_ASSESSMENT_REPLAY_MISMATCH");
+      }
+      this.workspace.db.exec("COMMIT");
+      return output;
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getClosureCheckerSubmission(
+    assessmentId: string,
+  ): (GrowthClosureAssessment & { adverseFindings: GrowthClosureAdverseFinding[] }) | null {
+    const assessment = this.getClosureAssessment(assessmentId);
+    if (!assessment || assessment.role !== "checker") return null;
+    const adverseFindings = (this.workspace.db.prepare(`
+      SELECT * FROM growth_closure_adverse_findings WHERE assessment_id = ? ORDER BY ordinal
+    `).all(assessmentId) as Row[]).map((row) => ({
+      id: readString(row, "id"), fingerprint: readString(row, "fingerprint"),
+      severity: readString(row, "severity"), category: readString(row, "category"),
+      safeSummary: readString(row, "safe_summary"), repairObjective: readString(row, "repair_objective"),
+      targetEvidence: (this.workspace.db.prepare(`
+        SELECT receipt_id, rank FROM growth_closure_adverse_finding_evidence
+        WHERE finding_id = ? ORDER BY ordinal
+      `).all(readString(row, "id")) as Array<{ receipt_id: string; rank: number }>)
+        .map((link) => ({ receiptId: link.receipt_id, rank: link.rank })),
+    })) as GrowthClosureAdverseFinding[];
+    return { ...assessment, adverseFindings };
+  }
+
+  sealClosureReviewV4(input: unknown): ReturnType<typeof growthClosureReviewV4SealSchema.parse> & {
+    checkerDecision: "accepted" | "repairs_required" | "blocked"; payloadHash: string; createdAt: string;
+  } {
+    const value = growthClosureReviewV4SealSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare(`
+        SELECT * FROM growth_closure_reviews WHERE idempotency_key = ?
+      `).get(value.idempotencyKey) as Row | undefined;
+      if (replay) {
+        if (readString(replay, "payload_hash") !== payloadHash || readString(replay, "contract_generation") !== "v26") {
+          throw growthError("GROWTH_CLOSURE_REVIEW_REPLAY_MISMATCH");
+        }
+        const output = this.getClosureReviewV4(readString(replay, "id")) ?? fail("GROWTH_DATA_INVALID");
+        this.workspace.db.exec("COMMIT");
+        return output;
+      }
+      const revision = this.getClosureRevision(value.profileId, value.revision);
+      const steward = this.getClosureStewardSubmission(value.stewardAssessmentId);
+      const checker = this.getClosureCheckerSubmission(value.checkerAssessmentId);
+      if (!revision || revision.contractGeneration !== "v26" || !steward || !checker
+        || steward.profileId !== value.profileId || checker.profileId !== value.profileId
+        || steward.revision !== value.revision || checker.revision !== value.revision
+        || steward.decision !== "ready_for_checker" || steward.agentInvocationId === checker.agentInvocationId
+        || steward.cycleId !== checker.cycleId || steward.checkpointId !== checker.checkpointId
+        || steward.ruleRevision !== checker.ruleRevision || steward.receiptId !== checker.receiptId
+        || canonicalAuditHash(steward.facetResults) !== canonicalAuditHash(value.facetResults)
+        || canonicalAuditHash(checker.adverseFindings) !== canonicalAuditHash(value.adverseFindings)) {
+        throw growthError("GROWTH_CLOSURE_REVIEW_ASSESSMENT_MISMATCH");
+      }
+      const required = revision.facets.filter((facet) => facet.required);
+      const resultByFacet = new Map(value.facetResults.map((result) => [result.facetId, result]));
+      if (checker.decision === "accepted" && (value.adverseFindings.length > 0
+        || required.some((facet) => resultByFacet.get(facet.id)?.state !== "satisfied"))) {
+        throw growthError("GROWTH_CLOSURE_ACCEPTANCE_INCOMPLETE");
+      }
+      if (checker.decision === "repairs_required"
+        && !value.adverseFindings.some((finding) => ["major", "blocking"].includes(finding.severity))) {
+        throw growthError("GROWTH_CLOSURE_REPAIR_FINDING_REQUIRED");
+      }
+      if (checker.decision === "blocked" && !value.adverseFindings.some((finding) => finding.severity === "blocking")) {
+        throw growthError("GROWTH_CLOSURE_BLOCK_FINDING_REQUIRED");
+      }
+      const now = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_closure_reviews (
+          id, profile_id, revision, steward_assessment_id, checker_assessment_id, checker_decision,
+          idempotency_key, payload_hash, created_at, contract_generation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'v26')
+      `).run(value.id, value.profileId, value.revision, value.stewardAssessmentId, value.checkerAssessmentId,
+        checker.decision, value.idempotencyKey, payloadHash, now);
+      this.workspace.db.exec("COMMIT");
+      return this.getClosureReviewV4(value.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getClosureReviewV4(reviewId: string): (ReturnType<typeof growthClosureReviewV4SealSchema.parse> & {
+    checkerDecision: "accepted" | "repairs_required" | "blocked"; payloadHash: string; createdAt: string;
+  }) | null {
+    const row = this.workspace.db.prepare(`
+      SELECT * FROM growth_closure_reviews WHERE id = ? AND contract_generation = 'v26'
+    `).get(reviewId) as Row | undefined;
+    if (!row) return null;
+    const steward = this.getClosureStewardSubmission(readString(row, "steward_assessment_id")) ?? fail("GROWTH_DATA_INVALID");
+    const checker = this.getClosureCheckerSubmission(readString(row, "checker_assessment_id")) ?? fail("GROWTH_DATA_INVALID");
+    return {
+      id: readString(row, "id"), profileId: readString(row, "profile_id"), revision: readNumber(row, "revision"),
+      stewardAssessmentId: steward.id, checkerAssessmentId: checker.id, idempotencyKey: readString(row, "idempotency_key"),
+      facetResults: steward.facetResults, adverseFindings: checker.adverseFindings,
+      checkerDecision: readString(row, "checker_decision") as "accepted" | "repairs_required" | "blocked",
+      payloadHash: readString(row, "payload_hash"), createdAt: readString(row, "created_at"),
+    };
+  }
+
+  getClosureEvaluationOutcome(outcomeId: string): GrowthClosureEvaluationOutcome | null {
+    const row = this.workspace.db.prepare(`
+      SELECT * FROM growth_closure_evaluation_outcomes WHERE id = ?
+    `).get(outcomeId) as Row | undefined;
+    return row ? growthClosureEvaluationOutcomeSchema.parse({
+      id: readString(row, "id"), cycleId: readString(row, "cycle_id"), profileId: readString(row, "profile_id"),
+      revision: readNumber(row, "revision"), receiptId: readString(row, "receipt_id"),
+      stewardAssessmentId: readString(row, "steward_assessment_id"),
+      checkerAssessmentId: readNullableString(row, "checker_assessment_id"), reviewId: readNullableString(row, "review_id"),
+      decision: readString(row, "decision"), idempotencyKey: readString(row, "idempotency_key"),
+      payloadHash: readString(row, "payload_hash"), createdAt: readString(row, "created_at"),
+    }) : null;
+  }
+
+  sealClosureEvaluationOutcome(input: unknown): GrowthClosureEvaluationOutcome {
+    const value = growthClosureEvaluationOutcomeSealSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare(`
+        SELECT id, payload_hash FROM growth_closure_evaluation_outcomes WHERE idempotency_key = ?
+      `).get(value.idempotencyKey) as Row | undefined;
+      if (replay) {
+        if (readString(replay, "payload_hash") !== payloadHash) throw growthError("GROWTH_CLOSURE_OUTCOME_REPLAY_MISMATCH");
+        const outcome = this.getClosureEvaluationOutcome(readString(replay, "id")) ?? fail("GROWTH_DATA_INVALID");
+        this.#ensureClosureEvaluationEvent(outcome);
+        this.workspace.db.exec("COMMIT");
+        return outcome;
+      }
+      if (this.workspace.db.prepare("SELECT 1 FROM growth_closure_evaluation_outcomes WHERE id = ?").get(value.id)) {
+        throw growthError("GROWTH_CLOSURE_OUTCOME_ID_CONFLICT");
+      }
+      const cycle = this.#requiredCycle(value.cycleId);
+      const intent = this.getCycleIntent(cycle.id);
+      const steward = this.getClosureStewardSubmission(value.stewardAssessmentId);
+      if (cycle.status !== "running" || !cycle.runId || cycle.receiptId !== value.receiptId
+        || intent.kind !== "closure_evaluation" || intent.profileId !== value.profileId || intent.revision !== value.revision
+        || intent.checkpointId !== cycle.inputCheckpointId || !steward || steward.cycleId !== cycle.id
+        || steward.receiptId !== value.receiptId || steward.profileId !== value.profileId || steward.revision !== value.revision) {
+        throw growthError("GROWTH_CLOSURE_OUTCOME_REFERENCE_MISMATCH");
+      }
+      if (value.decision === "continue_growing") {
+        if (steward.decision !== "continue_growing") throw growthError("GROWTH_CLOSURE_OUTCOME_DECISION_MISMATCH");
+      } else {
+        const checker = this.getClosureCheckerSubmission(value.checkerAssessmentId);
+        const review = this.getClosureReviewV4(value.reviewId);
+        if (steward.decision !== "ready_for_checker" || !checker || !review
+          || checker.cycleId !== cycle.id || checker.receiptId !== value.receiptId
+          || checker.profileId !== value.profileId || checker.revision !== value.revision
+          || review.checkerAssessmentId !== checker.id || review.stewardAssessmentId !== steward.id
+          || checker.decision !== value.decision || review.checkerDecision !== value.decision) {
+          throw growthError("GROWTH_CLOSURE_OUTCOME_DECISION_MISMATCH");
+        }
+      }
+      const now = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_closure_evaluation_outcomes (
+          id, cycle_id, profile_id, revision, receipt_id, steward_assessment_id,
+          checker_assessment_id, review_id, decision, idempotency_key, payload_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(value.id, value.cycleId, value.profileId, value.revision, value.receiptId, value.stewardAssessmentId,
+        value.checkerAssessmentId, value.reviewId, value.decision, value.idempotencyKey, payloadHash, now);
+      this.workspace.db.prepare(`
+        UPDATE growth_cycles
+        SET status = 'evaluated', failure_code = NULL, change_set_id = NULL, output_checkpoint_id = NULL,
+          updated_at = ?, terminal_at = ?
+        WHERE id = ? AND status = 'running'
+      `).run(now, now, cycle.id);
+      const outcome = this.getClosureEvaluationOutcome(value.id) ?? fail("GROWTH_DATA_INVALID");
+      this.#ensureClosureEvaluationEvent(outcome);
+      this.workspace.db.exec("COMMIT");
+      return outcome;
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  repairClosureEvaluationEvent(cycleId: string): GrowthEvent {
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.workspace.db.prepare(`
+        SELECT id FROM growth_closure_evaluation_outcomes WHERE cycle_id = ?
+      `).get(cycleId) as Row | undefined;
+      if (!row) throw growthError("GROWTH_CLOSURE_OUTCOME_NOT_FOUND");
+      const outcome = this.getClosureEvaluationOutcome(readString(row, "id")) ?? fail("GROWTH_DATA_INVALID");
+      const event = this.#ensureClosureEvaluationEvent(outcome);
+      this.workspace.db.exec("COMMIT");
+      return event;
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  createClosureRepairLineage(input: unknown): GrowthClosureRepairLineage {
+    const value = growthClosureRepairLineageCreateSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare(`
+        SELECT id, payload_hash FROM growth_closure_repair_lineage WHERE idempotency_key = ?
+      `).get(value.idempotencyKey) as Row | undefined;
+      if (replay) {
+        if (readString(replay, "payload_hash") !== payloadHash) throw growthError("GROWTH_CLOSURE_REPAIR_REPLAY_MISMATCH");
+        const lineage = this.getClosureRepairLineage(readString(replay, "id")) ?? fail("GROWTH_DATA_INVALID");
+        this.workspace.db.exec("COMMIT");
+        return lineage;
+      }
+      const cycle = this.#requiredCycle(value.repairCycleId);
+      const intent = this.getCycleIntent(cycle.id);
+      const review = this.getClosureReviewV4(value.originalReviewId);
+      if (cycle.status !== "planned" || intent.kind !== "repair" || !review || review.checkerDecision !== "repairs_required"
+        || intent.profileId !== value.profileId || intent.revision !== value.revision
+        || intent.originalReviewId !== value.originalReviewId || intent.selectedFindingId !== value.selectedFindingId
+        || intent.selectedFindingFingerprint !== value.selectedFindingFingerprint) {
+        throw growthError("GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID");
+      }
+      const selected = review.adverseFindings.find((finding) => finding.id === value.selectedFindingId);
+      const expectedBacklog = review.adverseFindings.filter((finding) => finding.id !== value.selectedFindingId).map((finding) => finding.id);
+      if (!selected || !["major", "blocking"].includes(selected.severity)
+        || selected.fingerprint !== value.selectedFindingFingerprint
+        || !sameStrings(value.backlogFindingIds, expectedBacklog)) {
+        throw growthError("GROWTH_CLOSURE_REPAIR_FINDING_INVALID");
+      }
+      const prior = this.getClosureRepairStallState(value.profileId, value.revision, value.selectedFindingFingerprint);
+      const now = new Date().toISOString();
+      const resolutionState = prior.sameFingerprintAttempts >= 1 || prior.noProgressAttempts >= 2 ? "stalled" : "planned";
+      this.workspace.db.prepare(`
+        INSERT INTO growth_closure_repair_lineage (
+          id, profile_id, revision, original_review_id, selected_finding_id, selected_finding_fingerprint,
+          repair_cycle_id, resolution_state, idempotency_key, payload_hash, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(value.id, value.profileId, value.revision, value.originalReviewId, value.selectedFindingId,
+        value.selectedFindingFingerprint, value.repairCycleId, resolutionState, value.idempotencyKey, payloadHash, now, now);
+      const insertBacklog = this.workspace.db.prepare(`
+        INSERT INTO growth_closure_repair_backlog (lineage_id, finding_id, ordinal) VALUES (?, ?, ?)
+      `);
+      value.backlogFindingIds.forEach((findingId, ordinal) => insertBacklog.run(value.id, findingId, ordinal));
+      this.workspace.db.exec("COMMIT");
+      return this.getClosureRepairLineage(value.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getClosureRepairLineage(lineageId: string): GrowthClosureRepairLineage | null {
+    const row = this.workspace.db.prepare(`
+      SELECT * FROM growth_closure_repair_lineage WHERE id = ?
+    `).get(lineageId) as Row | undefined;
+    if (!row) return null;
+    const backlogFindingIds = (this.workspace.db.prepare(`
+      SELECT finding_id FROM growth_closure_repair_backlog WHERE lineage_id = ? ORDER BY ordinal
+    `).all(lineageId) as Array<{ finding_id: string }>).map((entry) => entry.finding_id);
+    return growthClosureRepairLineageSchema.parse({
+      id: readString(row, "id"), profileId: readString(row, "profile_id"), revision: readNumber(row, "revision"),
+      originalReviewId: readString(row, "original_review_id"), selectedFindingId: readString(row, "selected_finding_id"),
+      selectedFindingFingerprint: readString(row, "selected_finding_fingerprint"),
+      repairCycleId: readString(row, "repair_cycle_id"), backlogFindingIds,
+      idempotencyKey: readString(row, "idempotency_key"), resolutionState: readString(row, "resolution_state"),
+      payloadHash: readString(row, "payload_hash"), createdAt: readString(row, "created_at"), updatedAt: readString(row, "updated_at"),
+    });
+  }
+
+  markClosureRepairResolution(
+    lineageId: string,
+    resolutionState: "committed" | "resolved" | "no_progress",
+  ): GrowthClosureRepairLineage {
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const lineage = this.getClosureRepairLineage(lineageId);
+      if (!lineage) throw growthError("GROWTH_CLOSURE_REPAIR_NOT_FOUND");
+      const cycle = this.#requiredCycle(lineage.repairCycleId);
+      const cycleCommitted = cycle.status === "committed" && cycle.changeSetId !== null && cycle.outputCheckpointId !== null;
+      if (lineage.resolutionState === resolutionState
+        || (lineage.resolutionState === "stalled" && resolutionState === "no_progress" && cycleCommitted)) {
+        this.workspace.db.exec("COMMIT");
+        return lineage;
+      }
+      if (lineage.resolutionState === "stalled" || lineage.resolutionState === "resolved"
+        || lineage.resolutionState === "no_progress"
+        || (lineage.resolutionState === "committed" && resolutionState !== "resolved")) {
+        throw growthError("GROWTH_CLOSURE_REPAIR_TRANSITION_INVALID");
+      }
+      if (!cycleCommitted) {
+        throw growthError("GROWTH_CLOSURE_REPAIR_CYCLE_NOT_COMMITTED");
+      }
+      if (resolutionState === "resolved") {
+        if (lineage.resolutionState !== "committed") {
+          throw growthError("GROWTH_CLOSURE_REPAIR_TRANSITION_INVALID");
+        }
+        const accepted = this.workspace.db.prepare(`
+          SELECT outcomes.id
+          FROM growth_closure_evaluation_outcomes outcomes
+          JOIN growth_cycles evaluation_cycles ON evaluation_cycles.id = outcomes.cycle_id
+          JOIN growth_cycles repair_cycles ON repair_cycles.id = ?
+          JOIN growth_closure_profile_revisions revisions
+            ON revisions.profile_id = outcomes.profile_id AND revisions.revision = outcomes.revision
+          WHERE outcomes.profile_id = ? AND outcomes.revision > ? AND outcomes.decision = 'accepted'
+            AND evaluation_cycles.status = 'evaluated'
+            AND evaluation_cycles.goal_id = repair_cycles.goal_id
+            AND evaluation_cycles.sequence > repair_cycles.sequence
+            AND evaluation_cycles.input_checkpoint_id = repair_cycles.output_checkpoint_id
+            AND revisions.checkpoint_id = repair_cycles.output_checkpoint_id
+          ORDER BY evaluation_cycles.sequence, outcomes.created_at, outcomes.id
+          LIMIT 1
+        `).get(cycle.id, lineage.profileId, lineage.revision) as Row | undefined;
+        if (!accepted) throw growthError("GROWTH_CLOSURE_REPAIR_RESOLUTION_UNPROVEN");
+      }
+      const now = new Date().toISOString();
+      const updated = this.workspace.db.prepare(`
+        UPDATE growth_closure_repair_lineage SET resolution_state = ?, updated_at = ?
+        WHERE id = ? AND resolution_state = ?
+      `).run(resolutionState, now, lineageId, lineage.resolutionState);
+      if (updated.changes !== 1) throw growthError("GROWTH_CLOSURE_REPAIR_TRANSITION_INVALID");
+      if (resolutionState === "no_progress") {
+        const state = this.getClosureRepairStallState(lineage.profileId, lineage.revision, lineage.selectedFindingFingerprint);
+        if (state.noProgressAttempts >= 2) {
+          this.workspace.db.prepare(`
+            UPDATE growth_closure_repair_lineage SET resolution_state = 'stalled', updated_at = ? WHERE id = ?
+          `).run(now, lineageId);
+        }
+      }
+      this.workspace.db.exec("COMMIT");
+      return this.getClosureRepairLineage(lineageId) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getClosureRepairStallState(profileId: string, revision: number, fingerprint: string): {
+    stalled: boolean; sameFingerprintAttempts: number; noProgressAttempts: number;
+  } {
+    const same = this.workspace.db.prepare(`
+      SELECT COUNT(*) AS count FROM growth_closure_repair_lineage
+      WHERE profile_id = ? AND revision = ? AND selected_finding_fingerprint = ?
+    `).get(profileId, revision, fingerprint) as { count: number };
+    const noProgress = this.workspace.db.prepare(`
+      SELECT COUNT(*) AS count FROM growth_closure_repair_lineage
+      WHERE profile_id = ? AND revision = ? AND resolution_state IN ('no_progress', 'stalled')
+    `).get(profileId, revision) as { count: number };
+    return {
+      stalled: same.count >= 2 || noProgress.count >= 2,
+      sameFingerprintAttempts: same.count,
+      noProgressAttempts: noProgress.count,
+    };
+  }
+
   getClosureReview(reviewId: string): GrowthClosureReview | null {
-    const row = this.workspace.db.prepare("SELECT * FROM growth_closure_reviews WHERE id = ?").get(reviewId) as Row | undefined;
+    const row = this.workspace.db.prepare(`
+      SELECT * FROM growth_closure_reviews WHERE id = ? AND contract_generation = 'legacy_pre_v26'
+    `).get(reviewId) as Row | undefined;
     if (!row) return null;
     const findings = (this.workspace.db.prepare(`
       SELECT * FROM growth_closure_review_findings WHERE review_id = ? ORDER BY ordinal
@@ -893,74 +1349,8 @@ export class GrowthRepository {
   }
 
   sealClosureReview(input: unknown): GrowthClosureReview {
-    const value = growthClosureReviewSealSchema.parse(input);
-    const payloadHash = canonicalAuditHash(value);
-    this.workspace.db.exec("BEGIN IMMEDIATE");
-    try {
-      const replay = this.workspace.db.prepare("SELECT id, payload_hash FROM growth_closure_reviews WHERE idempotency_key = ?")
-        .get(value.idempotencyKey) as { id: string; payload_hash: string } | undefined;
-      if (replay) {
-        if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_CLOSURE_REVIEW_REPLAY_MISMATCH");
-        const review = this.getClosureReview(replay.id);
-        if (!review) throw growthError("GROWTH_DATA_INVALID");
-        this.workspace.db.exec("COMMIT");
-        return review;
-      }
-      if (this.workspace.db.prepare("SELECT 1 FROM growth_closure_reviews WHERE id = ?").get(value.id)) {
-        throw growthError("GROWTH_CLOSURE_REVIEW_ID_CONFLICT");
-      }
-      const revision = this.getClosureRevision(value.profileId, value.revision);
-      const steward = this.getClosureAssessment(value.stewardAssessmentId);
-      const checker = this.getClosureAssessment(value.checkerAssessmentId);
-      if (!revision || !steward || !checker || steward.role !== "steward" || checker.role !== "checker"
-        || steward.profileId !== value.profileId || checker.profileId !== value.profileId
-        || steward.revision !== value.revision || checker.revision !== value.revision
-        || steward.decision !== "ready_for_checker" || steward.agentInvocationId === checker.agentInvocationId
-        || steward.cycleId !== checker.cycleId || steward.checkpointId !== checker.checkpointId
-        || steward.ruleRevision !== checker.ruleRevision || steward.receiptId !== checker.receiptId) {
-        throw growthError("GROWTH_CLOSURE_REVIEW_ASSESSMENT_MISMATCH");
-      }
-      const facetById = new Map(revision.facets.map((facet) => [facet.id, facet]));
-      if (value.findings.some((finding) => !facetById.has(finding.facetId) || finding.evidence.receiptId !== steward.receiptId)) {
-        throw growthError("GROWTH_CLOSURE_FINDING_REFERENCE_MISMATCH");
-      }
-      const requiredContent = revision.facets.filter((facet) => facet.kind === "content" && facet.required);
-      const satisfied = new Set(value.findings.filter((finding) => finding.state === "satisfied").map((finding) => finding.facetId));
-      const hasUnresolved = value.findings.some((finding) => ["missing", "conflicted", "blocked"].includes(finding.state));
-      if (checker.decision === "accepted" && (hasUnresolved || requiredContent.some((facet) => !satisfied.has(facet.id)))) {
-        throw growthError("GROWTH_CLOSURE_ACCEPTANCE_INCOMPLETE");
-      }
-      if (checker.decision === "repairs_required" && !value.findings.some((finding) => ["missing", "conflicted"].includes(finding.state))) {
-        throw growthError("GROWTH_CLOSURE_REPAIR_FINDING_REQUIRED");
-      }
-      if (checker.decision === "blocked" && !value.findings.some((finding) => finding.state === "blocked")) {
-        throw growthError("GROWTH_CLOSURE_BLOCK_FINDING_REQUIRED");
-      }
-      const accepted = this.workspace.db.prepare(`
-        SELECT 1 FROM growth_closure_reviews WHERE profile_id = ? AND revision = ? AND checker_decision = 'accepted'
-      `).get(value.profileId, value.revision);
-      if (accepted) throw growthError("GROWTH_CLOSURE_ALREADY_ACCEPTED");
-      const now = new Date().toISOString();
-      this.workspace.db.prepare(`
-        INSERT INTO growth_closure_reviews (
-          id, profile_id, revision, steward_assessment_id, checker_assessment_id, checker_decision,
-          idempotency_key, payload_hash, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(value.id, value.profileId, value.revision, value.stewardAssessmentId, value.checkerAssessmentId,
-        checker.decision, value.idempotencyKey, payloadHash, now);
-      const insertFinding = this.workspace.db.prepare(`
-        INSERT INTO growth_closure_review_findings (
-          review_id, profile_id, revision, facet_id, state, safe_summary, receipt_id, rank, ordinal
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      value.findings.forEach((finding, ordinal) => insertFinding.run(value.id, value.profileId, value.revision,
-        finding.facetId, finding.state, finding.safeSummary, finding.evidence.receiptId, finding.evidence.rank, ordinal));
-      this.workspace.db.exec("COMMIT");
-      return this.getClosureReview(value.id) ?? fail("GROWTH_DATA_INVALID");
-    } catch (error) {
-      this.workspace.db.exec("ROLLBACK");
-      throw error;
-    }
+    growthClosureReviewSealSchema.parse(input);
+    throw growthError("GROWTH_CLOSURE_LEGACY_WRITE_FORBIDDEN");
   }
 
   getClosureState(profileId: string): GrowthClosureState {
@@ -968,17 +1358,26 @@ export class GrowthRepository {
     if (!profile) throw growthError("GROWTH_CLOSURE_PROFILE_NOT_FOUND");
     const revision = this.getClosureRevision(profile.id, profile.currentRevision);
     if (!revision) throw growthError("GROWTH_DATA_INVALID");
-    const reviewRow = this.workspace.db.prepare(`
-      SELECT id, checker_decision, steward_assessment_id FROM growth_closure_reviews
-      WHERE profile_id = ? AND revision = ? ORDER BY created_at DESC, id DESC LIMIT 1
+    const outcomeRow = this.workspace.db.prepare(`
+      SELECT outcomes.id
+      FROM growth_closure_evaluation_outcomes outcomes
+      JOIN growth_cycles cycles ON cycles.id = outcomes.cycle_id
+      WHERE outcomes.profile_id = ? AND outcomes.revision = ? AND cycles.status = 'evaluated'
+      ORDER BY cycles.sequence DESC, outcomes.created_at DESC, outcomes.id DESC
+      LIMIT 1
     `).get(profile.id, revision.revision) as Row | undefined;
-    const review = reviewRow ? this.getClosureReview(readString(reviewRow, "id")) : null;
+    const outcome = outcomeRow
+      ? this.getClosureEvaluationOutcome(readString(outcomeRow, "id")) ?? fail("GROWTH_DATA_INVALID")
+      : null;
+    const steward = outcome
+      ? this.getClosureStewardSubmission(outcome.stewardAssessmentId) ?? fail("GROWTH_DATA_INVALID")
+      : null;
     const contentFacets = revision.facets.filter((facet) => facet.kind === "content" && facet.required);
-    const satisfied = review?.findings.filter((finding) => finding.state === "satisfied").map((finding) => finding.facetId) ?? [];
+    const satisfied = steward?.facetResults.filter((result) => result.state === "satisfied").map((result) => result.facetId) ?? [];
     const satisfiedSet = new Set(satisfied);
     const missing = contentFacets.filter((facet) => !satisfiedSet.has(facet.id)).map((facet) => facet.id);
-    const contentState = review?.checkerDecision === "accepted" ? "closed"
-      : review?.checkerDecision === "blocked" ? "blocked" : "growing";
+    const contentState = outcome?.decision === "accepted" ? "closed"
+      : outcome?.decision === "blocked" ? "blocked" : "growing";
     const visualRows = this.workspace.db.prepare(`
       SELECT items.status FROM growth_illustration_items items
       JOIN growth_illustration_requests requests ON requests.id = items.request_id
@@ -992,11 +1391,11 @@ export class GrowthRepository {
         ? "blocked"
         : visualStatuses.some((status) => ["queued", "running"].includes(status))
           ? "generating" : "ready";
-    const progress = reviewRow ? this.workspace.db.prepare(`
+    const progress = outcome ? this.workspace.db.prepare(`
       SELECT cycles.sequence FROM growth_closure_assessments assessments
       JOIN growth_cycles cycles ON cycles.id = assessments.cycle_id
       WHERE assessments.id = ?
-    `).get(readString(reviewRow, "steward_assessment_id")) as { sequence: number } | undefined : undefined;
+    `).get(outcome.stewardAssessmentId) as { sequence: number } | undefined : undefined;
     return growthClosureStateSchema.parse({
       profileId: profile.id, goalId: profile.goalId, profileKind: profile.profileKind,
       subjectResourceId: profile.subjectResourceId, revision: revision.revision, epoch: revision.epoch,
@@ -1339,13 +1738,42 @@ export class GrowthRepository {
             WHERE batches.cycle_id = ? AND contracts.contract_version = 'v25'
           `).get(readString(previous, "id")))
         : false;
-      const expectedInput = previous ? previousOutput ?? (resumesCreatorAnswer ? branchHead : null) : branchHead;
+      const previousStatus = previous ? readString(previous, "status") : null;
+      const expectedInput = previous
+        ? previousOutput ?? (resumesCreatorAnswer || previousStatus === "evaluated" ? readString(previous, "input_checkpoint_id") : null)
+        : branchHead;
       if (!expectedInput || value.inputCheckpointId !== expectedInput || value.inputCheckpointId !== branchHead) {
         throw growthError("GROWTH_CYCLE_INPUT_CHECKPOINT_MISMATCH");
       }
       this.#assertCheckpointBranch(value.inputCheckpointId, goal.branchId);
       const sequence = goal.currentCycleSequence + 1;
       const intent = value.intent;
+      if (intent.kind === "closure_evaluation") {
+        const profile = this.getClosureProfile(intent.profileId);
+        const revision = this.getClosureRevision(intent.profileId, intent.revision);
+        if (!profile || profile.goalId !== goal.id || profile.contractGeneration !== "v26" || !revision
+          || revision.contractGeneration !== "v26" || intent.checkpointId !== value.inputCheckpointId
+          || revision.checkpointId !== value.inputCheckpointId || revision.ruleRevision !== value.ruleRevision) {
+          throw growthError("GROWTH_CLOSURE_EVALUATION_INTENT_INVALID");
+        }
+      } else if (intent.kind === "repair") {
+        const repairSource = this.workspace.db.prepare(`
+          SELECT reviews.profile_id, reviews.revision, reviews.checker_decision, reviews.contract_generation,
+            findings.id AS finding_id, findings.fingerprint, findings.severity
+          FROM growth_closure_reviews reviews
+          JOIN growth_closure_assessments checker ON checker.id = reviews.checker_assessment_id
+          JOIN growth_closure_adverse_findings findings ON findings.assessment_id = checker.id
+          WHERE reviews.id = ? AND findings.id = ?
+        `).get(intent.originalReviewId, intent.selectedFindingId) as Row | undefined;
+        if (!repairSource || readString(repairSource, "profile_id") !== intent.profileId
+          || readNumber(repairSource, "revision") !== intent.revision
+          || readString(repairSource, "checker_decision") !== "repairs_required"
+          || readString(repairSource, "contract_generation") !== "v26"
+          || readString(repairSource, "fingerprint") !== intent.selectedFindingFingerprint
+          || !["major", "blocking"].includes(readString(repairSource, "severity"))) {
+          throw growthError("GROWTH_CLOSURE_REPAIR_INTENT_INVALID");
+        }
+      }
       const now = new Date().toISOString();
       this.workspace.db.prepare(`
         INSERT INTO growth_cycles (
@@ -1353,16 +1781,31 @@ export class GrowthRepository {
           run_id, receipt_id, change_set_id, output_checkpoint_id, status, failure_code, created_at, updated_at, terminal_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'planned', NULL, ?, ?, NULL)
       `).run(value.id, value.goalId, sequence, value.idempotencyKey, payloadHash, value.inputCheckpointId, value.ruleRevision, now, now);
-      this.workspace.db.prepare("INSERT INTO growth_cycle_intents (cycle_id, kind, created_at) VALUES (?, ?, ?)")
-        .run(value.id, intent.kind, now);
-      const insertFocus = this.workspace.db.prepare(`
-        INSERT INTO growth_cycle_intent_focuses (cycle_id, ordinal, focus_kind) VALUES (?, ?, ?)
-      `);
-      intent.focusKinds.forEach((focusKind, ordinal) => insertFocus.run(value.id, ordinal, focusKind));
-      const insertFrontier = this.workspace.db.prepare(`
-        INSERT INTO growth_cycle_intent_frontier (cycle_id, ordinal, frontier_kind) VALUES (?, ?, ?)
-      `);
-      intent.resumeFrontier.forEach((frontierKind, ordinal) => insertFrontier.run(value.id, ordinal, frontierKind));
+      this.workspace.db.prepare(`
+        INSERT INTO growth_cycle_intents (
+          cycle_id, kind, contract_generation, profile_id, revision, checkpoint_id, original_review_id,
+          selected_finding_id, selected_finding_fingerprint, created_at
+        ) VALUES (?, ?, 'persisted_v26', ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        value.id, intent.kind,
+        intent.kind === "closure_evaluation" || intent.kind === "repair" ? intent.profileId : null,
+        intent.kind === "closure_evaluation" || intent.kind === "repair" ? intent.revision : null,
+        intent.kind === "closure_evaluation" ? intent.checkpointId : null,
+        intent.kind === "repair" ? intent.originalReviewId : null,
+        intent.kind === "repair" ? intent.selectedFindingId : null,
+        intent.kind === "repair" ? intent.selectedFindingFingerprint : null,
+        now,
+      );
+      if (intent.kind === "expand" || intent.kind === "revision") {
+        const insertFocus = this.workspace.db.prepare(`
+          INSERT INTO growth_cycle_intent_focuses (cycle_id, ordinal, focus_kind) VALUES (?, ?, ?)
+        `);
+        intent.focusKinds.forEach((focusKind, ordinal) => insertFocus.run(value.id, ordinal, focusKind));
+        const insertFrontier = this.workspace.db.prepare(`
+          INSERT INTO growth_cycle_intent_frontier (cycle_id, ordinal, frontier_kind) VALUES (?, ?, ?)
+        `);
+        intent.resumeFrontier.forEach((frontierKind, ordinal) => insertFrontier.run(value.id, ordinal, frontierKind));
+      }
       this.workspace.db.prepare("UPDATE growth_goals SET current_cycle_sequence = ?, updated_at = ? WHERE id = ?").run(sequence, now, value.goalId);
       this.workspace.db.exec("COMMIT");
       return this.getCycle(value.id) ?? fail("GROWTH_DATA_INVALID");
@@ -1521,6 +1964,7 @@ export class GrowthRepository {
   appendEvent(input: unknown): GrowthEvent {
     const value = growthEventAppendSchema.parse(input);
     if (value.targetKind === "inquiry") throw growthError("GROWTH_INQUIRY_EVENT_REPOSITORY_OWNED");
+    if (value.targetKind === "closure_evaluation") throw growthError("GROWTH_CLOSURE_EVENT_REPOSITORY_OWNED");
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const existingRow = this.workspace.db.prepare("SELECT * FROM growth_events WHERE goal_id = ? AND sequence = ?").get(value.goalId, value.sequence) as Row | undefined;
@@ -1723,6 +2167,125 @@ export class GrowthRepository {
     this.getRuleRevision(goal.id, ruleRevision);
   }
 
+  #assertClosureRevisionShape(
+    profileKind: "world_birth" | "oc_saga" | "story_universe" | "mixed_birth",
+    componentProfiles: ReadonlyArray<"world_birth" | "oc_saga" | "story_universe">,
+    focusOcResourceId: string | null,
+  ): void {
+    if (profileKind === "mixed_birth") {
+      if (componentProfiles.length === 0
+        || componentProfiles.includes("oc_saga") !== (focusOcResourceId !== null)) {
+        throw growthError("GROWTH_CLOSURE_REVISION_SHAPE_INVALID");
+      }
+      return;
+    }
+    if (componentProfiles.length > 0 || focusOcResourceId !== null) {
+      throw growthError("GROWTH_CLOSURE_REVISION_SHAPE_INVALID");
+    }
+  }
+
+  #appendClosureAssessmentRow(
+    value: ClosureAssessmentRowInput,
+    payloadHash: string,
+    contractGeneration: "legacy_pre_v26" | "v26",
+  ): GrowthClosureAssessment {
+    const replay = this.workspace.db.prepare(`
+      SELECT id, payload_hash, contract_generation FROM growth_closure_assessments WHERE idempotency_key = ?
+    `).get(value.idempotencyKey) as Row | undefined;
+    if (replay) {
+      if (readString(replay, "payload_hash") !== payloadHash
+        || readString(replay, "contract_generation") !== contractGeneration) {
+        throw growthError("GROWTH_CLOSURE_ASSESSMENT_REPLAY_MISMATCH");
+      }
+      return this.getClosureAssessment(readString(replay, "id")) ?? fail("GROWTH_DATA_INVALID");
+    }
+    if (this.workspace.db.prepare("SELECT 1 FROM growth_closure_assessments WHERE id = ?").get(value.id)) {
+      throw growthError("GROWTH_CLOSURE_ASSESSMENT_ID_CONFLICT");
+    }
+    const profile = this.getClosureProfile(value.profileId);
+    const revision = this.getClosureRevision(value.profileId, value.revision);
+    if (!profile || !revision) throw growthError("GROWTH_CLOSURE_REVISION_NOT_FOUND");
+    if (contractGeneration === "v26" && (profile.contractGeneration !== "v26" || revision.contractGeneration !== "v26")) {
+      throw growthError("GROWTH_CLOSURE_LEGACY_REVISION_REQUIRES_EXPLICIT_REVISION");
+    }
+    const cycle = this.#requiredCycle(value.cycleId);
+    const receipt = this.getReceipt(value.receiptId);
+    if (cycle.goalId !== profile.goalId || cycle.status !== "running" || !cycle.runId
+      || cycle.inputCheckpointId !== value.checkpointId || cycle.ruleRevision !== value.ruleRevision
+      || cycle.receiptId !== value.receiptId || !receipt || receipt.cycleId !== cycle.id
+      || receipt.runId !== cycle.runId || receipt.checkpointId !== cycle.inputCheckpointId
+      || receipt.checkpointId !== revision.checkpointId || receipt.checkpointId !== value.checkpointId
+      || revision.ruleRevision !== value.ruleRevision) {
+      throw growthError("GROWTH_CLOSURE_ASSESSMENT_REFERENCE_MISMATCH");
+    }
+    if (contractGeneration === "v26") {
+      const intent = this.getCycleIntent(cycle.id);
+      if (intent.kind !== "closure_evaluation" || intent.profileId !== profile.id || intent.revision !== revision.revision
+        || intent.checkpointId !== cycle.inputCheckpointId) {
+        throw growthError("GROWTH_CLOSURE_EVALUATION_INTENT_INVALID");
+      }
+    }
+    const invocation = this.workspace.db.prepare(`
+      SELECT invocations.role, invocations.run_id, events.run_id AS event_run_id,
+        events.event_type, events.output_sha256, events.error_code
+      FROM agent_invocations invocations
+      JOIN agent_audit_events events ON events.invocation_id = invocations.id
+      WHERE invocations.id = ? AND events.entity_type = 'invocation' AND events.terminal = 1
+    `).get(value.agentInvocationId) as Row | undefined;
+    if (!invocation || readString(invocation, "role") !== value.role || readString(invocation, "run_id") !== cycle.runId
+      || readString(invocation, "event_run_id") !== cycle.runId || readString(invocation, "event_type") !== "completed"
+      || readNullableString(invocation, "error_code") !== null || readNullableString(invocation, "output_sha256") !== value.outputSha256) {
+      throw growthError("GROWTH_CLOSURE_INVOCATION_MISMATCH");
+    }
+    const now = new Date().toISOString();
+    this.workspace.db.prepare(`
+      INSERT INTO growth_closure_assessments (
+        id, profile_id, revision, role, decision, cycle_id, checkpoint_id, rule_revision, receipt_id,
+        agent_invocation_id, output_sha256, idempotency_key, payload_hash, created_at, contract_generation
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(value.id, value.profileId, value.revision, value.role, value.decision, value.cycleId, value.checkpointId,
+      value.ruleRevision, value.receiptId, value.agentInvocationId, value.outputSha256, value.idempotencyKey,
+      payloadHash, now, contractGeneration);
+    return this.getClosureAssessment(value.id) ?? fail("GROWTH_DATA_INVALID");
+  }
+
+  #ensureClosureEvaluationEvent(outcome: GrowthClosureEvaluationOutcome): GrowthEvent {
+    const cycle = this.#requiredCycle(outcome.cycleId);
+    if (cycle.status !== "evaluated" || !cycle.runId || cycle.receiptId !== outcome.receiptId
+      || cycle.changeSetId !== null || cycle.outputCheckpointId !== null || cycle.failureCode !== null) {
+      throw growthError("GROWTH_CLOSURE_OUTCOME_REFERENCE_MISMATCH");
+    }
+    const existing = this.workspace.db.prepare(`
+      SELECT * FROM growth_events WHERE cycle_id = ? AND phase = 'cycle_evaluated'
+    `).get(cycle.id) as Row | undefined;
+    if (existing) {
+      const event = mapEvent(existing);
+      if (event.goalId !== cycle.goalId || event.runId !== cycle.runId || event.targetKind !== "closure_evaluation"
+        || event.targetId !== outcome.id || event.targetVersionId !== null || event.durableState !== "evaluated"
+        || event.contentRef !== null) {
+        throw growthError("GROWTH_CLOSURE_EVENT_REPLAY_MISMATCH");
+      }
+      return event;
+    }
+    const last = this.workspace.db.prepare(`
+      SELECT MAX(sequence) AS sequence FROM growth_events WHERE goal_id = ?
+    `).get(cycle.goalId) as { sequence: number | null };
+    const event = growthEventSchema.parse({
+      goalId: cycle.goalId, cycleId: cycle.id, runId: cycle.runId, sequence: (last.sequence ?? 0) + 1,
+      safeSummary: "Closure evaluation recorded.", phase: "cycle_evaluated", targetKind: "closure_evaluation",
+      targetId: outcome.id, targetVersionId: null, durableState: "evaluated", contentRef: null,
+      createdAt: new Date().toISOString(),
+    });
+    this.workspace.db.prepare(`
+      INSERT INTO growth_events (
+        goal_id, cycle_id, run_id, sequence, safe_summary, phase, target_kind, target_id,
+        target_version_id, durable_state, content_ref_kind, content_ref_id, content_ref_version_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?)
+    `).run(event.goalId, event.cycleId, event.runId, event.sequence, event.safeSummary, event.phase,
+      event.targetKind, event.targetId, event.durableState, event.createdAt);
+    return event;
+  }
+
   #assertOcSubject(resourceId: string, checkpointId: string): void {
     const subject = new ResourceRepository(this.workspace).listAtCheckpoint(checkpointId)
       .find((resource) => resource.id === resourceId);
@@ -1739,6 +2302,22 @@ export class GrowthRepository {
       VALUES (?, ?, ?, ?, ?, ?)
     `);
     facets.forEach((facet, ordinal) => insert.run(profileId, revision, facet.id, facet.kind, facet.required ? 1 : 0, ordinal));
+  }
+
+  #insertClosureComponents(profileId: string, revision: number, components: readonly string[]): void {
+    const insert = this.workspace.db.prepare(`
+      INSERT INTO growth_closure_profile_components (profile_id, revision, component_profile, ordinal)
+      VALUES (?, ?, ?, ?)
+    `);
+    components.forEach((component, ordinal) => insert.run(profileId, revision, component, ordinal));
+  }
+
+  #closureComponents(profileId: string, revision: number): Array<"world_birth" | "oc_saga" | "story_universe"> {
+    return (this.workspace.db.prepare(`
+      SELECT component_profile FROM growth_closure_profile_components
+      WHERE profile_id = ? AND revision = ? ORDER BY ordinal
+    `).all(profileId, revision) as Array<{ component_profile: "world_birth" | "oc_saga" | "story_universe" }>)
+      .map((row) => row.component_profile);
   }
 
   #assertIllustrationAnchor(
@@ -2019,11 +2598,18 @@ function legacyCycleIntent(cycle: GrowthCycle): GrowthCycleIntent {
   });
 }
 
-function mapClosureProfile(row: Row): GrowthClosureProfile {
+function mapClosureProfile(
+  row: Row,
+  componentProfiles: Array<"world_birth" | "oc_saga" | "story_universe"> | null,
+): GrowthClosureProfile {
+  const contractGeneration = readString(row, "contract_generation");
   return growthClosureProfileSchema.parse({
     id: readString(row, "id"), goalId: readString(row, "goal_id"), profileKind: readString(row, "profile_kind"),
     subjectResourceId: readNullableString(row, "subject_resource_id"), currentRevision: readNumber(row, "current_revision"),
-    currentEpoch: readNumber(row, "current_epoch"), createdAt: readString(row, "created_at"), updatedAt: readString(row, "updated_at"),
+    currentEpoch: readNumber(row, "current_epoch"), contractGeneration,
+    componentProfiles,
+    focusOcResourceId: contractGeneration === "v26" ? readNullableString(row, "focus_oc_resource_id") : null,
+    createdAt: readString(row, "created_at"), updatedAt: readString(row, "updated_at"),
   });
 }
 
@@ -2174,6 +2760,15 @@ function receiptInputFromOutput(value: GrowthRetrievalReceipt): GrowthRetrievalR
 function eventInputFromOutput(value: GrowthEvent): GrowthEventAppend {
   const { createdAt: _createdAt, ...input } = value;
   return growthEventAppendSchema.parse(input);
+}
+
+function assessmentInputFromOutput(value: GrowthClosureAssessment): ClosureAssessmentRowInput {
+  return {
+    id: value.id, profileId: value.profileId, revision: value.revision, role: value.role,
+    decision: value.decision, cycleId: value.cycleId, checkpointId: value.checkpointId,
+    ruleRevision: value.ruleRevision, receiptId: value.receiptId, agentInvocationId: value.agentInvocationId,
+    outputSha256: value.outputSha256, idempotencyKey: value.idempotencyKey,
+  };
 }
 
 function mapCycle(row: Row): GrowthCycle {

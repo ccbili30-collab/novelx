@@ -290,7 +290,7 @@ function artifactKey(artifact: AgentArtifact): string {
 }
 
 function cycleSummary(status: GrowthCycle["status"]): string {
-  return ({ planned: "等待开始", running: "正在处理", committed: "已提交", blocked: "已阻塞", failed: "已失败", cancelled: "已取消", reconciliation_required: "需要核对" })[status];
+  return ({ planned: "等待开始", running: "正在处理", committed: "已提交", evaluated: "闭环已评估", blocked: "已阻塞", failed: "已失败", cancelled: "已取消", reconciliation_required: "需要核对" })[status];
 }
 
 function coordinatorLabel(status: Exclude<CoordinatorStatus, "running">): string {

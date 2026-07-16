@@ -1251,7 +1251,7 @@ export const agentRunCancelRequestSchema = z.object({
   runId: z.string().min(1).max(120),
 }).strict();
 
-export const growthStrategySchema = z.literal("grow_world_story_oc_inquiry_v3");
+export const growthStrategySchema = z.literal("grow_world_story_oc_closure_v4");
 
 export const growthStartRequestSchema = z.object({
   requestId: z.uuid(),
@@ -1284,7 +1284,7 @@ const growthPublicCycleSchema = z.object({
   id: opaqueIdSchema,
   sequence: z.number().int().min(1).max(1_000_000),
   runId: z.string().min(1).max(120).nullable(),
-  status: z.enum(["planned", "running", "committed", "blocked", "failed", "cancelled", "reconciliation_required"]),
+  status: z.enum(["planned", "running", "committed", "evaluated", "blocked", "failed", "cancelled", "reconciliation_required"]),
 }).strict();
 
 const growthPublicGoalSchema = z.object({
@@ -1332,9 +1332,24 @@ export const growthInquiryPublicEventSchema = z.object({
   }
 });
 
+export const growthClosureEvaluationPublicEventSchema = z.object({
+  goalId: opaqueIdSchema,
+  cycleId: opaqueIdSchema,
+  runId: z.string().min(1).max(120),
+  sequence: z.number().int().min(1).max(1_000_000),
+  phase: z.literal("cycle_evaluated"),
+  durableState: z.literal("evaluated"),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  targetKind: z.literal("closure_evaluation"),
+  targetId: opaqueIdSchema,
+  targetVersionId: z.null(),
+  contentRef: z.null(),
+}).strict();
+
 export const growthProjectedEventSchema = z.union([
   growthPublicEventSchema,
   growthInquiryPublicEventSchema,
+  growthClosureEvaluationPublicEventSchema,
 ]);
 
 const growthPublicSnapshotSchema = z.object({

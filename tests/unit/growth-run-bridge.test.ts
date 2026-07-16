@@ -160,6 +160,40 @@ describe("Growth Run bridge", () => {
     expect(growth.listEvents(setup.goalId).filter((event) => event.cycleId === revision.id && event.phase === "cycle_terminal")).toHaveLength(1);
   });
 
+  it("fails closed for an unintegrated Closure evaluation intent before Worker spawn", async () => {
+    const setup = createSetup();
+    const prior = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "closure-world");
+    const growth = new GrowthRepository(setup.workspace);
+    const profile = growth.createClosureProfile({
+      id: "closure-profile", idempotencyKey: "closure-profile-key", goalId: setup.goalId,
+      profileKind: "world_birth", subjectResourceId: null, componentProfiles: [], focusOcResourceId: null,
+      contractGeneration: "v26", checkpointId: prior.outputCheckpointId, ruleRevision: 1,
+      facets: [{ id: "history", kind: "content", required: true }],
+    });
+    const evaluation = growth.beginCycle({
+      id: "closure-evaluation-cycle", goalId: setup.goalId, idempotencyKey: "closure-evaluation-cycle-key",
+      inputCheckpointId: prior.outputCheckpointId, ruleRevision: 1,
+      intent: { kind: "closure_evaluation", profileId: profile.id, revision: 1, checkpointId: prior.outputCheckpointId },
+    });
+    const spawn = vi.fn(() => new FakeWorker());
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
+
+    expect(() => lifecycle.start({
+      goalId: setup.goalId, cycleId: evaluation.id,
+      request: { projectId: "project-1", sessionId: "closure-evaluation", userInput: "evaluate closure", mode: "free" },
+      emit: () => undefined,
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED" }));
+    expect(spawn).not.toHaveBeenCalled();
+    expect(growth.getCycle(evaluation.id)).toMatchObject({
+      status: "blocked", runId: null, receiptId: null, changeSetId: null,
+      failureCode: "GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED",
+    });
+    lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: evaluation.id });
+    expect(growth.listEvents(setup.goalId).filter((event) => (
+      event.cycleId === evaluation.id && event.phase === "cycle_terminal"
+    ))).toHaveLength(1);
+  });
+
   it("pins a source-document seed to its owning resource without exposing source content", async () => {
     const setup = createSourceDocumentSetup();
     const worker = new FakeWorker();

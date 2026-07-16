@@ -4,6 +4,7 @@ import type { ApplicationRegistryRepository } from "../domain/application/applic
 import {
   growthCapabilityVersion,
   type GrowthCycle,
+  type GrowthContentCycleIntent,
   type GrowthCycleIntent,
   type GrowthEvent,
   type GrowthGoal,
@@ -44,7 +45,7 @@ interface GrowthAdvanceRequest {
   seed: GrowthStartRequest["seed"];
 }
 
-const strategy = "grow_world_story_oc_inquiry_v3" as const;
+const strategy = "grow_world_story_oc_closure_v4" as const;
 interface DeliveryRoute {
   growth?: (event: GrowthLiveEvent) => void;
   agent?: (event: AgentRunEvent) => void;
@@ -117,10 +118,10 @@ export class GrowthCoordinator {
     }
     const boundaryCycle = current;
     const currentIntent = repository.getCycleIntent(boundaryCycle.id);
-    const estimated = estimateRevisionIntent({
-      currentIntent,
-      formalCoverageKinds: formalCoverageKinds(context, boundaryCycle.outputCheckpointId ?? boundaryCycle.inputCheckpointId),
-    });
+    const coverageKinds = formalCoverageKinds(context, boundaryCycle.outputCheckpointId ?? boundaryCycle.inputCheckpointId);
+    const estimated = isContentIntent(currentIntent)
+      ? estimateRevisionIntent({ currentIntent, formalCoverageKinds: coverageKinds })
+      : { kind: "revision" as const, focusKinds: coverageKinds.length > 0 ? coverageKinds : ["world", "story", "oc"] as GrowthFocusKind[], resumeFrontier: [] };
     const persisted = repository.appendRule({
       goalId: goal.id,
       expectedRevision: input.expectedRevision,
@@ -158,6 +159,10 @@ export class GrowthCoordinator {
       return;
     }
     if (current?.status === "committed" && this.#activeCycleRuns.has(current.id)) return;
+    if (current?.status === "evaluated") {
+      this.#releaseListeners(input.goal.id);
+      return;
+    }
     if (current && ["blocked", "failed", "cancelled", "reconciliation_required"].includes(current.status)) {
       this.#releaseListeners(input.goal.id);
       return;
@@ -166,7 +171,8 @@ export class GrowthCoordinator {
       this.#startPlanned(input, current);
       return;
     }
-    const latestIntent = current?.status === "committed" ? input.repository.getCycleIntent(current.id) : null;
+    const projectedIntent = current?.status === "committed" ? input.repository.getCycleIntent(current.id) : null;
+    const latestIntent = projectedIntent && isContentIntent(projectedIntent) ? projectedIntent : null;
     const decision = planGrowthFrontier({
       seedKinds: seedKinds(input.context, input.goal),
       formalCoverageKinds: formalCoverageKinds(input.context, current?.outputCheckpointId ?? input.context.checkpointId),
@@ -396,6 +402,9 @@ function projectEvent(event: GrowthEvent) {
   };
 }
 function stagePrompt(sequence: number, intent: GrowthCycleIntent, seed: GrowthStartRequest["seed"], initialRuleText: string): string {
+  if (!isContentIntent(intent)) {
+    return `Growth 策略 ${strategy}，第 ${sequence} 个 Cycle。Closure evaluation/repair 尚未接入 Worker，必须失败关闭。`;
+  }
   const seedText = seed.kind === "text" ? `\n用户种子：${seed.text}` : "\n用户种子已保存为授权资料；先检索后创作。";
   return `Growth 策略 ${strategy}，第 ${sequence} 个 Cycle。锁定规则：${initialRuleText}\n持久 Intent：${intent.kind}；有序 focus：${intent.focusKinds.join("、")}；后续 frontier：${intent.resumeFrontier.join("、") || "等待闭环证据"}。先使用 growth_v1 检索证据，再提交一次 3–7 条证据化自询；只有 durable selected 后，本 Cycle 才可经一个现有 Change Set 持久化模型生成内容。需要创作者取舍时必须零 Change Set 并安全阻塞。${seedText}`;
 }
@@ -408,8 +417,10 @@ function coordinatorStatus(
 ): "running" | "awaiting_guidance" | "completed" | "blocked" | "failed" | "cancelled" | "reconciliation_required" {
   const current = cycles.at(-1);
   if (hasActiveRun || current?.status === "planned" || current?.status === "running") return "running";
+  if (current?.status === "evaluated") return "awaiting_guidance";
   if (current && current.status !== "committed") return current.status;
-  const latestIntent = current ? repository.getCycleIntent(current.id) : null;
+  const projectedIntent = current ? repository.getCycleIntent(current.id) : null;
+  const latestIntent = projectedIntent && isContentIntent(projectedIntent) ? projectedIntent : null;
   const decision = planGrowthFrontier({
     seedKinds: seedKinds(context, goal),
     formalCoverageKinds: formalCoverageKinds(context, current?.outputCheckpointId ?? context.checkpointId),
@@ -460,4 +471,8 @@ function exactRuleReplay(repository: GrowthRepository, input: GrowthGuideRequest
   } catch {
     return false;
   }
+}
+
+function isContentIntent(intent: GrowthCycleIntent): intent is GrowthContentCycleIntent {
+  return intent.kind === "expand" || intent.kind === "revision";
 }

@@ -31,8 +31,8 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
       const mode = state.__growthSnapshotMode;
       const cycleSequence = mode === "cycle3" ? 3 : 1;
       return {
-        capabilityVersion: "hackathon-growth-inquiry-v3",
-        strategy: "grow_world_story_oc_inquiry_v3",
+        capabilityVersion: "hackathon-growth-closure-v4",
+        strategy: "grow_world_story_oc_closure_v4",
         coordinatorStatus: "running",
         goal: { id: goalId, status: "active", currentCycleSequence: cycleSequence },
         ...(mode === "missing" ? {} : {
@@ -252,7 +252,7 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.webContents.send("novax:growth-event", {
         sessionId: (globalThis as typeof globalThis & { __growthStartCalls?: Array<{ sessionId?: string }> }).__growthStartCalls?.[0]?.sessionId,
-        strategy: "grow_world_story_oc_inquiry_v3",
+        strategy: "grow_world_story_oc_closure_v4",
         event: {
           goalId: "goal-guidance-ui",
           cycleId: "cycle-1",

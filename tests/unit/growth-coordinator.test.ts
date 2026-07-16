@@ -312,7 +312,9 @@ describe("GrowthCoordinator", () => {
     expect(new Set(snapshot.cycles.map((cycle) => cycle.runId)).size).toBe(3);
     const repository = new GrowthRepository(setup.workspace);
     const cycles = repository.listCycles(initial.goal.id);
-    expect(repository.listCycleIntents(initial.goal.id).every((intent) => intent.focusKinds.length === 1)).toBe(true);
+    expect(repository.listCycleIntents(initial.goal.id).every((intent) => (
+      (intent.kind === "expand" || intent.kind === "revision") && intent.focusKinds.length === 1
+    ))).toBe(true);
     expect(cycles[1]!.inputCheckpointId).toBe(cycles[0]!.outputCheckpointId);
     expect(cycles[2]!.inputCheckpointId).toBe(cycles[1]!.outputCheckpointId);
     expect(cycles.every((cycle) => cycle.receiptId && cycle.changeSetId && cycle.outputCheckpointId)).toBe(true);
@@ -566,7 +568,7 @@ function growthRequest(setup: ReturnType<typeof createSetup>, overrides: Partial
 }> = {}) {
   return {
     requestId: "11111111-1111-4111-8111-111111111111", projectId: setup.projectId, sessionId: setup.sessionId,
-    seed: { kind: "text" as const, text: "A user seed." }, initialRuleText: "Keep sources.", strategy: "grow_world_story_oc_inquiry_v3" as const,
+    seed: { kind: "text" as const, text: "A user seed." }, initialRuleText: "Keep sources.", strategy: "grow_world_story_oc_closure_v4" as const,
     ...overrides,
   };
 }

@@ -4,14 +4,14 @@ const idSchema = z.string().trim().min(1).max(240);
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const timestampSchema = z.iso.datetime({ offset: true });
 
-export const growthContractVersion = "1.0.0" as const;
-export const growthCapabilityVersion = "hackathon-growth-inquiry-v3" as const;
+export const growthContractVersion = "1.1.0" as const;
+export const growthCapabilityVersion = "hackathon-growth-closure-v4" as const;
 
 export const growthGoalStatusSchema = z.enum([
   "active", "completed", "blocked", "cancelled", "reconciliation_required",
 ]);
 export const growthCycleStatusSchema = z.enum([
-  "planned", "running", "committed", "blocked", "failed", "cancelled", "reconciliation_required",
+  "planned", "running", "committed", "evaluated", "blocked", "failed", "cancelled", "reconciliation_required",
 ]);
 
 const uniqueValues = (values: readonly string[], context: z.RefinementCtx, path: string): void => {
@@ -78,13 +78,16 @@ export const growthCycleSchema = z.object({
   updatedAt: timestampSchema,
   terminalAt: timestampSchema.nullable(),
 }).strict().superRefine((value, context) => {
-  const terminal = ["committed", "blocked", "failed", "cancelled", "reconciliation_required"].includes(value.status);
+  const terminal = ["committed", "evaluated", "blocked", "failed", "cancelled", "reconciliation_required"].includes(value.status);
   if (terminal !== (value.terminalAt !== null)) context.addIssue({ code: "custom", message: "Terminal timestamp does not match cycle status." });
   if (value.status === "committed" && (!value.runId || !value.receiptId || !value.changeSetId || !value.outputCheckpointId || value.failureCode)) {
     context.addIssue({ code: "custom", message: "Committed cycle requires run, receipt, Change Set and output checkpoint only." });
   }
   if (value.status !== "committed" && (value.changeSetId !== null || value.outputCheckpointId !== null)) {
     context.addIssue({ code: "custom", message: "Only committed cycles may expose Change Set output state." });
+  }
+  if (value.status === "evaluated" && (!value.runId || !value.receiptId || value.failureCode)) {
+    context.addIssue({ code: "custom", message: "Evaluated cycle requires run, receipt and no failure state." });
   }
   if (value.status === "planned" && (value.runId || value.receiptId || value.failureCode || value.terminalAt)) {
     context.addIssue({ code: "custom", message: "Planned cycle contains execution state." });
@@ -97,17 +100,39 @@ export const growthCycleSchema = z.object({
   }
 });
 
+const growthFocusKindSchema = z.enum(["world", "story", "oc"]);
+const growthContentCycleIntentCreateSchema = z.object({
+  kind: z.enum(["expand", "revision"]),
+  focusKinds: z.array(growthFocusKindSchema).min(1).max(3),
+  resumeFrontier: z.array(growthFocusKindSchema).max(3),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.focusKinds, context, "focusKinds");
+  uniqueValues(value.resumeFrontier, context, "resumeFrontier");
+});
+const growthClosureEvaluationIntentCreateSchema = z.object({
+  kind: z.literal("closure_evaluation"),
+  profileId: idSchema,
+  revision: z.number().int().min(1).max(1_000_000),
+  checkpointId: idSchema,
+}).strict();
+const growthRepairIntentCreateSchema = z.object({
+  kind: z.literal("repair"),
+  profileId: idSchema,
+  revision: z.number().int().min(1).max(1_000_000),
+  originalReviewId: idSchema,
+  selectedFindingId: idSchema,
+  selectedFindingFingerprint: sha256Schema,
+}).strict();
+export const growthCycleIntentCreateSchema = z.union([
+  growthContentCycleIntentCreateSchema,
+  growthClosureEvaluationIntentCreateSchema,
+  growthRepairIntentCreateSchema,
+]);
+
 export const growthCycleBeginSchema = z.object({
   id: idSchema, goalId: idSchema, idempotencyKey: idSchema, inputCheckpointId: idSchema,
   ruleRevision: z.number().int().min(1).max(1_000_000),
-  intent: z.object({
-    kind: z.enum(["expand", "revision"]),
-    focusKinds: z.array(z.enum(["world", "story", "oc"])).min(1).max(3),
-    resumeFrontier: z.array(z.enum(["world", "story", "oc"])).max(3),
-  }).strict().superRefine((value, context) => {
-    uniqueValues(value.focusKinds, context, "focusKinds");
-    uniqueValues(value.resumeFrontier, context, "resumeFrontier");
-  }),
+  intent: growthCycleIntentCreateSchema,
 }).strict();
 export const growthCycleAttachRunSchema = z.object({ cycleId: idSchema, runId: idSchema }).strict();
 export const growthCycleAttachChangeSetSchema = z.object({ cycleId: idSchema, changeSetId: idSchema }).strict();
@@ -221,13 +246,13 @@ export const growthRetrievalReceiptSchema = z.object({
 
 export const growthEventPhaseSchema = z.enum([
   "cycle_planned", "run_attached", "receipt_recorded", "inquiry_selected", "creator_choice_required",
-  "change_set_committed", "cycle_terminal",
+  "change_set_committed", "cycle_evaluated", "cycle_terminal",
 ]);
 export const growthEventTargetKindSchema = z.enum([
-  "document", "resource", "assertion", "relation", "change_set", "inquiry",
+  "document", "resource", "assertion", "relation", "change_set", "inquiry", "closure_evaluation",
 ]);
 export const growthDurableStateSchema = z.enum([
-  "planned", "running", "committed", "blocked", "failed", "cancelled", "reconciliation_required",
+  "planned", "running", "committed", "evaluated", "blocked", "failed", "cancelled", "reconciliation_required",
 ]);
 export const growthContentRefSchema = z.object({
   kind: growthContentRefKindSchema,
@@ -262,6 +287,16 @@ const refineEvent = (value: {
   if (value.phase === "change_set_committed" && value.targetKind !== "change_set") {
     context.addIssue({ code: "custom", message: "Change Set commit phase requires Change Set target." });
   }
+  const evaluationPhase = value.phase === "cycle_evaluated";
+  if (evaluationPhase !== (value.targetKind === "closure_evaluation")) {
+    context.addIssue({ code: "custom", message: "Closure evaluation target is event-only and requires its evaluation phase." });
+  }
+  if (evaluationPhase && (value.durableState !== "evaluated" || value.targetVersionId !== null || value.contentRef !== null)) {
+    context.addIssue({ code: "custom", message: "Evaluated Closure event cannot expose a version or content reference." });
+  }
+  if (!evaluationPhase && value.durableState === "evaluated") {
+    context.addIssue({ code: "custom", message: "Evaluated durable state requires the Closure evaluation phase." });
+  }
   const inquiryPhase = value.phase === "inquiry_selected" || value.phase === "creator_choice_required";
   if (inquiryPhase !== (value.targetKind === "inquiry")) {
     context.addIssue({ code: "custom", message: "Inquiry event phases require the event-only Inquiry target." });
@@ -280,16 +315,39 @@ const refineEvent = (value: {
 export const growthEventAppendSchema = z.object(eventInputShape).strict().superRefine(refineEvent);
 export const growthEventSchema = z.object({ ...eventInputShape, createdAt: timestampSchema }).strict().superRefine(refineEvent);
 
-export const growthCycleIntentSchema = z.object({
+const intentProjectionShape = {
   cycleId: idSchema,
-  kind: z.enum(["expand", "revision"]),
-  focusKinds: z.array(z.enum(["world", "story", "oc"])).min(1).max(3),
-  resumeFrontier: z.array(z.enum(["world", "story", "oc"])).max(3),
-  provenance: z.enum(["persisted_v24", "legacy_v23_projection"]),
-}).strict().superRefine((value, context) => {
-  uniqueValues(value.focusKinds, context, "focusKinds");
-  uniqueValues(value.resumeFrontier, context, "resumeFrontier");
-});
+  provenance: z.enum(["persisted_v26", "persisted_v24", "legacy_v23_projection"]),
+};
+export const growthCycleIntentSchema = z.union([
+  z.object({
+    ...intentProjectionShape,
+    kind: z.enum(["expand", "revision"]),
+    focusKinds: z.array(growthFocusKindSchema).min(1).max(3),
+    resumeFrontier: z.array(growthFocusKindSchema).max(3),
+  }).strict().superRefine((value, context) => {
+    uniqueValues(value.focusKinds, context, "focusKinds");
+    uniqueValues(value.resumeFrontier, context, "resumeFrontier");
+  }),
+  z.object({
+    ...intentProjectionShape,
+    provenance: z.literal("persisted_v26"),
+    kind: z.literal("closure_evaluation"),
+    profileId: idSchema,
+    revision: z.number().int().min(1).max(1_000_000),
+    checkpointId: idSchema,
+  }).strict(),
+  z.object({
+    ...intentProjectionShape,
+    provenance: z.literal("persisted_v26"),
+    kind: z.literal("repair"),
+    profileId: idSchema,
+    revision: z.number().int().min(1).max(1_000_000),
+    originalReviewId: idSchema,
+    selectedFindingId: idSchema,
+    selectedFindingFingerprint: sha256Schema,
+  }).strict(),
+]);
 
 export const growthInquiryEvidenceLinkSchema = z.object({
   receiptId: idSchema,
@@ -544,6 +602,7 @@ export const growthInquiryCreatorAnswerSchema = z.object({
 }).strict();
 
 export const growthClosureProfileKindSchema = z.enum(["world_birth", "oc_saga", "story_universe", "mixed_birth"]);
+export const growthClosureComponentProfileSchema = z.enum(["world_birth", "oc_saga", "story_universe"]);
 export const growthClosureFacetCreateSchema = z.object({
   id: idSchema,
   kind: z.enum(["content", "visual"]),
@@ -556,13 +615,29 @@ export const growthClosureProfileCreateSchema = z.object({
   goalId: idSchema,
   profileKind: growthClosureProfileKindSchema,
   subjectResourceId: idSchema.nullable(),
+  componentProfiles: z.array(growthClosureComponentProfileSchema).max(3),
+  focusOcResourceId: idSchema.nullable(),
+  contractGeneration: z.literal("v26"),
   checkpointId: idSchema,
   ruleRevision: z.number().int().min(1).max(1_000_000),
   facets: z.array(growthClosureFacetCreateSchema).min(1).max(100),
 }).strict().superRefine((value, context) => {
   uniqueValues(value.facets.map((facet) => facet.id), context, "facets");
+  uniqueValues(value.componentProfiles, context, "componentProfiles");
   if (value.profileKind === "oc_saga" && value.subjectResourceId === null) {
     context.addIssue({ code: "custom", path: ["subjectResourceId"], message: "OC saga closure requires an OC subject." });
+  }
+  if (value.profileKind !== "oc_saga" && value.subjectResourceId !== null) {
+    context.addIssue({ code: "custom", path: ["subjectResourceId"], message: "Only OC saga closure may bind a subject resource." });
+  }
+  if (value.profileKind === "mixed_birth") {
+    if (value.componentProfiles.length === 0) context.addIssue({ code: "custom", path: ["componentProfiles"], message: "Mixed closure requires explicit component profiles." });
+    const needsFocusOc = value.componentProfiles.includes("oc_saga");
+    if (needsFocusOc !== (value.focusOcResourceId !== null)) {
+      context.addIssue({ code: "custom", path: ["focusOcResourceId"], message: "Mixed OC saga component requires exactly one focus OC." });
+    }
+  } else if (value.componentProfiles.length > 0 || value.focusOcResourceId !== null) {
+    context.addIssue({ code: "custom", path: ["componentProfiles"], message: "Only mixed closure may declare component profiles or a focus OC." });
   }
 });
 
@@ -572,10 +647,16 @@ export const growthClosureRevisionAppendSchema = z.object({
   idempotencyKey: idSchema,
   checkpointId: idSchema,
   ruleRevision: z.number().int().min(1).max(1_000_000),
+  componentProfiles: z.array(growthClosureComponentProfileSchema).max(3),
+  focusOcResourceId: idSchema.nullable(),
+  contractGeneration: z.literal("v26"),
   facets: z.array(growthClosureFacetCreateSchema).min(1).max(100),
-}).strict().superRefine((value, context) => uniqueValues(value.facets.map((facet) => facet.id), context, "facets"));
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.facets.map((facet) => facet.id), context, "facets");
+  uniqueValues(value.componentProfiles, context, "componentProfiles");
+});
 
-export const growthClosureProfileSchema = z.object({
+const growthClosureProfileCommonShape = {
   id: idSchema,
   goalId: idSchema,
   profileKind: growthClosureProfileKindSchema,
@@ -584,9 +665,41 @@ export const growthClosureProfileSchema = z.object({
   currentEpoch: z.number().int().min(1).max(1_000_000),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
-}).strict();
+};
+const growthClosureLegacyProfileSchema = z.object({
+    ...growthClosureProfileCommonShape,
+    contractGeneration: z.literal("legacy_pre_v26"),
+    componentProfiles: z.null(),
+    focusOcResourceId: z.null(),
+  }).strict();
+const growthClosureV26ProfileSchema = z.object({
+    ...growthClosureProfileCommonShape,
+    contractGeneration: z.literal("v26"),
+    componentProfiles: z.array(growthClosureComponentProfileSchema).max(3),
+    focusOcResourceId: idSchema.nullable(),
+  }).strict().superRefine((value, context) => {
+    uniqueValues(value.componentProfiles, context, "componentProfiles");
+    if (value.profileKind === "oc_saga") {
+      if (value.subjectResourceId === null) context.addIssue({ code: "custom", path: ["subjectResourceId"], message: "OC saga closure requires a subject." });
+      if (value.componentProfiles.length > 0 || value.focusOcResourceId !== null) context.addIssue({ code: "custom", path: ["componentProfiles"], message: "Non-mixed closure cannot declare components." });
+      return;
+    }
+    if (value.subjectResourceId !== null) context.addIssue({ code: "custom", path: ["subjectResourceId"], message: "Only OC saga closure may bind a subject." });
+    if (value.profileKind === "mixed_birth") {
+      if (value.componentProfiles.length === 0) context.addIssue({ code: "custom", path: ["componentProfiles"], message: "Mixed closure requires explicit components." });
+      if (value.componentProfiles.includes("oc_saga") !== (value.focusOcResourceId !== null)) {
+        context.addIssue({ code: "custom", path: ["focusOcResourceId"], message: "Mixed OC saga component requires a focus OC." });
+      }
+    } else if (value.componentProfiles.length > 0 || value.focusOcResourceId !== null) {
+      context.addIssue({ code: "custom", path: ["componentProfiles"], message: "Non-mixed closure cannot declare components." });
+    }
+  });
+export const growthClosureProfileSchema = z.union([
+  growthClosureLegacyProfileSchema,
+  growthClosureV26ProfileSchema,
+]);
 
-export const growthClosureRevisionSchema = z.object({
+const growthClosureRevisionCommonShape = {
   profileId: idSchema,
   revision: z.number().int().min(1).max(1_000_000),
   epoch: z.number().int().min(1).max(1_000_000),
@@ -594,7 +707,21 @@ export const growthClosureRevisionSchema = z.object({
   ruleRevision: z.number().int().min(1).max(1_000_000),
   facets: z.array(growthClosureFacetCreateSchema).min(1).max(100),
   createdAt: timestampSchema,
-}).strict();
+};
+export const growthClosureRevisionSchema = z.union([
+  z.object({
+    ...growthClosureRevisionCommonShape,
+    contractGeneration: z.literal("legacy_pre_v26"),
+    componentProfiles: z.null(),
+    focusOcResourceId: z.null(),
+  }).strict(),
+  z.object({
+    ...growthClosureRevisionCommonShape,
+    contractGeneration: z.literal("v26"),
+    componentProfiles: z.array(growthClosureComponentProfileSchema).max(3),
+    focusOcResourceId: idSchema.nullable(),
+  }).strict(),
+]);
 
 const closureAssessmentCommonShape = {
   id: idSchema,
@@ -616,6 +743,129 @@ export const growthClosureAssessmentSchema = z.discriminatedUnion("role", [
   z.object({ ...closureAssessmentCommonShape, role: z.literal("steward"), decision: z.enum(["continue_growing", "ready_for_checker"]), payloadHash: sha256Schema, createdAt: timestampSchema }).strict(),
   z.object({ ...closureAssessmentCommonShape, role: z.literal("checker"), decision: z.enum(["accepted", "repairs_required", "blocked"]), payloadHash: sha256Schema, createdAt: timestampSchema }).strict(),
 ]);
+
+export const growthClosureFacetResultSchema = z.object({
+  facetId: idSchema,
+  state: z.enum(["satisfied", "missing", "conflicted", "blocked"]),
+  coverage: z.enum(["complete", "partial", "unknown"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  evidence: z.array(growthInquiryEvidenceLinkSchema).max(100),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.evidence.map((link) => `${link.receiptId}:${link.rank}`), context, "evidence");
+  if (value.state === "satisfied" && value.evidence.length === 0) {
+    context.addIssue({ code: "custom", path: ["evidence"], message: "Satisfied Closure facet requires pinned evidence." });
+  }
+});
+
+export const growthClosureFindingSeveritySchema = z.enum(["minor", "major", "blocking"]);
+export const growthClosureFindingCategorySchema = z.enum([
+  "world_consistency", "story_consistency", "character_consistency", "causality", "continuity",
+  "evidence_gap", "scope_violation", "creator_choice_required",
+]);
+export const growthClosureAdverseFindingSchema = z.object({
+  id: idSchema,
+  fingerprint: sha256Schema,
+  severity: growthClosureFindingSeveritySchema,
+  category: growthClosureFindingCategorySchema,
+  targetEvidence: z.array(growthInquiryEvidenceLinkSchema).min(1).max(100),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  repairObjective: z.string().trim().min(1).max(2_000),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.targetEvidence.map((link) => `${link.receiptId}:${link.rank}`), context, "targetEvidence");
+});
+
+export const growthClosureStewardSubmissionSchema = z.object({
+  ...closureAssessmentCommonShape,
+  role: z.literal("steward"),
+  decision: z.enum(["continue_growing", "ready_for_checker"]),
+  facetResults: z.array(growthClosureFacetResultSchema).min(1).max(100),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.facetResults.map((result) => result.facetId), context, "facetResults");
+});
+
+export const growthClosureCheckerSubmissionSchema = z.object({
+  ...closureAssessmentCommonShape,
+  role: z.literal("checker"),
+  decision: z.enum(["accepted", "repairs_required", "blocked"]),
+  adverseFindings: z.array(growthClosureAdverseFindingSchema).max(100),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.adverseFindings.map((finding) => finding.id), context, "adverseFindings");
+  uniqueValues(value.adverseFindings.map((finding) => finding.fingerprint), context, "adverseFindings");
+  if (value.decision === "accepted" && value.adverseFindings.length > 0) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Accepted Checker submission cannot contain adverse findings." });
+  }
+  if (value.decision === "repairs_required" && !value.adverseFindings.some((finding) => ["major", "blocking"].includes(finding.severity))) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Repairs require a major or blocking finding." });
+  }
+  if (value.decision === "blocked" && !value.adverseFindings.some((finding) => finding.severity === "blocking")) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Blocked Checker submission requires a blocking finding." });
+  }
+});
+
+export const growthClosureReviewV4SealSchema = z.object({
+  id: idSchema,
+  profileId: idSchema,
+  revision: z.number().int().min(1).max(1_000_000),
+  stewardAssessmentId: idSchema,
+  checkerAssessmentId: idSchema,
+  idempotencyKey: idSchema,
+  facetResults: z.array(growthClosureFacetResultSchema).min(1).max(100),
+  adverseFindings: z.array(growthClosureAdverseFindingSchema).max(100),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.facetResults.map((result) => result.facetId), context, "facetResults");
+  uniqueValues(value.adverseFindings.map((finding) => finding.id), context, "adverseFindings");
+});
+
+const growthClosureEvaluationOutcomeCommonShape = {
+  id: idSchema,
+  cycleId: idSchema,
+  profileId: idSchema,
+  revision: z.number().int().min(1).max(1_000_000),
+  receiptId: idSchema,
+  stewardAssessmentId: idSchema,
+  idempotencyKey: idSchema,
+};
+export const growthClosureEvaluationOutcomeSealSchema = z.discriminatedUnion("decision", [
+  z.object({
+    ...growthClosureEvaluationOutcomeCommonShape,
+    decision: z.literal("continue_growing"),
+    checkerAssessmentId: z.null(),
+    reviewId: z.null(),
+  }).strict(),
+  z.object({
+    ...growthClosureEvaluationOutcomeCommonShape,
+    decision: z.enum(["accepted", "repairs_required", "blocked"]),
+    checkerAssessmentId: idSchema,
+    reviewId: idSchema,
+  }).strict(),
+]);
+export const growthClosureEvaluationOutcomeSchema = z.union([
+  growthClosureEvaluationOutcomeSealSchema.options[0].extend({ payloadHash: sha256Schema, createdAt: timestampSchema }).strict(),
+  growthClosureEvaluationOutcomeSealSchema.options[1].extend({ payloadHash: sha256Schema, createdAt: timestampSchema }).strict(),
+]);
+
+export const growthClosureRepairLineageCreateSchema = z.object({
+  id: idSchema,
+  profileId: idSchema,
+  revision: z.number().int().min(1).max(1_000_000),
+  originalReviewId: idSchema,
+  selectedFindingId: idSchema,
+  selectedFindingFingerprint: sha256Schema,
+  repairCycleId: idSchema,
+  backlogFindingIds: z.array(idSchema).max(99),
+  idempotencyKey: idSchema,
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.backlogFindingIds, context, "backlogFindingIds");
+  if (value.backlogFindingIds.includes(value.selectedFindingId)) {
+    context.addIssue({ code: "custom", path: ["backlogFindingIds"], message: "Selected repair finding cannot remain in backlog." });
+  }
+});
+export const growthClosureRepairLineageSchema = growthClosureRepairLineageCreateSchema.extend({
+  resolutionState: z.enum(["planned", "committed", "resolved", "no_progress", "stalled"]),
+  payloadHash: sha256Schema,
+  createdAt: timestampSchema,
+  updatedAt: timestampSchema,
+}).strict();
 
 export const growthClosureReviewFindingSchema = z.object({
   facetId: idSchema,
@@ -777,6 +1027,7 @@ export type GrowthGoalCreate = z.infer<typeof growthGoalCreateSchema>;
 export type GrowthRuleRevision = z.infer<typeof growthRuleRevisionSchema>;
 export type GrowthCycle = z.infer<typeof growthCycleSchema>;
 export type GrowthCycleIntent = z.infer<typeof growthCycleIntentSchema>;
+export type GrowthContentCycleIntent = Extract<GrowthCycleIntent, { kind: "expand" | "revision" }>;
 export type GrowthRetrievalReceiptCreate = z.infer<typeof growthRetrievalReceiptCreateSchema>;
 export type GrowthRetrievalReceipt = z.infer<typeof growthRetrievalReceiptSchema>;
 export type GrowthRetrievalReceiptLink = z.infer<typeof growthRetrievalReceiptLinkSchema>;
@@ -788,6 +1039,12 @@ export type GrowthInquiryCreatorAnswer = z.infer<typeof growthInquiryCreatorAnsw
 export type GrowthClosureProfile = z.infer<typeof growthClosureProfileSchema>;
 export type GrowthClosureRevision = z.infer<typeof growthClosureRevisionSchema>;
 export type GrowthClosureAssessment = z.infer<typeof growthClosureAssessmentSchema>;
+export type GrowthClosureStewardSubmission = z.infer<typeof growthClosureStewardSubmissionSchema>;
+export type GrowthClosureCheckerSubmission = z.infer<typeof growthClosureCheckerSubmissionSchema>;
+export type GrowthClosureFacetResult = z.infer<typeof growthClosureFacetResultSchema>;
+export type GrowthClosureAdverseFinding = z.infer<typeof growthClosureAdverseFindingSchema>;
+export type GrowthClosureEvaluationOutcome = z.infer<typeof growthClosureEvaluationOutcomeSchema>;
+export type GrowthClosureRepairLineage = z.infer<typeof growthClosureRepairLineageSchema>;
 export type GrowthClosureReview = z.infer<typeof growthClosureReviewSchema>;
 export type GrowthClosureState = z.infer<typeof growthClosureStateSchema>;
 export type GrowthIllustrationRequest = z.infer<typeof growthIllustrationRequestSchema>;
