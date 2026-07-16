@@ -331,11 +331,14 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
       const result = options.growthBinding
         ? growthRetrieveGraphEvidenceResultSchema.parse(await executor.retrieveGraphEvidence(args, signal))
         : retrieveGraphEvidenceResultSchema.parse(await executor.retrieveGraphEvidence(args, signal));
+      const modelVisibleResult = options.growthBinding && "receiptId" in result
+        ? (({ receiptId: _receiptId, ...safe }) => safe)(result)
+        : result;
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
-            result,
+            result: modelVisibleResult,
             priorInquiries: options.growthBinding?.priorInquiries ?? [],
             novaxInstruction: options.growthBinding?.kind === "closure_evaluation"
               ? "This pinned Closure Receipt and deterministic facet projection are recorded. Do not repeat retrieval or propose changes. Submit exactly one Closure self-assessment next."

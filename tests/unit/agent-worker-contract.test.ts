@@ -47,6 +47,38 @@ describe("agent worker fail-closed contract", () => {
     }).success).toBe(false);
   });
 
+  it("keeps Longform authority internal, phase-bound, and structurally strict", () => {
+    const base = {
+      capabilityVersion: "hackathon-growth-closure-v4", goalId: "goal-1", cycleId: "cycle-1",
+      inputCheckpointId: "checkpoint-1", ruleRevision: 1,
+      authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
+      kind: "expand", focusKinds: ["oc"], resumeFrontier: [], seedResourceIds: ["oc-1"],
+      domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+      greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
+    };
+    const outline = {
+      phase: "outline", outlineId: "outline-1", mainStoryResourceId: "story-1",
+      worldResourceId: "world-1", focusOcResourceId: "oc-1", personalStoryResourceId: "volume-1",
+    };
+    expect(growthRunBindingSchema.safeParse({ ...base, longformAuthority: outline }).success).toBe(true);
+    expect(growthRunBindingSchema.safeParse({ ...base, focusKinds: ["story"], longformAuthority: outline }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...base, longformAuthority: { ...outline, checkpointId: "forged" } }).success).toBe(false);
+
+    const section = {
+      phase: "section", outlineId: "outline-1", storyResourceId: "volume-1",
+      outlineDocumentVersionId: "outline-version-1", storyTitle: "The Salt Heir", summary: "A bounded OC saga.",
+      sections: ["opening", "turn"].map((localId) => ({
+        localId, title: localId, objective: `Write ${localId}.`, evidenceIds: [`evidence-${localId}`],
+        continuityConstraints: ["Preserve the pinned facts."], estimatedCodePoints: { min: 200, max: 800 },
+      })),
+      selectedSectionId: "turn", sectionSortOrder: 1, completedSectionIds: ["opening"],
+      priorProseEvidenceIds: ["prose-version-1"], priorContentSha256: ["a".repeat(64)],
+    };
+    expect(growthRunBindingSchema.safeParse({ ...base, longformAuthority: section }).success).toBe(true);
+    expect(growthRunBindingSchema.safeParse({ ...base, longformAuthority: { ...section, selectedSectionId: "opening" } }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...base, longformAuthority: { ...section, sections: [...section.sections, section.sections[0]] } }).success).toBe(false);
+  });
+
   it("keeps submit_growth_inquiry strict, authority-free, and safe on response", () => {
     const inquiry = (localId: string, priority: number) => ({
       localId,

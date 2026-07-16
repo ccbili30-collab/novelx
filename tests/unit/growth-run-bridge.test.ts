@@ -146,6 +146,58 @@ describe("Growth Run bridge", () => {
     await vi.waitFor(() => expect(growth.getCycle(cycle4.id)?.status).toBe("cancelled"));
   });
 
+  it("derives Longform outline authority from the pinned checkpoint before Worker spawn", async () => {
+    const setup = createSetup();
+    const world = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "longform-world");
+    const growth = new GrowthRepository(setup.workspace);
+    const storyRoot = setup.authorizedScopeResourceIds.find((id) => new ResourceRepository(setup.workspace)
+      .listAtCheckpoint(world.outputCheckpointId).some((resource) => resource.id === id && resource.type === "story"))!;
+    const storyCycle = growth.beginCycle({
+      id: "longform-story-cycle", goalId: setup.goalId, idempotencyKey: "longform-story-cycle",
+      inputCheckpointId: world.outputCheckpointId, ruleRevision: 1,
+      intent: { kind: "expand", focusKinds: ["story"], resumeFrontier: ["oc"] },
+    });
+    const story = await commitPriorResourceCycle(setup, storyCycle.id, "story", "story", storyRoot, "longform-story");
+    const ocRoot = setup.authorizedScopeResourceIds.find((id) => new ResourceRepository(setup.workspace)
+      .listAtCheckpoint(story.outputCheckpointId).some((resource) => resource.id === id && resource.type === "oc"))!;
+    const ocCycle = growth.beginCycle({
+      id: "longform-oc-cycle", goalId: setup.goalId, idempotencyKey: "longform-oc-cycle",
+      inputCheckpointId: story.outputCheckpointId, ruleRevision: 1,
+      intent: { kind: "expand", focusKinds: ["oc"], resumeFrontier: [] },
+    });
+    const oc = await commitPriorResourceCycle(setup, ocCycle.id, "oc", "oc", ocRoot, "longform-oc");
+    growth.createClosureProfile({
+      id: "longform-profile", idempotencyKey: "longform-profile-key", goalId: setup.goalId,
+      profileKind: "mixed_birth", subjectResourceId: null,
+      componentProfiles: ["world_birth", "story_universe", "oc_saga"], focusOcResourceId: oc.resourceId,
+      contractGeneration: "v26", checkpointId: oc.outputCheckpointId, ruleRevision: 1,
+      facets: [
+        { id: GROWTH_CLOSURE_FACETS.oc.personalStoryBinding, kind: "content", required: true },
+        { id: GROWTH_CLOSURE_FACETS.oc.personalStory, kind: "content", required: true },
+      ],
+    });
+    const outlineCycle = growth.beginCycle({
+      id: "longform-outline-cycle", goalId: setup.goalId, idempotencyKey: "longform-outline-cycle",
+      inputCheckpointId: oc.outputCheckpointId, ruleRevision: 1,
+      intent: { kind: "expand", focusKinds: ["oc"], resumeFrontier: [] },
+    });
+    const worker = new FakeWorker();
+    const supervisor = createSupervisor(setup, worker);
+    const runId = new GrowthRunLifecycle(setup.workspace, supervisor).start({
+      goalId: setup.goalId, cycleId: outlineCycle.id,
+      request: { projectId: "project-1", sessionId: "longform-outline", userInput: "create personal saga", mode: "free" },
+      emit: () => undefined,
+    });
+    worker.spawn();
+    const binding = (worker.sent[0] as { growthBinding: { longformAuthority: Record<string, unknown> } }).growthBinding;
+    expect(binding.longformAuthority).toMatchObject({
+      phase: "outline", mainStoryResourceId: story.resourceId, focusOcResourceId: oc.resourceId,
+    });
+    expect(binding.longformAuthority).not.toHaveProperty("checkpointId");
+    supervisor.cancel(runId);
+    await vi.waitFor(() => expect(growth.getCycle(outlineCycle.id)?.status).toBe("cancelled"));
+  });
+
   it("blocks a revision intent before Worker spawn and repairs its terminal event exactly once", async () => {
     const setup = createSetup();
     const prior = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "revision-world");

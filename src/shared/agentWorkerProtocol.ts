@@ -10,6 +10,43 @@ const jsonValueSchema = z.json();
 const jsonObjectSchema = z.record(z.string().min(1).max(240), jsonValueSchema);
 const localInquiryIdSchema = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
 
+const growthLongformOutlineSectionBindingSchema = z.object({
+  localId: localInquiryIdSchema,
+  title: z.string().trim().min(1).max(500),
+  objective: z.string().trim().min(1).max(4_000),
+  evidenceIds: z.array(identifierSchema).min(1).max(200),
+  continuityConstraints: z.array(z.string().trim().min(1).max(2_000)).min(1).max(50),
+  estimatedCodePoints: z.object({
+    min: z.number().int().min(200).max(8_000),
+    max: z.number().int().min(200).max(8_000),
+  }).strict(),
+}).strict();
+
+const growthLongformAuthoritySchema = z.discriminatedUnion("phase", [
+  z.object({
+    phase: z.literal("outline"),
+    outlineId: identifierSchema,
+    mainStoryResourceId: identifierSchema,
+    worldResourceId: identifierSchema,
+    focusOcResourceId: identifierSchema,
+    personalStoryResourceId: identifierSchema,
+  }).strict(),
+  z.object({
+    phase: z.literal("section"),
+    outlineId: identifierSchema,
+    storyResourceId: identifierSchema,
+    outlineDocumentVersionId: identifierSchema,
+    storyTitle: z.string().trim().min(1).max(500),
+    summary: z.string().trim().min(1).max(2_000),
+    sections: z.array(growthLongformOutlineSectionBindingSchema).min(2).max(100),
+    selectedSectionId: localInquiryIdSchema,
+    sectionSortOrder: z.number().int().min(0).max(2_147_483_647),
+    completedSectionIds: z.array(localInquiryIdSchema).max(100),
+    priorProseEvidenceIds: z.array(identifierSchema).max(100),
+    priorContentSha256: z.array(sha256Schema).max(100),
+  }).strict(),
+]);
+
 export const growthPriorInquiryContextSchema = z.object({
   localId: localInquiryIdSchema,
   question: z.string().trim().min(1).max(2_000),
@@ -56,6 +93,7 @@ export const growthRunBindingSchema = z.object({
     repairObjective: z.string().trim().min(1).max(2_000),
     targetEvidenceIds: z.array(identifierSchema).min(1).max(100),
   }).strict().nullable().default(null),
+  longformAuthority: growthLongformAuthoritySchema.nullable().optional(),
 }).strict().superRefine((value, context) => {
   if (new Set(value.authorizedScopeResourceIds).size !== value.authorizedScopeResourceIds.length) {
     context.addIssue({ code: "custom", path: ["authorizedScopeResourceIds"], message: "Growth binding scopes must be unique." });
@@ -81,6 +119,21 @@ export const growthRunBindingSchema = z.object({
     }
   } else if (value.focusKinds.length === 0 || value.closureProfile !== null || value.closureRepair !== null) {
     context.addIssue({ code: "custom", path: ["focusKinds"], message: "Content-growth bindings require focus kinds and cannot carry Closure authority." });
+  }
+  if (value.longformAuthority && (value.kind !== "expand" || value.focusKinds.length !== 1
+    || value.focusKinds[0] !== "oc" || value.greenfieldCreateAuthorized)) {
+    context.addIssue({ code: "custom", path: ["longformAuthority"], message: "Longform authority requires one non-greenfield OC expansion." });
+  }
+  if (value.longformAuthority?.phase === "section") {
+    const sectionIds = value.longformAuthority.sections.map((section) => section.localId);
+    if (new Set(sectionIds).size !== sectionIds.length
+      || !sectionIds.includes(value.longformAuthority.selectedSectionId)
+      || value.longformAuthority.completedSectionIds.includes(value.longformAuthority.selectedSectionId)
+      || new Set(value.longformAuthority.completedSectionIds).size !== value.longformAuthority.completedSectionIds.length
+      || new Set(value.longformAuthority.priorProseEvidenceIds).size !== value.longformAuthority.priorProseEvidenceIds.length
+      || new Set(value.longformAuthority.priorContentSha256).size !== value.longformAuthority.priorContentSha256.length) {
+      context.addIssue({ code: "custom", path: ["longformAuthority"], message: "Longform section authority is inconsistent." });
+    }
   }
   const closure = value.closureProfile;
   if (closure) {
@@ -228,6 +281,8 @@ const growthClosureEvaluationProjectionSchema = z.object({
 export const growthRetrieveGraphEvidenceResultSchema = z.object({
   variant: z.literal("growth_v1"),
   receiptRecorded: z.literal(true),
+  /** Internal-only. Agent tool presentation strips this authority before model-visible serialization. */
+  receiptId: identifierSchema.optional(),
   evidence: z.array(growthEvidenceHitSchema).max(100_000),
   coverage: z.object({
     state: z.enum(["complete", "partial", "unknown"]),

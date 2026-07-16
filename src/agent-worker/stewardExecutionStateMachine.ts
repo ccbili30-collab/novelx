@@ -16,6 +16,12 @@ import {
 import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "./growth/growthWorldFragment";
 import { growthInquiryBriefSchema } from "./growth/growthInquiryBrief";
 import {
+  compileGrowthLongformOutlineChangeSet,
+  growthLongformOutlineParameters,
+  type GrowthLongformOutline,
+} from "./growth/growthLongformOutline";
+import { compileGrowthLongformSectionChangeSet } from "./growth/growthLongformSection";
+import {
   isExplicitGreenfieldFreeCreateRequest,
   inspectProjectFilesResultSchema,
   listProjectDirectoryResultSchema,
@@ -182,6 +188,20 @@ function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
       steps: ["retrieve_graph_evidence", "propose_change_set"],
     };
   }
+  if (binding.longformAuthority?.phase === "outline") {
+    return {
+      objective: "change_set",
+      scopeResourceIds: [...binding.authorizedScopeResourceIds],
+      steps: ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"],
+    };
+  }
+  if (binding.longformAuthority?.phase === "section") {
+    return {
+      objective: "change_set",
+      scopeResourceIds: [...binding.authorizedScopeResourceIds],
+      steps: ["retrieve_graph_evidence", "submit_growth_inquiry", "writer", "propose_change_set"],
+    };
+  }
   const focus = growthFocus(binding);
   return {
     objective: "change_set",
@@ -279,10 +299,12 @@ export function createStewardExecutionStateMachine(input: {
   const allowedEvidenceIds = new Set<string>();
   let proposedChangeSet: z.infer<typeof proposeChangeSetResultSchema> | null = null;
   let growthReceiptRecorded = false;
+  let growthReceiptId: string | null = null;
   let growthInquirySelected = false;
   let growthPostInquiryMissingSource = false;
   const growthWorldsByEvidenceId = new Map<string, string>();
   const growthStoriesByEvidenceId = new Map<string, string>();
+  const growthEvidenceById = new Map<string, unknown>();
   let trustedStoryWorld: TrustedStoryWorldEvidence | null = null;
   let trustedOcStory: { evidenceId: string; resourceId: string } | null = null;
   let trustedWorldMapSources: TrustedGrowthWorldMapSources | null = null;
@@ -350,6 +372,17 @@ export function createStewardExecutionStateMachine(input: {
       parameters: Type.Object({}, { additionalProperties: false }),
     } : input.growthBinding?.kind === "repair" && original.name === "propose_change_set" ? {
       description: `Submit exactly one source-bound Change Set for the selected Closure repair. Repair only this objective: ${input.growthBinding.closureRepair?.repairObjective ?? "the selected finding"}. Do not rewrite unrelated resources, add images, or broaden the task.`,
+    } : input.growthBinding?.longformAuthority?.phase === "outline" && original.name === "propose_change_set" ? {
+      description: "Submit one high-level OC personal-story outline. Supply only story title, summary, section objectives, cited evidence, continuity constraints, and bounded character ranges. Main story, world, focus OC, personal-story resource, document identities, checkpoint, and Receipt are trusted by the Harness.",
+      parameters: growthLongformOutlineParameters,
+    } : input.growthBinding?.longformAuthority?.phase === "section" && original.name === "writer" ? {
+      description: "Write exactly the one trusted incomplete personal-story section from pinned evidence and prior prose. Parameters are compiled by the Harness; do not supply resource, document, checkpoint, Receipt, or evidence authority.",
+      parameters: Type.Object({}, { additionalProperties: false }),
+    } : input.growthBinding?.longformAuthority?.phase === "section" && original.name === "propose_change_set" ? {
+      description: "Persist the immediately preceding Writer candidate as the selected personal-story section. Supply only the selected outline section local ID; all content and project authority are compiled by the Harness.",
+      parameters: Type.Object({
+        outlineSectionId: Type.Literal(input.growthBinding.longformAuthority.selectedSectionId),
+      }, { additionalProperties: false }),
     } : growthFocus(input.growthBinding) === "story" && original.name === "writer" ? {
       description: "Create a candidate formal story opening from a high-level Story Brief and the pinned formal-world evidence. Supply only the creative brief: premise, opening situation, central tension, point of view, tone, required/avoided elements, and target length. This is Creator authoring, not a player or GM turn. Do not supply source material, evidence IDs, GM resolutions, resource IDs, or authority fields.",
       parameters: growthStoryBriefParameters,
@@ -389,6 +422,12 @@ export function createStewardExecutionStateMachine(input: {
           ? compileClosureCheckerInput()
           : input.growthBinding?.kind === "closure_evaluation" && name === "submit_closure_checker_review"
           ? compileClosureCheckerSubmission()
+          : input.growthBinding?.longformAuthority?.phase === "section" && name === "writer"
+          ? compileLongformWriterInput()
+          : input.growthBinding?.longformAuthority?.phase === "outline" && name === "propose_change_set"
+          ? compileLongformOutlineProposal(effectiveParams)
+          : input.growthBinding?.longformAuthority?.phase === "section" && name === "propose_change_set"
+          ? compileLongformSectionProposal(effectiveParams)
           : growthFocus(input.growthBinding) === "story" && name === "writer"
           ? compileGrowthStoryBrief(effectiveParams, trustedStoryWorld ?? { evidenceId: "", label: "", excerpt: null, resourceId: "" })
           : growthFocus(input.growthBinding) === "story" && name === "propose_change_set"
@@ -421,7 +460,11 @@ export function createStewardExecutionStateMachine(input: {
         if (plan?.objective !== "inspect_files") nextStepIndex += 1;
         if (name !== "submit_growth_inquiry") executions.push({ tool: name, status: "succeeded", details });
         const nextTool = requiredNextTool();
-        const instruction = name === "submit_growth_inquiry" && growthFocus(input.growthBinding) === "oc" && nextTool === "propose_change_set"
+        const instruction = name === "submit_growth_inquiry" && input.growthBinding?.longformAuthority?.phase === "outline"
+          ? "The pinned evidence and Inquiry are durable. Submit one high-level personal-story outline now; do not supply project identifiers or authority fields."
+          : name === "submit_growth_inquiry" && input.growthBinding?.longformAuthority?.phase === "section"
+          ? "The pinned evidence and Inquiry are durable. Call Writer for the one trusted incomplete personal-story section now."
+          : name === "submit_growth_inquiry" && growthFocus(input.growthBinding) === "oc" && nextTool === "propose_change_set"
           ? "The pinned Growth Receipt contains one trusted formal story. Create the required high-level OC Fragment now; do not repeat retrieval or supply low-level identifiers."
           : undefined;
         return appendRequiredNextTool(result, nextTool, instruction);
@@ -609,8 +652,20 @@ export function createStewardExecutionStateMachine(input: {
       throw stateError("STEWARD_GROWTH_INQUIRY_REQUIRED");
     }
     if (name === "writer" && growthFocus(input.growthBinding) === "story" && !trustedStoryWorld) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");
+    if (name === "writer" && input.growthBinding?.longformAuthority?.phase === "section") {
+      const authority = input.growthBinding.longformAuthority;
+      const selected = authority.sections.find((section) => section.localId === authority.selectedSectionId);
+      const required = selected ? [...selected.evidenceIds, ...authority.priorProseEvidenceIds] : [];
+      if (!selected || required.some((id) => !growthEvidenceById.has(id))) throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
+    }
+    if (name === "propose_change_set" && input.growthBinding?.longformAuthority?.phase === "section" && !writerCandidate) {
+      throw stateError("STEWARD_LONGFORM_WRITER_REQUIRED");
+    }
     if (name === "propose_change_set" && growthFocus(input.growthBinding) === "story" && !writerCandidate) throw stateError("STEWARD_STORY_WRITER_REQUIRED");
-    if (name === "propose_change_set" && growthFocus(input.growthBinding) === "oc" && !trustedOcStory) throw stateError("STEWARD_OC_STORY_REQUIRED");
+    if (name === "propose_change_set" && growthFocus(input.growthBinding) === "oc"
+      && !input.growthBinding?.longformAuthority && !trustedOcStory) {
+      throw stateError("STEWARD_OC_STORY_REQUIRED");
+    }
     if (name === "save_task_note") {
       const note = saveTaskNoteArgsSchema.safeParse(params);
       if (!note.success || !pendingReadRange || note.data.source.path !== pendingReadRange.path
@@ -664,6 +719,85 @@ export function createStewardExecutionStateMachine(input: {
     pendingImageRequest = image.data;
   }
 
+  function compileLongformOutlineProposal(params: unknown): unknown {
+    const authority = input.growthBinding?.longformAuthority;
+    if (authority?.phase !== "outline" || !growthReceiptId) throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
+    return compileGrowthLongformOutlineChangeSet(params, {
+      outlineId: authority.outlineId,
+      checkpointId: input.growthBinding!.inputCheckpointId,
+      receiptId: growthReceiptId,
+      availableEvidenceIds: [...growthEvidenceById.keys()],
+      mainStoryResourceId: authority.mainStoryResourceId,
+      worldResourceId: authority.worldResourceId,
+      focusOcResourceId: authority.focusOcResourceId,
+      personalStoryResourceId: authority.personalStoryResourceId,
+    });
+  }
+
+  function compileLongformWriterInput(): Record<string, unknown> {
+    const authority = input.growthBinding?.longformAuthority;
+    if (authority?.phase !== "section" || !growthReceiptId) throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
+    const selected = authority.sections.find((section) => section.localId === authority.selectedSectionId);
+    if (!selected) throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
+    const requiredEvidenceIds = [...selected.evidenceIds, ...authority.priorProseEvidenceIds];
+    if (requiredEvidenceIds.some((id) => !growthEvidenceById.has(id))) throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
+    const sourceMaterial = JSON.stringify({
+      storyTitle: authority.storyTitle,
+      outlineSummary: authority.summary,
+      section: selected,
+      evidence: requiredEvidenceIds.map((id) => growthEvidenceById.get(id)),
+    });
+    if (sourceMaterial.length > 160_000) throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
+    return {
+      instruction: "Write exactly this one bounded OC personal-story section. Preserve continuity with the supplied pinned evidence and prior prose. Return only a Writer candidate; do not claim Canon, project authority, or a committed Change Set.",
+      sourceMaterial,
+      evidenceIds: [...selected.evidenceIds],
+      gmResolution: null,
+      gmResolutionId: null,
+      styleConstraints: [
+        ...selected.continuityConstraints,
+        `Unicode code point range: ${selected.estimatedCodePoints.min}-${selected.estimatedCodePoints.max}.`,
+        "Do not pad, repeat filler, or add leading/trailing whitespace.",
+      ],
+    };
+  }
+
+  function compileLongformSectionProposal(params: unknown): unknown {
+    const authority = input.growthBinding?.longformAuthority;
+    const selection = readObject(params);
+    if (authority?.phase !== "section" || !growthReceiptId || !writerCandidate
+      || selection?.outlineSectionId !== authority.selectedSectionId) {
+      throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
+    }
+    const outline: GrowthLongformOutline = {
+      outlineId: authority.outlineId,
+      checkpointId: input.growthBinding!.inputCheckpointId,
+      receiptId: growthReceiptId,
+      storyTitle: authority.storyTitle,
+      summary: authority.summary,
+      sections: authority.sections,
+    };
+    const selected = authority.sections.find((section) => section.localId === authority.selectedSectionId);
+    if (!selected || !sameStringSets(writerCandidate.evidenceIds, selected.evidenceIds)) {
+      throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
+    }
+    return compileGrowthLongformSectionChangeSet({
+      outlineSectionId: authority.selectedSectionId,
+      candidateText: writerCandidate.text,
+      evidenceIds: [...selected.evidenceIds],
+    }, {
+      outline,
+      checkpointId: input.growthBinding!.inputCheckpointId,
+      receiptId: growthReceiptId,
+      availableEvidenceIds: [...growthEvidenceById.keys()],
+      priorProseEvidenceIds: authority.priorProseEvidenceIds,
+      completedSectionIds: authority.completedSectionIds,
+      priorContentSha256: authority.priorContentSha256,
+      storyResourceId: authority.storyResourceId,
+      sectionSortOrder: authority.sectionSortOrder,
+    });
+  }
+
   function applySuccessfulResult(name: OperationalToolName, details: unknown, params?: unknown): void {
     if (name === "list_project_directory") {
       const listing = listProjectDirectoryResultSchema.safeParse(details);
@@ -684,8 +818,11 @@ export function createStewardExecutionStateMachine(input: {
         const retrieval = growthRetrieveGraphEvidenceResultSchema.safeParse(details);
         if (!retrieval.success || !retrieval.data.receiptRecorded) throw stateError("STEWARD_TOOL_RESULT_INVALID");
         growthReceiptRecorded = true;
+        growthReceiptId = retrieval.data.receiptId ?? null;
+        if (input.growthBinding.longformAuthority && !growthReceiptId) throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
         for (const evidence of retrieval.data.evidence) {
           allowedEvidenceIds.add(evidence.evidenceId);
+          growthEvidenceById.set(evidence.evidenceId, evidence);
           if (input.growthBinding.kind === "closure_evaluation") closureEvidenceById.set(evidence.evidenceId, evidence);
           if (evidence.kind === "resource" && evidence.resource.type === "world" && evidence.resource.objectKind === "world") growthWorldsByEvidenceId.set(evidence.evidenceId, evidence.resource.resourceId);
           if (evidence.kind === "resource" && evidence.resource.type === "story" && evidence.resource.objectKind === "story") growthStoriesByEvidenceId.set(evidence.evidenceId, evidence.resource.resourceId);
@@ -709,7 +846,7 @@ export function createStewardExecutionStateMachine(input: {
           if (worlds.length !== 1) { growthPostInquiryMissingSource = true; }
           else trustedStoryWorld = worlds[0]!;
         }
-        if (growthFocus(input.growthBinding) === "oc") {
+        if (growthFocus(input.growthBinding) === "oc" && !input.growthBinding.longformAuthority) {
           const stories = [...growthStoriesByEvidenceId.entries()]
             .map(([evidenceId, resourceId]) => ({ evidenceId, resourceId }))
             .filter((story, index, all) => all.findIndex((candidate) => candidate.resourceId === story.resourceId) === index);
@@ -787,6 +924,18 @@ export function createStewardExecutionStateMachine(input: {
         kind: file.kind,
         complete: file.complete,
       })));
+      return;
+    }
+    if (name === "writer" && input.growthBinding?.longformAuthority?.phase === "section") {
+      const output = writerOutputSchema.safeParse(details);
+      if (!output.success) throw stateError("STEWARD_TOOL_RESULT_INVALID");
+      if (output.data.status !== "candidate") { blockReason = "tool_failed"; return; }
+      const authority = input.growthBinding.longformAuthority;
+      const selected = authority.sections.find((section) => section.localId === authority.selectedSectionId);
+      if (!selected || !sameStringSets(output.data.evidenceIds, selected.evidenceIds)) {
+        throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
+      }
+      writerCandidate = { text: output.data.candidateText, evidenceIds: output.data.evidenceIds };
       return;
     }
     if (name === "writer" && growthFocus(input.growthBinding) === "story") {

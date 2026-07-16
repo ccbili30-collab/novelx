@@ -5,6 +5,34 @@ import type { AgentWorkerToolRequest, RetrieveGraphEvidenceArgs } from "../../sr
 import { growthCapabilityVersion } from "../../src/shared/growthContract";
 
 describe("Agent Worker tool bridge", () => {
+  it("keeps the persisted Growth Receipt id internal while preserving it for the state machine", async () => {
+    const receipt = {
+      variant: "growth_v1" as const, receiptRecorded: true as const, receiptId: "receipt-internal-1", evidence: [],
+      coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
+      diagnostics: { expandedEdges: 0, consumedContentChars: 0 }, closureEvaluation: null,
+    };
+    const tools = createAgentTools({ retrieveGraphEvidence: async () => receipt } as never, {
+      growthBinding: {
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", kind: "expand",
+        focusKinds: ["oc"], resumeFrontier: [], inputCheckpointId: "checkpoint-1", ruleRevision: 1,
+        authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: ["oc-1"],
+        domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+        greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
+        longformAuthority: {
+          phase: "outline", outlineId: "outline-1", mainStoryResourceId: "story-1", worldResourceId: "world-1",
+          focusOcResourceId: "oc-1", personalStoryResourceId: "volume-1",
+        },
+      },
+    });
+    const result = await tools.find((candidate) => candidate.name === "retrieve_graph_evidence")!.execute("request-1", {
+      variant: "growth_v1", query: "OC saga", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+      expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
+    });
+    expect(result.details).toMatchObject({ receiptId: "receipt-internal-1" });
+    expect(result.content[0]?.type).toBe("text");
+    expect(result.content[0]?.type === "text" ? result.content[0].text : "").not.toContain("receipt-internal-1");
+  });
+
   it("exposes the three audited project tools", () => {
     const bridge = new AgentWorkerToolBridge(() => true);
     const tools = createAgentTools({

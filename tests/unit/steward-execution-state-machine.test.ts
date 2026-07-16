@@ -881,6 +881,55 @@ describe("Steward tool handoff state machine", () => {
     expect(machine.snapshot().executions.map((entry) => entry.tool)).toEqual(["retrieve_graph_evidence", "propose_change_set"]);
   });
 
+  it("compiles a high-level Longform outline with trusted project authority", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", {
+      ...growthRetrievalResult(), receiptId: "receipt-longform-1",
+    });
+    let compiled: unknown;
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "longform-outline-change", mode: "free", status: "committed", gateStatus: "ready",
+      blockedReason: null, itemCount: 6, committedOutputs: [],
+    });
+    propose.execute = vi.fn(async (_requestId, args) => {
+      compiled = args;
+      return { content: [{ type: "text" as const, text: "ok" }], details: {
+        changeSetId: "longform-outline-change", mode: "free", status: "committed", gateStatus: "ready",
+        blockedReason: null, itemCount: 6, committedOutputs: [],
+      } };
+    });
+    const machine = createStewardExecutionStateMachine({
+      mode: "free", userInput: "为这个 OC 建立个人长篇", authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
+      growthBinding: {
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", kind: "expand",
+        focusKinds: ["oc"], resumeFrontier: [], inputCheckpointId: "checkpoint-1", ruleRevision: 1,
+        authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: ["oc-1"],
+        domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+        greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
+        longformAuthority: {
+          phase: "outline", outlineId: "outline-1", mainStoryResourceId: "story-1", worldResourceId: "world-1",
+          focusOcResourceId: "oc-1", personalStoryResourceId: "volume-1",
+        },
+      },
+      operationalTools: [retrieve, selectedInquiryTool(), propose], resultCapture: createRoleOutputTool("steward"),
+    });
+    expect(machine.snapshot().plan?.steps).toEqual(["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"]);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await submitSelectedInquiry(machine.tools);
+    await tool(machine.tools, "propose_change_set").execute("outline", {
+      storyTitle: "The Salt Heir", summary: "An OC personal story grounded in the pinned world.",
+      sections: ["opening", "turn"].map((localId) => ({
+        localId, title: localId, objective: `Write ${localId}.`, evidenceIds: ["version-growth-setting"],
+        continuityConstraints: ["Preserve the pinned world rule."], estimatedCodePoints: { min: 5000, max: 6000 },
+      })),
+    });
+    expect(compiled).toEqual(expect.objectContaining({ items: expect.arrayContaining([
+      expect.objectContaining({ kind: "resource.put", payload: expect.objectContaining({ resourceId: "volume-1", type: "story", objectKind: "volume", parentId: "story-1" }) }),
+      expect.objectContaining({ kind: "creative_relation.put", payload: expect.objectContaining({ relationKind: "uses_world", sourceResourceId: "volume-1", targetResourceId: "world-1" }) }),
+      expect.objectContaining({ kind: "creative_relation.put", payload: expect.objectContaining({ relationKind: "uses_oc", sourceResourceId: "volume-1", targetResourceId: "oc-1" }) }),
+    ]) }));
+    expect(JSON.stringify(compiled)).not.toContain("receipt-longform-1");
+  });
+
 });
 
 function createMachine(mode: "free" | "assist", operationalTools: AgentTool[]) {
