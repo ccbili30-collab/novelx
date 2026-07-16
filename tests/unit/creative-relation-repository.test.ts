@@ -16,6 +16,33 @@ afterEach(() => {
 });
 
 describe("creative relation repository", () => {
+  it("allows a story volume to bind its world and focus OC without permitting chapters", () => {
+    const workspace = createWorkspace();
+    const resources = new ResourceRepository(workspace);
+    const relations = new CreativeRelationRepository(workspace);
+    const changes = new ChangeSetRepository(workspace);
+    const rootsByDomain = new Map(resources.listCurrent().map((resource) => [resource.type, resource]));
+    let worldId = "";
+    let ocId = "";
+    let volumeId = "";
+    let chapterId = "";
+    const objects = changes.propose({ idempotencyKey: "volume-relation-objects", mode: "free", summary: "Create volume relation objects" });
+    changes.commit(objects.id, "Create volume relation objects", (checkpointId) => {
+      worldId = resources.putRevision({ checkpointId, type: "world", objectKind: "world", title: "World", parentId: rootsByDomain.get("world")!.id, state: "active" });
+      ocId = resources.putRevision({ checkpointId, type: "oc", objectKind: "oc", title: "OC", parentId: rootsByDomain.get("oc")!.id, state: "active" });
+      const storyId = resources.putRevision({ checkpointId, type: "story", objectKind: "story", title: "Story", parentId: rootsByDomain.get("story")!.id, state: "active" });
+      volumeId = resources.putRevision({ checkpointId, type: "story", objectKind: "volume", title: "Volume", parentId: storyId, state: "active" });
+      chapterId = resources.putRevision({ checkpointId, type: "story", objectKind: "chapter", title: "Chapter", parentId: volumeId, state: "active" });
+    });
+    const binding = changes.propose({ idempotencyKey: "volume-relations", mode: "free", summary: "Bind volume" });
+    changes.commit(binding.id, "Bind volume", (checkpointId) => {
+      expect(relations.putRevision({ checkpointId, kind: "uses_world", sourceResourceId: volumeId, targetResourceId: worldId, state: "active" })).toBeTypeOf("string");
+      expect(relations.putRevision({ checkpointId, kind: "uses_oc", sourceResourceId: volumeId, targetResourceId: ocId, state: "active" })).toBeTypeOf("string");
+      expect(() => relations.putRevision({ checkpointId, kind: "uses_world", sourceResourceId: chapterId, targetResourceId: worldId, state: "active" }))
+        .toThrow(expect.objectContaining({ code: "RELATION_SOURCE_KIND_INVALID" }));
+    });
+  });
+
   it("versions story references and OC variant origins on the checkpoint chain", () => {
     const workspace = createWorkspace();
     const resources = new ResourceRepository(workspace);

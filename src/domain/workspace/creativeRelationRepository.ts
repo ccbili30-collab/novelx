@@ -177,11 +177,15 @@ function assertRelationEndpoints(kind: CreativeRelationKind, source: ResourceRec
   if (source.id === target.id) throw relationError("RELATION_SELF_REFERENCE", "A resource cannot relate to itself.");
   switch (kind) {
     case "uses_world":
-      if (source.objectKind !== "story") throw relationError("RELATION_SOURCE_KIND_INVALID", "Only a story can use a world.");
+      if (source.type !== "story" || (source.objectKind !== "story" && source.objectKind !== "volume")) {
+        throw relationError("RELATION_SOURCE_KIND_INVALID", "Only a story or story volume can use a world.");
+      }
       if (target.objectKind !== "world") throw relationError("RELATION_TARGET_KIND_INVALID", "A world reference must target a world.");
       return;
     case "uses_oc":
-      if (source.objectKind !== "story") throw relationError("RELATION_SOURCE_KIND_INVALID", "Only a story can use an OC.");
+      if (source.type !== "story" || (source.objectKind !== "story" && source.objectKind !== "volume")) {
+        throw relationError("RELATION_SOURCE_KIND_INVALID", "Only a story or story volume can use an OC.");
+      }
       if (target.objectKind !== "oc") throw relationError("RELATION_TARGET_KIND_INVALID", "An OC reference must target a base OC.");
       return;
     case "variant_of":
