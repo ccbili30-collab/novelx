@@ -107,9 +107,9 @@ flowchart LR
 
 ---
 
-## 4. 阶段 1：Repair 权限与领域正确性 [ ]
+## 4. 阶段 1：Repair 权限与领域正确性 [x]
 
-**状态：** `not_started`
+**状态：** `completed`
 **目标：** Repair 只能修改 Checker finding 明确授权的真实对象，同时允许在两个已授权端点之间补建合法缺失关系。
 
 ### 文件所有权
@@ -148,16 +148,16 @@ interface GrowthRepairAuthorizedTarget {
 
 ### 实现步骤
 
-1. [ ] 写失败测试：未选中的 `documentId` 搭配已选中的 `payload.resourceId` 必须拒绝。
-2. [ ] 写失败测试：未选中的 assertion/constraint profile 通过伪造 scope 换绑必须拒绝。
-3. [ ] 写失败测试：只授权一个端点时创建 relation 必须拒绝且零 Change Set 副作用。
-4. [ ] 写成功测试：两个端点都被 finding 选中，且领域策略允许时，可创建缺失 `uses_world` / `uses_oc`。
-5. [ ] 写失败测试：端点均选中但 relation kind 不合法时，由唯一领域策略拒绝。
-6. [ ] 实现 `growthRepairTargetPolicy.ts`，按 checkpoint 回查真实 owner/scope/endpoint。
-7. [ ] Closure authority resolver 只返回经过策略编译的授权集合。
-8. [ ] 从 `growthRunLifecycle.ts` 删除重复身份判断，只保留 resolver 调用和终态门禁。
-9. [ ] 验证拒绝发生在 Worker/Change Set executor 前，正式对象、checkpoint、Change Set 数量不变。
-10. [ ] 更新 ADR。
+1. [x] 未选中的 `documentId` 搭配已选中的 `payload.resourceId` 被既有跨组件回归拒绝。
+2. [x] 未选中的 assertion/constraint profile 通过伪造 scope 换绑被既有跨组件回归拒绝。
+3. [x] 只授权一个端点时创建 relation 被拒绝且零 Change Set 副作用。
+4. [x] 两个端点都被 finding 选中且领域策略允许时，可创建缺失关系。
+5. [x] 资源 type/objectKind/parent 换绑和非法 relation kind 由新策略测试拒绝。
+6. [x] `growthRepairTargetPolicy.ts` 按 checkpoint 回查真实 owner/scope/endpoint。
+7. [x] `growthRunLifecycle.ts` 的提案门禁调用阶段策略，不再自行解释对象身份。
+8. [x] 从 `growthRunLifecycle.ts` 删除重复身份判断，只保留调用和终态门禁。
+9. [x] 拒绝发生在 Change Set executor 前，正式对象、checkpoint、Change Set 数量不变。
+10. [x] ADR 与 Main Growth 路由已更新。
 
 ### 定向验收
 
@@ -168,16 +168,16 @@ npm run verify:prompt-publication
 git diff --check
 ```
 
-- [ ] 测试全部通过、0 skipped。
-- [ ] active Prompt 身份不变。
-- [ ] ID/owner/scope 换绑和合法补关系均有回归。
-- [ ] 越权路径零副作用。
-- [ ] 暂存文件逐项审查。
-- [ ] 提交：`fix(growth): enforce repair target authority`。
+- [x] 6 个定向文件、93/93 通过、0 skipped。
+- [x] active Prompt 身份不变。
+- [x] ID/owner/scope/parent 换绑和合法补关系均有回归。
+- [x] 越权路径零副作用。
+- [x] 暂存文件逐项审查。
+- [x] 提交：`410fea7 fix(growth): enforce repair target authority`。
 
 **停止条件：** 需要修改公开协议、Schema、权限、Canon，或 finding 无法唯一解析对象身份。
 
-**完成证据：** Commit / Tests / Remaining 待填。
+**完成证据：** Commit `410fea7`；Vitest 6 files / 93 passed / 0 skipped；typecheck、Prompt publication、diff check passed；未运行 Provider。阶段 2 仍未开始。
 
 ---
 
@@ -566,7 +566,7 @@ npm run verify:installer
 
 | 能力 | 单元 | 持久化/跨组件 | 无 Provider UI | 真实 Live | 重开 | 打包 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Repair 权限 | [ ] | [ ] | N/A | 阶段 6 间接覆盖 | [ ] | N/A |
+| Repair 权限 | [x] | [x] | N/A | 阶段 6 间接覆盖 | [x] | N/A |
 | 用户规则修订 | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
 | 自询与 Creator Choice | 已有基础 | 已有基础 | [ ] | [ ] | [ ] | [ ] |
 | Closure/Checker/Repair | 已有基础 | [ ] | [ ] | [ ] | [ ] | [ ] |
@@ -598,6 +598,7 @@ npm run verify:installer
 | 日期 | 阶段 | 状态 | Commit | 验收 | 首失败/风险 |
 | --- | --- | --- | --- | --- | --- |
 | 2026-07-16 | 0 模块化基线 | completed | `a666f07` | `npm test` 756/756；typecheck/build passed | 未运行 Provider/打包 |
+| 2026-07-16 | 1 Repair 权限 | completed | `410fea7` | Vitest 93/93；typecheck/Prompt gate/diff passed | 未运行 Provider；真实 Live 留到阶段 6 |
 
 只追加经验证的行，不把计划或中间态写成完成。
 
@@ -605,14 +606,14 @@ npm run verify:installer
 
 ## 13. 当前对话进度板
 
-**已验收：1/7 阶段｜剩余：6 阶段**
+**已验收：2/7 阶段｜剩余：5 阶段**
 
 - [x] 0. 模块化基线与全量测试
-- [ ] 1. Repair 权限与领域正确性
+- [x] 1. Repair 权限与领域正确性
 - [ ] 2. 用户规则影响分析与修订
 - [ ] 3. OC 万字 Longform 自动循环
 - [ ] 4. 通用插图队列
 - [ ] 5. 生长过程与图文图鉴 UI
 - [ ] 6. 真实 Live、打包与冻结验收
 
-**下一执行入口：** 阶段 1。先写 Repair ID/owner/scope 换绑失败测试；在测试证明现有缺口之前不修改生产代码。
+**下一执行入口：** 阶段 2。先用现有 Revision Intent 的失败关闭测试确定可复用合同，再写 Impact Brief 的第一条失败测试。
