@@ -4,12 +4,27 @@ import {
   compileLongformOutlineProposal,
   compileLongformSectionProposal,
   compileLongformWriterInput,
+  longformPostInquiryInstruction,
+  longformToolPresentation,
   requireLongformWriterEvidence,
 } from "../../src/agent-worker/growth/phases/longform/growthLongformPhase";
 import { growthCapabilityVersion } from "../../src/shared/growthContract";
 import type { GrowthRunBinding } from "../../src/shared/agentWorkerProtocol";
 
 describe("Growth Longform phase", () => {
+  it("owns Longform-only tool presentation and post-Inquiry guidance", () => {
+    const outline = outlineBinding();
+    const section = sectionBinding();
+    expect(longformToolPresentation(outline, "propose_change_set")?.description).toContain("high-level OC personal-story outline");
+    expect(longformToolPresentation(section, "writer")?.description).toContain("trusted incomplete personal-story section");
+    expect(longformToolPresentation(section, "propose_change_set")?.parameters).toMatchObject({
+      properties: { outlineSectionId: { const: "turn" } },
+    });
+    expect(longformToolPresentation(section, "generate_image")).toBeNull();
+    expect(longformPostInquiryInstruction(outline)).toContain("Submit one high-level personal-story outline");
+    expect(longformPostInquiryInstruction(section)).toContain("Call Writer");
+  });
+
   it("compiles an outline using only trusted binding authority", () => {
     const binding = outlineBinding();
     const proposal = compileLongformOutlineProposal({

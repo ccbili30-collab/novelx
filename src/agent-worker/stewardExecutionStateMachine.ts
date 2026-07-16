@@ -15,13 +15,14 @@ import {
 } from "./growth/growthWorldMapBrief";
 import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "./growth/growthWorldFragment";
 import { growthInquiryBriefSchema } from "./growth/growthInquiryBrief";
-import { growthLongformOutlineParameters } from "./growth/growthLongformOutline";
 import { resolveGrowthPhasePlan } from "./growth/core/growthPhaseRegistry";
 import {
   captureLongformWriterCandidate,
   compileLongformOutlineProposal,
   compileLongformSectionProposal,
   compileLongformWriterInput,
+  longformPostInquiryInstruction,
+  longformToolPresentation,
   requireLongformWriterEvidence,
 } from "./growth/phases/longform/growthLongformPhase";
 import {
@@ -333,9 +334,11 @@ export function createStewardExecutionStateMachine(input: {
     },
   };
 
-  const wrappedOperationalTools = input.operationalTools.map((original): AgentTool => ({
-    ...original,
-    ...(input.growthBinding?.kind === "closure_evaluation" && original.name === "checker" ? {
+  const wrappedOperationalTools = input.operationalTools.map((original): AgentTool => {
+    const longformPresentation = longformToolPresentation(input.growthBinding, original.name);
+    return {
+      ...original,
+      ...(input.growthBinding?.kind === "closure_evaluation" && original.name === "checker" ? {
       description: "Independently review the trusted pinned Closure facet assessment. Parameters are compiled by the Harness from the recorded Receipt; do not supply content, evidence, scope, checkpoint, profile, or authority fields.",
       parameters: Type.Object({}, { additionalProperties: false }),
     } : input.growthBinding?.kind === "closure_evaluation" && original.name === "submit_closure_checker_review" ? {
@@ -343,18 +346,8 @@ export function createStewardExecutionStateMachine(input: {
       parameters: Type.Object({}, { additionalProperties: false }),
     } : input.growthBinding?.kind === "repair" && original.name === "propose_change_set" ? {
       description: `Submit exactly one source-bound Change Set for the selected Closure repair. Repair only this objective: ${input.growthBinding.closureRepair?.repairObjective ?? "the selected finding"}. Do not rewrite unrelated resources, add images, or broaden the task.`,
-    } : input.growthBinding?.longformAuthority?.phase === "outline" && original.name === "propose_change_set" ? {
-      description: "Submit one high-level OC personal-story outline. Supply only story title, summary, section objectives, cited evidence, continuity constraints, and bounded character ranges. Main story, world, focus OC, personal-story resource, document identities, checkpoint, and Receipt are trusted by the Harness.",
-      parameters: growthLongformOutlineParameters,
-    } : input.growthBinding?.longformAuthority?.phase === "section" && original.name === "writer" ? {
-      description: "Write exactly the one trusted incomplete personal-story section from pinned evidence and prior prose. Parameters are compiled by the Harness; do not supply resource, document, checkpoint, Receipt, or evidence authority.",
-      parameters: Type.Object({}, { additionalProperties: false }),
-    } : input.growthBinding?.longformAuthority?.phase === "section" && original.name === "propose_change_set" ? {
-      description: "Persist the immediately preceding Writer candidate as the selected personal-story section. Supply only the selected outline section local ID; all content and project authority are compiled by the Harness.",
-      parameters: Type.Object({
-        outlineSectionId: Type.Literal(input.growthBinding.longformAuthority.selectedSectionId),
-      }, { additionalProperties: false }),
-    } : growthFocus(input.growthBinding) === "story" && original.name === "writer" ? {
+    } : longformPresentation ? longformPresentation
+    : growthFocus(input.growthBinding) === "story" && original.name === "writer" ? {
       description: "Create a candidate formal story opening from a high-level Story Brief and the pinned formal-world evidence. Supply only the creative brief: premise, opening situation, central tension, point of view, tone, required/avoided elements, and target length. This is Creator authoring, not a player or GM turn. Do not supply source material, evidence IDs, GM resolutions, resource IDs, or authority fields.",
       parameters: growthStoryBriefParameters,
     } : growthFocus(input.growthBinding) === "story" && original.name === "propose_change_set" ? {
@@ -448,12 +441,11 @@ export function createStewardExecutionStateMachine(input: {
         if (plan?.objective !== "inspect_files") nextStepIndex += 1;
         if (name !== "submit_growth_inquiry") executions.push({ tool: name, status: "succeeded", details });
         const nextTool = requiredNextTool();
-        const instruction = name === "submit_growth_inquiry" && input.growthBinding?.longformAuthority?.phase === "outline"
-          ? "The pinned evidence and Inquiry are durable. Submit one high-level personal-story outline now; do not supply project identifiers or authority fields."
-          : name === "submit_growth_inquiry" && input.growthBinding?.longformAuthority?.phase === "section"
-          ? "The pinned evidence and Inquiry are durable. Call Writer for the one trusted incomplete personal-story section now."
-          : name === "submit_growth_inquiry" && growthFocus(input.growthBinding) === "oc" && nextTool === "propose_change_set"
+        const instruction = name === "submit_growth_inquiry"
+          ? longformPostInquiryInstruction(input.growthBinding)
+            ?? (growthFocus(input.growthBinding) === "oc" && nextTool === "propose_change_set"
           ? "The pinned Growth Receipt contains one trusted formal story. Create the required high-level OC Fragment now; do not repeat retrieval or supply low-level identifiers."
+          : undefined)
           : undefined;
         return appendRequiredNextTool(result, nextTool, instruction);
       } catch (error) {
@@ -465,8 +457,9 @@ export function createStewardExecutionStateMachine(input: {
         blockReason = "tool_failed";
         throw error;
       }
-    },
-  }));
+      },
+    };
+  });
 
   const finalTool: AgentTool = {
     ...input.resultCapture.tool,

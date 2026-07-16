@@ -1,7 +1,9 @@
+import { Type, type TSchema } from "typebox";
 import { writerOutputSchema } from "../../../contracts/roleOutputs";
 import type { GrowthRunBinding } from "../../../../shared/agentWorkerProtocol";
 import {
   compileGrowthLongformOutlineChangeSet,
+  growthLongformOutlineParameters,
   type GrowthLongformOutline,
 } from "../../growthLongformOutline";
 import { compileGrowthLongformSectionChangeSet } from "../../growthLongformSection";
@@ -11,9 +13,52 @@ export interface GrowthLongformWriterCandidate {
   evidenceIds: string[];
 }
 
+export interface GrowthLongformToolPresentation {
+  description: string;
+  parameters?: TSchema;
+}
+
 type LongformAuthority = NonNullable<GrowthRunBinding["longformAuthority"]>;
 type OutlineAuthority = Extract<LongformAuthority, { phase: "outline" }>;
 type SectionAuthority = Extract<LongformAuthority, { phase: "section" }>;
+
+export function longformToolPresentation(
+  binding: GrowthRunBinding | undefined,
+  toolName: string,
+): GrowthLongformToolPresentation | null {
+  const authority = binding?.longformAuthority;
+  if (authority?.phase === "outline" && toolName === "propose_change_set") {
+    return {
+      description: "Submit one high-level OC personal-story outline. Supply only story title, summary, section objectives, cited evidence, continuity constraints, and bounded character ranges. Main story, world, focus OC, personal-story resource, document identities, checkpoint, and Receipt are trusted by the Harness.",
+      parameters: growthLongformOutlineParameters,
+    };
+  }
+  if (authority?.phase === "section" && toolName === "writer") {
+    return {
+      description: "Write exactly the one trusted incomplete personal-story section from pinned evidence and prior prose. Parameters are compiled by the Harness; do not supply resource, document, checkpoint, Receipt, or evidence authority.",
+      parameters: Type.Object({}, { additionalProperties: false }),
+    };
+  }
+  if (authority?.phase === "section" && toolName === "propose_change_set") {
+    return {
+      description: "Persist the immediately preceding Writer candidate as the selected personal-story section. Supply only the selected outline section local ID; all content and project authority are compiled by the Harness.",
+      parameters: Type.Object({
+        outlineSectionId: Type.Literal(authority.selectedSectionId),
+      }, { additionalProperties: false }),
+    };
+  }
+  return null;
+}
+
+export function longformPostInquiryInstruction(binding: GrowthRunBinding | undefined): string | undefined {
+  if (binding?.longformAuthority?.phase === "outline") {
+    return "The pinned evidence and Inquiry are durable. Submit one high-level personal-story outline now; do not supply project identifiers or authority fields.";
+  }
+  if (binding?.longformAuthority?.phase === "section") {
+    return "The pinned evidence and Inquiry are durable. Call Writer for the one trusted incomplete personal-story section now.";
+  }
+  return undefined;
+}
 
 export function compileLongformOutlineProposal(input: {
   binding: GrowthRunBinding;
