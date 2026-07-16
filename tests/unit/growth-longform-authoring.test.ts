@@ -42,7 +42,6 @@ describe("Growth longform authoring", () => {
       worldResourceId: "world-1",
       focusOcResourceId: "oc-focus-1",
       personalStoryResourceId: "story-personal-1",
-      outlineDocumentId: "document-outline-1",
     });
     expect(proposal.items.map((item) => item.kind)).toEqual([
       "resource.put", "creative_relation.put", "creative_relation.put",
@@ -72,7 +71,7 @@ describe("Growth longform authoring", () => {
     expect(() => compileGrowthLongformOutlineChangeSet(validOutlineInput, {
       outlineId: "outline-1", checkpointId: "checkpoint-1", receiptId: "receipt-1",
       availableEvidenceIds: evidence, mainStoryResourceId: "story-main-1", worldResourceId: "world-1",
-      focusOcResourceId: "oc-focus-1", personalStoryResourceId: "", outlineDocumentId: "document-outline-1",
+      focusOcResourceId: "oc-focus-1", personalStoryResourceId: "",
     })).toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_OUTLINE_AUTHORITY_INVALID" }));
   });
 
@@ -108,13 +107,12 @@ describe("Growth longform authoring", () => {
     }, {
       ...authority(outline),
       storyResourceId: "story-personal-1",
-      sectionDocumentId: "document-section-origin",
       sectionSortOrder: 1,
     });
     expect(proposal.items.map((item) => item.kind)).toEqual(["creative_document.put", "document.put"]);
     expect(proposal.items.find((item) => item.kind === "creative_document.put")).toMatchObject({
       payload: {
-        documentId: "document-section-origin",
+        documentId: expect.stringMatching(/^growth-longform-section-/),
         resourceId: "story-personal-1",
         kind: "prose",
         sortOrder: 1,

@@ -69,7 +69,6 @@ export interface GrowthLongformOutlineChangeSetAuthority extends GrowthLongformO
   worldResourceId: string;
   focusOcResourceId: string;
   personalStoryResourceId: string;
-  outlineDocumentId: string;
 }
 
 export interface GrowthLongformOutline {
@@ -128,11 +127,11 @@ export function compileGrowthLongformOutlineChangeSet(
   const worldResourceId = identifier.safeParse(authority.worldResourceId);
   const focusOcResourceId = identifier.safeParse(authority.focusOcResourceId);
   const personalStoryResourceId = identifier.safeParse(authority.personalStoryResourceId);
-  const outlineDocumentId = identifier.safeParse(authority.outlineDocumentId);
   if (!mainStoryResourceId.success || !worldResourceId.success || !focusOcResourceId.success
-    || !personalStoryResourceId.success || !outlineDocumentId.success) {
+    || !personalStoryResourceId.success) {
     throw outlineError("GROWTH_LONGFORM_OUTLINE_AUTHORITY_INVALID");
   }
+  const outlineDocumentId = deriveGrowthLongformOutlineDocumentId(personalStoryResourceId.data, outline.outlineId);
   const prefix = `growth-${createHash("sha256").update(`${outline.outlineId}:outline`).digest("hex").slice(0, 20)}`;
   const storyItemId = `${prefix}-personal-story`;
   const usesWorldItemId = `${prefix}-uses-world`;
@@ -190,7 +189,7 @@ export function compileGrowthLongformOutlineChangeSet(
         dependsOn: [storyItemId],
         kind: "creative_document.put",
         payload: {
-          documentId: outlineDocumentId.data,
+          documentId: outlineDocumentId,
           create: true,
           resourceId: personalStoryResourceId.data,
           kind: "writing_constraints",
@@ -205,7 +204,7 @@ export function compileGrowthLongformOutlineChangeSet(
         kind: "document.put",
         payload: {
           resourceId: personalStoryResourceId.data,
-          creativeDocumentId: outlineDocumentId.data,
+          creativeDocumentId: outlineDocumentId,
           content,
         },
       },
@@ -225,6 +224,13 @@ export function compileGrowthLongformOutlineChangeSet(
       },
     ],
   });
+}
+
+export function deriveGrowthLongformOutlineDocumentId(personalStoryResourceId: string, outlineId: string): string {
+  const story = identifier.safeParse(personalStoryResourceId);
+  const outline = identifier.safeParse(outlineId);
+  if (!story.success || !outline.success) throw outlineError("GROWTH_LONGFORM_OUTLINE_AUTHORITY_INVALID");
+  return `growth-longform-outline-${createHash("sha256").update(`${story.data}:${outline.data}`).digest("hex").slice(0, 32)}`;
 }
 
 function firstOutlineCode(messages: string[]): GrowthLongformOutlineErrorCode {

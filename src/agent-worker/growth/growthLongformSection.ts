@@ -36,7 +36,6 @@ export interface GrowthLongformSectionAuthority {
 
 export interface GrowthLongformSectionChangeSetAuthority extends GrowthLongformSectionAuthority {
   storyResourceId: string;
-  sectionDocumentId: string;
   sectionSortOrder: number;
 }
 
@@ -126,11 +125,15 @@ export function compileGrowthLongformSectionChangeSet(
 ): ProposeChangeSetArgs {
   const section = compileGrowthLongformSection(input, authority);
   const storyResourceId = identifier.safeParse(authority.storyResourceId);
-  const sectionDocumentId = identifier.safeParse(authority.sectionDocumentId);
   const sectionSortOrder = z.number().int().min(0).max(2_147_483_647).safeParse(authority.sectionSortOrder);
-  if (!storyResourceId.success || !sectionDocumentId.success || !sectionSortOrder.success) {
+  if (!storyResourceId.success || !sectionSortOrder.success) {
     throw sectionError("GROWTH_LONGFORM_SECTION_AUTHORITY_MISMATCH");
   }
+  const sectionDocumentId = deriveGrowthLongformSectionDocumentId(
+    storyResourceId.data,
+    section.outlineId,
+    section.outlineSectionId,
+  );
   const outlineSection = authority.outline.sections.find((candidate) => candidate.localId === section.outlineSectionId)!;
   const prefix = `growth-${createHash("sha256").update(`${section.outlineId}:${section.outlineSectionId}`).digest("hex").slice(0, 20)}`;
   const creativeItemId = `${prefix}-creative-document`;
@@ -143,7 +146,7 @@ export function compileGrowthLongformSectionChangeSet(
         dependsOn: [],
         kind: "creative_document.put",
         payload: {
-          documentId: sectionDocumentId.data,
+          documentId: sectionDocumentId,
           create: true,
           resourceId: storyResourceId.data,
           kind: "prose",
@@ -158,12 +161,28 @@ export function compileGrowthLongformSectionChangeSet(
         kind: "document.put",
         payload: {
           resourceId: storyResourceId.data,
-          creativeDocumentId: sectionDocumentId.data,
+          creativeDocumentId: sectionDocumentId,
           content: section.candidateText,
         },
       },
     ],
   });
+}
+
+export function deriveGrowthLongformSectionDocumentId(
+  personalStoryResourceId: string,
+  outlineId: string,
+  sectionLocalId: string,
+): string {
+  const story = identifier.safeParse(personalStoryResourceId);
+  const outline = identifier.safeParse(outlineId);
+  const section = localId.safeParse(sectionLocalId);
+  if (!story.success || !outline.success || !section.success) {
+    throw sectionError("GROWTH_LONGFORM_SECTION_AUTHORITY_MISMATCH");
+  }
+  return `growth-longform-section-${createHash("sha256")
+    .update(`${story.data}:${outline.data}:${section.data}`)
+    .digest("hex").slice(0, 32)}`;
 }
 
 function hasRepeatedFiller(text: string): boolean {
