@@ -103,10 +103,49 @@ const checkerBlockedSchema = z.object({
   reasons: z.array(blockedReasonSchema).min(1).max(20),
 }).strict();
 
+const closureFindingSchema = z.object({
+  localId: z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/),
+  severity: z.enum(["minor", "major", "blocking"]),
+  category: z.enum([
+    "world_consistency",
+    "story_consistency",
+    "character_consistency",
+    "causality",
+    "continuity",
+    "evidence_gap",
+    "scope_violation",
+    "creator_choice_required",
+  ]),
+  evidenceIds: z.array(identifierSchema).min(1).max(100),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  repairObjective: z.string().trim().min(1).max(2_000),
+}).strict();
+
+const checkerClosureReviewSchema = z.object({
+  status: z.literal("closure_review"),
+  decision: z.enum(["accepted", "repairs_required", "blocked"]),
+  adverseFindings: z.array(closureFindingSchema).max(100),
+}).strict().superRefine((value, context) => {
+  const localIds = value.adverseFindings.map((finding) => finding.localId);
+  if (new Set(localIds).size !== localIds.length) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Closure finding local IDs must be unique." });
+  }
+  if (value.decision === "accepted" && value.adverseFindings.length > 0) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Accepted Closure review cannot contain adverse findings." });
+  }
+  if (value.decision === "repairs_required" && !value.adverseFindings.some((finding) => finding.severity === "major" || finding.severity === "blocking")) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Closure repairs require a major or blocking finding." });
+  }
+  if (value.decision === "blocked" && !value.adverseFindings.some((finding) => finding.severity === "blocking")) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Blocked Closure review requires a blocking finding." });
+  }
+});
+
 export const checkerOutputSchema = z.discriminatedUnion("status", [
   checkerPassedSchema,
   checkerFindingsSchema,
   checkerBlockedSchema,
+  checkerClosureReviewSchema,
 ]);
 
 export const roleOutputSchemas = {

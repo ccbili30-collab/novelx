@@ -27,12 +27,36 @@ const writerParameters = Type.Object({
   styleConstraints: Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 100 }),
 }, { additionalProperties: false });
 
-const checkerParameters = Type.Object({
+const genericCheckerParameters = Type.Object({
   candidateText: Type.String({ minLength: 1, maxLength: 100_000 }),
   sourceMaterial: Type.String({ minLength: 1, maxLength: 160_000 }),
   evidenceIds: Type.Array(identifier, { minItems: 1, maxItems: 200 }),
   constraints: Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 100 }),
 }, { additionalProperties: false });
+
+const closureFacetParameters = Type.Object({
+  facetId: identifier,
+  state: Type.Union([Type.Literal("satisfied"), Type.Literal("missing"), Type.Literal("conflicted"), Type.Literal("blocked")]),
+  coverage: Type.Union([Type.Literal("complete"), Type.Literal("partial"), Type.Literal("unknown")]),
+  safeSummary: Type.String({ minLength: 1, maxLength: 1_000 }),
+  evidenceIds: Type.Array(identifier, { maxItems: 100 }),
+}, { additionalProperties: false });
+
+const closureCheckerParameters = Type.Object({
+  evaluationKind: Type.Literal("closure_v4"),
+  profileKind: Type.Union([
+    Type.Literal("world_birth"),
+    Type.Literal("story_universe"),
+    Type.Literal("oc_saga"),
+    Type.Literal("mixed_birth"),
+  ]),
+  sourceMaterial: Type.String({ minLength: 1, maxLength: 160_000 }),
+  evidenceIds: Type.Array(identifier, { minItems: 1, maxItems: 200 }),
+  facetResults: Type.Array(closureFacetParameters, { minItems: 1, maxItems: 100 }),
+  constraints: Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 100 }),
+}, { additionalProperties: false });
+
+const checkerParameters = Type.Union([genericCheckerParameters, closureCheckerParameters]);
 
 export type WriterSpecialistInput = Static<typeof writerParameters>;
 export type CheckerSpecialistInput = Static<typeof checkerParameters>;
@@ -148,7 +172,7 @@ export function createBoundSpecialistToolSet(
   const checker: AgentTool<typeof checkerParameters> = {
     name: "checker",
     label: "调用校验器",
-    description: "Check candidate content against supplied evidence and constraints. This tool cannot rewrite or commit content.",
+    description: "Check candidate content or a Closure v4 facet assessment against supplied evidence and constraints. Closure review must use closure_review. This tool cannot rewrite or commit content.",
     parameters: checkerParameters,
     execute: async (_toolCallId, params, signal) => {
       const capture = createRoleOutputTool("checker");
@@ -278,9 +302,17 @@ function validateCheckerSources(input: Static<typeof checkerParameters>, result:
   const allowedEvidence = new Set(input.evidenceIds);
   const evidenceIds = result.status === "findings"
     ? result.findings.flatMap((finding) => finding.evidence.map((evidence) => evidence.sourceId))
+    : result.status === "closure_review"
+      ? result.adverseFindings.flatMap((finding) => finding.evidenceIds)
     : result.status === "blocked"
       ? result.reasons.flatMap((reason) => reason.evidenceIds)
       : [];
+  if ("evaluationKind" in input && result.status !== "closure_review") {
+    throw specialistError("CHECKER_OUTPUT_SCHEMA_INVALID");
+  }
+  if (!("evaluationKind" in input) && result.status === "closure_review") {
+    throw specialistError("CHECKER_OUTPUT_SCHEMA_INVALID");
+  }
   if (evidenceIds.some((evidenceId) => !allowedEvidence.has(evidenceId))) {
     throw specialistError("CHECKER_EVIDENCE_MISMATCH");
   }

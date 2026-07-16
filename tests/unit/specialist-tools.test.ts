@@ -37,7 +37,7 @@ describe("Specialist Agent tools", () => {
     });
   });
 
-  it("allows Checker to submit only passed, findings or blocked results", async () => {
+  it("allows generic Checker to submit only passed, findings or blocked results", async () => {
     for (const submission of [checkerPassed(), checkerFindings(), checkerBlocked()]) {
       const checker = specialist("checker", async (input) => {
         expect(input.tools.map((tool) => tool.name)).toEqual(["submit_checker_result"]);
@@ -58,6 +58,35 @@ describe("Specialist Agent tools", () => {
     });
     await expect(checker.execute("checker-call", checkerInput())).rejects.toMatchObject({
       code: "CHECKER_OUTPUT_SCHEMA_INVALID",
+    });
+  });
+
+  it("requires the dedicated evidence-bound closure_review branch for Closure evaluation", async () => {
+    const closure = specialist("checker", async (input) => {
+      expect(input.userInput).toContain('"evaluationKind":"closure_v4"');
+      await input.tools[0].execute("checker-closure", checkerClosureReview());
+      return { text: "raw Checker output is ignored", stopReason: "stop" };
+    });
+    const result = await closure.execute("checker-call", closureCheckerInput());
+    expect(result.details).toEqual(checkerClosureReview());
+
+    const genericOutput = specialist("checker", async (input) => {
+      await input.tools[0].execute("checker-passed", checkerPassed());
+      return { text: "", stopReason: "stop" };
+    });
+    await expect(genericOutput.execute("checker-call", closureCheckerInput())).rejects.toMatchObject({
+      code: "CHECKER_OUTPUT_SCHEMA_INVALID",
+    });
+
+    const forgedEvidence = specialist("checker", async (input) => {
+      await input.tools[0].execute("checker-closure", {
+        ...checkerClosureReview(),
+        adverseFindings: [{ ...checkerClosureReview().adverseFindings[0], evidenceIds: ["invented-evidence"] }],
+      });
+      return { text: "", stopReason: "stop" };
+    });
+    await expect(forgedEvidence.execute("checker-call", closureCheckerInput())).rejects.toMatchObject({
+      code: "CHECKER_EVIDENCE_MISMATCH",
     });
   });
 
@@ -285,6 +314,23 @@ function checkerInput() {
   };
 }
 
+function closureCheckerInput() {
+  return {
+    evaluationKind: "closure_v4" as const,
+    profileKind: "mixed_birth" as const,
+    sourceMaterial: "潮汐历法、港口制度与继承战争均来自当前固定检查点。",
+    evidenceIds: ["evidence-1"],
+    facetResults: [{
+      facetId: "closure.world.fact.history_timeline",
+      state: "satisfied" as const,
+      coverage: "complete" as const,
+      safeSummary: "历史时间线具有固定来源。",
+      evidenceIds: ["evidence-1"],
+    }],
+    constraints: ["只报告有来源的不利发现；不得补写替代正文。"],
+  };
+}
+
 function writerCandidate() {
   return {
     status: "candidate" as const,
@@ -331,6 +377,21 @@ function checkerBlocked() {
       code: "missing_source" as const,
       message: "缺少可核验来源。",
       evidenceIds: [],
+    }],
+  };
+}
+
+function checkerClosureReview() {
+  return {
+    status: "closure_review" as const,
+    decision: "repairs_required" as const,
+    adverseFindings: [{
+      localId: "history_gap",
+      severity: "major" as const,
+      category: "causality" as const,
+      evidenceIds: ["evidence-1"],
+      safeSummary: "战争结果与继承制度之间缺少因果桥接。",
+      repairObjective: "补充战争结果怎样改变继承制度的有来源说明。",
     }],
   };
 }

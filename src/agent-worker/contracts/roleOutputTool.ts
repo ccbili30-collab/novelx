@@ -99,6 +99,31 @@ const checkerParameters = Type.Union([
     status: Type.Literal("blocked"),
     reasons: Type.Array(blockedReason, { minItems: 1, maxItems: 20 }),
   }, { additionalProperties: false }),
+  Type.Object({
+    status: Type.Literal("closure_review"),
+    decision: Type.Union([
+      Type.Literal("accepted"),
+      Type.Literal("repairs_required"),
+      Type.Literal("blocked"),
+    ]),
+    adverseFindings: Type.Array(Type.Object({
+      localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }),
+      severity: Type.Union([Type.Literal("minor"), Type.Literal("major"), Type.Literal("blocking")]),
+      category: Type.Union([
+        Type.Literal("world_consistency"),
+        Type.Literal("story_consistency"),
+        Type.Literal("character_consistency"),
+        Type.Literal("causality"),
+        Type.Literal("continuity"),
+        Type.Literal("evidence_gap"),
+        Type.Literal("scope_violation"),
+        Type.Literal("creator_choice_required"),
+      ]),
+      evidenceIds: Type.Array(identifier, { minItems: 1, maxItems: 100 }),
+      safeSummary: Type.String({ minLength: 1, maxLength: 1_000 }),
+      repairObjective: Type.String({ minLength: 1, maxLength: 2_000 }),
+    }, { additionalProperties: false }), { maxItems: 100 }),
+  }, { additionalProperties: false }),
 ]);
 
 const parametersByRole: Record<PromptRole, TSchema> = {
@@ -147,7 +172,7 @@ function resultToolDescription(role: PromptRole): string {
     return "Submit exactly one Writer result. candidate requires candidateText, evidenceIds, gmResolutionId and empty authorityChanges. blocked requires reasons with code, message and evidenceIds. Runtime validation remains strict.";
   }
   if (role === "checker") {
-    return "Submit exactly one Checker result. passed requires empty findings. findings requires findings with severity, category, evidence, location, scope and reason. blocked requires reasons with code, message and evidenceIds. Runtime validation remains strict.";
+    return "Submit exactly one Checker result. passed requires empty findings. findings requires findings with severity, category, evidence, location, scope and reason. closure_review requires decision and evidence-backed adverseFindings with localId, severity, category, evidenceIds, safeSummary and repairObjective. blocked requires reasons with code, message and evidenceIds. Runtime validation remains strict.";
   }
   return "Submit the single structured Steward result for this run. This tool does not write project data.";
 }

@@ -174,7 +174,7 @@ describe("agent worker fail-closed contract", () => {
 
     expect(steward.type).toBe("object");
     expect(writer.anyOf).toHaveLength(2);
-    expect(checker.anyOf).toHaveLength(3);
+    expect(checker.anyOf).toHaveLength(4);
   });
 
   it("accepts only valid Writer branches and rejects cross-branch or extra fields", () => {
@@ -202,7 +202,7 @@ describe("agent worker fail-closed contract", () => {
     })).toThrow();
   });
 
-  it("accepts only valid Checker branches and rejects cross-branch or extra fields", () => {
+  it("accepts only valid Checker branches and rejects cross-branch or extra fields", async () => {
     const tool = createRoleOutputTool("checker").tool;
     const passed = { status: "passed", findings: [] };
     const findings = {
@@ -217,9 +217,28 @@ describe("agent worker fail-closed contract", () => {
       status: "blocked",
       reasons: [{ code: "major_conflict", message: "来源冲突。", evidenceIds: ["source-1"] }],
     };
-    for (const [id, arguments_] of [["checker-passed", passed], ["checker-findings", findings], ["checker-blocked", blocked]] as const) {
+    const closureReview = {
+      status: "closure_review",
+      decision: "repairs_required",
+      adverseFindings: [{
+        localId: "history_gap",
+        severity: "major",
+        category: "causality",
+        evidenceIds: ["source-1"],
+        safeSummary: "战争结果与继承制度之间缺少因果桥接。",
+        repairObjective: "补充战争结果怎样改变继承制度的有来源说明。",
+      }],
+    };
+    for (const [id, arguments_] of [["checker-passed", passed], ["checker-findings", findings], ["checker-blocked", blocked], ["checker-closure", closureReview]] as const) {
       expect(validateToolArguments(tool, { type: "toolCall", id, name: tool.name, arguments: arguments_ })).toEqual(arguments_);
     }
+    const structurallyValidButSemanticallyInvalid = validateToolArguments(tool, {
+      type: "toolCall", id: "checker-closure-invalid", name: tool.name,
+      arguments: { ...closureReview, decision: "accepted" },
+    });
+    await expect(tool.execute("checker-closure-invalid", structurallyValidButSemanticallyInvalid)).rejects.toMatchObject({
+      code: "AGENT_OUTPUT_SCHEMA_INVALID",
+    });
     expect(() => validateToolArguments(tool, {
       type: "toolCall", id: "checker-cross", name: tool.name,
       arguments: { ...passed, reasons: [] },
