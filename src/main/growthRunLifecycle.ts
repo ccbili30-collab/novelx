@@ -217,6 +217,8 @@ class BoundGrowthRun implements AgentRunInternalBinding {
       ...input.gateway,
       retrieveGraphEvidence: (args, context) => this.#retrieve(args, context),
       submitGrowthInquiry: (args, context) => this.#submitInquiry(args, context),
+      submitClosureSelfAssessment: () => { throw growthRunError("GROWTH_BINDING_INVALID"); },
+      submitClosureCheckerReview: () => { throw growthRunError("GROWTH_BINDING_INVALID"); },
       proposeChangeSet: (args, context) => this.#propose(input.gateway, args, context),
       generateImage: (args, context) => this.#generate(input.gateway, args, context),
     };

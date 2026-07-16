@@ -20,6 +20,8 @@ import {
   retrieveGraphEvidenceResultSchema,
   growthRetrieveGraphEvidenceResultSchema,
   submitGrowthInquiryResultSchema,
+  submitClosureSelfAssessmentResultSchema,
+  submitClosureCheckerReviewResultSchema,
   searchProjectFilesResultSchema,
   statProjectFileResultSchema,
   saveTaskNoteResultSchema,
@@ -55,6 +57,10 @@ import {
   type GrowthRetrieveGraphEvidenceResult,
   type SubmitGrowthInquiryArgs,
   type SubmitGrowthInquiryResult,
+  type SubmitClosureSelfAssessmentArgs,
+  type SubmitClosureSelfAssessmentResult,
+  type SubmitClosureCheckerReviewArgs,
+  type SubmitClosureCheckerReviewResult,
   type GrowthRunBinding,
   type GenerateImageArgs,
   type GenerateImageResult,
@@ -112,6 +118,14 @@ export interface GrowthAgentToolGateway extends Omit<AgentToolGateway, "retrieve
     args: SubmitGrowthInquiryArgs,
     context: AgentToolInvocationContext,
   ): Promise<SubmitGrowthInquiryResult>;
+  submitClosureSelfAssessment(
+    args: SubmitClosureSelfAssessmentArgs,
+    context: AgentToolInvocationContext,
+  ): Promise<SubmitClosureSelfAssessmentResult>;
+  submitClosureCheckerReview(
+    args: SubmitClosureCheckerReviewArgs,
+    context: AgentToolInvocationContext,
+  ): Promise<SubmitClosureCheckerReviewResult>;
 }
 
 /** Internal Main-only binding hook. It is never populated from Renderer or model tool arguments. */
@@ -496,6 +510,14 @@ export class AgentProcessSupervisor {
           if (!run.internalBinding) throw Object.assign(new Error("Growth Inquiry requires an internal binding."), { code: "GROWTH_BINDING_INVALID" });
           return await run.gateway!.submitGrowthInquiry(request.args, context);
         }
+        case "submit_closure_self_assessment": {
+          if (!run.internalBinding) throw Object.assign(new Error("Closure assessment requires an internal binding."), { code: "GROWTH_BINDING_INVALID" });
+          return await run.gateway!.submitClosureSelfAssessment(request.args, context);
+        }
+        case "submit_closure_checker_review": {
+          if (!run.internalBinding) throw Object.assign(new Error("Closure review requires an internal binding."), { code: "GROWTH_BINDING_INVALID" });
+          return await run.gateway!.submitClosureCheckerReview(request.args, context);
+        }
         case "inspect_project_files": return await run.gateway!.inspectProjectFiles(request.args, context);
         case "list_project_directory": return await run.gateway!.listProjectDirectory(request.args, context);
         case "stat_project_file": return await run.gateway!.statProjectFile(request.args, context);
@@ -603,6 +625,35 @@ export class AgentProcessSupervisor {
           phase: "completed",
           domains: ["graph"],
         });
+        return;
+      }
+      if (request.tool === "submit_closure_self_assessment" || request.tool === "submit_closure_checker_review") {
+        const parsed = request.tool === "submit_closure_self_assessment"
+          ? submitClosureSelfAssessmentResultSchema.safeParse(result)
+          : submitClosureCheckerReviewResultSchema.safeParse(result);
+        if (!parsed.success) {
+          if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+          this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
+          return;
+        }
+        try {
+          run.audit.appendToolTerminal({
+            runId,
+            invocationId: stewardInvocationId(runId),
+            toolInvocationId: request.requestId,
+            eventType: "succeeded",
+            errorCode: null,
+            resultSha256: canonicalAuditHash(parsed.data),
+          });
+        } catch {
+          this.#failAudit(runId);
+          return;
+        }
+        this.#sendToolSuccess(run, {
+          type: "tool.response", runId, requestId: request.requestId, ok: true,
+          tool: request.tool, result: parsed.data,
+        });
+        run.emit({ type: "run.activity", runId, label: presentation.label, phase: "completed", domains: ["graph"] });
         return;
       }
       if (request.tool === "inspect_project_files" || isProjectFileTool(request.tool)) {
@@ -1046,6 +1097,8 @@ function toolPresentation(request: AgentWorkerToolRequest): { label: string; dom
   if (isProjectFileTool(request.tool)) return { label: "检查项目文件" };
   if (request.tool === "retrieve_graph_evidence") return { label: "检索项目事实", domains: ["graph"] };
   if (request.tool === "submit_growth_inquiry") return { label: "证据化自询", domains: ["graph"] };
+  if (request.tool === "submit_closure_self_assessment") return { label: "检查内容闭环", domains: ["graph"] };
+  if (request.tool === "submit_closure_checker_review") return { label: "记录独立检查", domains: ["graph"] };
   if (request.tool === "inspect_project_files") return { label: "检查项目文件" };
   if (request.tool === "generate_image") {
     const image = generateImageArgsSchema.safeParse(request.args);
