@@ -21,6 +21,7 @@ import {
   type GrowthLongformOutline,
 } from "./growth/growthLongformOutline";
 import { compileGrowthLongformSectionChangeSet } from "./growth/growthLongformSection";
+import { resolveGrowthPhasePlan } from "./growth/core/growthPhaseRegistry";
 import {
   isExplicitGreenfieldFreeCreateRequest,
   inspectProjectFilesResultSchema,
@@ -174,43 +175,11 @@ const planSchema = z.object({
 type StewardPlan = z.infer<typeof planSchema>;
 
 function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
-  if (binding.kind === "closure_evaluation") {
-    return {
-      objective: "orchestrate",
-      scopeResourceIds: [...binding.authorizedScopeResourceIds],
-      steps: ["retrieve_graph_evidence", "submit_closure_self_assessment"],
-    };
-  }
-  if (binding.kind === "repair") {
-    return {
-      objective: "change_set",
-      scopeResourceIds: [...binding.authorizedScopeResourceIds],
-      steps: ["retrieve_graph_evidence", "propose_change_set"],
-    };
-  }
-  if (binding.longformAuthority?.phase === "outline") {
-    return {
-      objective: "change_set",
-      scopeResourceIds: [...binding.authorizedScopeResourceIds],
-      steps: ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"],
-    };
-  }
-  if (binding.longformAuthority?.phase === "section") {
-    return {
-      objective: "change_set",
-      scopeResourceIds: [...binding.authorizedScopeResourceIds],
-      steps: ["retrieve_graph_evidence", "submit_growth_inquiry", "writer", "propose_change_set"],
-    };
-  }
-  const focus = growthFocus(binding);
+  const phase = resolveGrowthPhasePlan(binding);
   return {
-    objective: "change_set",
+    objective: phase.objective,
     scopeResourceIds: [...binding.authorizedScopeResourceIds],
-    steps: focus === "world"
-      ? ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set", "generate_image"]
-      : focus === "oc"
-      ? ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"]
-      : ["retrieve_graph_evidence", "submit_growth_inquiry", "writer", "propose_change_set"],
+    steps: [...phase.steps],
   };
 }
 
