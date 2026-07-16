@@ -9,9 +9,11 @@ import { AgentAuditRepository } from "../../src/domain/audit/agentAuditRepositor
 import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
 import { GROWTH_CLOSURE_FACETS } from "../../src/domain/growth/growthClosureEvaluator";
+import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { CreativeRelationRepository } from "../../src/domain/workspace/creativeRelationRepository";
 import { CreativeDocumentRepository } from "../../src/domain/workspace/creativeDocumentRepository";
+import { ConstraintProfileRepository } from "../../src/domain/workspace/constraintProfileRepository";
 import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
@@ -348,8 +350,45 @@ describe("Growth Run bridge", () => {
     const prior = await commitPriorResourceCycle(
       setup, setup.cycleId, "world", "world", setup.scopeId, "closure-repair-world",
     );
+    const unrelatedLocationId = "repair-unrelated-location";
+    const unrelatedDocumentId = "repair-unrelated-document";
+    const unrelatedAssertionId = "repair-unrelated-assertion";
+    const unrelatedProfileId = "repair-unrelated-profile";
+    new ResourceRepository(setup.workspace).putRevision({
+      resourceId: unrelatedLocationId, create: true, checkpointId: prior.outputCheckpointId,
+      type: "world", objectKind: "location", title: "Unrelated harbor", parentId: prior.resourceId,
+      state: "active", sortOrder: 1,
+    });
+    new CreativeDocumentRepository(setup.workspace).putRevision({
+      documentId: unrelatedDocumentId, create: true, checkpointId: prior.outputCheckpointId,
+      resourceId: unrelatedLocationId, kind: "location_profile", title: "Unrelated harbor profile",
+      state: "active", sortOrder: 0,
+    });
+    const unrelatedDocumentVersionId = new DocumentRepository(setup.workspace).putVersion({
+      resourceId: unrelatedLocationId, creativeDocumentId: unrelatedDocumentId,
+      checkpointId: prior.outputCheckpointId, content: "This location is outside the selected repair target.",
+      authorKind: "agent",
+    });
+    new AssertionRepository(setup.workspace).putVersion({
+      assertionId: unrelatedAssertionId, checkpointId: prior.outputCheckpointId,
+      scopeType: "location", scopeId: unrelatedLocationId, subject: unrelatedLocationId,
+      predicate: "closure.world.fact.geography_environment", object: { status: "unrelated" },
+      status: "current", source: { kind: "document_version", ref: unrelatedDocumentVersionId },
+    });
+    new ConstraintProfileRepository(setup.workspace).putVersion({
+      profileId: unrelatedProfileId, create: true, checkpointId: prior.outputCheckpointId,
+      scopeResourceId: unrelatedLocationId, title: "Unrelated constraints",
+      payload: {
+        narrativePerson: null, tense: null, tone: null, pacing: null, humorLevel: null,
+        prohibitedContent: [], requiredContent: [], notes: "Unrelated scope.",
+      },
+      state: "active", authorKind: "agent",
+    });
     const { growth, profile, evaluation } = createClosureEvaluation(
-      setup, prior.outputCheckpointId, GROWTH_CLOSURE_FACETS.world.resource, "repair",
+      setup, prior.outputCheckpointId, [
+        GROWTH_CLOSURE_FACETS.world.resource,
+        GROWTH_CLOSURE_FACETS.world.location,
+      ], "repair",
     );
     const evaluationWorker = new FakeWorker();
     const evaluationLifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, evaluationWorker));
@@ -368,10 +407,16 @@ describe("Growth Run bridge", () => {
       ok: true, result: { closureEvaluation: { deterministicContentReady: true } },
     }));
     const retrieval = evaluationWorker.sent.at(-1) as {
-      result: { evidence: Array<{ evidenceId: string }> };
+      result: {
+        evidence: Array<{ evidenceId: string }>;
+        closureEvaluation: { facetResults: Array<{ facetId: string; evidenceIds: string[] }> };
+      };
     };
     expect(retrieval.result.evidence).not.toHaveLength(0);
-    const targetEvidenceId = retrieval.result.evidence[0]!.evidenceId;
+    const targetEvidenceId = retrieval.result.closureEvaluation.facetResults
+      .find((facet) => facet.facetId === GROWTH_CLOSURE_FACETS.world.resource)!.evidenceIds[0]!;
+    const locationEvidenceId = retrieval.result.closureEvaluation.facetResults
+      .find((facet) => facet.facetId === GROWTH_CLOSURE_FACETS.world.location)!.evidenceIds[0]!;
     evaluationWorker.receive({
       type: "tool.request", runId: evaluationRunId, requestId: randomUUID(),
       tool: "submit_closure_self_assessment",
@@ -389,8 +434,8 @@ describe("Growth Run bridge", () => {
         decision: "repairs_required",
         adverseFindings: [{
           localId: "repair-world-title", severity: "major", category: "world_consistency",
-          evidenceIds: [targetEvidenceId], safeSummary: "The world title is too generic.",
-          repairObjective: "Give the existing world a distinctive title without changing unrelated nodes.",
+          evidenceIds: [targetEvidenceId, locationEvidenceId], safeSummary: "The world title is generic and its selected harbor lacks a relation.",
+          repairObjective: "Rename the selected world and connect only the selected harbor.",
         }],
       },
     });
@@ -441,14 +486,17 @@ describe("Growth Run bridge", () => {
     expect(repairCommand.growthBinding).toMatchObject({
       kind: "repair", closureProfile: null,
       closureRepair: {
-        repairObjective: "Give the existing world a distinctive title without changing unrelated nodes.",
-        targetEvidenceIds: [targetEvidenceId],
+        repairObjective: "Rename the selected world and connect only the selected harbor.",
+        targetEvidenceIds: [targetEvidenceId, locationEvidenceId],
       },
     });
     beginStewardInvocation(setup.workspace, repairRunId);
     requestGrowthRetrieval(repairWorker, repairRunId, randomUUID(), "bounded repair", 1);
     await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({
-      ok: true, result: { evidence: [expect.objectContaining({ evidenceId: targetEvidenceId })] },
+      ok: true, result: { evidence: expect.arrayContaining([
+        expect.objectContaining({ evidenceId: targetEvidenceId }),
+        expect.objectContaining({ evidenceId: locationEvidenceId }),
+      ]) },
     }));
     const changeSetsBeforeRejectedProposal = setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get();
     repairWorker.receive({
@@ -469,17 +517,63 @@ describe("Growth Run bridge", () => {
     }));
     expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get())
       .toEqual(changeSetsBeforeRejectedProposal);
+    for (const [summary, item] of [
+      ["Attempt to rebind an unrelated document.", {
+        id: "repair-rebind-document", dependsOn: [], kind: "creative_document.put",
+        payload: {
+          documentId: unrelatedDocumentId, create: false, resourceId: prior.resourceId,
+          kind: "location_profile", title: "Rebound profile", state: "active", sortOrder: 0,
+        },
+      }],
+      ["Attempt to rebind an unrelated assertion.", {
+        id: "repair-rebind-assertion", dependsOn: [], kind: "assertion.put",
+        payload: {
+          assertionId: unrelatedAssertionId, scopeType: "world", scopeId: prior.resourceId,
+          subject: prior.resourceId, predicate: "closure.world.fact.geography_environment",
+          object: { status: "rebound" }, evidenceIds: [targetEvidenceId],
+        },
+      }],
+      ["Attempt to rebind an unrelated constraint profile.", {
+        id: "repair-rebind-constraint", dependsOn: [], kind: "constraint_profile.put",
+        payload: {
+          profileId: unrelatedProfileId, create: false, scopeResourceId: prior.resourceId,
+          title: "Rebound constraints", profile: {
+            narrativePerson: null, tense: null, tone: null, pacing: null, humorLevel: null,
+            prohibitedContent: [], requiredContent: [], notes: "Rebound scope.",
+          }, state: "active",
+        },
+      }],
+    ] as const) {
+      repairWorker.receive({
+        type: "tool.request", runId: repairRunId, requestId: randomUUID(), tool: "propose_change_set",
+        args: { summary, items: [item] },
+      });
+      await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({
+        ok: false, error: { code: "GROWTH_BINDING_INVALID" },
+      }));
+      expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get())
+        .toEqual(changeSetsBeforeRejectedProposal);
+    }
     repairWorker.receive({
       type: "tool.request", runId: repairRunId, requestId: randomUUID(), tool: "propose_change_set",
       args: {
         summary: "Rename the reviewed world only.",
-        items: [{
-          id: "repair-world", dependsOn: [], kind: "resource.put",
-          payload: {
-            resourceId: prior.resourceId, create: false, type: "world", objectKind: "world",
-            title: "The Tidemarked Reach", parentId: setup.scopeId, state: "active", sortOrder: 0,
+        items: [
+          {
+            id: "repair-world", dependsOn: [], kind: "resource.put",
+            payload: {
+              resourceId: prior.resourceId, create: false, type: "world", objectKind: "world",
+              title: "The Tidemarked Reach", parentId: setup.scopeId, state: "active", sortOrder: 0,
+            },
           },
-        }],
+          {
+            id: "repair-selected-relation", dependsOn: ["repair-world"], kind: "creative_relation.put",
+            payload: {
+              relationId: "repair-selected-relation", create: true, relationKind: "related_to",
+              sourceResourceId: prior.resourceId, targetResourceId: unrelatedLocationId, state: "active",
+            },
+          },
+        ],
       },
     });
     await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({
@@ -491,6 +585,8 @@ describe("Growth Run bridge", () => {
       outputCheckpointId: expect.any(String), failureCode: null,
     });
     expect(growth.getClosureRepairLineage(lineage.id)?.resolutionState).toBe("planned");
+    expect(new CreativeRelationRepository(setup.workspace).getCurrent("repair-selected-relation"))
+      .toMatchObject({ sourceResourceId: prior.resourceId, targetResourceId: unrelatedLocationId, kind: "related_to" });
     const changeSetCount = setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get();
     repairWorker.receive({
       type: "tool.request", runId: repairRunId, requestId: randomUUID(), tool: "propose_change_set",
@@ -1219,7 +1315,7 @@ function createSetup(focusKinds: Array<"world" | "story" | "oc"> = ["world"]) {
 function createClosureEvaluation(
   setup: ReturnType<typeof createSetup>,
   checkpointId: string,
-  facetId: string,
+  facetId: string | string[],
   suffix: string,
 ) {
   const growth = new GrowthRepository(setup.workspace);
@@ -1234,7 +1330,8 @@ function createClosureEvaluation(
     contractGeneration: "v26",
     checkpointId,
     ruleRevision: 1,
-    facets: [{ id: facetId, kind: "content", required: true }],
+    facets: (Array.isArray(facetId) ? facetId : [facetId])
+      .map((id) => ({ id, kind: "content" as const, required: true })),
   });
   const evaluation = growth.beginCycle({
     id: `closure-evaluation-${suffix}`,

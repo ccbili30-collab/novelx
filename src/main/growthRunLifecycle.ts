@@ -41,7 +41,10 @@ import { GraphRetrievalService } from "../domain/retrieval/graphRetrievalService
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import { DocumentRepository } from "../domain/workspace/documentRepository";
 import { CreativeDocumentRepository } from "../domain/workspace/creativeDocumentRepository";
+import { CreativeRelationRepository } from "../domain/workspace/creativeRelationRepository";
+import { ConstraintProfileRepository } from "../domain/workspace/constraintProfileRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
+import { AssertionRepository } from "../domain/graph/assertionRepository";
 import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeSetPolicy";
 import { ChangeSetRepository } from "../domain/changeSet/changeSetRepository";
 import type { WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
@@ -701,35 +704,74 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     const documentIds = new Set(targets.filter((link) => link.targetKind === "document").map((link) => link.targetId));
     const assertionIds = new Set(targets.filter((link) => link.targetKind === "assertion").map((link) => link.targetId));
     const relationIds = new Set(targets.filter((link) => link.targetKind === "relation").map((link) => link.targetId));
-    const documentOwners = new Map(new CreativeDocumentRepository(this.#workspace)
-      .listAtCheckpoint(cycle.inputCheckpointId)
-      .filter((document) => documentIds.has(document.id))
-      .map((document) => [document.id, document.resourceId]));
+    const checkpointResources = new ResourceRepository(this.#workspace).listAtCheckpoint(cycle.inputCheckpointId);
+    const checkpointDocuments = new CreativeDocumentRepository(this.#workspace).listAtCheckpoint(cycle.inputCheckpointId);
+    const checkpointRelations = new CreativeRelationRepository(this.#workspace).listAtCheckpoint(cycle.inputCheckpointId);
+    const checkpointAssertions = new AssertionRepository(this.#workspace)
+      .listCurrentInScopesAtCheckpoint(checkpointResources.map((resource) => resource.id), cycle.inputCheckpointId);
+    const checkpointProfiles = new ConstraintProfileRepository(this.#workspace).listAtCheckpoint(cycle.inputCheckpointId);
+    const documentsById = new Map(checkpointDocuments.map((document) => [document.id, document]));
+    const assertionsById = new Map(checkpointAssertions.map((assertion) => [assertion.assertionId, assertion]));
+    const relationsById = new Map(checkpointRelations.map((relation) => [relation.id, relation]));
+    const profilesById = new Map(checkpointProfiles.map((profile) => [profile.profileId, profile]));
+    const newDocumentsById = new Map(args.items.flatMap((item) => (
+      item.kind === "creative_document.put" && item.payload.create
+        ? [[item.payload.documentId, item.payload] as const]
+        : []
+    )));
 
     const inBounds = args.items.every((item) => {
       switch (item.kind) {
         case "resource.put":
           return !item.payload.create && resourceIds.has(item.payload.resourceId);
         case "creative_document.put": {
-          const selectedOwner = documentOwners.get(item.payload.documentId);
-          if (selectedOwner) {
-            return !item.payload.create && selectedOwner === item.payload.resourceId;
+          const current = documentsById.get(item.payload.documentId);
+          if (current) {
+            return !item.payload.create
+              && current.resourceId === item.payload.resourceId
+              && current.kind === item.payload.kind
+              && (documentIds.has(current.id) || resourceIds.has(current.resourceId));
           }
-          return resourceIds.has(item.payload.resourceId);
+          return item.payload.create && resourceIds.has(item.payload.resourceId);
         }
         case "document.put": {
           if (!item.payload.creativeDocumentId) return resourceIds.has(item.payload.resourceId);
-          const selectedOwner = documentOwners.get(item.payload.creativeDocumentId);
-          return selectedOwner
-            ? selectedOwner === item.payload.resourceId
-            : resourceIds.has(item.payload.resourceId);
+          const current = documentsById.get(item.payload.creativeDocumentId);
+          if (current) {
+            return current.resourceId === item.payload.resourceId
+              && (documentIds.has(current.id) || resourceIds.has(current.resourceId));
+          }
+          const created = newDocumentsById.get(item.payload.creativeDocumentId);
+          return created?.resourceId === item.payload.resourceId && resourceIds.has(item.payload.resourceId);
         }
-        case "assertion.put":
-          return assertionIds.has(item.payload.assertionId) || resourceIds.has(item.payload.scopeId);
-        case "creative_relation.put":
-          return !item.payload.create && relationIds.has(item.payload.relationId);
-        case "constraint_profile.put":
-          return item.payload.scopeResourceId !== null && resourceIds.has(item.payload.scopeResourceId);
+        case "assertion.put": {
+          const current = assertionsById.get(item.payload.assertionId);
+          if (!current) return resourceIds.has(item.payload.scopeId);
+          return current.scopeType === item.payload.scopeType
+            && current.scopeId === item.payload.scopeId
+            && current.subject === item.payload.subject
+            && (assertionIds.has(current.assertionId) || resourceIds.has(current.scopeId));
+        }
+        case "creative_relation.put": {
+          const current = relationsById.get(item.payload.relationId);
+          if (current) {
+            return !item.payload.create
+              && relationIds.has(current.id)
+              && current.kind === item.payload.relationKind
+              && current.sourceResourceId === item.payload.sourceResourceId
+              && current.targetResourceId === item.payload.targetResourceId;
+          }
+          return item.payload.create
+            && resourceIds.has(item.payload.sourceResourceId)
+            && resourceIds.has(item.payload.targetResourceId);
+        }
+        case "constraint_profile.put": {
+          if (item.payload.scopeResourceId === null || !resourceIds.has(item.payload.scopeResourceId)) return false;
+          const current = profilesById.get(item.payload.profileId);
+          return current
+            ? !item.payload.create && current.scopeResourceId === item.payload.scopeResourceId
+            : item.payload.create;
+        }
         case "project_file.put":
         case "project_file.delete":
           return false;
