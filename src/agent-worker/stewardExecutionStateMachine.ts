@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type TSchema } from "typebox";
 import { z } from "zod";
 import type { RoleOutputToolCapture } from "./contracts/roleOutputTool";
-import { checkerOutputSchema, stewardOutputSchema, writerOutputSchema, type CheckerOutput, type StewardOutput } from "./contracts/roleOutputs";
+import { checkerOutputSchema, stewardOutputSchema, writerOutputSchema, type StewardOutput } from "./contracts/roleOutputs";
 import { compileGrowthOcFragment, growthOcFragmentParameters } from "./growth/growthOcFragment";
 import { compileGrowthStoryBrief, growthStoryBriefParameters, type TrustedStoryWorldEvidence } from "./growth/growthStoryBrief";
 import { compileGrowthStoryFragment, growthStoryFragmentParameters } from "./growth/growthStoryFragment";
@@ -16,6 +16,15 @@ import {
 import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "./growth/growthWorldFragment";
 import { growthInquiryBriefSchema } from "./growth/growthInquiryBrief";
 import { resolveGrowthPhasePlan } from "./growth/core/growthPhaseRegistry";
+import {
+  captureClosureCheckerOutput,
+  closureToolPresentation,
+  compileClosureCheckerInput,
+  compileClosureCheckerSubmission,
+  validateClosureCheckerReviewResult,
+  type ClosureCheckerOutput,
+  type ClosureEvaluation,
+} from "./growth/phases/closure/growthClosurePhase";
 import {
   captureLongformWriterCandidate,
   compileLongformOutlineProposal,
@@ -43,8 +52,6 @@ import {
   submitGrowthInquiryResultSchema,
   submitClosureSelfAssessmentArgsSchema,
   submitClosureSelfAssessmentResultSchema,
-  submitClosureCheckerReviewArgsSchema,
-  submitClosureCheckerReviewResultSchema,
   type GrowthClosureFacetProjection,
   type GrowthRunBinding,
 } from "../shared/agentWorkerProtocol";
@@ -281,8 +288,8 @@ export function createStewardExecutionStateMachine(input: {
   let trustedOcStory: { evidenceId: string; resourceId: string } | null = null;
   let trustedWorldMapSources: TrustedGrowthWorldMapSources | null = null;
   let writerCandidate: { text: string; evidenceIds: string[] } | null = null;
-  let closureEvaluation: NonNullable<z.infer<typeof growthRetrieveGraphEvidenceResultSchema>["closureEvaluation"]> | null = null;
-  let closureCheckerOutput: Extract<CheckerOutput, { status: "closure_review" }> | null = null;
+  let closureEvaluation: ClosureEvaluation | null = null;
+  let closureCheckerOutput: ClosureCheckerOutput | null = null;
   const closureEvidenceById = new Map<string, unknown>();
   let greenfieldProposalCorrectionAttempts = 0;
   const committedOutputIds = new Set<string>();
@@ -335,18 +342,12 @@ export function createStewardExecutionStateMachine(input: {
   };
 
   const wrappedOperationalTools = input.operationalTools.map((original): AgentTool => {
+    const closurePresentation = closureToolPresentation(input.growthBinding, original.name);
     const longformPresentation = longformToolPresentation(input.growthBinding, original.name);
     return {
       ...original,
-      ...(input.growthBinding?.kind === "closure_evaluation" && original.name === "checker" ? {
-      description: "Independently review the trusted pinned Closure facet assessment. Parameters are compiled by the Harness from the recorded Receipt; do not supply content, evidence, scope, checkpoint, profile, or authority fields.",
-      parameters: Type.Object({}, { additionalProperties: false }),
-    } : input.growthBinding?.kind === "closure_evaluation" && original.name === "submit_closure_checker_review" ? {
-      description: "Record the immediately preceding independent Checker result. Parameters are compiled by the Harness; do not supply findings, evidence, scope, checkpoint, profile, hashes, or authority fields.",
-      parameters: Type.Object({}, { additionalProperties: false }),
-    } : input.growthBinding?.kind === "repair" && original.name === "propose_change_set" ? {
-      description: `Submit exactly one source-bound Change Set for the selected Closure repair. Repair only this objective: ${input.growthBinding.closureRepair?.repairObjective ?? "the selected finding"}. Do not rewrite unrelated resources, add images, or broaden the task.`,
-    } : longformPresentation ? longformPresentation
+      ...(closurePresentation ? closurePresentation
+    : longformPresentation ? longformPresentation
     : growthFocus(input.growthBinding) === "story" && original.name === "writer" ? {
       description: "Create a candidate formal story opening from a high-level Story Brief and the pinned formal-world evidence. Supply only the creative brief: premise, opening situation, central tension, point of view, tone, required/avoided elements, and target length. This is Creator authoring, not a player or GM turn. Do not supply source material, evidence IDs, GM resolutions, resource IDs, or authority fields.",
       parameters: growthStoryBriefParameters,
@@ -383,9 +384,13 @@ export function createStewardExecutionStateMachine(input: {
       requireCurrentStep(name, effectiveParams);
       try {
         const compiledParams = input.growthBinding?.kind === "closure_evaluation" && name === "checker"
-          ? compileClosureCheckerInput()
+          ? compileClosureCheckerInput({
+              binding: input.growthBinding,
+              evaluation: closureEvaluation,
+              evidenceById: closureEvidenceById,
+            })
           : input.growthBinding?.kind === "closure_evaluation" && name === "submit_closure_checker_review"
-          ? compileClosureCheckerSubmission()
+          ? compileClosureCheckerSubmission(closureCheckerOutput)
           : input.growthBinding?.longformAuthority?.phase === "section" && name === "writer"
           ? compileLongformWriterInput({
               authority: input.growthBinding.longformAuthority,
@@ -935,15 +940,7 @@ export function createStewardExecutionStateMachine(input: {
     }
     if (name === "checker") {
       if (input.growthBinding?.kind === "closure_evaluation") {
-        const checker = checkerOutputSchema.safeParse(details);
-        if (!checker.success || checker.data.status !== "closure_review" || !closureEvaluation) {
-          throw stateError("STEWARD_TOOL_RESULT_INVALID");
-        }
-        const allowed = new Set(closureEvaluation.facetResults.flatMap((facet) => facet.evidenceIds));
-        if (checker.data.adverseFindings.flatMap((finding) => finding.evidenceIds).some((id) => !allowed.has(id))) {
-          throw stateError("STEWARD_CLOSURE_EVIDENCE_MISMATCH");
-        }
-        closureCheckerOutput = checker.data;
+        closureCheckerOutput = captureClosureCheckerOutput({ details, evaluation: closureEvaluation });
         return;
       }
       const checker = readCheckerResult(details);
@@ -957,10 +954,7 @@ export function createStewardExecutionStateMachine(input: {
       }
     }
     if (name === "submit_closure_checker_review") {
-      const result = submitClosureCheckerReviewResultSchema.safeParse(details);
-      if (!result.success || !closureCheckerOutput || result.data.decision !== closureCheckerOutput.decision) {
-        throw stateError("STEWARD_TOOL_RESULT_INVALID");
-      }
+      validateClosureCheckerReviewResult(details, closureCheckerOutput);
     }
   }
 
@@ -971,41 +965,6 @@ export function createStewardExecutionStateMachine(input: {
       throw stateError("STEWARD_CLOSURE_CHECKER_REQUIRED");
     }
     plan.steps.splice(nextStepIndex + 1, 0, "checker", "submit_closure_checker_review");
-  }
-
-  function compileClosureCheckerInput(): Record<string, unknown> {
-    const binding = input.growthBinding;
-    if (binding?.kind !== "closure_evaluation" || !binding.closureProfile || !closureEvaluation) {
-      throw stateError("STEWARD_CLOSURE_CHECKER_REQUIRED");
-    }
-    const evidenceIds = [...new Set(closureEvaluation.facetResults.flatMap((facet) => facet.evidenceIds))];
-    const sourceMaterial = JSON.stringify({
-      evidence: evidenceIds.map((evidenceId) => closureEvidenceById.get(evidenceId)),
-      facetResults: closureEvaluation.facetResults,
-    });
-    if (evidenceIds.length === 0 || evidenceIds.some((id) => !closureEvidenceById.has(id)) || sourceMaterial.length > 160_000) {
-      throw stateError("STEWARD_CLOSURE_EVIDENCE_MISMATCH");
-    }
-    return {
-      evaluationKind: "closure_v4",
-      profileKind: binding.closureProfile.profileKind,
-      sourceMaterial,
-      evidenceIds,
-      facetResults: closureEvaluation.facetResults,
-      constraints: [
-        "Review only the pinned facet results and cited evidence IDs.",
-        "Do not invent missing facts, rewrite creative content, or grant Canon authority.",
-        "Return accepted only when no adverse finding remains.",
-      ],
-    };
-  }
-
-  function compileClosureCheckerSubmission(): z.infer<typeof submitClosureCheckerReviewArgsSchema> {
-    if (!closureCheckerOutput) throw stateError("STEWARD_CLOSURE_CHECKER_REQUIRED");
-    return submitClosureCheckerReviewArgsSchema.parse({
-      decision: closureCheckerOutput.decision,
-      adverseFindings: closureCheckerOutput.adverseFindings,
-    });
   }
 
   function registerLongReadFiles(entries: Array<{ path: string; kind: "file" | "directory" }>): void {
