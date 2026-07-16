@@ -198,21 +198,110 @@ describe("Growth Run bridge", () => {
     await vi.waitFor(() => expect(growth.getCycle(outlineCycle.id)?.status).toBe("cancelled"));
   });
 
-  it("blocks a revision intent before Worker spawn and repairs its terminal event exactly once", async () => {
+  it("binds a newer rule to one evidence-pinned revision Cycle and rejects out-of-receipt targets", async () => {
     const setup = createSetup();
     const prior = await commitPriorResourceCycle(setup, setup.cycleId, "world", "world", setup.scopeId, "revision-world");
     const growth = new GrowthRepository(setup.workspace);
+    const priorResourceVersionId = (setup.workspace.db.prepare(`
+      SELECT id FROM resource_revisions WHERE resource_id = ? AND created_checkpoint_id = ?
+    `).get(prior.resourceId, prior.outputCheckpointId) as { id: string }).id;
+    const unrelatedResourceId = setup.authorizedScopeResourceIds.find((resourceId) => resourceId !== setup.scopeId)!;
+    const unrelatedResourceVersionId = (setup.workspace.db.prepare(`
+      SELECT id FROM resource_revisions WHERE resource_id = ? ORDER BY rowid DESC LIMIT 1
+    `).get(unrelatedResourceId) as { id: string }).id;
+    const visualRequest = growth.createIllustrationRequest({
+      id: "revision-visual-request", goalId: setup.goalId, cycleId: setup.cycleId, ruleRevision: 1,
+      coverageMode: "custom", closureProfileId: null, closureRevision: null,
+      idempotencyKey: "revision-visual-request-key",
+    });
+    growth.sealIllustrationBatch({
+      id: "revision-visual-batch", requestId: visualRequest.id, sequence: 1, cursor: null, nextCursor: null,
+      idempotencyKey: "revision-visual-batch-key", snapshots: [],
+      items: [{
+        id: "revision-affected-visual", purpose: "scene", title: "Affected visual", variantKey: "affected",
+        compiledPromptSha256: "e".repeat(64), requiredForVisualClosure: false,
+        anchor: { kind: "resource", resourceId: prior.resourceId, resourceVersionId: priorResourceVersionId },
+        sources: [{ kind: "resource", resourceId: prior.resourceId, resourceVersionId: priorResourceVersionId }],
+      }, {
+        id: "revision-unrelated-visual", purpose: "scene", title: "Unrelated visual", variantKey: "unrelated",
+        compiledPromptSha256: "f".repeat(64), requiredForVisualClosure: false,
+        anchor: { kind: "resource", resourceId: unrelatedResourceId, resourceVersionId: unrelatedResourceVersionId },
+        sources: [{ kind: "resource", resourceId: unrelatedResourceId, resourceVersionId: unrelatedResourceVersionId }],
+      }],
+    });
     growth.appendRule({ goalId: setup.goalId, expectedRevision: 1, ruleText: "revision two", sourceMessageId: "revision-two" });
     const revision = growth.beginCycle({ id: "revision-cycle", goalId: setup.goalId, idempotencyKey: "revision-cycle", inputCheckpointId: prior.outputCheckpointId, ruleRevision: 2, intent: { kind: "revision", focusKinds: ["world"], resumeFrontier: ["story", "oc"] } });
-    const spawn = vi.fn(() => new FakeWorker());
-    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, new FakeWorker(), spawn));
-    expect(() => lifecycle.start({ goalId: setup.goalId, cycleId: revision.id, request: { projectId: "project-1", sessionId: "revision", userInput: "revise", mode: "free" }, emit: () => undefined }))
-      .toThrowError(expect.objectContaining({ code: "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED" }));
-    expect(spawn).not.toHaveBeenCalled();
-    expect(growth.getCycle(revision.id)).toMatchObject({ status: "blocked", runId: null, changeSetId: null, failureCode: "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED" });
-    lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: revision.id });
-    lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: revision.id });
-    expect(growth.listEvents(setup.goalId).filter((event) => event.cycleId === revision.id && event.phase === "cycle_terminal")).toHaveLength(1);
+    const worker = new FakeWorker();
+    const supervisor = createSupervisor(setup, worker);
+    const runId = new GrowthRunLifecycle(setup.workspace, supervisor).start({
+      goalId: setup.goalId, cycleId: revision.id,
+      request: { projectId: "project-1", sessionId: "revision", userInput: "revise", mode: "free" },
+      emit: () => undefined,
+    });
+    worker.spawn();
+    const command = worker.sent[0] as { growthBinding: { kind: string; ruleRevision: number; greenfieldCreateAuthorized: boolean } };
+    expect(command.growthBinding).toMatchObject({ kind: "revision", ruleRevision: 2, greenfieldCreateAuthorized: false });
+    worker.receive({ type: "run.started", runId });
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, "11111111-1111-4111-8111-111111111111", "revision world", 10);
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+    const retrieval = (worker.sent[1] as {
+      ok: true;
+      result: { evidence: Array<{ evidenceId: string }>; revisionAuthority: { targets: Array<Record<string, unknown>> } };
+    }).result;
+    const target = retrieval.revisionAuthority.targets.find((candidate) => candidate.kind === "resource") as {
+      evidenceId: string; resourceId: string; type: string; objectKind: string; parentId: string; sortOrder: number;
+    };
+    worker.receive({
+      type: "tool.request", runId, requestId: "22222222-2222-4222-8222-222222222222",
+      tool: "submit_growth_inquiry",
+      args: {
+        inquiries: [3, 2, 1].map((priority, index) => ({
+          localId: `revision_${index}`, question: `What changes at priority ${priority}?`,
+          evidenceIds: [target.evidenceId], evidenceState: "known",
+          safeSummary: `Assessing revision impact ${index}.`, proposedAction: "Apply one bounded revision.",
+          provisionalAssumption: null, priority, requiresCreatorChoice: false,
+        })),
+        selectedLocalId: "revision_0", priorTransitions: [],
+      },
+    });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(3));
+
+    worker.receive({
+      type: "tool.request", runId, requestId: "33333333-3333-4333-8333-333333333333",
+      tool: "propose_change_set",
+      args: { summary: "forged", items: [{
+        id: "forged", dependsOn: [], kind: "resource.put",
+        payload: { resourceId: "outside-receipt", create: false, type: "world", objectKind: "world", title: "forged", parentId: target.parentId, state: "active", sortOrder: 0 },
+      }] },
+    });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(4));
+    expect(worker.sent[3]).toMatchObject({ ok: false, error: { code: "GROWTH_BINDING_INVALID" } });
+
+    worker.receive({
+      type: "tool.request", runId, requestId: "44444444-4444-4444-8444-444444444444",
+      tool: "propose_change_set",
+      args: { summary: "Apply revision two", growthRevisionImpact: {
+        revisedEvidenceIds: [target.evidenceId], preservedEvidenceIds: [], staleVisualEvidenceIds: [target.evidenceId],
+      }, items: [{
+        id: "revision-resource", dependsOn: [], kind: "resource.put",
+        payload: {
+          resourceId: target.resourceId, create: false, type: target.type, objectKind: target.objectKind,
+          title: "Revised world", parentId: target.parentId, state: "active", sortOrder: target.sortOrder,
+        },
+      }] },
+    });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(5));
+    expect(worker.sent[4]).toMatchObject({ ok: true, result: { status: "committed" } });
+    worker.receive({ type: "run.completed", runId, outcome: "completed", message: "done", changeSetState: "committed", artifacts: [] });
+    await vi.waitFor(() => expect(growth.getCycle(revision.id)?.status).toBe("committed"));
+    expect(growth.getCycle(revision.id)).toMatchObject({
+      ruleRevision: 2, inputCheckpointId: prior.outputCheckpointId,
+      receiptId: expect.any(String), changeSetId: expect.any(String), outputCheckpointId: expect.any(String),
+    });
+    expect(growth.getCycle(revision.id)!.outputCheckpointId).not.toBe(prior.outputCheckpointId);
+    expect(growth.getIllustrationItem("revision-affected-visual")?.status).toBe("stale");
+    expect(growth.getIllustrationItem("revision-unrelated-visual")?.status).toBe("planned");
   });
 
   it("records a missing deterministic Closure facet as a durable continue-growing evaluation", async () => {

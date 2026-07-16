@@ -254,6 +254,8 @@ export class GrowthCoordinator {
           ? "闭环评估 Cycle 已计划，等待绑定独立检查 Run。"
           : isClosureRepair
           ? "闭环返工 Cycle 已计划，等待绑定修复 Run。"
+          : input.intent.kind === "revision"
+          ? "新规则已进入安全修订轮，等待绑定 Agent Run。"
           : "Growth Cycle 已计划，等待绑定 Agent Run。",
         phase: "cycle_planned",
         targetKind: "resource",

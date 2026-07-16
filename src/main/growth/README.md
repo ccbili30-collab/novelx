@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | 启动/恢复一个 Cycle | `../growthRunLifecycle.ts` | `GrowthRepository`、`AgentProcessSupervisor` |
 | 自动串行多个 Cycle | `../growthCoordinator.ts` | Goal/Cycle 持久状态与 Coordinator 测试 |
+| 修改规则修订 authority | `phases/revision/growthRevisionAuthorityResolver.ts`、`growthRevisionProposalPolicy.ts` | pinned Receipt、Revision bridge/Coordinator 测试 |
 | 修改 Longform authority | `phases/longform/growthLongformAuthorityResolver.ts` | `growthLongformProgress.ts`、Longform bridge 测试 |
 | 修改 Closure/Repair authority | `phases/closure/growthClosureAuthorityResolver.ts` | Closure profile/review/Receipt、Growth bridge 测试 |
 | 修改 Repair 对象/关系边界 | `phases/closure/growthRepairTargetPolicy.ts` | pinned checkpoint 身份、唯一关系策略、Repair target policy 测试 |
@@ -25,6 +26,7 @@
 
 ```powershell
 npx --no-install vitest run --config vitest.config.ts tests/unit/growth-run-bridge.test.ts tests/unit/growth-longform-progress.test.ts
+npx --no-install vitest run --config vitest.config.ts tests/unit/growth-revision-authority.test.ts tests/unit/growth-coordinator.test.ts
 npm run typecheck
 git diff --check
 ```

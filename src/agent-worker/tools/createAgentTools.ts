@@ -332,7 +332,7 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
         ? growthRetrieveGraphEvidenceResultSchema.parse(await executor.retrieveGraphEvidence(args, signal))
         : retrieveGraphEvidenceResultSchema.parse(await executor.retrieveGraphEvidence(args, signal));
       const modelVisibleResult = options.growthBinding && "receiptId" in result
-        ? (({ receiptId: _receiptId, ...safe }) => safe)(result)
+        ? (({ receiptId: _receiptId, revisionAuthority: _revisionAuthority, ...safe }) => safe)(result)
         : result;
       return {
         content: [{

@@ -170,6 +170,57 @@ describe("growth presentation", () => {
     }
   });
 
+  it("keeps saved, analyzing, and committed revision states distinct", async () => {
+    const { createGrowthPresentation, growthEventSummary, mergeGrowthEvent, recordGrowthGuidanceResponse } = await presentation();
+    let state = createGrowthPresentation(snapshot({
+      currentRuleRevision: 1,
+      activeCycleRuleRevision: 1,
+      guidanceStatus: "none",
+    }));
+
+    state = recordGrowthGuidanceResponse(state, {
+      goalId,
+      persistedRevision: 2,
+      currentCycleRevision: 1,
+      appliesAt: "next_cycle_boundary",
+      nextCycleSequence: 2,
+      nextCycleKind: "revision",
+      focusKinds: ["world", "story", "oc"],
+      status: "persisted_pending_boundary",
+    });
+    expect(state.guidance).toMatchObject({ pending: true, latestSavedRevision: 2 });
+    expect(state.rows[0]?.summary).not.toContain("已修改");
+
+    const analyzing = event({
+      cycleId: cycleTwo,
+      runId: "run-2",
+      sequence: 4,
+      phase: "receipt_recorded",
+      durableState: "running",
+      safeSummary: "正在分析新规则会影响哪些已检索节点。",
+    });
+    state = mergeGrowthEvent(state, analyzing);
+    expect(growthEventSummary(analyzing)).toBe("正在分析新规则会影响哪些已检索节点。");
+    expect(state.rows.find((row: { cycleId: string }) => row.cycleId === cycleTwo)?.summary).toBe("正在分析新规则会影响哪些已检索节点。");
+
+    const committed = event({
+      cycleId: cycleTwo,
+      runId: "run-2",
+      sequence: 5,
+      phase: "change_set_committed",
+      durableState: "committed",
+      safeSummary: "新规则的影响分析已提交，受影响对象已修改。",
+      targetKind: "change_set",
+      targetId: "revision-change-set-1",
+    });
+    state = mergeGrowthEvent(state, committed);
+    expect(state.rows.find((row: { cycleId: string }) => row.cycleId === cycleTwo)).toMatchObject({
+      durableState: "committed",
+      summary: "已提交",
+    });
+    expect(growthEventSummary(committed)).toBe("新规则的影响分析已提交，受影响对象已修改。");
+  });
+
   it("dedupes and orders out-of-order repository events without regressing committed state", async () => {
     const { createGrowthPresentation, mergeGrowthEvent } = await presentation();
     const committed = event({ sequence: 3, phase: "change_set_committed", durableState: "committed", targetKind: "change_set", targetId: "change-set-1" });

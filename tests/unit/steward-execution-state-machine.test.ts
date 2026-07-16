@@ -10,11 +10,48 @@ import {
 import { growthCapabilityVersion } from "../../src/shared/growthContract";
 
 describe("Steward tool handoff state machine", () => {
-  it("fails closed before exposing legacy create-only tools for a revision intent", () => {
-    expect(() => createGrowthMachine("world", [
-      successfulTool("retrieve_graph_evidence", growthRetrievalResult()),
-      successfulTool("propose_change_set", greenfieldCommittedProposal()),
-    ], "revision")).toThrowError(expect.objectContaining({ code: "STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED" }));
+  it("compiles one authority-bound revision fragment after retrieval and inquiry", async () => {
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "revision-change", mode: "free", status: "committed", gateStatus: "ready",
+      blockedReason: null, itemCount: 1,
+      committedOutputs: [{ itemId: "document-update", kind: "document_version", outputId: "version-setting-next" }],
+    });
+    const machine = createGrowthMachine("world", [
+      successfulTool("retrieve_graph_evidence", growthRevisionRetrievalResult()),
+      selectedInquiryTool(),
+      propose,
+    ], "revision");
+
+    expect(machine.snapshot().plan?.steps).toEqual([
+      "retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set",
+    ]);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await tool(machine.tools, "submit_growth_inquiry").execute("inquiry", growthInquiryBrief());
+    await tool(machine.tools, "propose_change_set").execute("propose", {
+      summary: "让潮汐规则影响港口秩序。",
+      impact: {
+        summary: "世界设定需要修订。",
+        targets: [{
+          evidenceId: "version-growth-setting", decision: "revise",
+          reasonSummary: "新规则改变港口治理。",
+        }],
+        additions: [],
+      },
+      resourceUpdates: [],
+      documentUpdates: [{
+        evidenceId: "version-growth-setting", title: "潮汐世界设定",
+        content: "潮汐决定港口税期、航路和继承仪式。",
+      }],
+      assertionUpdates: [], relationRemovals: [], resourceAdditions: [],
+      documentAdditions: [], assertionAdditions: [], relationAdditions: [],
+    });
+
+    expect(propose.execute).toHaveBeenCalledWith("propose", expect.objectContaining({
+      items: expect.arrayContaining([expect.objectContaining({
+        kind: "creative_document.put",
+        payload: expect.objectContaining({ documentId: "document-setting", create: false }),
+      })]),
+    }), undefined, undefined);
   });
 
   it("recognizes only conservative explicit Free Greenfield creation requests", () => {
@@ -1114,6 +1151,23 @@ function growthRetrievalResult() {
     coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
     diagnostics: { expandedEdges: 0, consumedContentChars: 12 },
     closureEvaluation: null,
+  };
+}
+
+function growthRevisionRetrievalResult() {
+  return {
+    ...growthRetrievalResult(),
+    revisionAuthority: {
+      targets: [{
+        kind: "document" as const,
+        evidenceId: "version-growth-setting",
+        documentId: "document-setting",
+        resourceId: "world-1",
+        documentKind: "setting" as const,
+        title: "世界设定",
+        sortOrder: 0,
+      }],
+    },
   };
 }
 

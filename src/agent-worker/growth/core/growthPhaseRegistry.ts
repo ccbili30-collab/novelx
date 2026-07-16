@@ -6,12 +6,14 @@ import {
   type GrowthPhasePlan,
   type GrowthPhaseToolName,
 } from "./growthPhaseHandler";
+import { growthRevisionPhaseHandler } from "../phases/revision/growthRevisionPhase";
 
 export type GrowthPhaseId =
   | "closure_evaluation"
   | "closure_repair"
   | "longform_outline"
   | "longform_section"
+  | "revision"
   | "world"
   | "story"
   | "oc";
@@ -31,6 +33,7 @@ const handlers: readonly GrowthPhaseHandler<GrowthPhaseId>[] = [
   fixedHandler("longform_section", (binding) => binding.longformAuthority?.phase === "section", "change_set", [
     "retrieve_graph_evidence", "submit_growth_inquiry", "writer", "propose_change_set",
   ]),
+  growthRevisionPhaseHandler,
   contentHandler("world", ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set", "generate_image"]),
   contentHandler("story", ["retrieve_graph_evidence", "submit_growth_inquiry", "writer", "propose_change_set"]),
   contentHandler("oc", ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"]),
@@ -39,7 +42,6 @@ const handlers: readonly GrowthPhaseHandler<GrowthPhaseId>[] = [
 const registry = createGrowthPhaseRegistry(handlers);
 
 export function resolveGrowthPhasePlan(binding: GrowthRunBinding): GrowthPhasePlan<GrowthPhaseId> {
-  if (binding.kind === "revision") throw phaseError("STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED");
   return registry.resolve(binding);
 }
 
@@ -63,8 +65,4 @@ function contentHandler(
     "change_set",
     steps,
   );
-}
-
-function phaseError(code: "STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED" | "GROWTH_PHASE_REGISTRY_INVALID"): Error & { code: string } {
-  return Object.assign(new Error("Growth phase registry failed closed."), { code });
 }

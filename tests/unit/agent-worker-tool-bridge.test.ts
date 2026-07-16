@@ -5,9 +5,15 @@ import type { AgentWorkerToolRequest, RetrieveGraphEvidenceArgs } from "../../sr
 import { growthCapabilityVersion } from "../../src/shared/growthContract";
 
 describe("Agent Worker tool bridge", () => {
-  it("keeps the persisted Growth Receipt id internal while preserving it for the state machine", async () => {
+  it("keeps persisted Receipt and revision target authority internal while preserving them for the state machine", async () => {
     const receipt = {
       variant: "growth_v1" as const, receiptRecorded: true as const, receiptId: "receipt-internal-1", evidence: [],
+      revisionAuthority: {
+        targets: [{
+          kind: "document" as const, evidenceId: "version-setting", documentId: "document-setting",
+          resourceId: "world-1", documentKind: "setting" as const, title: "Setting", sortOrder: 0,
+        }],
+      },
       coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
       diagnostics: { expandedEdges: 0, consumedContentChars: 0 }, closureEvaluation: null,
     };
@@ -29,8 +35,12 @@ describe("Agent Worker tool bridge", () => {
       expansionBudget: 20, resultBudget: 10, tokenBudget: 1000, contentBudgetChars: 4000, policyVersion: "graph-retrieval-v1",
     });
     expect(result.details).toMatchObject({ receiptId: "receipt-internal-1" });
+    expect(result.details).toMatchObject({ revisionAuthority: { targets: [expect.objectContaining({ documentId: "document-setting" })] } });
     expect(result.content[0]?.type).toBe("text");
-    expect(result.content[0]?.type === "text" ? result.content[0].text : "").not.toContain("receipt-internal-1");
+    const modelVisible = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(modelVisible).not.toContain("receipt-internal-1");
+    expect(modelVisible).not.toContain("document-setting");
+    expect(modelVisible).not.toContain("revisionAuthority");
   });
 
   it("exposes the three audited project tools", () => {

@@ -21,6 +21,7 @@ export interface GrowthFrontierPlannerInput {
 
 export type GrowthFrontierDecision =
   | { state: "plan"; intent: { kind: "expand"; focusKinds: [GrowthFocusKind]; resumeFrontier: GrowthFocusKind[] } }
+  | { state: "plan"; intent: { kind: "revision"; focusKinds: GrowthFocusKind[]; resumeFrontier: GrowthFocusKind[] } }
   | { state: "awaiting_guidance" | "content_closed"; intent: null };
 
 const canonicalOrder: GrowthFocusKind[] = ["world", "story", "oc"];
@@ -40,7 +41,13 @@ export function planGrowthFrontier(input: GrowthFrontierPlannerInput): GrowthFro
   }
 
   if (input.currentRuleRevision > input.latestCycle.ruleRevision) {
-    return { state: "awaiting_guidance", intent: null };
+    return {
+      state: "plan",
+      intent: estimateRevisionIntent({
+        currentIntent: input.latestCycle.intent,
+        formalCoverageKinds: coverageKinds,
+      }),
+    };
   }
 
   if (input.currentRuleRevision < input.latestCycle.ruleRevision) throw plannerError("GROWTH_FRONTIER_REVISION_INVALID");

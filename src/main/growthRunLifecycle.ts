@@ -54,6 +54,8 @@ import {
 import { GrowthLongformAuthorityResolver } from "./growth/phases/longform/growthLongformAuthorityResolver";
 import { GrowthClosureAuthorityResolver } from "./growth/phases/closure/growthClosureAuthorityResolver";
 import { assertGrowthRepairProposalAllowed } from "./growth/phases/closure/growthRepairTargetPolicy";
+import { GrowthRevisionAuthorityResolver } from "./growth/phases/revision/growthRevisionAuthorityResolver";
+import { assertGrowthRevisionProposalAllowed } from "./growth/phases/revision/growthRevisionProposalPolicy";
 
 export interface GrowthRunLifecycleStart {
   goalId: string;
@@ -98,14 +100,6 @@ export class GrowthRunLifecycle {
     if (intent.kind === "expand" && intent.focusKinds.length !== 1) {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
-    if (intent.kind === "revision") {
-      const terminal = repository.terminalizeCycle({
-        cycleId: cycle.id, status: "blocked", failureCode: "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED",
-      });
-      const event = repairTerminalEvent(repository, goal, terminal, "修订 Cycle 执行路径尚未接入，已安全阻塞。");
-      if (event) notifyPersistedEvent(input.onPersistedEvent, event);
-      throw growthRunError("GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED");
-    }
     const isClosureEvaluation = intent.kind === "closure_evaluation";
     const isClosureRepair = intent.kind === "repair";
     if ((isClosureEvaluation || isClosureRepair) && input.request.mode !== "free") throw growthRunError("GROWTH_BINDING_INVALID");
@@ -120,9 +114,16 @@ export class GrowthRunLifecycle {
       : null;
     const longformResolver = new GrowthLongformAuthorityResolver(this.workspace, repository);
     const longformPhase = longformResolver.resolvePhase(goal, cycle, intent);
-    const intentAnchors = isClosureEvaluation || isClosureRepair || longformPhase
+    const revisionPrerequisites = intent.kind === "revision"
+      ? new GrowthRevisionAuthorityResolver(this.workspace).prerequisites({
+          checkpointId: cycle.inputCheckpointId,
+          authorizedScopeResourceIds: goal.authorizedScopeResourceIds,
+          focusKinds: intent.focusKinds,
+        })
+      : null;
+    const intentAnchors = revisionPrerequisites?.anchors ?? (isClosureEvaluation || isClosureRepair || longformPhase
       ? []
-      : trustedIntentAnchors(this.workspace, repository, goal, cycle, intent.focusKinds[0]!);
+      : trustedIntentAnchors(this.workspace, repository, goal, cycle, intent.focusKinds[0]!));
     const priorInquiryAuthority = isClosureEvaluation || isClosureRepair ? [] : trustedPriorInquiryAuthority(repository, goal.id);
     const longformAuthority = longformPhase ? longformResolver.resolveAuthority(goal, cycle, intent, longformPhase) : null;
     const longformSeedResourceIds = longformAuthority?.phase === "outline"
@@ -143,7 +144,7 @@ export class GrowthRunLifecycle {
         ...longformSeedResourceIds,
       ]),
       domainRootResourceIds: trustedDomainRoots(this.workspace, cycle.inputCheckpointId, goal.authorizedScopeResourceIds),
-      greenfieldCreateAuthorized: !isClosureEvaluation && !isClosureRepair && input.request.mode === "free"
+      greenfieldCreateAuthorized: intent.kind === "expand" && input.request.mode === "free"
         && cycle.sequence === 1
         && intent.focusKinds[0] === "world"
         && isGreenfieldWorkspaceEmpty(this.workspace),
@@ -152,7 +153,15 @@ export class GrowthRunLifecycle {
       closureRepair: repairAuthority,
       longformAuthority,
     });
-    const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent, intentAnchors, priorInquiryAuthority);
+    const internal = new BoundGrowthRun(
+      this.workspace,
+      binding,
+      goal.branchId,
+      input.onPersistedEvent,
+      intentAnchors,
+      revisionPrerequisites?.requiredTargetVersionIds ?? [],
+      priorInquiryAuthority,
+    );
     return this.supervisor.start(
       { ...input.request, scopeResourceIds: binding.authorizedScopeResourceIds },
       input.emit,
@@ -217,6 +226,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
   #closureEvaluation: NonNullable<GrowthRetrieveGraphEvidenceResult["closureEvaluation"]> | null = null;
   #closureSelfAssessment: SubmitClosureSelfAssessmentArgs | null = null;
   #closureCheckerReview: SubmitClosureCheckerReviewArgs | null = null;
+  #revisionAuthority: GrowthRetrieveGraphEvidenceResult["revisionAuthority"] = null;
   readonly #evidenceRanks = new Map<string, number>();
   readonly #priorInquiries = new Map<string, GrowthPriorInquiryContext>();
 
@@ -226,6 +236,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     readonly branchId: string,
     readonly onPersistedEvent: ((event: GrowthEvent) => void) | undefined,
     readonly intentAnchors: TrustedIntentAnchor[],
+    readonly revisionRequiredTargetVersionIds: string[],
     priorInquiryAuthority: Array<GrowthPriorInquiryContext & { localId: string }>,
   ) {
     this.#workspace = workspace;
@@ -292,7 +303,10 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     if (!parsed.success) throw growthRunError("GROWTH_RETRIEVAL_INPUT_INVALID");
     if (!this.#runMatches(context) || this.#receiptRecorded) throw growthRunError("GROWTH_BINDING_INVALID");
     const { variant: _variant, ...retrievalArgs } = parsed.data;
-    const requiredTargetVersionIds = this.#requiredClosureTargetVersionIds();
+    const requiredTargetVersionIds = uniqueStrings([
+      ...this.#requiredClosureTargetVersionIds(),
+      ...this.revisionRequiredTargetVersionIds,
+    ]);
     let result: ReturnType<GraphRetrievalService["retrieve"]>;
     try {
       result = this.#graph.retrieve({
@@ -309,7 +323,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
         seedResourceIds: uniqueStrings([...this.workerBinding.seedResourceIds, ...retrievalArgs.seedResourceIds, ...this.intentAnchors.map((anchor) => anchor.resourceId)]),
         requiredResourceIds: this.intentAnchors.map((anchor) => anchor.resourceId),
         requiredTargetVersionIds,
-        resultBudget: Math.max(retrievalArgs.resultBudget, requiredTargetVersionIds.length),
+        resultBudget: Math.max(retrievalArgs.resultBudget, requiredTargetVersionIds.length + this.intentAnchors.length),
         validTime: null,
         recordedTime: null,
       });
@@ -342,9 +356,29 @@ class BoundGrowthRun implements AgentRunInternalBinding {
         throw growthRunError("GROWTH_CLOSURE_SUBMISSION_INVALID");
       }
     }
+    let revisionAuthority: GrowthRetrieveGraphEvidenceResult["revisionAuthority"] = null;
+    if (this.workerBinding.kind === "revision") {
+      try {
+        revisionAuthority = new GrowthRevisionAuthorityResolver(this.#workspace)
+          .resolve(this.workerBinding.inputCheckpointId, result.hits);
+        this.#revisionAuthority = revisionAuthority;
+      } catch {
+        this.#terminalizeKnownFailure("GROWTH_BINDING_INVALID");
+        throw growthRunError("GROWTH_BINDING_INVALID");
+      }
+    }
     const cycle = this.#requiredCycle();
     try {
-      this.#appendEvent(cycle, "receipt_recorded", "Growth 检索凭证已持久化。", receipt.links[0]?.targetKind, receipt.links[0]?.targetId, receipt.links[0]?.targetVersionId);
+      this.#appendEvent(
+        cycle,
+        "receipt_recorded",
+        this.workerBinding.kind === "revision"
+          ? "正在分析新规则会影响哪些已检索节点。"
+          : "Growth 检索凭证已持久化。",
+        receipt.links[0]?.targetKind,
+        receipt.links[0]?.targetId,
+        receipt.links[0]?.targetVersionId,
+      );
     } catch {
       this.#terminalizeReconciliation();
       throw growthRunError("GROWTH_RECONCILIATION_REQUIRED");
@@ -353,6 +387,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
       variant: "growth_v1",
       receiptRecorded: true,
       receiptId: receipt.id,
+      revisionAuthority,
       evidence: projectedEvidence,
       coverage: {
         state: result.diagnostics.coverage,
@@ -700,13 +735,27 @@ class BoundGrowthRun implements AgentRunInternalBinding {
     if (this.#proposalExecutionStarted) throw growthRunError("GROWTH_RUN_FAILED");
     const cycle = this.#requiredCycle();
     if (this.workerBinding.kind === "repair") this.#assertBoundedRepairProposal(cycle, args);
+    if (this.workerBinding.kind === "revision") this.#assertBoundedRevisionProposal(args);
+    const { growthRevisionImpact, ...gatewayArgs } = args;
     this.#proposalExecutionStarted = true;
-    const result = await gateway.proposeChangeSet(args, context);
+    const result = await gateway.proposeChangeSet(gatewayArgs, context);
     if (result.mode !== context.mode) throw growthRunError("GROWTH_RUN_FAILED");
     if (result.mode === "free" && result.status === "committed") {
       try {
+        if (this.workerBinding.kind === "revision") {
+          this.#markRevisionVisualsStale(growthRevisionImpact?.staleVisualEvidenceIds ?? []);
+        }
         const committed = this.#repository.attachCommittedChangeSet({ cycleId: this.workerBinding.cycleId, changeSetId: result.changeSetId });
-        this.#appendEvent(committed, "change_set_committed", "Growth Cycle 的 Free Change Set 已提交。", "change_set", committed.changeSetId!, committed.outputCheckpointId);
+        this.#appendEvent(
+          committed,
+          "change_set_committed",
+          this.workerBinding.kind === "revision"
+            ? "新规则的影响分析已提交，受影响对象已修改。"
+            : "Growth Cycle 的 Free Change Set 已提交。",
+          "change_set",
+          committed.changeSetId!,
+          committed.outputCheckpointId,
+        );
       } catch {
         this.#terminalizeReconciliation();
         throw growthRunError("GROWTH_RECONCILIATION_REQUIRED");
@@ -729,6 +778,38 @@ class BoundGrowthRun implements AgentRunInternalBinding {
       });
     } catch {
       throw growthRunError("GROWTH_BINDING_INVALID");
+    }
+  }
+
+  #assertBoundedRevisionProposal(args: ProposeChangeSetArgs): void {
+    if (!this.#revisionAuthority) throw growthRunError("GROWTH_BINDING_INVALID");
+    try {
+      assertGrowthRevisionProposalAllowed({
+        cycleId: this.workerBinding.cycleId,
+        domainRootResourceIds: this.workerBinding.domainRootResourceIds,
+        authority: this.#revisionAuthority,
+        proposal: args,
+      });
+    } catch {
+      throw growthRunError("GROWTH_BINDING_INVALID");
+    }
+  }
+
+  #markRevisionVisualsStale(evidenceIds: string[]): void {
+    if (evidenceIds.length === 0) return;
+    const placeholders = evidenceIds.map(() => "?").join(", ");
+    const rows = this.#workspace.db.prepare(`
+      SELECT DISTINCT items.id, items.anchor_hash
+      FROM growth_illustration_items items
+      JOIN growth_illustration_requests requests ON requests.id = items.request_id
+      JOIN growth_illustration_item_sources sources ON sources.item_id = items.id
+      WHERE requests.goal_id = ? AND items.status <> 'stale'
+        AND (sources.resource_version_id IN (${placeholders})
+          OR sources.document_version_id IN (${placeholders}))
+      ORDER BY items.id
+    `).all(this.workerBinding.goalId, ...evidenceIds, ...evidenceIds) as Array<{ id: string; anchor_hash: string }>;
+    for (const row of rows) {
+      this.#repository.markIllustrationItemStale({ itemId: row.id, expectedAnchorHash: row.anchor_hash });
     }
   }
 
@@ -1146,6 +1227,6 @@ function sameStrings(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function growthRunError(code: "GROWTH_BINDING_INVALID" | "GROWTH_RETRIEVAL_INPUT_INVALID" | "GROWTH_PERSISTENCE_FAILED" | "GROWTH_RETRIEVAL_REQUIRED" | "GROWTH_INQUIRY_REQUIRED" | "GROWTH_INQUIRY_INVALID" | "GROWTH_INQUIRY_STALLED" | "GROWTH_RECONCILIATION_REQUIRED" | "GROWTH_RUN_FAILED" | "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED" | "GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED" | "GROWTH_CLOSURE_NOT_READY" | "GROWTH_CLOSURE_SUBMISSION_INVALID"): Error & { code: string } {
+function growthRunError(code: "GROWTH_BINDING_INVALID" | "GROWTH_RETRIEVAL_INPUT_INVALID" | "GROWTH_PERSISTENCE_FAILED" | "GROWTH_RETRIEVAL_REQUIRED" | "GROWTH_INQUIRY_REQUIRED" | "GROWTH_INQUIRY_INVALID" | "GROWTH_INQUIRY_STALLED" | "GROWTH_RECONCILIATION_REQUIRED" | "GROWTH_RUN_FAILED" | "GROWTH_CLOSURE_NOT_READY" | "GROWTH_CLOSURE_SUBMISSION_INVALID"): Error & { code: string } {
   return Object.assign(new Error("Growth Run bridge failed."), { code });
 }

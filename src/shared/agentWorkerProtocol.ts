@@ -248,6 +248,43 @@ const growthEvidenceHitSchema = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 
+const growthRevisionTargetAuthoritySchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("resource"), evidenceId: identifierSchema, resourceId: identifierSchema,
+    type: workspaceResourceSchema.shape.type, objectKind: workspaceResourceSchema.shape.objectKind,
+    title: z.string().trim().min(1).max(500), parentId: identifierSchema.nullable(),
+    sortOrder: z.number().int().min(0).max(2_147_483_647),
+  }).strict(),
+  z.object({
+    kind: z.literal("document"), evidenceId: identifierSchema, documentId: identifierSchema,
+    resourceId: identifierSchema,
+    documentKind: z.enum([
+      "prose", "setting", "character_profile", "location_profile", "faction_profile",
+      "knowledge_note", "style_guide", "writing_constraints",
+    ]),
+    title: z.string().trim().min(1).max(500), sortOrder: z.number().int().min(0).max(2_147_483_647),
+  }).strict(),
+  z.object({
+    kind: z.literal("assertion"), evidenceId: identifierSchema, assertionId: identifierSchema,
+    scopeType: z.string().trim().min(1).max(80), scopeId: identifierSchema,
+    subject: z.string().trim().min(1).max(500), predicate: z.string().trim().min(1).max(240),
+    object: jsonObjectSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("relation"), evidenceId: identifierSchema, relationId: identifierSchema,
+    relationKind: workspaceCreativeRelationSchema.shape.kind,
+    sourceResourceId: identifierSchema, targetResourceId: identifierSchema,
+  }).strict(),
+]);
+
+export const growthRevisionAuthoritySchema = z.object({
+  targets: z.array(growthRevisionTargetAuthoritySchema).min(1).max(100),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.targets.map((target) => target.evidenceId)).size !== value.targets.length) {
+    context.addIssue({ code: "custom", path: ["targets"], message: "Revision authority evidence must be unique." });
+  }
+});
+
 export const growthClosureFacetProjectionSchema = z.object({
   facetId: identifierSchema,
   state: z.enum(["satisfied", "missing", "conflicted", "blocked"]),
@@ -283,6 +320,8 @@ export const growthRetrieveGraphEvidenceResultSchema = z.object({
   receiptRecorded: z.literal(true),
   /** Internal-only. Agent tool presentation strips this authority before model-visible serialization. */
   receiptId: identifierSchema.optional(),
+  /** Internal-only. Agent tool presentation strips this pinned target authority. */
+  revisionAuthority: growthRevisionAuthoritySchema.nullable().optional(),
   evidence: z.array(growthEvidenceHitSchema).max(100_000),
   coverage: z.object({
     state: z.enum(["complete", "partial", "unknown"]),
@@ -812,6 +851,20 @@ export const proposedChangeSetItemSchema = z.discriminatedUnion("kind", [
 export const proposeChangeSetArgsSchema = z.object({
   summary: z.string().trim().min(1).max(2_000),
   items: z.array(proposedChangeSetItemSchema).min(1).max(500),
+  /** Internal Worker-to-Main metadata; never present in the model-visible Change Set tool schema. */
+  growthRevisionImpact: z.object({
+    revisedEvidenceIds: z.array(identifierSchema).max(100),
+    preservedEvidenceIds: z.array(identifierSchema).max(100),
+    staleVisualEvidenceIds: z.array(identifierSchema).max(100),
+  }).strict().superRefine((value, context) => {
+    const all = [...value.revisedEvidenceIds, ...value.preservedEvidenceIds];
+    if (new Set(value.revisedEvidenceIds).size !== value.revisedEvidenceIds.length
+      || new Set(value.preservedEvidenceIds).size !== value.preservedEvidenceIds.length
+      || new Set(value.staleVisualEvidenceIds).size !== value.staleVisualEvidenceIds.length
+      || new Set(all).size !== all.length) {
+      context.addIssue({ code: "custom", message: "Revision impact evidence IDs must be unique and disjoint." });
+    }
+  }).optional(),
 }).strict();
 
 export const proposeChangeSetResultSchema = z.object({
@@ -1292,6 +1345,7 @@ export type RetrieveGraphEvidenceResult = z.infer<typeof retrieveGraphEvidenceRe
 export type GrowthRunBinding = z.infer<typeof growthRunBindingSchema>;
 export type GrowthRetrieveGraphEvidenceArgs = z.infer<typeof growthRetrieveGraphEvidenceArgsSchema>;
 export type GrowthRetrieveGraphEvidenceResult = z.infer<typeof growthRetrieveGraphEvidenceResultSchema>;
+export type GrowthRevisionAuthority = z.infer<typeof growthRevisionAuthoritySchema>;
 export type SubmitGrowthInquiryArgs = z.infer<typeof submitGrowthInquiryArgsSchema>;
 export type SubmitGrowthInquiryResult = z.infer<typeof submitGrowthInquiryResultSchema>;
 export type GrowthClosureFacetProjection = z.infer<typeof growthClosureFacetProjectionSchema>;

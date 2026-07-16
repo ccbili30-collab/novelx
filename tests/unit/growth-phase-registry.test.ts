@@ -48,9 +48,13 @@ describe("Growth phase registry characterization", () => {
     });
   });
 
-  it("fails closed for revision and ambiguous phase authority", () => {
-    expect(() => resolveGrowthPhasePlan(binding({ kind: "revision", focusKinds: ["oc"] })))
-      .toThrow(expect.objectContaining({ code: "STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED" }));
+  it("routes revision through one inquiry-grounded atomic Change Set and rejects ambiguous phase authority", () => {
+    expect(resolveGrowthPhasePlan(binding({ kind: "revision", focusKinds: ["world", "story", "oc"] })))
+      .toMatchObject({
+        phaseId: "revision",
+        objective: "change_set",
+        steps: ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"],
+      });
     expect(() => resolveGrowthPhasePlan(binding({ focusKinds: ["world", "oc"] })))
       .toThrow(expect.objectContaining({ code: "GROWTH_PHASE_REGISTRY_INVALID" }));
   });

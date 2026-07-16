@@ -35,6 +35,9 @@ import {
   requireLongformWriterEvidence,
 } from "./growth/phases/longform/growthLongformPhase";
 import {
+  createGrowthRevisionRuntime,
+} from "./growth/phases/revision/growthRevisionPhase";
+import {
   isExplicitGreenfieldFreeCreateRequest,
   inspectProjectFilesResultSchema,
   listProjectDirectoryResultSchema,
@@ -113,7 +116,6 @@ const ocCorrectionCodes = new Set([
   "GROWTH_OC_FRAGMENT_RELATION_INVALID",
   "GROWTH_OC_FRAGMENT_STORY_INVALID",
 ]);
-
 const planSchema = z.object({
   objective: z.enum(["discussion", "research", "inspect_files", "change_set", "draft", "check", "orchestrate"]),
   scopeResourceIds: z.array(z.string().trim().min(1).max(240)).max(100),
@@ -196,7 +198,7 @@ function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
 function growthFocus(binding: GrowthRunBinding | undefined): "world" | "story" | "oc" | null {
   if (!binding) return null;
   if (binding.kind === "closure_evaluation" || binding.kind === "repair") return null;
-  if (binding.kind === "revision") throw stateError("STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED");
+  if (binding.kind === "revision") return null;
   return binding.focusKinds[0] ?? null;
 }
 
@@ -204,12 +206,14 @@ function isGreenfieldProposalCorrection(
   binding: GrowthRunBinding | undefined,
   tool: OperationalToolName,
   error: unknown,
+  phaseCorrection = false,
 ): boolean {
   const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
   return tool === "propose_change_set" && code !== null && (
     (growthFocus(binding) === "world" && binding?.greenfieldCreateAuthorized && greenfieldCorrectionCodes.has(code))
     || (growthFocus(binding) === "story" && storyCorrectionCodes.has(code))
     || (growthFocus(binding) === "oc" && ocCorrectionCodes.has(code))
+    || phaseCorrection
   );
 }
 
@@ -279,6 +283,7 @@ export function createStewardExecutionStateMachine(input: {
   let proposedChangeSet: z.infer<typeof proposeChangeSetResultSchema> | null = null;
   let growthReceiptRecorded = false;
   let growthReceiptId: string | null = null;
+  const revisionRuntime = createGrowthRevisionRuntime(input.growthBinding);
   let growthInquirySelected = false;
   let growthPostInquiryMissingSource = false;
   const growthWorldsByEvidenceId = new Map<string, string>();
@@ -344,10 +349,12 @@ export function createStewardExecutionStateMachine(input: {
   const wrappedOperationalTools = input.operationalTools.map((original): AgentTool => {
     const closurePresentation = closureToolPresentation(input.growthBinding, original.name);
     const longformPresentation = longformToolPresentation(input.growthBinding, original.name);
+    const revisionPresentation = revisionRuntime?.toolPresentation(original.name) ?? null;
     return {
       ...original,
       ...(closurePresentation ? closurePresentation
     : longformPresentation ? longformPresentation
+    : revisionPresentation ? revisionPresentation
     : growthFocus(input.growthBinding) === "story" && original.name === "writer" ? {
       description: "Create a candidate formal story opening from a high-level Story Brief and the pinned formal-world evidence. Supply only the creative brief: premise, opening situation, central tension, point of view, tone, required/avoided elements, and target length. This is Creator authoring, not a player or GM turn. Do not supply source material, evidence IDs, GM resolutions, resource IDs, or authority fields.",
       parameters: growthStoryBriefParameters,
@@ -391,6 +398,8 @@ export function createStewardExecutionStateMachine(input: {
             })
           : input.growthBinding?.kind === "closure_evaluation" && name === "submit_closure_checker_review"
           ? compileClosureCheckerSubmission(closureCheckerOutput)
+          : revisionRuntime !== null && name === "propose_change_set"
+          ? revisionRuntime.compileProposal(name, effectiveParams)!
           : input.growthBinding?.longformAuthority?.phase === "section" && name === "writer"
           ? compileLongformWriterInput({
               authority: input.growthBinding.longformAuthority,
@@ -448,6 +457,7 @@ export function createStewardExecutionStateMachine(input: {
         const nextTool = requiredNextTool();
         const instruction = name === "submit_growth_inquiry"
           ? longformPostInquiryInstruction(input.growthBinding)
+            ?? revisionRuntime?.postInquiryInstruction(nextTool)
             ?? (growthFocus(input.growthBinding) === "oc" && nextTool === "propose_change_set"
           ? "The pinned Growth Receipt contains one trusted formal story. Create the required high-level OC Fragment now; do not repeat retrieval or supply low-level identifiers."
           : undefined)
@@ -455,7 +465,12 @@ export function createStewardExecutionStateMachine(input: {
         return appendRequiredNextTool(result, nextTool, instruction);
       } catch (error) {
         if (name !== "submit_growth_inquiry") executions.push({ tool: name, status: "failed", details: null });
-        if (isGreenfieldProposalCorrection(input.growthBinding, name, error)) {
+        if (isGreenfieldProposalCorrection(
+          input.growthBinding,
+          name,
+          error,
+          revisionRuntime?.isCorrectable(name, error) ?? false,
+        )) {
           greenfieldProposalCorrectionAttempts += 1;
           if (greenfieldProposalCorrectionAttempts <= 2) throw error;
         }
@@ -723,6 +738,11 @@ export function createStewardExecutionStateMachine(input: {
         if (!retrieval.success || !retrieval.data.receiptRecorded) throw stateError("STEWARD_TOOL_RESULT_INVALID");
         growthReceiptRecorded = true;
         growthReceiptId = retrieval.data.receiptId ?? null;
+        if (revisionRuntime) {
+          revisionRuntime.acceptRetrieval(retrieval.data);
+        } else if (retrieval.data.revisionAuthority) {
+          throw stateError("STEWARD_GROWTH_REVISION_AUTHORITY_REQUIRED");
+        }
         if (input.growthBinding.longformAuthority && !growthReceiptId) throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
         for (const evidence of retrieval.data.evidence) {
           allowedEvidenceIds.add(evidence.evidenceId);

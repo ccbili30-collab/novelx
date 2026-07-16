@@ -53,7 +53,21 @@ describe("GrowthCoordinator", () => {
     })).toEqual({ state: "plan", intent: { kind: "expand", focusKinds: [...focusKinds], resumeFrontier: [...resumeFrontier] } });
   });
 
-  it("persists guidance during C1 and awaits a safe revision boundary without creating a Cycle or Worker", async () => {
+  it("plans one revision over the latest committed checkpoint when a newer rule is persisted", () => {
+    expect(planGrowthFrontier({
+      seedKinds: [], formalCoverageKinds: ["world", "story", "oc"], currentRuleRevision: 2,
+      latestCycle: {
+        status: "committed", ruleRevision: 1,
+        intent: { kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"] },
+      },
+      closureStates: [],
+    })).toEqual({
+      state: "plan",
+      intent: { kind: "revision", focusKinds: ["world", "story", "oc"], resumeFrontier: ["story", "oc"] },
+    });
+  });
+
+  it("persists guidance during C1 and starts one pinned revision Cycle at the safe boundary", async () => {
     const setup = createSetup();
     const workers: FakeWorker[] = [];
     const supervisor = createSupervisor(setup, workers);
@@ -83,13 +97,19 @@ describe("GrowthCoordinator", () => {
     expect((workers[0]!.sent[0] as { userInput: string }).userInput).not.toContain("Use the revised rule.");
 
     await completeCycle(setup.workspace, workers[0]!);
-    await vi.waitFor(() => expect(coordinator.get({
-      projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id,
-    }).coordinatorStatus).toBe("awaiting_guidance"));
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    workers[1]!.spawn();
+    await vi.waitFor(() => expect(workers[1]!.sent).toHaveLength(1));
     const repository = new GrowthRepository(setup.workspace);
-    expect(repository.listCycles(started.goal.id).map((cycle) => cycle.status)).toEqual(["committed"]);
-    expect(repository.listEvents(started.goal.id).some((event) => event.cycleId.endsWith(":cycle:2"))).toBe(false);
-    expect(workers).toHaveLength(1);
+    const cycles = repository.listCycles(started.goal.id);
+    expect(cycles.map((cycle) => cycle.status)).toEqual(["committed", "running"]);
+    expect(cycles[1]).toMatchObject({ ruleRevision: 2, inputCheckpointId: cycles[0]!.outputCheckpointId });
+    expect(repository.getCycleIntent(cycles[1]!.id)).toMatchObject({ kind: "revision", focusKinds: ["world"] });
+    const command = workers[1]!.sent[0] as { userInput: string; growthBinding: { kind: string; ruleRevision: number } };
+    expect(command.growthBinding).toMatchObject({ kind: "revision", ruleRevision: 2 });
+    expect(command.userInput).toContain("Use the revised rule.");
+    supervisor.cancel(runId(workers[1]!));
+    await vi.waitFor(() => expect(repository.getCycle(cycles[1]!.id)?.status).toBe("cancelled"));
   });
 
   it("replays one guidance identity exactly and rejects a competing CAS write", async () => {
@@ -121,13 +141,16 @@ describe("GrowthCoordinator", () => {
     });
 
     await completeCycle(setup.workspace, workers[0]!);
-    await vi.waitFor(() => expect(coordinator.get({
-      projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id,
-    }).coordinatorStatus).toBe("awaiting_guidance"));
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    workers[1]!.spawn();
+    await vi.waitFor(() => expect(workers[1]!.sent).toHaveLength(1));
     const repository = new GrowthRepository(setup.workspace);
-    expect(repository.listCycles(started.goal.id)).toHaveLength(1);
+    expect(repository.listCycles(started.goal.id)).toHaveLength(2);
+    expect(repository.getCycleIntent(repository.listCycles(started.goal.id)[1]!.id)).toMatchObject({ kind: "revision" });
+    expect((workers[1]!.sent[0] as { growthBinding: { ruleRevision: number } }).growthBinding.ruleRevision).toBe(3);
     expect(repository.listRuleRevisions(started.goal.id, { limit: 10 }).map((rule) => rule.revision)).toEqual([1, 2, 3]);
-    expect(workers).toHaveLength(1);
+    supervisor.cancel(runId(workers[1]!));
+    await vi.waitFor(() => expect(repository.listCycles(started.goal.id)[1]!.status).toBe("cancelled"));
   });
 
   it("persists guidance while the automatic Closure evaluation is running without creating Cycle 5", async () => {
