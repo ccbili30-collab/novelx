@@ -358,6 +358,8 @@ interface GrowthInquiryBrief {
 
 **Decision gate (approved 2026-07-16):** Main Head 批准 SQLite schema 26、Closure Contract v4、专用 `closure_evaluation` Intent 与 `evaluated` 终态。`evaluated` 要求 Run/Receipt/terminal time，不含 Change Set、output checkpoint 或 failure code；它仅表示存在唯一 durable evaluation outcome，不自动等于 accepted 或 Goal completed。Cycle input、Receipt、Closure revision 与 assessment checkpoint/rule revision 必须完全一致，outcome 与终态同事务，事件可幂等补尾，结果不明仍 `reconciliation_required`。同时批准严格类型 submission、Facet Result/Checker adverse finding 分离、Repair lineage、mixed component/focus OC 绑定与 pinned-checkpoint relation 查询的窄范围扩展。版本升为 contract `1.1.0`、capability `hackathon-growth-closure-v4`、strategy `grow_world_story_oc_closure_v4`；v3 不得伪装兼容 v4。详细迁移与恢复不变量见配套 ADR。
 
+**Implementation status (2026-07-16, persistence/evaluator foundation):** SQLite schema 26、Closure Contract v4、`closure_evaluation`/`repair` Intent、`evaluated` 终态、严格 Steward/Checker submission、durable outcome、Repair lineage、旧 accepted Review 的历史-only 投影、pinned-checkpoint relation 查询与纯确定性 Closure evaluator 已实现。当前 evaluator 已证明 Unicode code point 的 9,999/10,000 边界、当前稳定 prose 跨文档累计、superseded 排除与“正文关键词不能冒充类型化来源”。公开 capability/strategy 已升级为 v4；尚未接线的 evaluation/repair Runtime 会在 Worker 前明确失败关闭。尚未完成：Coordinator 自动创建/推进 Closure Profile、独立 Checker 真实调用、repair→recheck、longform section 写作与真实 Provider 验收，故本状态不能称 Task 5 完成或内容闭环。
+
 **Closure profiles:**
 
 1. `world_birth` 至少检查：cosmology/astronomy/time、geography/environment、history/timeline、polities/institutions、culture/belief/economy、power/technology rules、current conflicts、world map、world scenes。检查对象必须是带稳定来源的文档、Assertion、资源和关系，不用关键词出现次数冒充结构。

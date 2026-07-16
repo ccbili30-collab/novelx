@@ -69,6 +69,8 @@ Main Head 于 2026-07-16 以 `approve-with-conditions` 批准 Schema 26 与 Clos
 
 Closure v4 必须持久化严格类型的 submission，不能只留 output hash。Facet Result 与 Checker adverse finding 分离：前者保存 `satisfied/missing/conflicted/blocked` 与 coverage/evidence；后者保存 severity、category、目标证据、safe summary、repair objective 与 Main 计算的稳定 fingerprint。`accepted` 要求所有必需 Facet Result 满足、Steward 为 `ready_for_checker`、Checker 通过且零 adverse finding。Repair Intent 必须绑定原 Review、一个选中 blocking finding/fingerprint 与 Repair Cycle，其他 finding 保持 backlog；重复 finding 或连续两个无进展 repair Cycle 进入 `GROWTH_CLOSURE_REPAIR_STALLED`。`mixed_birth` 显式保存用户要求的 component profiles；包含 `oc_saga` 时必须绑定 focus OC，不得从 facet ID 猜测。
 
+实现收口（2026-07-16）：Schema 26 与上述持久化不变量已经落地；Review 本身不再驱动 `closed/blocked`，只有同事务封存并使 Cycle 进入 `evaluated` 的 durable outcome 才能驱动 Closure 状态。旧 `legacy_pre_v26` accepted Review 仅供历史读取，当前投影保持 `growing`。Repair 只有在绑定 Cycle 已原子提交 Change Set 后才能进入 `committed/no_progress`；`resolved` 还要求该输出 checkpoint 上的新 Closure revision 获得后续独立 accepted outcome。当前公开 capability/strategy 已升为 v4，未接线的 evaluation/repair Worker 路径保持失败关闭；自动调度与 Provider 验收仍是后续实现，不属于本段已完成证据。
+
 ## Illustration
 
 Anchor（锚点）采用严格判别联合：
