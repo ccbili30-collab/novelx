@@ -274,13 +274,33 @@ const defaultVisualStyle = {
 
 **Files:**
 - Create: `src/agent-worker/growth/growthInquiryBrief.ts`
-- Create: `src/domain/growth/growthInquiryRepository.ts`
+- Modify: `src/shared/growthContract.ts`
+- Modify: `src/shared/agentWorkerProtocol.ts`
+- Modify: `src/shared/ipcContract.ts`
+- Modify: `src/domain/workspace/workspaceRepository.ts`
+- Modify: `src/domain/growth/growthRepository.ts`
 - Modify: `src/main/growthCoordinator.ts`
 - Modify: `src/main/growthRunLifecycle.ts`
+- Modify: `src/main/agentProcessSupervisor.ts`
+- Modify: `src/agent-worker/tools/createAgentTools.ts`
+- Modify: `src/agent-worker/tools/agentWorkerToolBridge.ts`
 - Modify: `src/agent-worker/stewardExecutionStateMachine.ts`
+- Modify: `src/agent-worker/stewardRuntime.ts`
+- Modify: `src/renderer/src/features/agent/growthPresentation.ts`
+- Modify: `src/renderer/src/features/agent/RunActivityTimeline.tsx`
+- Modify: `src/renderer/src/features/activity/RunWorkTargetPane.tsx`
+- Modify: `src/renderer/src/features/agent/StewardRuntimePanel.tsx`
 - Test: `tests/unit/growth-inquiry-brief.test.ts`
-- Test: `tests/unit/growth-inquiry-repository.test.ts`
+- Test: `tests/unit/growth-repository.test.ts`
+- Test: `tests/unit/workspace-persistence.test.ts`
+- Test: `tests/unit/agent-worker-contract.test.ts`
+- Test: `tests/unit/agent-worker-tool-bridge.test.ts`
+- Test: `tests/unit/growth-run-bridge.test.ts`
+- Test: `tests/unit/growth-coordinator.test.ts`
+- Test: `tests/unit/growth-presentation.test.ts`
 - Test: `tests/unit/steward-execution-state-machine.test.ts`
+
+**Decision gate:** Main Head 已以 `approve-with-conditions` 接受 SQLite v25、Inquiry 安全事件和同一 Cycle 的 Inquiry 工具链。`GrowthRepository` 继续是唯一持久化权威；禁止创建第二个 Inquiry Repository。v25 是语义加法，但会在单个 `BEGIN IMMEDIATE` 中 copy-and-swap `growth_events`，只扩大 `phase/target_kind` CHECK。迁移必须证明旧事件逐字段、行数、主键、索引和外键不变，`foreign_key_check` 通过，中途失败完整回滚，重复打开幂等。旧 v24 数据明确投影为 `legacy_v24`；旧二进制对 schema 25 失败关闭。
 
 **Inquiry contract:**
 
@@ -289,10 +309,11 @@ interface GrowthInquiryBrief {
   inquiries: Array<{
     localId: string;
     question: string;
-    evidenceRefs: string[];
+    evidenceIds: string[];
     evidenceState: "known" | "conflicted" | "unknown";
     safeSummary: string;
     proposedAction: string;
+    provisionalAssumption: string | null;
     priority: number;
     requiresCreatorChoice: boolean;
   }>;
@@ -302,16 +323,20 @@ interface GrowthInquiryBrief {
 
 1. 每个内容/修订 Cycle 必须先完成 pinned checkpoint 图检索，再提交 3–7 条 Inquiry；少于 3、多于 7、无 evidence state、重复 fingerprint 或选择不存在的问题均在模型副作用前拒绝。
 2. 问题必须针对因果和影响，而不是“还能加什么设定”。优先类别包括地理/制度后果、历史因果、角色选择、故事不可逆结果、跨节点冲突和视觉一致性。
-3. Main 根据标准化 question、evidence refs 和 rule revision 生成 fingerprint；当前 Goal 未解决问题和最近 Cycle 问题参与去重。模型不能自行指定 fingerprint。
-4. 仅一条最高价值 Inquiry 可成为本 Cycle 的 Growth Frontier；其他问题持久为 backlog，后续重新检索后可提升或关闭。
-5. `requiresCreatorChoice=true` 只有在多个答案会改变作品身份、核心规则或价值取舍时成立。此时 Cycle 在 Change Set 前进入 `blocked / GROWTH_CREATOR_CHOICE_REQUIRED`，UI 显示安全问题和选项；用户回答成为新 Rule Revision。
-6. 普通 unknown 不阻塞：模型必须给出明确标注的 provisional assumption（临时假设），并在后续 Checker review 中保持可追踪。
-7. 选定问题驱动恰好一个 Change Set；提交后下一 Cycle 必须从 output checkpoint 重新检索，更新该 Inquiry 为 answered/conflicted/unknown，不能直接沿用旧答案。
-8. 连续两个 Cycle 选择相同 fingerprint 且证据状态、目标节点和 closure facets 均无变化时，进入 `GROWTH_INQUIRY_STALLED`；不继续自言自语。
-9. Renderer 只接收 `safeSummary`，例如“正在推演：潮汐魔法对港口贸易、历法和宗教权力的连锁影响。”不得接收原始思维链、草稿答案或模型 token stream。
-10. 定向测试覆盖 2/3/7/8 数量边界、fingerprint 去重、backlog、provisional assumption、用户取舍阻塞、提交后重检、原地打转停止和重开恢复。
-11. 运行 3 文件定向 Vitest、typecheck、Prompt publication gate。
-12. 提交：`feat(growth): ground self inquiry in graph evidence`。
+3. Main 把模型可见 `evidenceIds` 精确解析为本次 Receipt ranks，并根据标准化 question、解析后的 ranks 和 rule revision 生成 fingerprint；当前 Goal 未解决问题和最近 Cycle 问题参与去重。模型不能提交 fingerprint、Receipt rank、checkpoint 或授权 scope。
+4. v25 为每个既有 Batch 写显式 contract/version 标记。新 v25 Batch 的每个问题必须有逐问题 detail；缺标记或 detail 不完整是损坏并失败关闭，不得用“缺少子行”猜成 legacy。
+5. 仅一条最高价值 Inquiry 可成为本 Cycle 的 Growth Frontier；其他问题初始持久为 backlog。`promoted` 必须链接后续 Cycle/Inquiry；`answered/closed` 必须绑定新 checkpoint 和新 Receipt，不能因 Change Set committed 就直接更新。`closed` 只表示在新证据下失效、重复或被替代，不等于 Closure accepted。
+6. `requiresCreatorChoice=true` 只有在多个答案会改变作品身份、核心规则或价值取舍时成立。阻塞 Batch 必须恰好一个具体问题进入 `creator_choice_required`，其余为 backlog，没有 selected；Batch、具体问题、Cycle/Goal blocked 和安全事件必须同事务完成。UI 显示安全问题并接受自由文本指导，不新增或伪造固定选项。
+7. 用户自由文本回答必须在同一事务/CAS 中创建一条 Rule Revision、唯一关联一个阻塞 Inquiry，并追加生命周期事实；实际内容修订归 Task 6。相同 replay 返回原关联，不同 payload 失败关闭。
+8. 普通 unknown 不阻塞：模型必须给出明确标注的 provisional assumption（临时假设），并在后续 Checker review 中保持可追踪；它始终是候选，不是 Canon。
+9. 正常 Inquiry 必须先 durable，再允许同一 Run 继续既有 Fragment，并且恰好一个 Change Set；Creator-choice 分支必须零 Change Set。提交后下一 Cycle 从 output checkpoint 重新检索后，才能用新证据更新 Inquiry 生命周期。
+10. 新增 `inquiry_selected`（仅 `running`）和 `creator_choice_required`（仅 `blocked`）安全事件，`targetKind=inquiry`、`targetId=exact inquiry id`、`contentRef=null`。事件只能从持久事实投影 allowlisted `safeSummary`，不得包含 question draft、proposedAction、provisional assumption、Prompt、token 或原始思维链；persist first、publish second，重开可确定性补事件后缀。
+11. Inquiry 使用 event 专用 target schema，不扩张 Retrieval 共用 target 枚举。因为公开/Worker 合同不兼容，capability/strategy 升为 `hackathon-growth-inquiry-v3` / `grow_world_story_oc_inquiry_v3`；不得沿用 dynamic-v2 标识伪装兼容。
+12. 连续两个 Cycle 选择相同 fingerprint 且证据状态、目标节点和 closure facets 均无变化时，进入 `GROWTH_INQUIRY_STALLED`；不继续自言自语。
+13. Renderer 只接收 `safeSummary`，例如“正在推演：潮汐魔法对港口贸易、历法和宗教权力的连锁影响。”不得接收原始思维链、草稿答案或模型 token stream。
+14. 定向测试覆盖 2/3/7/8 数量边界、Receipt rank 映射、Main fingerprint、Batch/blocked 原子性、legacy_v24、迁移回滚/幂等、backlog、provisional assumption、用户取舍自由文本关联、提交后重检、原地打转停止、事件补尾和重开恢复。
+15. 运行相关定向 Vitest、typecheck、Prompt publication gate；本批不调用真实 Provider。
+16. 提交：`feat(growth): ground self inquiry in graph evidence`。
 
 ---
 
