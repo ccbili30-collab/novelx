@@ -3,9 +3,10 @@ import type { SQLOutputValue } from "node:sqlite";
 import { canonicalAuditHash } from "../audit/canonicalAuditHash";
 import { CheckpointRepository } from "../version/checkpointRepository";
 import { ResourceRepository, type ResourceRecord } from "./resourceRepository";
+import { assertCreativeRelationAllowed, type CreativeRelationKind } from "./creativeRelationPolicy";
 import type { WorkspaceDatabase } from "./workspaceRepository";
 
-export type CreativeRelationKind = "uses_world" | "uses_oc" | "variant_of" | "related_to";
+export type { CreativeRelationKind } from "./creativeRelationPolicy";
 
 export interface CreativeRelationRecord {
   id: string;
@@ -130,7 +131,7 @@ export class CreativeRelationRepository {
     if (input.state === "active") {
       const source = this.requireCurrentResource(input.sourceResourceId, "RELATION_SOURCE_NOT_ACTIVE");
       const target = this.requireCurrentResource(input.targetResourceId, "RELATION_TARGET_NOT_ACTIVE");
-      assertRelationEndpoints(input.kind, source, target);
+      assertCreativeRelationAllowed({ kind: input.kind, source, target });
       const duplicate = this.listCurrent().find((relation) => (
         relation.id !== relationId
         && relation.kind === input.kind
@@ -170,32 +171,6 @@ export class CreativeRelationRepository {
     const resource = this.#resources.getCurrent(resourceId);
     if (!resource) throw relationError(code, "The relation endpoint is not active in the current branch.");
     return resource;
-  }
-}
-
-function assertRelationEndpoints(kind: CreativeRelationKind, source: ResourceRecord, target: ResourceRecord): void {
-  if (source.id === target.id) throw relationError("RELATION_SELF_REFERENCE", "A resource cannot relate to itself.");
-  switch (kind) {
-    case "uses_world":
-      if (source.type !== "story" || (source.objectKind !== "story" && source.objectKind !== "volume")) {
-        throw relationError("RELATION_SOURCE_KIND_INVALID", "Only a story or story volume can use a world.");
-      }
-      if (target.objectKind !== "world") throw relationError("RELATION_TARGET_KIND_INVALID", "A world reference must target a world.");
-      return;
-    case "uses_oc":
-      if (source.type !== "story" || (source.objectKind !== "story" && source.objectKind !== "volume")) {
-        throw relationError("RELATION_SOURCE_KIND_INVALID", "Only a story or story volume can use an OC.");
-      }
-      if (target.objectKind !== "oc") throw relationError("RELATION_TARGET_KIND_INVALID", "An OC reference must target a base OC.");
-      return;
-    case "variant_of":
-      if (source.objectKind !== "oc_variant") throw relationError("RELATION_SOURCE_KIND_INVALID", "Only an OC variant can declare a base OC.");
-      if (target.objectKind !== "oc") throw relationError("RELATION_TARGET_KIND_INVALID", "An OC variant must target a base OC.");
-      return;
-    case "related_to":
-      if (source.objectKind === "domain_root" || target.objectKind === "domain_root") {
-        throw relationError("RELATION_ENDPOINT_KIND_INVALID", "Domain roots cannot be related as creative objects.");
-      }
   }
 }
 
