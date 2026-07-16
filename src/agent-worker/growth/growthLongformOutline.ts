@@ -28,6 +28,7 @@ const sectionSchema = z.object({
 });
 
 export const growthLongformOutlineSchema = z.object({
+  storyTitle: safeText(500),
   summary: safeText(2_000),
   sections: z.array(sectionSchema).min(2).max(100),
 }).strict().superRefine((value, context) => {
@@ -41,6 +42,7 @@ export const growthLongformOutlineSchema = z.object({
 
 const identifierParameters = Type.String({ minLength: 1, maxLength: 240 });
 export const growthLongformOutlineParameters = Type.Object({
+  storyTitle: Type.String({ minLength: 1, maxLength: 500 }),
   summary: Type.String({ minLength: 1, maxLength: 2_000 }),
   sections: Type.Array(Type.Object({
     localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }),
@@ -63,8 +65,10 @@ export interface GrowthLongformOutlineAuthority {
 }
 
 export interface GrowthLongformOutlineChangeSetAuthority extends GrowthLongformOutlineAuthority {
-  storyResourceId: string;
+  mainStoryResourceId: string;
+  worldResourceId: string;
   focusOcResourceId: string;
+  personalStoryResourceId: string;
   outlineDocumentId: string;
 }
 
@@ -72,6 +76,7 @@ export interface GrowthLongformOutline {
   outlineId: string;
   checkpointId: string;
   receiptId: string;
+  storyTitle: string;
   summary: string;
   sections: z.infer<typeof sectionSchema>[];
 }
@@ -108,6 +113,7 @@ export function compileGrowthLongformOutline(
     outlineId: outlineId.data,
     checkpointId: checkpointId.data,
     receiptId: receiptId.data,
+    storyTitle: parsed.data.storyTitle,
     summary: parsed.data.summary,
     sections: parsed.data.sections,
   };
@@ -118,28 +124,75 @@ export function compileGrowthLongformOutlineChangeSet(
   authority: GrowthLongformOutlineChangeSetAuthority,
 ): ProposeChangeSetArgs {
   const outline = compileGrowthLongformOutline(input, authority);
-  const storyResourceId = identifier.safeParse(authority.storyResourceId);
+  const mainStoryResourceId = identifier.safeParse(authority.mainStoryResourceId);
+  const worldResourceId = identifier.safeParse(authority.worldResourceId);
   const focusOcResourceId = identifier.safeParse(authority.focusOcResourceId);
+  const personalStoryResourceId = identifier.safeParse(authority.personalStoryResourceId);
   const outlineDocumentId = identifier.safeParse(authority.outlineDocumentId);
-  if (!storyResourceId.success || !focusOcResourceId.success || !outlineDocumentId.success) {
+  if (!mainStoryResourceId.success || !worldResourceId.success || !focusOcResourceId.success
+    || !personalStoryResourceId.success || !outlineDocumentId.success) {
     throw outlineError("GROWTH_LONGFORM_OUTLINE_AUTHORITY_INVALID");
   }
   const prefix = `growth-${createHash("sha256").update(`${outline.outlineId}:outline`).digest("hex").slice(0, 20)}`;
+  const storyItemId = `${prefix}-personal-story`;
+  const usesWorldItemId = `${prefix}-uses-world`;
+  const usesOcItemId = `${prefix}-uses-oc`;
   const creativeItemId = `${prefix}-creative-document`;
   const documentItemId = `${prefix}-document`;
   const assertionItemId = `${prefix}-personal-story-binding`;
-  const content = JSON.stringify({ summary: outline.summary, sections: outline.sections });
+  const content = JSON.stringify({ storyTitle: outline.storyTitle, summary: outline.summary, sections: outline.sections });
   return proposeChangeSetArgsSchema.parse({
     summary: outline.summary,
     items: [
       {
-        id: creativeItemId,
+        id: storyItemId,
         dependsOn: [],
+        kind: "resource.put",
+        payload: {
+          resourceId: personalStoryResourceId.data,
+          create: true,
+          type: "story",
+          objectKind: "volume",
+          title: outline.storyTitle,
+          parentId: mainStoryResourceId.data,
+          state: "active",
+          sortOrder: 0,
+        },
+      },
+      {
+        id: usesWorldItemId,
+        dependsOn: [storyItemId],
+        kind: "creative_relation.put",
+        payload: {
+          relationId: `${prefix}-relation-uses-world`,
+          create: true,
+          relationKind: "uses_world",
+          sourceResourceId: personalStoryResourceId.data,
+          targetResourceId: worldResourceId.data,
+          state: "active",
+        },
+      },
+      {
+        id: usesOcItemId,
+        dependsOn: [storyItemId],
+        kind: "creative_relation.put",
+        payload: {
+          relationId: `${prefix}-relation-uses-oc`,
+          create: true,
+          relationKind: "uses_oc",
+          sourceResourceId: personalStoryResourceId.data,
+          targetResourceId: focusOcResourceId.data,
+          state: "active",
+        },
+      },
+      {
+        id: creativeItemId,
+        dependsOn: [storyItemId],
         kind: "creative_document.put",
         payload: {
           documentId: outlineDocumentId.data,
           create: true,
-          resourceId: storyResourceId.data,
+          resourceId: personalStoryResourceId.data,
           kind: "writing_constraints",
           title: "长篇结构",
           state: "active",
@@ -148,17 +201,17 @@ export function compileGrowthLongformOutlineChangeSet(
       },
       {
         id: documentItemId,
-        dependsOn: [creativeItemId],
+        dependsOn: [storyItemId, creativeItemId],
         kind: "document.put",
         payload: {
-          resourceId: storyResourceId.data,
+          resourceId: personalStoryResourceId.data,
           creativeDocumentId: outlineDocumentId.data,
           content,
         },
       },
       {
         id: assertionItemId,
-        dependsOn: [documentItemId],
+        dependsOn: [storyItemId, documentItemId],
         kind: "assertion.put",
         payload: {
           assertionId: `${prefix}-personal-story-binding`,
@@ -166,7 +219,7 @@ export function compileGrowthLongformOutlineChangeSet(
           scopeId: focusOcResourceId.data,
           subject: focusOcResourceId.data,
           predicate: "closure.oc.binding.personal_story",
-          object: { storyResourceId: storyResourceId.data },
+          object: { storyResourceId: personalStoryResourceId.data },
           evidenceIds: [`greenfield_document_output:${documentItemId}`],
         },
       },

@@ -13,6 +13,7 @@ import {
 
 const evidence = ["world-evidence", "oc-evidence"];
 const validOutlineInput = {
+  storyTitle: "潮汐债务",
   summary: "以潮汐债务和失落记忆为主线的角色个人长篇。",
   sections: [
     section("origin", 5_000, 5_500),
@@ -31,19 +32,32 @@ describe("Growth longform authoring", () => {
     expect(outline.sections.reduce((total, item) => total + item.estimatedCodePoints.min, 0)).toBe(10_000);
   });
 
-  it("compiles the outline into one sourced writing-constraints document and OC story binding", () => {
+  it("compiles the outline into one independent personal-story volume with world/OC bindings", () => {
     const proposal = compileGrowthLongformOutlineChangeSet(validOutlineInput, {
       outlineId: "outline-1",
       checkpointId: "checkpoint-1",
       receiptId: "receipt-1",
       availableEvidenceIds: evidence,
-      storyResourceId: "story-personal-1",
+      mainStoryResourceId: "story-main-1",
+      worldResourceId: "world-1",
       focusOcResourceId: "oc-focus-1",
+      personalStoryResourceId: "story-personal-1",
       outlineDocumentId: "document-outline-1",
     });
     expect(proposal.items.map((item) => item.kind)).toEqual([
+      "resource.put", "creative_relation.put", "creative_relation.put",
       "creative_document.put", "document.put", "assertion.put",
     ]);
+    expect(proposal.items.find((item) => item.kind === "resource.put")).toMatchObject({
+      payload: {
+        resourceId: "story-personal-1", type: "story", objectKind: "volume",
+        parentId: "story-main-1", title: validOutlineInput.storyTitle,
+      },
+    });
+    expect(proposal.items.filter((item) => item.kind === "creative_relation.put")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ payload: expect.objectContaining({ relationKind: "uses_world", sourceResourceId: "story-personal-1", targetResourceId: "world-1" }) }),
+      expect.objectContaining({ payload: expect.objectContaining({ relationKind: "uses_oc", sourceResourceId: "story-personal-1", targetResourceId: "oc-focus-1" }) }),
+    ]));
     const document = proposal.items.find((item) => item.kind === "document.put")!;
     expect(JSON.parse(document.payload.content)).toEqual(validOutlineInput);
     expect(proposal.items.find((item) => item.kind === "assertion.put")).toMatchObject({
@@ -57,8 +71,8 @@ describe("Growth longform authoring", () => {
     });
     expect(() => compileGrowthLongformOutlineChangeSet(validOutlineInput, {
       outlineId: "outline-1", checkpointId: "checkpoint-1", receiptId: "receipt-1",
-      availableEvidenceIds: evidence, storyResourceId: "", focusOcResourceId: "oc-focus-1",
-      outlineDocumentId: "document-outline-1",
+      availableEvidenceIds: evidence, mainStoryResourceId: "story-main-1", worldResourceId: "world-1",
+      focusOcResourceId: "oc-focus-1", personalStoryResourceId: "", outlineDocumentId: "document-outline-1",
     })).toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_OUTLINE_AUTHORITY_INVALID" }));
   });
 
