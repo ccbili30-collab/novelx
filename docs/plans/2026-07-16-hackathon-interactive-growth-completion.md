@@ -39,12 +39,12 @@
 每次向用户汇报时，从本文件重新渲染：
 
 ```text
-黑客松执行进度：4/7 阶段已验收，剩余 3 阶段
+黑客松执行进度：5/7 阶段已验收，剩余 2 阶段
 [x] 0. 模块化基线与全量测试
 [x] 1. Repair 权限与领域正确性
 [x] 2. 用户规则影响分析与修订
 [x] 3. OC 万字 Longform 自动循环
-[ ] 4. 通用插图队列
+[x] 4. 通用插图队列
 [ ] 5. 生长过程与图文图鉴 UI
 [ ] 6. 真实 Live、打包与冻结验收
 ```
@@ -337,9 +337,9 @@ git diff --check
 
 ---
 
-## 7. 阶段 4：通用插图队列 [ ]
+## 7. 阶段 4：通用插图队列 [x]
 
-**状态：** `not_started`
+**状态：** `completed`
 **目标：** 默认补齐地图、世界风貌、故事场景和主要 OC 立绘，并允许任意稳定文本或图谱节点请求任意数量的来源绑定插图。
 
 ### 文件所有权
@@ -373,18 +373,18 @@ git diff --check
 
 ### 实现步骤
 
-1. [ ] 只读审计现有 illustration 表和 repository API；不得重复建表。
-2. [ ] 默认选择测试覆盖地图、风貌、场景和角色立绘。
-3. [ ] anchor 测试覆盖 resource、stable text span、immutable snapshot。
-4. [ ] 10、100、超过单批大小的 items 均可分页执行。
-5. [ ] 幂等键相同只产生一个 Job。
-6. [ ] source version 改变后旧 Asset stale，但保留可回看。
-7. [ ] 重开恢复 planned/queued/running/ready/failed/cancelled/reconciliation。
-8. [ ] Provider 结果未知不得自动再收费。
-9. [ ] Coordinator 先原子持久化完整计划，再执行第一项。
-10. [ ] 每项继续通过现有 `generate_image` Gateway 和 Job/Asset 权威链。
-11. [ ] 默认风格为成熟漫画＋手绘；除非用户覆盖，避免写实、3D、chibi、kawaii 和通用萌系。
-12. [ ] 图片事实只来自 source versions；单项失败不丢后续项。
+1. [x] 只读审计现有 illustration 表和 repository API；未重复建表。
+2. [x] 默认选择测试覆盖地图、风貌、场景和角色立绘。
+3. [x] anchor 测试覆盖 resource、stable text span、working/conversation immutable snapshot。
+4. [x] 10、100、105 个 items 均可分页；每批最多 20，无 Request 总量上限。
+5. [x] 幂等键相同只产生一个 Job。
+6. [x] source version 改变后旧 Item 与 Asset 同时 stale，但保留可回看。
+7. [x] 重开恢复 planned/queued/running/ready/failed/cancelled/reconciliation。
+8. [x] Provider 结果未知进入 reconciliation，不自动再次收费。
+9. [x] Coordinator 在一个 SQLite 事务中持久化完整计划，再执行第一项；第二批失败全回滚。
+10. [x] 每项继续通过现有 `generate_image` Gateway 和 Job/Asset 权威链。
+11. [x] 默认风格为成熟漫画＋手绘；除非用户覆盖，避免写实、3D、chibi、kawaii 和通用萌系。
+12. [x] 图片事实只来自 source versions；单项失败不丢后续项。
 
 ### 定向验收
 
@@ -396,15 +396,15 @@ npm run build
 git diff --check
 ```
 
-- [ ] 默认视觉集合完整规划。
-- [ ] 任意文本/节点支持一张、多张和多变体。
-- [ ] 无产品总量硬上限，内部批次/并发有界。
-- [ ] stale、恢复、取消、部分失败、结果未知通过。
-- [ ] 提交：`feat(growth): queue source-bound illustrations`。
+- [x] 默认视觉集合完整规划。
+- [x] 任意文本/节点支持一张、多张和多变体。
+- [x] 无产品总量硬上限，内部批次 20、并发 1。
+- [x] stale、恢复、取消、部分失败、结果未知通过。
+- [x] 提交：`6ed78e2 feat(growth): queue source-bound illustrations`。
 
 **停止条件：** 现有 Schema 无法表达锚点/幂等/reconciliation，或需要修改 Provider 公开协议/权限。
 
-**完成证据：** Commit / Tests / Remaining 待填。
+**完成证据：** `6ed78e2`；9 个定向 Vitest 文件 106/106、0 skipped；`npm run typecheck`、`npm run verify:prompt-publication`、`npm run build`、`git diff --check` 均通过。未运行真实 Provider、Renderer E2E 或全量测试；本阶段只证明 Main/SQLite/Gateway 的通用队列权威，UI 接入和真实多图 Live 留到阶段 5/6。
 
 ---
 
@@ -600,6 +600,8 @@ npm run verify:installer
 | 2026-07-16 | 0 模块化基线 | completed | `a666f07` | `npm test` 756/756；typecheck/build passed | 未运行 Provider/打包 |
 | 2026-07-16 | 1 Repair 权限 | completed | `410fea7` | Vitest 93/93；typecheck/Prompt gate/diff passed | 未运行 Provider；真实 Live 留到阶段 6 |
 | 2026-07-16 | 2 用户规则修订 | completed | `3a39df5` | Vitest 146/146；typecheck/Prompt gate/diff passed | 未运行 Provider/Electron/build/full suite |
+| 2026-07-16 | 3 OC 万字 Longform | completed | `089ee99` | Vitest 132/132；typecheck/Prompt gate/diff passed | 未运行 Provider/Electron/build/full suite |
+| 2026-07-16 | 4 通用插图队列 | completed | `6ed78e2` | Vitest 106/106；typecheck/Prompt gate/build/diff passed | 未运行 Provider/Renderer E2E/full suite |
 
 只追加经验证的行，不把计划或中间态写成完成。
 
@@ -607,14 +609,14 @@ npm run verify:installer
 
 ## 13. 当前对话进度板
 
-**已验收：3/7 阶段｜剩余：4 阶段**
+**已验收：5/7 阶段｜剩余：2 阶段**
 
 - [x] 0. 模块化基线与全量测试
 - [x] 1. Repair 权限与领域正确性
 - [x] 2. 用户规则影响分析与修订
-- [ ] 3. OC 万字 Longform 自动循环
-- [ ] 4. 通用插图队列
+- [x] 3. OC 万字 Longform 自动循环
+- [x] 4. 通用插图队列
 - [ ] 5. 生长过程与图文图鉴 UI
 - [ ] 6. 真实 Live、打包与冻结验收
 
-**下一执行入口：** 阶段 3。先复核已有 Longform outline/section/progress 的冻结边界与当前测试，再以测试先行补齐自动 outline → 分节写作 → 10,000 字 → Closure 复检循环。
+**下一执行入口：** 阶段 5。只读取 Renderer 的 Growth 时间线、右栏创作面板、Showcase 与现有安全事件投影；接入真实 Rule Revision、Closure、Longform 和 Illustration Queue 状态，不让 Renderer 推断提交或直接调用 Provider。

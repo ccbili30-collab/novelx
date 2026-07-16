@@ -6,16 +6,17 @@
 ## 0. 最新状态覆盖（优先于下方迁移历史）
 
 - 黑客松分支：`codex/hackathon-10day`。
-- 当前最新阶段实现头：`089ee99`。Repair、Revision 与 Longform 实现只完成定向验收；全量测试与生产构建结论仍固定在模块化基线 `a666f07`，不得跨头沿用。
+- 当前最新阶段实现头：`6ed78e2`。Repair、Revision、Longform 与 Illustration Queue 只完成各自定向验收；全量测试结论仍固定在模块化基线 `a666f07`，不得跨头沿用。当前头的生产构建已通过。
 - 真实 Growth 最高视觉边界记录在 `notes/status/2026-07-15-hackathon-growth-live-text-boundary.md`：空工作区经真实 `gpt-5.4` 与 `gpt-image-2` 完成世界→故事→OC 三个 committed Cycle、世界地图、自动 Showcase 和后续 research-only 检索。
 - 该 Live 不覆盖 Player/GM 回合、小说提取、导出、全量测试、安装包或升级链，不能称为完整 NovelX 闭环。
 - Cycle 间用户指导的确定性 Revision 路径已接通：规则仅在安全边界进入新 Cycle，重新检索 pinned checkpoint，以模型 Impact Brief 和一个受 Main authority 二次验证的 Change Set 修改 world/story/OC，并只将受影响插图标记 stale。当前实现尚无真实 Provider Live，交互式 Growth 仍未闭环。
 - Longform 已具备 outline/section 编译器、稳定身份、pinned progress resolver、Main→Worker authority 与自动 `outline → section → recheck` 协调的确定性证据。每节独立检索和提交；累计 10,000 Unicode 字符后进入独立 Closure recheck。章节运行中收到新规则时，先完成当前原子提交，再执行 Revision/recheck，最后以新规则继续。当前实现尚无真实 Provider Live。
+- 通用 Illustration Queue 已有 Main-only 的完整计划原子持久化、每批 20/并发 1/无总量上限、既有图片 Gateway 执行、来源 stale、取消、部分失败和重开 reconciliation 的确定性证据。默认覆盖要求地图、主要风貌、故事场景与每个主要 OC 立绘；任意稳定文本、working/conversation snapshot 可多图、多变体。Renderer 接入和真实多图 Live 尚未完成。
 - `story` 与 `volume` 的关系语义已集中到 `src/domain/workspace/creativeRelationPolicy.ts`：二者均可作为 `uses_world` / `uses_oc` 的叙事源，`chapter` 不可。
 - Growth 计划工具序列与稳定 `GrowthPhaseHandler` seam 已位于 `src/agent-worker/growth/core/`；新增测试阶段不需要修改顶层 Steward 状态机主体。
 - Longform 与 Closure/Repair 的 Worker 编译/工具展示分别位于 `src/agent-worker/growth/phases/longform/`、`phases/closure/`；对应 Main authority resolver 位于 `src/main/growth/phases/`。顶层仍保留跨阶段工具分派、副作用门禁、恢复和终态。
 - Growth 的最短 AI 阅读路径为 `src/agent-worker/growth/README.md` 与 `src/main/growth/README.md`。维护目标是缩小上下文和修改半径，不是继续增加战术功能。
-- 模块化基线 `a666f07` 已运行完整 `npm test`：Unit 728/728、Integration 22/22、e2e-support 6/6，零跳过；生产 `npm run build` 通过，并验证 3 组 active Prompt publication。其后的 Repair、Revision 与 Longform 阶段只运行定向测试、typecheck 与 Prompt gate；完整冻结验收留到执行计划阶段 6。
+- 模块化基线 `a666f07` 已运行完整 `npm test`：Unit 728/728、Integration 22/22、e2e-support 6/6，零跳过。Illustration Queue 头 `6ed78e2` 的 9 个定向文件 106/106、typecheck、3 组 active Prompt publication 与生产 build 通过；完整冻结验收仍留到执行计划阶段 6。
 
 下方内容保存 2026-07-14 的迁移与冻结历史。若与本节冲突，以本节和日期更新的 `notes/status/` 为准。
 
