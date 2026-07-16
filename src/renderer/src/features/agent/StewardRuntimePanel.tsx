@@ -9,6 +9,9 @@ import {
   Send,
 } from "lucide-react";
 import type { AgentArtifact, SessionMessage, SessionSummary, WorkspaceSnapshot } from "../../../../shared/ipcContract";
+import type { GrowthPresentationSnapshot } from "../../../../shared/growthPresentationContract";
+import { GrowthGuidanceStatus } from "../growth/GrowthGuidanceStatus";
+import { GrowthImpactSummary } from "../growth/GrowthImpactSummary";
 import { PendingChangeSets } from "../change-set/PendingChangeSets";
 import { AgentArtifactList } from "./AgentArtifactList";
 import { AgentMessageContent } from "./AgentMessageContent";
@@ -44,6 +47,7 @@ interface StewardRuntimePanelProps {
   onActivityChange(activity: { label: string; domains: string[] } | null): void;
   onGrowthPresentationChange(presentation: GrowthPresentation | null): void;
   onGrowthArtifactsChange(artifacts: AgentArtifact[]): void;
+  growthDetails: GrowthPresentationSnapshot | null;
 }
 
 interface FeedEntry {
@@ -88,6 +92,7 @@ export function StewardRuntimePanel({
   onActivityChange,
   onGrowthPresentationChange,
   onGrowthArtifactsChange,
+  growthDetails,
 }: StewardRuntimePanelProps) {
   const [mode, setMode] = useState<"assist" | "free" | "growth">("assist");
   const [draft, setDraft] = useState("");
@@ -518,6 +523,8 @@ export function StewardRuntimePanel({
             onOpenChangeSet={onOpenChangeSet}
             onOpenDocumentReference={onOpenDocumentReference}
           /> : null}
+          {growthPresentation ? <GrowthGuidanceStatus snapshot={growthDetails} /> : null}
+          {growthPresentation ? <GrowthImpactSummary snapshot={growthDetails} /> : null}
           {running ? (
             <div className="steward-running" role="status">
               <LoaderCircle size={14} aria-hidden="true" />

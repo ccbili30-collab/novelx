@@ -16,6 +16,10 @@ import {
   growthGetRequestSchema,
   growthGuideRequestSchema,
   growthGuideResponseSchema,
+  growthIllustrationCancelRequestSchema,
+  growthIllustrationCreateRequestSchema,
+  growthPresentationInspectRequestSchema,
+  growthPresentationSnapshotSchema,
   growthClosureEvaluationPublicEventSchema,
   growthInquiryPublicEventSchema,
   growthLiveEventSchema,
@@ -128,6 +132,47 @@ describe("desktop IPC contract", () => {
     };
     expect(workspaceImageAssetSchema.parse(image).purpose).toBe("world_map");
     expect(workspaceImageAssetSchema.safeParse({ ...image, purpose: "placeholder_map" }).success).toBe(false);
+  });
+
+  it("admits only Creator-safe Growth presentation and illustration commands", () => {
+    const inspect = { projectId: "project-1", sessionId: "session-1", goalId: "goal-1" };
+    expect(growthPresentationInspectRequestSchema.parse(inspect)).toEqual(inspect);
+    for (const field of ["branchId", "checkpointId", "lens", "scopeResourceIds", "apiKey"]) {
+      expect(growthPresentationInspectRequestSchema.safeParse({ ...inspect, [field]: "forged" }).success, field).toBe(false);
+    }
+    const create = {
+      ...inspect,
+      requestId: "illustration-request-1",
+      target: { kind: "resource", resourceId: "oc-1" },
+      purpose: "character_portrait",
+      title: "流浪骑士立绘",
+      compositionDescription: "半身像，突出旅途磨损和沉静气质。",
+      variantCount: 3,
+    };
+    expect(growthIllustrationCreateRequestSchema.parse(create)).toEqual(create);
+    expect(growthIllustrationCreateRequestSchema.safeParse({ ...create, target: { ...create.target, resourceVersionId: "forged" } }).success).toBe(false);
+    expect(growthIllustrationCreateRequestSchema.parse({ ...create, target: { kind: "graph_node", nodeId: "fact-node-1" } }).target).toEqual({ kind: "graph_node", nodeId: "fact-node-1" });
+    expect(growthIllustrationCreateRequestSchema.safeParse({ ...create, target: { kind: "graph_node", nodeId: "fact-node-1", scopeResourceId: "forged" } }).success).toBe(false);
+    expect(growthIllustrationCreateRequestSchema.safeParse({ ...create, prompt: "raw prompt" }).success).toBe(false);
+    expect(growthIllustrationCreateRequestSchema.safeParse({ ...create, variantCount: 101 }).success).toBe(false);
+    expect(growthIllustrationCancelRequestSchema.parse({ ...inspect, requestId: create.requestId })).toEqual({ ...inspect, requestId: create.requestId });
+
+    const snapshot = {
+      capabilityVersion: "growth-presentation-v1",
+      goalId: "goal-1",
+      currentRuleRevision: 2,
+      activeCycleRuleRevision: 1,
+      guidanceStatus: "persisted_pending_boundary",
+      impacts: [{ cycleId: "cycle-1", sequence: 1, durableState: "committed", resourceCount: 2, documentCount: 1, assertionCount: 3, relationCount: 2 }],
+      inquirySummaries: ["正在推演潮汐规则对港口制度的影响。"],
+      closures: [{ profileId: "profile-1", profileKind: "oc", subjectResourceId: "oc-1", revision: 1, contentState: "growing", visualState: "generating", satisfiedCount: 2, missingCount: 1, checkerDecision: "repairs_required", findings: [{ severity: "major", category: "continuity", safeSummary: "角色动机尚未与战争经历衔接。", repairObjective: "补充战争经历对当下选择的因果影响。" }], lastProgressCycleSequence: 4 }],
+      longform: { status: "ready", focusOcResourceId: "oc-1", personalStoryResourceId: "volume-1", storyTitle: "灰潮之旅", completedSectionCount: 3, totalSectionCount: 6, totalCodePoints: 5320, currentSectionTitle: "第三幕：旧港", complete: false },
+      illustrationRequests: [{ id: "request-1", status: "running", coverageMode: "custom", itemCount: 1, readyCount: 0, createdAt: "2026-07-16T00:00:00.000Z", updatedAt: "2026-07-16T00:00:01.000Z", items: [{ id: "item-1", requestId: "request-1", purpose: "character_portrait", title: "流浪骑士立绘", variantKey: "variant-1", status: "running", source: { kind: "resource", sourceResourceId: "oc-1", label: "流浪骑士", excerpt: null }, imageJobId: "job-1", assetId: null, thumbnailUrl: null, mimeType: null, width: null, height: null, createdAt: "2026-07-16T00:00:00.000Z", updatedAt: "2026-07-16T00:00:01.000Z" }] }],
+    } as const;
+    expect(growthPresentationSnapshotSchema.parse(snapshot)).toEqual(snapshot);
+    for (const field of ["prompt", "toolArgs", "locator", "relativePath", "credential"]) {
+      expect(growthPresentationSnapshotSchema.safeParse({ ...snapshot, [field]: "unsafe" }).success, field).toBe(false);
+    }
   });
 
   it("accepts auditable artifacts and rejects unstructured document locations", () => {
@@ -278,6 +323,9 @@ describe("desktop IPC contract", () => {
       growthStart: "novax:growth-start",
       growthGet: "novax:growth-get",
       growthGuide: "novax:growth-guide",
+      growthInspect: "novax:growth-inspect",
+      growthIllustrate: "novax:growth-illustrate",
+      growthIllustrationCancel: "novax:growth-illustration-cancel",
       growthEvent: "novax:growth-event",
     });
   });

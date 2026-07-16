@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { ArrowRightLeft, BookOpenText, Brain, CheckCircle2, ChevronRight, CircleUserRound, Clock3, Image, LoaderCircle, Map, Network } from "lucide-react";
 import type { AgentArtifact, CollaborationListResult, HandoffSummary, SessionSummary, WorkspaceSnapshot } from "../../../../shared/ipcContract";
+import type { GrowthIllustrationCreateRequest, GrowthPresentationSnapshot } from "../../../../shared/growthPresentationContract";
 import type { GrowthPresentation } from "../agent/growthPresentation";
 import { ProjectFilesPanel } from "./ProjectFilesPanel";
 import { RunWorkTargetPane } from "./RunWorkTargetPane";
+import { GrowthIllustrationGallery } from "../growth/GrowthIllustrationGallery";
 
 const domains = [
   { type: "world", label: "世界", icon: Map },
@@ -21,12 +23,18 @@ interface ProjectActivityPanelProps {
   activity: { label: string; domains: string[] } | null;
   growthPresentation: GrowthPresentation | null;
   growthArtifacts: AgentArtifact[];
+  growthDetails: GrowthPresentationSnapshot | null;
+  growthIllustrationBusy: boolean;
+  growthIllustrationError: string | null;
   collaboration: CollaborationListResult;
   refreshKey: number;
   onOpenResource(resourceId: string): Promise<void>;
   onOpenDocument(documentId: string, resourceId: string): Promise<void>;
   onOpenChangeSet(changeSetId: string): Promise<void>;
   onOpenReadyImage(image: Extract<AgentArtifact, { kind: "image" }>): Promise<void> | void;
+  onCreateGrowthIllustration(input: Omit<GrowthIllustrationCreateRequest, "projectId" | "sessionId" | "goalId" | "requestId">): Promise<void>;
+  onCancelGrowthIllustration(requestId: string): Promise<void>;
+  onOpenGrowthIllustration(item: GrowthPresentationSnapshot["illustrationRequests"][number]["items"][number]): Promise<void> | void;
   onOpenGraph(): Promise<void>;
   onViewAll(): void;
   onCreateHandoff(): void;
@@ -35,26 +43,27 @@ interface ProjectActivityPanelProps {
 
 export function ProjectActivityPanel(props: ProjectActivityPanelProps) {
   const storageKey = props.projectId ? `novelx:right-panel:${props.projectId}` : null;
-  const [open, setOpen] = useState({ current: true, files: true, activity: false });
+  const [open, setOpen] = useState({ current: true, gallery: true, files: true, activity: false });
 
   useEffect(() => {
     if (!storageKey) {
-      setOpen({ current: true, files: true, activity: false });
+      setOpen({ current: true, gallery: true, files: true, activity: false });
       return;
     }
     try {
-      const saved = JSON.parse(window.localStorage.getItem(storageKey) ?? "null") as { current?: unknown; files?: unknown; activity?: unknown } | null;
+      const saved = JSON.parse(window.localStorage.getItem(storageKey) ?? "null") as { current?: unknown; gallery?: unknown; files?: unknown; activity?: unknown } | null;
       setOpen({
         current: typeof saved?.current === "boolean" ? saved.current : true,
+        gallery: typeof saved?.gallery === "boolean" ? saved.gallery : true,
         files: typeof saved?.files === "boolean" ? saved.files : true,
         activity: typeof saved?.activity === "boolean" ? saved.activity : false,
       });
     } catch {
-      setOpen({ current: true, files: true, activity: false });
+      setOpen({ current: true, gallery: true, files: true, activity: false });
     }
   }, [storageKey]);
 
-  function setSection(section: "current" | "files" | "activity", value: boolean) {
+  function setSection(section: "current" | "gallery" | "files" | "activity", value: boolean) {
     const next = { ...open, [section]: value };
     setOpen(next);
     if (storageKey) window.localStorage.setItem(storageKey, JSON.stringify(next));
@@ -73,6 +82,18 @@ export function ProjectActivityPanel(props: ProjectActivityPanelProps) {
           onOpenChangeSet={props.onOpenChangeSet}
           onOpenGraph={props.onOpenGraph}
           onOpenReadyImage={props.onOpenReadyImage}
+        />
+      </details>
+      <details className="right-panel-section right-panel-section--gallery" open={open.gallery} onToggle={(event) => setSection("gallery", event.currentTarget.open)}>
+        <summary><ChevronRight size={14} /><span>图文图鉴</span></summary>
+        <GrowthIllustrationGallery
+          snapshot={props.growthDetails}
+          workspace={props.workspace}
+          busy={props.growthIllustrationBusy}
+          error={props.growthIllustrationError}
+          onCreate={props.onCreateGrowthIllustration}
+          onCancel={props.onCancelGrowthIllustration}
+          onOpen={props.onOpenGrowthIllustration}
         />
       </details>
       <details className="right-panel-section" open={open.files} onToggle={(event) => setSection("files", event.currentTarget.open)}>

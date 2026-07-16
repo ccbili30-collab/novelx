@@ -97,6 +97,7 @@ export interface SemanticGraphInspector {
 interface BuiltGraph {
   snapshot: SemanticGraphSnapshot;
   details: Map<string, SemanticGraphNodeDetail>;
+  authorityResourceIds: Map<string, string>;
 }
 
 export class SemanticGraphService {
@@ -150,6 +151,14 @@ export class SemanticGraphService {
     return { node, detail, relations };
   }
 
+  /** Main-only authority lookup. The raw resource id is never part of the public graph projection. */
+  inspectCreatorNodeEvidence(nodeId: string): { inspector: SemanticGraphInspector; sourceResourceId: string } {
+    const graph = this.#build();
+    const sourceResourceId = graph.authorityResourceIds.get(nodeId);
+    if (!sourceResourceId) throw graphError("GRAPH_NODE_NOT_FOUND", "Graph node was not found on the current branch.");
+    return { inspector: this.inspectNode(nodeId), sourceResourceId };
+  }
+
   #build(): BuiltGraph {
     const branch = this.#checkpoints.getActiveBranch();
     const activeResources = new Map(this.#resources.listCurrent(branch.id).map((resource) => [resource.id, resource]));
@@ -157,6 +166,7 @@ export class SemanticGraphService {
     const nodes = new Map<string, SemanticGraphNode>();
     const edges: SemanticGraphEdge[] = [];
     const details = new Map<string, SemanticGraphNodeDetail>();
+    const authorityResourceIds = new Map<string, string>();
 
     for (const assertion of assertions) {
       const status = assertion.status as SemanticGraphStatus;
@@ -176,6 +186,7 @@ export class SemanticGraphService {
         sourceCount: sources.length,
         relationCount: 0,
       });
+      authorityResourceIds.set(subjectId, assertion.scopeId);
       details.set(subjectId, {
         kind: "subject",
         label: subjectNode.label,
@@ -199,6 +210,7 @@ export class SemanticGraphService {
         relationCount: 0,
       };
       nodes.set(factId, factNode);
+      authorityResourceIds.set(factId, assertion.scopeId);
       details.set(factId, {
         kind: "fact",
         subject: boundedText(assertion.subject, 500),
@@ -233,6 +245,7 @@ export class SemanticGraphService {
           sourceCount: sources.length,
           relationCount: 0,
         });
+        authorityResourceIds.set(entityId, resource.id);
         details.set(entityId, {
           kind: "entity",
           label: entityNode.label,
@@ -280,6 +293,7 @@ export class SemanticGraphService {
         },
       },
       details,
+      authorityResourceIds,
     };
   }
 

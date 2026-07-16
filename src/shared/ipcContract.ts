@@ -19,6 +19,29 @@ import {
   growthContentRefSchema,
   growthSeedSchema,
 } from "./growthContract";
+import {
+  growthIllustrationCancelRequestSchema,
+  growthIllustrationCreateRequestSchema,
+  growthPresentationInspectRequestSchema,
+  growthPresentationSnapshotSchema,
+  type GrowthIllustrationCancelRequest,
+  type GrowthIllustrationCreateRequest,
+  type GrowthPresentationInspectRequest,
+  type GrowthPresentationSnapshot,
+} from "./growthPresentationContract";
+
+export {
+  growthIllustrationCancelRequestSchema,
+  growthIllustrationCreateRequestSchema,
+  growthPresentationInspectRequestSchema,
+  growthPresentationSnapshotSchema,
+} from "./growthPresentationContract";
+export type {
+  GrowthIllustrationCancelRequest,
+  GrowthIllustrationCreateRequest,
+  GrowthPresentationInspectRequest,
+  GrowthPresentationSnapshot,
+} from "./growthPresentationContract";
 
 export const desktopIpcChannels = {
   systemStatus: "novax:system-status",
@@ -114,6 +137,9 @@ export const desktopIpcChannels = {
   growthStart: "novax:growth-start",
   growthGet: "novax:growth-get",
   growthGuide: "novax:growth-guide",
+  growthInspect: "novax:growth-inspect",
+  growthIllustrate: "novax:growth-illustrate",
+  growthIllustrationCancel: "novax:growth-illustration-cancel",
   growthEvent: "novax:growth-event",
 } as const;
 
@@ -1719,6 +1745,9 @@ export interface DesktopApi {
     start(request: GrowthStartRequest): Promise<GrowthStartResponse>;
     get(request: GrowthGetRequest): Promise<GrowthGetResponse>;
     guide(request: GrowthGuideRequest): Promise<GrowthGuideResponse>;
+    inspect(request: GrowthPresentationInspectRequest): Promise<GrowthPresentationSnapshot>;
+    illustrate(request: GrowthIllustrationCreateRequest): Promise<GrowthPresentationSnapshot>;
+    cancelIllustration(request: GrowthIllustrationCancelRequest): Promise<GrowthPresentationSnapshot>;
     subscribe(listener: (event: GrowthLiveEvent) => void): () => void;
   };
 }

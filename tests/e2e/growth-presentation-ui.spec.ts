@@ -19,6 +19,10 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
       __growthUseSessionGoals?: boolean;
       __growthGuideResolvers?: Record<string, () => void>;
       __growthGuideResolved?: string[];
+      __growthInspectCalls?: Array<{ goalId?: string }>;
+      __growthInspectDelayFirst?: boolean;
+      __growthInspectFirstResolver?: () => void;
+      __growthInspectFirstCompleted?: boolean;
     };
     state.__growthGuideCalls = [];
     state.__growthStartCalls = [];
@@ -26,6 +30,8 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
     state.__growthUseSessionGoals = false;
     state.__growthGuideResolvers = {};
     state.__growthGuideResolved = [];
+    state.__growthInspectCalls = [];
+    state.__growthInspectDelayFirst = false;
     state.__growthSnapshotMode = "same_revision";
     const snapshot = (goalId = "goal-guidance-ui") => {
       const mode = state.__growthSnapshotMode;
@@ -85,6 +91,27 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
         status: "persisted_pending_boundary",
       };
     });
+    ipcMain.removeHandler("novax:growth-inspect");
+    ipcMain.handle("novax:growth-inspect", async (_event, request: { goalId?: string }) => {
+      const callIndex = state.__growthInspectCalls?.length ?? 0;
+      state.__growthInspectCalls?.push(request);
+      if (state.__growthInspectDelayFirst && callIndex === 0) {
+        await new Promise<void>((resolve) => { state.__growthInspectFirstResolver = resolve; });
+        state.__growthInspectFirstCompleted = true;
+      }
+      return {
+        capabilityVersion: "growth-presentation-v1",
+        goalId: request.goalId,
+        currentRuleRevision: 1,
+        activeCycleRuleRevision: 1,
+        guidanceStatus: "none",
+        impacts: [],
+        inquirySummaries: [`projection:${request.goalId}`],
+        closures: [],
+        longform: { status: "unavailable" },
+        illustrationRequests: [],
+      };
+    });
   });
 }
 
@@ -117,6 +144,7 @@ test("starts explicit Growth mode once and visibly fails closed without a Provid
     await growthMode.click({ timeout: 8_000 });
     await expect(growthMode).toHaveAttribute("aria-checked", "true");
     await expect(page.getByText("当前创作", { exact: true })).toBeVisible();
+    await expect(page.getByText("图文图鉴", { exact: true })).toBeVisible();
     await expect(page.getByText("文件夹内容", { exact: true })).toBeVisible();
 
     await composer.fill("建立一个有潮汐禁令的海港世界");
@@ -133,6 +161,12 @@ test("starts explicit Growth mode once and visibly fails closed without a Provid
     await expect(timeline).not.toContainText("本次生长已完成");
     await expect(page.locator("body")).not.toContainText("thinking");
     await expect(page.locator(".run-work-target-pane__world-map")).toHaveCount(0);
+    const gallery = page.getByRole("region", { name: "图文图鉴" });
+    await expect(gallery).toBeVisible();
+    await expect(gallery.locator("img")).toHaveCount(0);
+    await expect(gallery).not.toContainText("已就绪");
+    await expect(gallery.getByRole("button", { name: "生成配图" })).toBeDisabled();
+    await expect(page.getByLabel("Growth 规则状态")).toBeVisible();
     await expect(page.locator("main.workbench")).toHaveClass(/workbench--agent/);
     await expect(page.locator(".creative-showcase")).toHaveCount(0);
     await page.screenshot({ path: "test-results/novax-growth-presentation-fail-closed-1440x900.png", fullPage: true });
@@ -164,7 +198,11 @@ test("keeps a newer scope guide saving when the previous scope resolves", async 
       env: { ...process.env, NOVAX_DESKTOP_E2E_USER_DATA: userDataPath },
     });
     await installGrowthGuidanceMock(app);
-    await app.evaluate(() => { (globalThis as typeof globalThis & { __growthUseSessionGoals?: boolean }).__growthUseSessionGoals = true; });
+    await app.evaluate(() => {
+      const state = globalThis as typeof globalThis & { __growthUseSessionGoals?: boolean; __growthInspectDelayFirst?: boolean };
+      state.__growthUseSessionGoals = true;
+      state.__growthInspectDelayFirst = true;
+    });
     const page = await app.firstWindow();
     const rail = page.getByRole("complementary", { name: "项目与 Agent 会话" });
     const composer = page.getByLabel("给大管家发送消息");
@@ -188,6 +226,11 @@ test("keeps a newer scope guide saving when the previous scope resolves", async 
     await expect(composer).toBeEnabled({ timeout: 8_000 });
     await composer.fill("建立新会话世界");
     await page.getByTitle("发送").click();
+    const startCalls = await app.evaluate(() => (globalThis as typeof globalThis & { __growthStartCalls?: Array<{ sessionId?: string }> }).__growthStartCalls ?? []);
+    const newGoalId = `goal-${startCalls.at(-1)?.sessionId}`;
+    const growthSummary = page.locator(".growth-impact-summary");
+    await expect(growthSummary).toContainText(`projection:${newGoalId}`, { timeout: 8_000 });
+    await app.evaluate(() => { (globalThis as typeof globalThis & { __growthInspectFirstResolver?: () => void }).__growthInspectFirstResolver?.(); });
     guidance = page.getByRole("textbox", { name: "追加世界规则或指导" });
     await expect(guidance).toBeEnabled({ timeout: 8_000 });
     await guidance.fill("延迟新会话指导");
@@ -203,9 +246,12 @@ test("keeps a newer scope guide saving when the previous scope resolves", async 
     await expect(page.getByText(/已保存为规则修订/)).toHaveCount(0);
 
     await app.evaluate(() => { (globalThis as typeof globalThis & { __growthGuideResolvers?: Record<string, () => void> }).__growthGuideResolvers?.["延迟新会话指导"]?.(); });
-    await expect(page.getByText("已保存为规则修订 #2，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：故事", { exact: true })).toBeVisible();
+    await expect(page.getByText("已保存为规则修订 #2，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：世界、故事、OC", { exact: true })).toBeVisible();
     await expect(guidance).toHaveValue("");
     await expect(page.getByRole("button", { name: "保存中" })).toHaveCount(0);
+    const oldGoalId = `goal-${startCalls[0]?.sessionId}`;
+    await expect.poll(() => app?.evaluate(() => Boolean((globalThis as typeof globalThis & { __growthInspectFirstCompleted?: boolean }).__growthInspectFirstCompleted))).toBe(true);
+    await expect(growthSummary).not.toContainText(`projection:${oldGoalId}`);
   } finally {
     if (app) await app.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -271,7 +317,7 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
     await expect.poll(async () => app?.evaluate(() => (
       (globalThis as typeof globalThis & { __growthGetCalls?: unknown[] }).__growthGetCalls?.length ?? 0
     ))).toBe(1);
-    await expect(page.getByText("已保存为规则修订 #2，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：故事", { exact: true })).toBeVisible();
+    await expect(page.getByText("已保存为规则修订 #2，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：世界、故事、OC", { exact: true })).toBeVisible();
     await expect(guidance).toHaveValue("");
     await expect(page.getByRole("button", { name: "保存中" })).toHaveCount(0);
     await expect(page.locator(".growth-guidance-card")).toContainText("规则修订 #2");
@@ -282,7 +328,7 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
 
     await guidance.fill("OC 必须携带退潮印记");
     await save.click();
-    await expect(page.getByText("已保存为规则修订 #3，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：故事", { exact: true })).toBeVisible();
+    await expect(page.getByText("已保存为规则修订 #3，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：世界、故事、OC", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Growth 规则修订")).toContainText("最新已保存 #3");
 
     await app.evaluate(() => { (globalThis as typeof globalThis & { __growthSnapshotMode?: string }).__growthSnapshotMode = "complete"; });
@@ -315,7 +361,7 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
 
     await app.evaluate(() => { (globalThis as typeof globalThis & { __growthSnapshotMode?: string }).__growthSnapshotMode = "missing"; });
     await page.reload();
-    await expect(page.getByRole("textbox", { name: "追加世界规则或指导" })).toBeDisabled({ timeout: 8_000 });
+    await expect(page.getByRole("textbox", { name: "追加世界规则或指导" })).toHaveCount(0, { timeout: 8_000 });
     await expect(page.getByText("规则修订状态不可用，无法安全保存指导。", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Growth 规则修订")).toHaveCount(0);
   } finally {

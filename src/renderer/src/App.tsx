@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { BookOpen, Boxes, Download, FileInput, Image, LoaderCircle, MessageSquareText, PanelLeft, Settings, Sparkles } from "lucide-react";
 import type { AgentArtifact, CollaborationListResult, CreativeWorkspaceMutation, HandoffSummary, ProjectAddResult, ProjectSummary, SessionSummary, WorkspaceSnapshot } from "../../shared/ipcContract";
 import type { DesktopUpdateState } from "../../shared/desktopUpdateContract";
+import type { GrowthIllustrationCreateRequest, GrowthPresentationSnapshot } from "../../shared/growthPresentationContract";
 import { StewardRuntimePanel } from "./features/agent/StewardRuntimePanel";
 import type { GrowthPresentation } from "./features/agent/growthPresentation";
 import { resolveAgentScopeResourceIds } from "../../shared/agentScope";
@@ -75,6 +76,10 @@ export function App() {
   const [activity, setActivity] = useState<{ label: string; domains: string[] } | null>(null);
   const [growthPresentation, setGrowthPresentation] = useState<GrowthPresentation | null>(null);
   const [growthArtifacts, setGrowthArtifacts] = useState<AgentArtifact[]>([]);
+  const [growthDetails, setGrowthDetails] = useState<GrowthPresentationSnapshot | null>(null);
+  const [growthIllustrationBusy, setGrowthIllustrationBusy] = useState(false);
+  const [growthIllustrationError, setGrowthIllustrationError] = useState<string | null>(null);
+  const [growthDetailsRefreshKey, setGrowthDetailsRefreshKey] = useState(0);
   const [collaboration, setCollaboration] = useState<CollaborationListResult>({ sharedMemories: [], handoffs: [] });
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [handoffBusy, setHandoffBusy] = useState(false);
@@ -128,8 +133,54 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const projectId = activeProjectId;
+    const sessionId = activeSessionId;
+    const goalId = growthPresentation?.goalId ?? null;
+    if (!projectId || !sessionId || !goalId) {
+      setGrowthDetails(null);
+      setGrowthIllustrationError(null);
+      return;
+    }
+    const inspectRequest = { projectId, sessionId, goalId };
+    let cancelled = false;
+    let timer: number | null = null;
+    async function refresh() {
+      try {
+        const next = await window.novaxDesktop.growth.inspect(inspectRequest);
+        if (cancelled) return;
+        setGrowthDetails(next);
+        const hasActiveIllustration = next.illustrationRequests.some((request) => request.items.some((item) => (
+          item.status === "planned" || item.status === "queued" || item.status === "running"
+        )));
+        if (growthPresentation?.running || hasActiveIllustration) timer = window.setTimeout(() => void refresh(), 1_500);
+      } catch {
+        if (!cancelled) setGrowthDetails(null);
+      }
+    }
+    void refresh();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [
+    activeProjectId,
+    activeSessionId,
+    committedWorkspaceRefreshKey,
+    growthDetailsRefreshKey,
+    growthPresentation?.goalId,
+    growthPresentation?.running,
+    growthPresentation?.guidance?.latestSavedRevision,
+    growthPresentation?.events.at(-1)?.sequence,
+  ]);
+
+  useEffect(() => {
     applyThemePreference(theme, document.documentElement, window.localStorage);
   }, [theme]);
+
+  useEffect(() => {
+    setGrowthIllustrationBusy(false);
+    setGrowthIllustrationError(null);
+  }, [currentShowcaseScopeKey]);
 
   useEffect(() => {
     applyBackgroundPreference(background, snowBackgroundUrl, document.documentElement, window.localStorage);
@@ -413,6 +464,67 @@ export function App() {
     await openReadyImageShowcase(artifact);
   }, [openReadyImageShowcase]);
 
+  async function createGrowthIllustration(input: Omit<GrowthIllustrationCreateRequest, "projectId" | "sessionId" | "goalId" | "requestId">) {
+    const goalId = growthPresentation?.goalId;
+    if (!activeProjectId || !activeSessionId || !goalId || growthIllustrationBusy) return;
+    const requestGeneration = showcaseNavigationScope.current.generation;
+    setGrowthIllustrationBusy(true);
+    setGrowthIllustrationError(null);
+    try {
+      const snapshot = await window.novaxDesktop.growth.illustrate({
+        ...input,
+        projectId: activeProjectId,
+        sessionId: activeSessionId,
+        goalId,
+        requestId: crypto.randomUUID(),
+      });
+      if (showcaseNavigationScope.current.generation !== requestGeneration) return;
+      setGrowthDetails(snapshot);
+      setGrowthDetailsRefreshKey((value) => value + 1);
+    } catch {
+      if (showcaseNavigationScope.current.generation === requestGeneration) {
+        setGrowthIllustrationError("配图请求未被接受；没有生成本地替代图片。请确认来源仍在当前检查点，并检查图片模型配置。");
+      }
+    } finally {
+      if (showcaseNavigationScope.current.generation === requestGeneration) setGrowthIllustrationBusy(false);
+    }
+  }
+
+  async function cancelGrowthIllustration(requestId: string) {
+    const goalId = growthPresentation?.goalId;
+    if (!activeProjectId || !activeSessionId || !goalId) return;
+    const requestGeneration = showcaseNavigationScope.current.generation;
+    setGrowthIllustrationError(null);
+    try {
+      const snapshot = await window.novaxDesktop.growth.cancelIllustration({
+        projectId: activeProjectId,
+        sessionId: activeSessionId,
+        goalId,
+        requestId,
+      });
+      if (showcaseNavigationScope.current.generation !== requestGeneration) return;
+      setGrowthDetails(snapshot);
+      setGrowthDetailsRefreshKey((value) => value + 1);
+    } catch {
+      if (showcaseNavigationScope.current.generation === requestGeneration) {
+        setGrowthIllustrationError("取消请求失败；状态未被伪造为已取消。请刷新后确认真实 Job 状态。");
+      }
+    }
+  }
+
+  async function openGrowthIllustration(item: GrowthPresentationSnapshot["illustrationRequests"][number]["items"][number]) {
+    if (item.status !== "ready" || !item.assetId || !item.thumbnailUrl) return;
+    await openReadyImageManually({
+      kind: "image",
+      assetId: item.assetId,
+      title: item.title,
+      status: "ready",
+      purpose: item.purpose,
+      sourceLabel: item.source.label,
+      thumbnailUrl: item.thumbnailUrl,
+    });
+  }
+
   async function openChangeSet(changeSetId: string) {
     await flushEditor();
     setSelectedChangeSetId(changeSetId);
@@ -615,6 +727,7 @@ export function App() {
         onActivityChange={setActivity}
         onGrowthPresentationChange={setGrowthPresentation}
         onGrowthArtifactsChange={setGrowthArtifacts}
+        growthDetails={growthDetails}
       />
     </section>
   );
@@ -711,12 +824,18 @@ export function App() {
               activity={activity}
               growthPresentation={growthPresentation}
               growthArtifacts={growthArtifacts}
+              growthDetails={growthDetails}
+              growthIllustrationBusy={growthIllustrationBusy}
+              growthIllustrationError={growthIllustrationError}
               collaboration={collaboration}
               refreshKey={changeSetRefreshKey}
               onOpenResource={openActivityResource}
               onOpenDocument={openShowcaseDocument}
               onOpenChangeSet={openChangeSet}
               onOpenReadyImage={openReadyImageManually}
+              onCreateGrowthIllustration={createGrowthIllustration}
+              onCancelGrowthIllustration={cancelGrowthIllustration}
+              onOpenGrowthIllustration={openGrowthIllustration}
               onOpenGraph={openGrowthGraph}
               onViewAll={() => setMode("ide")}
               onCreateHandoff={() => setHandoffOpen(true)}

@@ -26,6 +26,12 @@ import {
   type GrowthStartRequest,
   type GrowthStartResponse,
 } from "../shared/ipcContract";
+import type {
+  GrowthIllustrationCancelRequest,
+  GrowthIllustrationCreateRequest,
+  GrowthPresentationInspectRequest,
+  GrowthPresentationSnapshot,
+} from "../shared/growthPresentationContract";
 import { GrowthRunLifecycle } from "./growthRunLifecycle";
 import { GrowthLongformCoordinator } from "./growth/phases/longform/growthLongformCoordinator";
 import { syncClosureProfilesAfterRevision } from "./growth/phases/revision/growthRevisionClosureSync";
@@ -35,6 +41,8 @@ import type { WorkspaceSession } from "./workspaceIpc";
 import { DocumentRepository } from "../domain/workspace/documentRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
 import { ChangeSetRepository, type ChangeSetItemRecord } from "../domain/changeSet/changeSetRepository";
+import { GrowthPresentationProjector } from "./growth/growthPresentationProjector";
+import { GrowthIllustrationApplicationService } from "./growth/illustration/growthIllustrationApplicationService";
 
 interface GrowthWorkspaceContext {
   workspace: import("../domain/workspace/workspaceRepository").WorkspaceDatabase;
@@ -63,6 +71,7 @@ interface DeliveryRoute {
 export class GrowthCoordinator {
   readonly #listeners = new Map<string, Map<string, DeliveryRoute>>();
   readonly #activeCycleRuns = new Map<string, string>();
+  #illustrationApplication: { workspace: GrowthWorkspaceContext["workspace"]; service: GrowthIllustrationApplicationService } | null = null;
 
   constructor(
     readonly workspaceSession: WorkspaceSession,
@@ -148,6 +157,29 @@ export class GrowthCoordinator {
       status: "persisted_pending_boundary",
     });
     return response;
+  }
+
+  inspect(input: GrowthPresentationInspectRequest): GrowthPresentationSnapshot {
+    const context = this.#presentationContext(input.projectId, input.sessionId, input.goalId);
+    return new GrowthPresentationProjector(context.workspace).project({ goalId: input.goalId, checkpointId: context.checkpointId });
+  }
+
+  illustrate(input: GrowthIllustrationCreateRequest): GrowthPresentationSnapshot {
+    const context = this.#presentationContext(input.projectId, input.sessionId, input.goalId);
+    this.#illustrationService(context).create(input, context);
+    return new GrowthPresentationProjector(context.workspace).project({ goalId: input.goalId, checkpointId: context.checkpointId });
+  }
+
+  cancelIllustration(input: GrowthIllustrationCancelRequest): GrowthPresentationSnapshot {
+    const context = this.#presentationContext(input.projectId, input.sessionId, input.goalId);
+    this.#illustrationService(context).cancel(input);
+    return new GrowthPresentationProjector(context.workspace).project({ goalId: input.goalId, checkpointId: context.checkpointId });
+  }
+
+  dispose(): void {
+    this.#illustrationApplication?.service.dispose();
+    this.#illustrationApplication = null;
+    this.#listeners.clear();
   }
 
   #advance(input: {
@@ -640,6 +672,26 @@ export class GrowthCoordinator {
       throw coordinatorError("GROWTH_WORKSPACE_REQUIRED");
     }
     return context;
+  }
+
+  #presentationContext(projectId: string, sessionId: string, goalId: string): GrowthWorkspaceContext {
+    this.#assertProjectSession(projectId, sessionId);
+    const context = this.#requiredContext(projectId);
+    const goal = new GrowthRepository(context.workspace).getGoal(goalId);
+    if (!goal || goal.branchId !== context.branchId || !sameStrings(goal.authorizedScopeResourceIds, context.authorizedScopeResourceIds)) {
+      throw coordinatorError("GROWTH_GUIDANCE_AUTHORITY_MISMATCH");
+    }
+    return context;
+  }
+
+  #illustrationService(context: GrowthWorkspaceContext): GrowthIllustrationApplicationService {
+    if (this.#illustrationApplication?.workspace === context.workspace) return this.#illustrationApplication.service;
+    this.#illustrationApplication?.service.dispose();
+    const gateway = this.workspaceSession.createAgentToolGateway();
+    if (!gateway) throw coordinatorError("GROWTH_WORKSPACE_REQUIRED");
+    const service = new GrowthIllustrationApplicationService(context.workspace, gateway);
+    this.#illustrationApplication = { workspace: context.workspace, service };
+    return service;
   }
 }
 

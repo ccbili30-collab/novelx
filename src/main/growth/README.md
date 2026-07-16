@@ -14,6 +14,7 @@
 | 修改规则修订后的 Closure 衔接 | `phases/revision/growthRevisionClosureSync.ts` | Rule Revision、Closure revision、Coordinator 测试 |
 | 修改 Closure/Repair authority | `phases/closure/growthClosureAuthorityResolver.ts` | Closure profile/review/Receipt、Growth bridge 测试 |
 | 修改 Repair 对象/关系边界 | `phases/closure/growthRepairTargetPolicy.ts` | pinned checkpoint 身份、唯一关系策略、Repair target policy 测试 |
+| 修改 Creator 安全展示/自由配图 | `growthPresentationProjector.ts`、`illustration/growthIllustrationApplicationService.ts` | `growthPresentationContract.ts`、配图 README 与投影测试 |
 | 修改 Worker 阶段工具和编译 | `../../agent-worker/growth/README.md` | 对应阶段目录与定向测试 |
 
 ## 稳定不变量

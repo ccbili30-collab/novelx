@@ -14,6 +14,10 @@ import {
   growthGetResponseSchema,
   growthGuideRequestSchema,
   growthGuideResponseSchema,
+  growthIllustrationCancelRequestSchema,
+  growthIllustrationCreateRequestSchema,
+  growthPresentationInspectRequestSchema,
+  growthPresentationSnapshotSchema,
   growthLiveEventSchema,
   growthStartRequestSchema,
   growthStartResponseSchema,
@@ -130,6 +134,21 @@ export function registerDesktopIpc(
     if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
     return growthGuideResponseSchema.parse(growthCoordinator.guide(request));
   });
+  ipcMain.handle(desktopIpcChannels.growthInspect, (_event, payload: unknown) => {
+    const request = growthPresentationInspectRequestSchema.parse(payload);
+    if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
+    return growthPresentationSnapshotSchema.parse(growthCoordinator.inspect(request));
+  });
+  ipcMain.handle(desktopIpcChannels.growthIllustrate, (_event, payload: unknown) => {
+    const request = growthIllustrationCreateRequestSchema.parse(payload);
+    if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
+    return growthPresentationSnapshotSchema.parse(growthCoordinator.illustrate(request));
+  });
+  ipcMain.handle(desktopIpcChannels.growthIllustrationCancel, (_event, payload: unknown) => {
+    const request = growthIllustrationCancelRequestSchema.parse(payload);
+    if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
+    return growthPresentationSnapshotSchema.parse(growthCoordinator.cancelIllustration(request));
+  });
   ipcMain.handle(desktopIpcChannels.playerTurnStart, (event, payload: unknown) => {
     const request = playerTurnStartRequestSchema.parse(payload);
     const runId = playerSupervisor.start(request, (playerEvent) => {
@@ -157,7 +176,7 @@ export function registerDesktopIpc(
   ipcMain.handle(desktopIpcChannels.decomposerCancel, (_event, payload: unknown) => {
     decomposerSupervisor.cancel(decomposerCancelRequestSchema.parse(payload).runId);
   });
-  return { dispose: () => { decomposerSupervisor.dispose(); playerSupervisor.dispose(); supervisor.dispose(); } };
+  return { dispose: () => { growthCoordinator?.dispose(); decomposerSupervisor.dispose(); playerSupervisor.dispose(); supervisor.dispose(); } };
 }
 
 function readCode(error: unknown): string { return error && typeof error === "object" && "code" in error ? String(error.code).slice(0, 120) : "DECOMPOSITION_FAILED"; }

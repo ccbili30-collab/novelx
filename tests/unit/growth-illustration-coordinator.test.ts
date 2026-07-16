@@ -193,7 +193,9 @@ describe("Growth Illustration Coordinator", () => {
     });
     const result = await coordinator.execute({ requestId: snapshot.request.id, plan: compiled, signal: new AbortController().signal });
     expect(result.attemptedItemIds).toHaveLength(1);
-    expect(result.request.status).toBe("planned");
+    expect(result.request.status).toBe("failed");
+    expect(new GrowthRepository(snapshot.workspace).listIllustrationItems(snapshot.request.id).map((item) => item.status))
+      .toEqual(["failed"]);
     expect(snapshot.workspace.db.prepare("SELECT snapshot_text FROM growth_illustration_text_snapshots").get())
       .toEqual({ snapshot_text: snapshotText });
     expect(snapshot.workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });

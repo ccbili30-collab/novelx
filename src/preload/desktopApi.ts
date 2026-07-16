@@ -8,6 +8,10 @@ import {
   growthGetResponseSchema,
   growthGuideRequestSchema,
   growthGuideResponseSchema,
+  growthIllustrationCancelRequestSchema,
+  growthIllustrationCreateRequestSchema,
+  growthPresentationInspectRequestSchema,
+  growthPresentationSnapshotSchema,
   growthLiveEventSchema,
   growthStartRequestSchema,
   growthStartResponseSchema,
@@ -564,6 +568,18 @@ export function exposeDesktopApi(): void {
       async guide(request) {
         const safeRequest = growthGuideRequestSchema.parse(request);
         return growthGuideResponseSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthGuide, safeRequest));
+      },
+      async inspect(request) {
+        const safeRequest = growthPresentationInspectRequestSchema.parse(request);
+        return growthPresentationSnapshotSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthInspect, safeRequest));
+      },
+      async illustrate(request) {
+        const safeRequest = growthIllustrationCreateRequestSchema.parse(request);
+        return growthPresentationSnapshotSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthIllustrate, safeRequest));
+      },
+      async cancelIllustration(request) {
+        const safeRequest = growthIllustrationCancelRequestSchema.parse(request);
+        return growthPresentationSnapshotSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthIllustrationCancel, safeRequest));
       },
       subscribe(listener) {
         const handler = (_event: IpcRendererEvent, payload: unknown) => {

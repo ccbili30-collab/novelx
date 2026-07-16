@@ -53,6 +53,7 @@ export function CreativeShowcase(props: {
       .map((relation) => relation.targetResourceId));
     return props.workspace.resources.filter((resource) => ids.has(resource.id) && resource.objectKind === "oc");
   }, [props.workspace.relations, props.workspace.resources, storyId]);
+  const imageSections = useMemo(() => groupShowcaseImages(showcase?.images ?? [], props.workspace), [showcase?.images, props.workspace]);
 
   useEffect(() => {
     if (props.storyResourceId && stories.some((story) => story.id === props.storyResourceId)
@@ -203,12 +204,15 @@ export function CreativeShowcase(props: {
 
         {(showcase?.images.length ?? 0) > 1 ? (
           <div className="showcase-filmstrip" aria-label="图片资产列表">
-            {showcase?.images.map((image) => (
-              <button type="button" key={image.jobId} data-selected={image.jobId === selectedImage?.jobId} onClick={() => setSelectedImageId(image.assetId)}>
-                {image.thumbnailUrl ? <img src={image.thumbnailUrl} alt="" loading="lazy" /> : <Image size={18} aria-hidden="true" />}
-                <span>{image.title} · {image.statusMessage}</span>
-              </button>
-            ))}
+            {imageSections.map((section) => <section key={section.key} aria-label={section.label}>
+              <h2>{section.label}<small>{section.images.length}</small></h2>
+              <div>{section.images.map((image) => (
+                <button type="button" key={image.jobId} data-selected={image.jobId === selectedImage?.jobId} onClick={() => setSelectedImageId(image.assetId)}>
+                  {image.thumbnailUrl ? <img src={image.thumbnailUrl} alt="" loading="lazy" /> : <Image size={18} aria-hidden="true" />}
+                  <span>{image.title} · {image.statusMessage}</span>
+                </button>
+              ))}</div>
+            </section>)}
           </div>
         ) : null}
 
@@ -249,6 +253,33 @@ export function CreativeShowcase(props: {
       </div>
     </article>
   );
+}
+
+export function groupShowcaseImages(images: CreativeShowcaseSnapshot["images"], workspace: WorkspaceSnapshot) {
+  const resourceById = new Map(workspace.resources.map((resource) => [resource.id, resource]));
+  const groups = new Map<string, { key: string; label: string; images: CreativeShowcaseSnapshot["images"] }>();
+  const order = [
+    ["map", "世界地图"], ["world", "世界风貌"], ["story", "故事场景"], ["oc", "OC 卡与立绘"], ["detail", "重要细节"],
+  ] as const;
+  for (const [key, label] of order) groups.set(key, { key, label, images: [] });
+  for (const image of images) {
+    let key = "detail";
+    if (image.purpose === "world_map") key = "map";
+    else if (image.purpose === "character_portrait") key = "oc";
+    else {
+      const sourceTypes = image.sourceResourceIds.flatMap((id) => {
+        const resource = resourceById.get(id);
+        return resource ? [resource.type] : [];
+      });
+      if (sourceTypes.some((type) => type === "story")) key = "story";
+      else if (sourceTypes.some((type) => type === "world")) key = "world";
+    }
+    groups.get(key)!.images.push(image);
+  }
+  return order.flatMap(([key]) => {
+    const group = groups.get(key)!;
+    return group.images.length > 0 ? [group] : [];
+  });
 }
 
 function firstParagraph(content: string): string {

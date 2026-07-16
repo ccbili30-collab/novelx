@@ -1078,6 +1078,15 @@ export class GrowthRepository {
     };
   }
 
+  listClosureReviewsV4(profileId: string): Array<NonNullable<ReturnType<GrowthRepository["getClosureReviewV4"]>>> {
+    const rows = this.workspace.db.prepare(`
+      SELECT id FROM growth_closure_reviews
+      WHERE profile_id = ? AND contract_generation = 'v26'
+      ORDER BY created_at, id
+    `).all(profileId) as Array<{ id: string }>;
+    return rows.map((row) => this.getClosureReviewV4(row.id) ?? fail("GROWTH_DATA_INVALID"));
+  }
+
   getClosureEvaluationOutcome(outcomeId: string): GrowthClosureEvaluationOutcome | null {
     const row = this.workspace.db.prepare(`
       SELECT * FROM growth_closure_evaluation_outcomes WHERE id = ?
@@ -1447,6 +1456,15 @@ export class GrowthRepository {
     });
   }
 
+  listIllustrationRequests(goalId: string): GrowthIllustrationRequest[] {
+    this.#requiredGoal(goalId);
+    const rows = this.workspace.db.prepare(`
+      SELECT id FROM growth_illustration_requests
+      WHERE goal_id = ? ORDER BY created_at, id
+    `).all(goalId) as Array<{ id: string }>;
+    return rows.map((row) => this.getIllustrationRequest(row.id) ?? fail("GROWTH_DATA_INVALID"));
+  }
+
   getIllustrationItem(itemId: string): GrowthIllustrationItem | null {
     const row = this.workspace.db.prepare("SELECT * FROM growth_illustration_items WHERE id = ?").get(itemId) as Row | undefined;
     if (!row) return null;
@@ -1752,6 +1770,27 @@ export class GrowthRepository {
       const now = new Date().toISOString();
       this.workspace.db.prepare(`
         UPDATE growth_illustration_items SET status = 'cancelled', updated_at = ? WHERE id = ?
+      `).run(now, item.id);
+      this.#syncIllustrationAggregates(item.requestId, now);
+      this.workspace.db.exec("COMMIT");
+      return this.getIllustrationItem(item.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      if (this.workspace.db.isTransaction) this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  failIllustrationItemBeforeDispatch(itemId: string): GrowthIllustrationItem {
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const item = this.getIllustrationItem(itemId);
+      if (!item) throw growthError("GROWTH_ILLUSTRATION_ITEM_NOT_FOUND");
+      if (item.imageJobId || item.status !== "planned") {
+        throw growthError("GROWTH_ILLUSTRATION_ITEM_NOT_FAILABLE");
+      }
+      const now = new Date().toISOString();
+      this.workspace.db.prepare(`
+        UPDATE growth_illustration_items SET status = 'failed', updated_at = ? WHERE id = ?
       `).run(now, item.id);
       this.#syncIllustrationAggregates(item.requestId, now);
       this.workspace.db.exec("COMMIT");

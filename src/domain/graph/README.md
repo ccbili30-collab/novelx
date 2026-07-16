@@ -1,6 +1,6 @@
 # Semantic Graph（语义图谱）领域合同
 
-Last verified（最近验证）: 2026-07-10
+Last verified（最近验证）: 2026-07-16
 
 Semantic Graph（语义图谱）是当前 Canonical Assertion Version（权威断言版本）的只读投影，不是独立事实存储。
 
@@ -35,6 +35,8 @@ Renderer（渲染进程）只获得哈希化节点键、语义标签、范围、
 
 - `window.novaxDesktop.graph.getSnapshot()`
 - `window.novaxDesktop.graph.inspectNode({ nodeId })`
+
+Main-only（仅主进程）的 `inspectCreatorNodeEvidence(nodeId)` 可把哈希节点键解析回当前分支的来源资源，用于来源绑定插图。原始资源 ID 不进入公开图谱投影；Main 仍须再按 Growth Goal 授权范围验证。
 
 ## 未完成边界
 

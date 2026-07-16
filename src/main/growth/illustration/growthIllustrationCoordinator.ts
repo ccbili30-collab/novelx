@@ -115,6 +115,9 @@ export class GrowthIllustrationCoordinator {
           this.#growth.bindIllustrationImageJob({ itemId: current.id, imageJobId: job.id });
           persistedStatus = this.#growth.refreshIllustrationItemFromJob(current.id).status;
         }
+        if (!job && current.status === "planned") {
+          this.#growth.failIllustrationItemBeforeDispatch(current.id);
+        }
         if (persistedStatus !== "ready") failedItemIds.push(current.id);
         if (input.signal.aborted) {
           this.#cancelRemaining(input.requestId);
