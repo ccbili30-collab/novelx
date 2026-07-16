@@ -15,13 +15,15 @@ import {
 } from "./growth/growthWorldMapBrief";
 import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "./growth/growthWorldFragment";
 import { growthInquiryBriefSchema } from "./growth/growthInquiryBrief";
-import {
-  compileGrowthLongformOutlineChangeSet,
-  growthLongformOutlineParameters,
-  type GrowthLongformOutline,
-} from "./growth/growthLongformOutline";
-import { compileGrowthLongformSectionChangeSet } from "./growth/growthLongformSection";
+import { growthLongformOutlineParameters } from "./growth/growthLongformOutline";
 import { resolveGrowthPhasePlan } from "./growth/core/growthPhaseRegistry";
+import {
+  captureLongformWriterCandidate,
+  compileLongformOutlineProposal,
+  compileLongformSectionProposal,
+  compileLongformWriterInput,
+  requireLongformWriterEvidence,
+} from "./growth/phases/longform/growthLongformPhase";
 import {
   isExplicitGreenfieldFreeCreateRequest,
   inspectProjectFilesResultSchema,
@@ -392,11 +394,28 @@ export function createStewardExecutionStateMachine(input: {
           : input.growthBinding?.kind === "closure_evaluation" && name === "submit_closure_checker_review"
           ? compileClosureCheckerSubmission()
           : input.growthBinding?.longformAuthority?.phase === "section" && name === "writer"
-          ? compileLongformWriterInput()
+          ? compileLongformWriterInput({
+              authority: input.growthBinding.longformAuthority,
+              receiptId: growthReceiptId ?? "",
+              evidenceById: growthEvidenceById,
+            })
           : input.growthBinding?.longformAuthority?.phase === "outline" && name === "propose_change_set"
-          ? compileLongformOutlineProposal(effectiveParams)
+          ? compileLongformOutlineProposal({
+              binding: input.growthBinding,
+              authority: input.growthBinding.longformAuthority,
+              receiptId: growthReceiptId ?? "",
+              availableEvidenceIds: [...growthEvidenceById.keys()],
+              params: effectiveParams,
+            })
           : input.growthBinding?.longformAuthority?.phase === "section" && name === "propose_change_set"
-          ? compileLongformSectionProposal(effectiveParams)
+          ? compileLongformSectionProposal({
+              binding: input.growthBinding,
+              authority: input.growthBinding.longformAuthority,
+              receiptId: growthReceiptId ?? "",
+              availableEvidenceIds: [...growthEvidenceById.keys()],
+              writerCandidate,
+              params: effectiveParams,
+            })
           : growthFocus(input.growthBinding) === "story" && name === "writer"
           ? compileGrowthStoryBrief(effectiveParams, trustedStoryWorld ?? { evidenceId: "", label: "", excerpt: null, resourceId: "" })
           : growthFocus(input.growthBinding) === "story" && name === "propose_change_set"
@@ -622,10 +641,7 @@ export function createStewardExecutionStateMachine(input: {
     }
     if (name === "writer" && growthFocus(input.growthBinding) === "story" && !trustedStoryWorld) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");
     if (name === "writer" && input.growthBinding?.longformAuthority?.phase === "section") {
-      const authority = input.growthBinding.longformAuthority;
-      const selected = authority.sections.find((section) => section.localId === authority.selectedSectionId);
-      const required = selected ? [...selected.evidenceIds, ...authority.priorProseEvidenceIds] : [];
-      if (!selected || required.some((id) => !growthEvidenceById.has(id))) throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
+      requireLongformWriterEvidence(input.growthBinding.longformAuthority, growthEvidenceById);
     }
     if (name === "propose_change_set" && input.growthBinding?.longformAuthority?.phase === "section" && !writerCandidate) {
       throw stateError("STEWARD_LONGFORM_WRITER_REQUIRED");
@@ -686,85 +702,6 @@ export function createStewardExecutionStateMachine(input: {
       }
     }
     pendingImageRequest = image.data;
-  }
-
-  function compileLongformOutlineProposal(params: unknown): unknown {
-    const authority = input.growthBinding?.longformAuthority;
-    if (authority?.phase !== "outline" || !growthReceiptId) throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
-    return compileGrowthLongformOutlineChangeSet(params, {
-      outlineId: authority.outlineId,
-      checkpointId: input.growthBinding!.inputCheckpointId,
-      receiptId: growthReceiptId,
-      availableEvidenceIds: [...growthEvidenceById.keys()],
-      mainStoryResourceId: authority.mainStoryResourceId,
-      worldResourceId: authority.worldResourceId,
-      focusOcResourceId: authority.focusOcResourceId,
-      personalStoryResourceId: authority.personalStoryResourceId,
-    });
-  }
-
-  function compileLongformWriterInput(): Record<string, unknown> {
-    const authority = input.growthBinding?.longformAuthority;
-    if (authority?.phase !== "section" || !growthReceiptId) throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
-    const selected = authority.sections.find((section) => section.localId === authority.selectedSectionId);
-    if (!selected) throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
-    const requiredEvidenceIds = [...selected.evidenceIds, ...authority.priorProseEvidenceIds];
-    if (requiredEvidenceIds.some((id) => !growthEvidenceById.has(id))) throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
-    const sourceMaterial = JSON.stringify({
-      storyTitle: authority.storyTitle,
-      outlineSummary: authority.summary,
-      section: selected,
-      evidence: requiredEvidenceIds.map((id) => growthEvidenceById.get(id)),
-    });
-    if (sourceMaterial.length > 160_000) throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
-    return {
-      instruction: "Write exactly this one bounded OC personal-story section. Preserve continuity with the supplied pinned evidence and prior prose. Return only a Writer candidate; do not claim Canon, project authority, or a committed Change Set.",
-      sourceMaterial,
-      evidenceIds: [...selected.evidenceIds],
-      gmResolution: null,
-      gmResolutionId: null,
-      styleConstraints: [
-        ...selected.continuityConstraints,
-        `Unicode code point range: ${selected.estimatedCodePoints.min}-${selected.estimatedCodePoints.max}.`,
-        "Do not pad, repeat filler, or add leading/trailing whitespace.",
-      ],
-    };
-  }
-
-  function compileLongformSectionProposal(params: unknown): unknown {
-    const authority = input.growthBinding?.longformAuthority;
-    const selection = readObject(params);
-    if (authority?.phase !== "section" || !growthReceiptId || !writerCandidate
-      || selection?.outlineSectionId !== authority.selectedSectionId) {
-      throw stateError("STEWARD_LONGFORM_AUTHORITY_INVALID");
-    }
-    const outline: GrowthLongformOutline = {
-      outlineId: authority.outlineId,
-      checkpointId: input.growthBinding!.inputCheckpointId,
-      receiptId: growthReceiptId,
-      storyTitle: authority.storyTitle,
-      summary: authority.summary,
-      sections: authority.sections,
-    };
-    const selected = authority.sections.find((section) => section.localId === authority.selectedSectionId);
-    if (!selected || !sameStringSets(writerCandidate.evidenceIds, selected.evidenceIds)) {
-      throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
-    }
-    return compileGrowthLongformSectionChangeSet({
-      outlineSectionId: authority.selectedSectionId,
-      candidateText: writerCandidate.text,
-      evidenceIds: [...selected.evidenceIds],
-    }, {
-      outline,
-      checkpointId: input.growthBinding!.inputCheckpointId,
-      receiptId: growthReceiptId,
-      availableEvidenceIds: [...growthEvidenceById.keys()],
-      priorProseEvidenceIds: authority.priorProseEvidenceIds,
-      completedSectionIds: authority.completedSectionIds,
-      priorContentSha256: authority.priorContentSha256,
-      storyResourceId: authority.storyResourceId,
-      sectionSortOrder: authority.sectionSortOrder,
-    });
   }
 
   function applySuccessfulResult(name: OperationalToolName, details: unknown, params?: unknown): void {
@@ -896,15 +833,12 @@ export function createStewardExecutionStateMachine(input: {
       return;
     }
     if (name === "writer" && input.growthBinding?.longformAuthority?.phase === "section") {
-      const output = writerOutputSchema.safeParse(details);
-      if (!output.success) throw stateError("STEWARD_TOOL_RESULT_INVALID");
-      if (output.data.status !== "candidate") { blockReason = "tool_failed"; return; }
-      const authority = input.growthBinding.longformAuthority;
-      const selected = authority.sections.find((section) => section.localId === authority.selectedSectionId);
-      if (!selected || !sameStringSets(output.data.evidenceIds, selected.evidenceIds)) {
-        throw stateError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
-      }
-      writerCandidate = { text: output.data.candidateText, evidenceIds: output.data.evidenceIds };
+      const candidate = captureLongformWriterCandidate({
+        authority: input.growthBinding.longformAuthority,
+        details,
+      });
+      if (!candidate) { blockReason = "tool_failed"; return; }
+      writerCandidate = candidate;
       return;
     }
     if (name === "writer" && growthFocus(input.growthBinding) === "story") {
