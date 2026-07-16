@@ -4,6 +4,8 @@ import {
   type GrowthRetrieveGraphEvidenceArgs,
   type RetrieveGraphEvidenceArgs,
   type SubmitGrowthInquiryArgs,
+  type SubmitClosureSelfAssessmentArgs,
+  type SubmitClosureCheckerReviewArgs,
 } from "../shared/agentWorkerProtocol";
 import { verifyPromptRegistry } from "./promptRegistry";
 import { playerWorkerTurnStartCommandSchema } from "../shared/playerWorkerProtocol";
@@ -82,6 +84,12 @@ process.on("message", (payload: unknown) => {
           "submit_growth_inquiry",
           args as SubmitGrowthInquiryArgs,
           signal,
+        ),
+        submitClosureSelfAssessment: (args, signal) => toolBridge.invoke(
+          command.runId, "submit_closure_self_assessment", args as SubmitClosureSelfAssessmentArgs, signal,
+        ),
+        submitClosureCheckerReview: (args, signal) => toolBridge.invoke(
+          command.runId, "submit_closure_checker_review", args as SubmitClosureCheckerReviewArgs, signal,
         ),
         inspectProjectFiles: (args, signal) => toolBridge.invoke(
           command.runId,

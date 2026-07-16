@@ -12,6 +12,8 @@ import {
   growthRunBindingSchema,
   submitGrowthInquiryArgsSchema,
   submitGrowthInquiryResultSchema,
+  submitClosureSelfAssessmentArgsSchema,
+  submitClosureCheckerReviewArgsSchema,
 } from "../../src/shared/agentWorkerProtocol";
 import { agentRunEventSchema } from "../../src/shared/ipcContract";
 
@@ -24,7 +26,7 @@ describe("agent worker fail-closed contract", () => {
       inputCheckpointId: "checkpoint-1", ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
       kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], seedResourceIds: ["seed-resource"],
       domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
-      priorInquiries: [],
+      priorInquiries: [], closureProfile: null,
     };
     expect(growthRunBindingSchema.parse(binding)).toEqual(binding);
     expect(growthRunBindingSchema.safeParse({ ...binding, seedResourceIds: ["seed-resource", "seed-resource"] }).success).toBe(false);
@@ -79,6 +81,65 @@ describe("agent worker fail-closed contract", () => {
       .toBe(false);
   });
 
+  it("keeps Closure evaluation authority internal and its submissions evidence-bound", () => {
+    const closureProfile = {
+      profileId: "profile-1", revision: 2, profileKind: "mixed_birth" as const, subjectResourceId: null,
+      componentProfiles: ["world_birth", "story_universe", "oc_saga"] as const,
+      focusOcResourceId: "oc-1", requiredContentFacetIds: ["facet-world", "facet-story", "facet-oc"],
+    };
+    const binding = {
+      capabilityVersion: "hackathon-growth-closure-v4" as const, goalId: "goal-1", cycleId: "cycle-closure",
+      kind: "closure_evaluation" as const, focusKinds: [], resumeFrontier: [], inputCheckpointId: "checkpoint-2",
+      ruleRevision: 3, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [],
+      domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+      greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile,
+    };
+    expect(growthRunBindingSchema.safeParse(binding).success).toBe(true);
+    expect(growthRunBindingSchema.safeParse({ ...binding, focusKinds: ["world"] }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, closureProfile: null }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, greenfieldCreateAuthorized: true }).success).toBe(false);
+
+    const facet = {
+      facetId: "facet-world", state: "satisfied" as const, coverage: "complete" as const,
+      safeSummary: "World structure is pinned.", evidenceIds: ["evidence-world"],
+    };
+    expect(growthRetrieveGraphEvidenceResultSchema.safeParse({
+      variant: "growth_v1", receiptRecorded: true, evidence: [],
+      coverage: { state: "complete", searchedScopeCount: 3, omittedCount: 0, truncated: false },
+      diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
+      closureEvaluation: {
+        profileId: "profile-1", revision: 2, profileKind: "mixed_birth",
+        deterministicContentReady: true, facetResults: [facet],
+      },
+    }).success).toBe(true);
+    expect(growthRetrieveGraphEvidenceResultSchema.safeParse({
+      variant: "growth_v1", receiptRecorded: true, evidence: [],
+      coverage: { state: "complete", searchedScopeCount: 3, omittedCount: 0, truncated: false },
+      diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
+      closureEvaluation: {
+        profileId: "profile-1", revision: 2, profileKind: "mixed_birth",
+        deterministicContentReady: true, facetResults: [{ ...facet, evidenceIds: [] }],
+      },
+    }).success).toBe(false);
+
+    expect(submitClosureSelfAssessmentArgsSchema.parse({
+      decision: "ready_for_checker", safeSummary: "Pinned facets are ready for independent review.",
+    })).toEqual({ decision: "ready_for_checker", safeSummary: "Pinned facets are ready for independent review." });
+    expect(submitClosureSelfAssessmentArgsSchema.safeParse({
+      decision: "ready_for_checker", safeSummary: "Ready.", checkpointId: "forged",
+    }).success).toBe(false);
+    const finding = {
+      localId: "finding_1", severity: "major" as const, category: "causality" as const,
+      evidenceIds: ["evidence-world"], safeSummary: "A causal bridge is incomplete.",
+      repairObjective: "Connect the cause to its downstream institution.",
+    };
+    expect(submitClosureCheckerReviewArgsSchema.safeParse({ decision: "repairs_required", adverseFindings: [finding] }).success).toBe(true);
+    expect(submitClosureCheckerReviewArgsSchema.safeParse({ decision: "accepted", adverseFindings: [finding] }).success).toBe(false);
+    expect(submitClosureCheckerReviewArgsSchema.safeParse({
+      decision: "repairs_required", adverseFindings: [{ ...finding, receiptId: "forged" }],
+    }).success).toBe(false);
+  });
+
   it("keeps only allowlisted Change Set policy and domain errors in strict Worker failure responses", () => {
     const response = {
       type: "tool.response" as const,
@@ -115,6 +176,7 @@ describe("agent worker fail-closed contract", () => {
       receiptRecorded: true as const,
       coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
       diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
+      closureEvaluation: null,
     };
     const resource = {
       evidenceId: "resource-version-1", kind: "resource" as const, label: "World", excerpt: null,

@@ -1222,6 +1222,8 @@ const TOOL_ERROR_MESSAGES = {
   GROWTH_INQUIRY_REQUIRED: "A durable Growth Inquiry is required before downstream work.",
   GROWTH_INQUIRY_INVALID: "The Growth Inquiry is invalid.",
   GROWTH_INQUIRY_STALLED: "The Growth Inquiry made no evidence-backed progress.",
+  GROWTH_CLOSURE_NOT_READY: "The pinned Growth Closure evidence is not ready for independent review.",
+  GROWTH_CLOSURE_SUBMISSION_INVALID: "The Growth Closure submission is invalid.",
   GROWTH_RECONCILIATION_REQUIRED: "The Growth Change Set outcome requires reconciliation.",
   GROWTH_RUN_FAILED: "The Growth Cycle run failed before a committed Change Set.",
   GREENFIELD_CREATE_EXPLICIT_FREE_REQUIRED: "Greenfield creation requires trusted Free authorization.",

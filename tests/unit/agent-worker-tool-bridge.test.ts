@@ -38,7 +38,7 @@ describe("Agent Worker tool bridge", () => {
     }, {
       growthBinding: {
         capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], inputCheckpointId: "checkpoint-1",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [],
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null,
       },
     });
 
@@ -125,6 +125,37 @@ describe("Agent Worker tool bridge", () => {
       tool: "submit_growth_inquiry", result: { status: "selected", safeSummary: "正在推演。" },
     })).toBe(true);
     await expect(pending).resolves.toEqual({ status: "selected", safeSummary: "正在推演。" });
+  });
+
+  it("correlates strict Closure submissions without accepting authority fields", async () => {
+    let sent: AgentWorkerToolRequest | undefined;
+    const bridge = new AgentWorkerToolBridge((request) => { sent = request; return true; });
+    const assessment = bridge.invoke("run-closure", "submit_closure_self_assessment", {
+      decision: "ready_for_checker", safeSummary: "All deterministic facets are satisfied.",
+    });
+    expect(sent).toMatchObject({ runId: "run-closure", tool: "submit_closure_self_assessment" });
+    expect(bridge.handleResponse({
+      type: "tool.response", runId: "run-closure", requestId: sent!.requestId, ok: true,
+      tool: "submit_closure_self_assessment",
+      result: {
+        status: "checker_required", deterministicContentReady: true,
+        facetResults: [{
+          facetId: "facet-world", state: "satisfied", coverage: "complete",
+          safeSummary: "World structure is pinned.", evidenceIds: ["evidence-world"],
+        }],
+      },
+    })).toBe(true);
+    await expect(assessment).resolves.toMatchObject({ status: "checker_required", deterministicContentReady: true });
+
+    const review = bridge.invoke("run-closure", "submit_closure_checker_review", {
+      decision: "accepted", adverseFindings: [],
+    });
+    expect(sent).toMatchObject({ runId: "run-closure", tool: "submit_closure_checker_review" });
+    expect(bridge.handleResponse({
+      type: "tool.response", runId: "run-closure", requestId: sent!.requestId, ok: true,
+      tool: "submit_closure_checker_review", result: { status: "recorded", decision: "accepted" },
+    })).toBe(true);
+    await expect(review).resolves.toEqual({ status: "recorded", decision: "accepted" });
   });
 
   it("cleans up pending calls on cancellation and timeout", async () => {

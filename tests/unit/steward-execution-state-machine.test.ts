@@ -78,7 +78,7 @@ describe("Steward tool handoff state machine", () => {
       authorizedScopeResourceIds: ["world-1"],
       growthBinding: {
         capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], inputCheckpointId: "checkpoint-1",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [],
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null,
       },
       operationalTools: [retrieve, selectedInquiryTool(), propose],
       resultCapture: createRoleOutputTool("steward"),
@@ -308,7 +308,7 @@ describe("Steward tool handoff state machine", () => {
       authorizedScopeResourceIds: ["world-root"],
       growthBinding: {
         capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], inputCheckpointId: "checkpoint",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized, priorInquiries: [],
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized, priorInquiries: [], closureProfile: null,
       },
       operationalTools: [retrieve, selectedInquiryTool(), propose], resultCapture: createRoleOutputTool("steward"),
     });
@@ -346,7 +346,7 @@ describe("Steward tool handoff state machine", () => {
     };
     const binding = {
       capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", kind: "expand" as const, focusKinds: ["world" as const], resumeFrontier: ["story" as const, "oc" as const], inputCheckpointId: "checkpoint",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: true, priorInquiries: [],
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: true, priorInquiries: [], closureProfile: null,
     };
     const retrieve = successfulTool("retrieve_graph_evidence", emptyReceipt);
     let attempts = 0;
@@ -1002,7 +1002,7 @@ function createGrowthMachine(focus: "world" | "story" | "oc", operationalTools: 
     growthBinding: {
       capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: `cycle-${focus}`, kind, focusKinds: [focus], resumeFrontier: [], inputCheckpointId: "checkpoint",
       ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [],
-      domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [],
+      domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null,
     },
     operationalTools: growthTools,
     resultCapture: createRoleOutputTool("steward"),

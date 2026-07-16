@@ -28,6 +28,10 @@ import {
   generateImageArgsSchema,
   generateImageResultSchema,
   submitGrowthInquiryResultSchema,
+  submitClosureSelfAssessmentArgsSchema,
+  submitClosureSelfAssessmentResultSchema,
+  submitClosureCheckerReviewArgsSchema,
+  submitClosureCheckerReviewResultSchema,
   type ProposeChangeSetArgs,
   type ProposeChangeSetResult,
   type InspectProjectFilesArgs,
@@ -55,6 +59,10 @@ import {
   type GenerateImageResult,
   type SubmitGrowthInquiryArgs,
   type SubmitGrowthInquiryResult,
+  type SubmitClosureSelfAssessmentArgs,
+  type SubmitClosureSelfAssessmentResult,
+  type SubmitClosureCheckerReviewArgs,
+  type SubmitClosureCheckerReviewResult,
 } from "../../shared/agentWorkerProtocol";
 
 const identifier = Type.String({ minLength: 1, maxLength: 240 });
@@ -77,6 +85,29 @@ const growthRetrieveParameters = Type.Object({
   tokenBudget: Type.Integer({ minimum: 1, maximum: 1_000_000 }),
   contentBudgetChars: Type.Integer({ minimum: 1, maximum: 1_000_000 }),
   policyVersion: Type.String({ minLength: 1, maxLength: 120 }),
+}, { additionalProperties: false });
+
+const closureSelfAssessmentParameters = Type.Object({
+  decision: Type.Union([Type.Literal("continue_growing"), Type.Literal("ready_for_checker")]),
+  safeSummary: Type.String({ minLength: 1, maxLength: 1_000 }),
+}, { additionalProperties: false });
+
+const closureCheckerFindingParameters = Type.Object({
+  localId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }),
+  severity: Type.Union([Type.Literal("minor"), Type.Literal("major"), Type.Literal("blocking")]),
+  category: Type.Union([
+    Type.Literal("world_consistency"), Type.Literal("story_consistency"), Type.Literal("character_consistency"),
+    Type.Literal("causality"), Type.Literal("continuity"), Type.Literal("evidence_gap"),
+    Type.Literal("scope_violation"), Type.Literal("creator_choice_required"),
+  ]),
+  evidenceIds: Type.Array(identifier, { minItems: 1, maxItems: 100 }),
+  safeSummary: Type.String({ minLength: 1, maxLength: 1_000 }),
+  repairObjective: Type.String({ minLength: 1, maxLength: 2_000 }),
+}, { additionalProperties: false });
+
+const closureCheckerReviewParameters = Type.Object({
+  decision: Type.Union([Type.Literal("accepted"), Type.Literal("repairs_required"), Type.Literal("blocked")]),
+  adverseFindings: Type.Array(closureCheckerFindingParameters, { maxItems: 100 }),
 }, { additionalProperties: false });
 
 const inspectProjectFilesParameters = Type.Object({
@@ -280,6 +311,8 @@ export interface AgentToolExecutor {
   listTaskNotes(args: ListTaskNotesArgs, signal?: AbortSignal): Promise<ListTaskNotesResult>;
   generateImage(args: GenerateImageArgs, signal?: AbortSignal): Promise<GenerateImageResult>;
   submitGrowthInquiry?(args: SubmitGrowthInquiryArgs, signal?: AbortSignal): Promise<SubmitGrowthInquiryResult>;
+  submitClosureSelfAssessment?(args: SubmitClosureSelfAssessmentArgs, signal?: AbortSignal): Promise<SubmitClosureSelfAssessmentResult>;
+  submitClosureCheckerReview?(args: SubmitClosureCheckerReviewArgs, signal?: AbortSignal): Promise<SubmitClosureCheckerReviewResult>;
   proposeChangeSet(args: ProposeChangeSetArgs, signal?: AbortSignal): Promise<ProposeChangeSetResult>;
 }
 
@@ -304,7 +337,9 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
           text: JSON.stringify({
             result,
             priorInquiries: options.growthBinding?.priorInquiries ?? [],
-            novaxInstruction: options.growthBinding
+            novaxInstruction: options.growthBinding?.kind === "closure_evaluation"
+              ? "This pinned Closure Receipt and deterministic facet projection are recorded. Do not repeat retrieval or propose changes. Submit exactly one Closure self-assessment next."
+              : options.growthBinding
               ? "This pinned Growth Receipt is recorded. Do not repeat retrieval. Submit exactly one 3-7 item Growth Inquiry Brief next. Cite only returned evidence IDs; use the trusted priorInquiries local IDs only for explicit allowlisted transitions."
               : "Do not repeat the same retrieval. If the user requested a Change Set and evidence is sufficient, call propose_change_set. If the evidence conflicts or the user requested validation, call checker. Otherwise submit the final structured result.",
           }),
@@ -335,6 +370,36 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
         }],
         details: result,
       };
+    },
+  };
+
+  const submitClosureSelfAssessment: AgentTool<typeof closureSelfAssessmentParameters> = {
+    name: "submit_closure_self_assessment",
+    label: "提交闭环自评",
+    description: "Assess only the pinned Closure facets. Choose continue_growing when any required content facet is not satisfied; choose ready_for_checker only when every required facet is satisfied. Do not submit checkpoint, scope, Receipt, profile, run, or persistence authority.",
+    parameters: closureSelfAssessmentParameters,
+    execute: async (_toolCallId, params, signal) => {
+      if (!executor.submitClosureSelfAssessment) throw Object.assign(new Error("Closure assessment executor is required."), { code: "GROWTH_CLOSURE_SUBMISSION_INVALID" });
+      const result = submitClosureSelfAssessmentResultSchema.parse(await executor.submitClosureSelfAssessment(
+        submitClosureSelfAssessmentArgsSchema.parse(params), signal,
+      ));
+      return fileToolResult(result, result.status === "checker_required"
+        ? "The self-assessment is staged and an independent Checker review is required next."
+        : "The self-assessment is staged as continue_growing. Do not call Checker or propose changes; submit the final structured result.");
+    },
+  };
+
+  const submitClosureCheckerReview: AgentTool<typeof closureCheckerReviewParameters> = {
+    name: "submit_closure_checker_review",
+    label: "提交闭环检查",
+    description: "Submit only the independent Checker decision and its cited adverse findings. Do not submit checkpoint, scope, Receipt, profile, run, hashes, or persistence authority.",
+    parameters: closureCheckerReviewParameters,
+    execute: async (_toolCallId, params, signal) => {
+      if (!executor.submitClosureCheckerReview) throw Object.assign(new Error("Closure review executor is required."), { code: "GROWTH_CLOSURE_SUBMISSION_INVALID" });
+      const result = submitClosureCheckerReviewResultSchema.parse(await executor.submitClosureCheckerReview(
+        submitClosureCheckerReviewArgsSchema.parse(params), signal,
+      ));
+      return fileToolResult(result, "The independent Closure review is staged. Submit the final structured result without proposing project changes.");
     },
   };
 
@@ -495,7 +560,10 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
     },
   };
 
-  return [retrieve, ...(options.growthBinding ? [submitInquiry] : []), listDirectory, statFile, globFiles, searchFiles, readFile, saveNote, listNotes, inspectFiles, generateImage, propose];
+  const growthTools = options.growthBinding?.kind === "closure_evaluation"
+    ? [submitClosureSelfAssessment, submitClosureCheckerReview]
+    : options.growthBinding ? [submitInquiry] : [];
+  return [retrieve, ...growthTools, listDirectory, statFile, globFiles, searchFiles, readFile, saveNote, listNotes, inspectFiles, generateImage, propose];
 }
 
 function fileToolResult<T>(result: T, novaxInstruction: string) {

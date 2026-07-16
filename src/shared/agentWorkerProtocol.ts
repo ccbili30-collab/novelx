@@ -27,8 +27,8 @@ export const growthRunBindingSchema = z.object({
   capabilityVersion: z.literal(growthCapabilityVersion),
   goalId: identifierSchema,
   cycleId: identifierSchema,
-  kind: z.enum(["expand", "revision"]),
-  focusKinds: z.array(z.enum(["world", "story", "oc"])).min(1).max(3),
+  kind: z.enum(["expand", "revision", "closure_evaluation"]),
+  focusKinds: z.array(z.enum(["world", "story", "oc"])).max(3),
   resumeFrontier: z.array(z.enum(["world", "story", "oc"])).max(3),
   inputCheckpointId: identifierSchema,
   ruleRevision: z.number().int().min(1).max(1_000_000),
@@ -37,6 +37,15 @@ export const growthRunBindingSchema = z.object({
   domainRootResourceIds: z.object({ world: identifierSchema, oc: identifierSchema, story: identifierSchema }).strict(),
   greenfieldCreateAuthorized: z.boolean(),
   priorInquiries: z.array(growthPriorInquiryContextSchema).max(100),
+  closureProfile: z.object({
+    profileId: identifierSchema,
+    revision: z.number().int().min(1).max(1_000_000),
+    profileKind: z.enum(["world_birth", "oc_saga", "story_universe", "mixed_birth"]),
+    subjectResourceId: identifierSchema.nullable(),
+    componentProfiles: z.array(z.enum(["world_birth", "oc_saga", "story_universe"])).max(3),
+    focusOcResourceId: identifierSchema.nullable(),
+    requiredContentFacetIds: z.array(identifierSchema).min(1).max(100),
+  }).strict().nullable(),
 }).strict().superRefine((value, context) => {
   if (new Set(value.authorizedScopeResourceIds).size !== value.authorizedScopeResourceIds.length) {
     context.addIssue({ code: "custom", path: ["authorizedScopeResourceIds"], message: "Growth binding scopes must be unique." });
@@ -49,6 +58,36 @@ export const growthRunBindingSchema = z.object({
   }
   if (new Set(value.priorInquiries.map((inquiry) => inquiry.localId)).size !== value.priorInquiries.length) {
     context.addIssue({ code: "custom", path: ["priorInquiries"], message: "Prior Inquiry local IDs must be unique." });
+  }
+  if (value.kind === "closure_evaluation") {
+    if (value.focusKinds.length > 0 || value.resumeFrontier.length > 0 || value.greenfieldCreateAuthorized
+      || value.priorInquiries.length > 0 || value.closureProfile === null) {
+      context.addIssue({ code: "custom", path: ["kind"], message: "Closure evaluation bindings cannot carry content-growth authority." });
+    }
+  } else if (value.focusKinds.length === 0 || value.closureProfile !== null) {
+    context.addIssue({ code: "custom", path: ["focusKinds"], message: "Content-growth bindings require focus kinds and cannot carry Closure authority." });
+  }
+  const closure = value.closureProfile;
+  if (closure) {
+    if (new Set(closure.componentProfiles).size !== closure.componentProfiles.length
+      || new Set(closure.requiredContentFacetIds).size !== closure.requiredContentFacetIds.length) {
+      context.addIssue({ code: "custom", path: ["closureProfile"], message: "Closure binding components and facets must be unique." });
+    }
+    if (closure.profileKind === "oc_saga") {
+      if (closure.subjectResourceId === null || closure.componentProfiles.length > 0 || closure.focusOcResourceId !== null) {
+        context.addIssue({ code: "custom", path: ["closureProfile"], message: "OC saga Closure binding requires exactly one subject and no mixed components." });
+      }
+    } else if (closure.subjectResourceId !== null) {
+      context.addIssue({ code: "custom", path: ["closureProfile", "subjectResourceId"], message: "Only OC saga Closure may bind a subject resource." });
+    }
+    if (closure.profileKind === "mixed_birth") {
+      if (closure.componentProfiles.length === 0
+        || closure.componentProfiles.includes("oc_saga") !== (closure.focusOcResourceId !== null)) {
+        context.addIssue({ code: "custom", path: ["closureProfile"], message: "Mixed Closure binding requires explicit components and matching OC focus authority." });
+      }
+    } else if (closure.componentProfiles.length > 0 || closure.focusOcResourceId !== null) {
+      context.addIssue({ code: "custom", path: ["closureProfile"], message: "Only mixed Closure may bind component profiles or a focus OC." });
+    }
   }
   const roots = Object.values(value.domainRootResourceIds);
   if (new Set(roots).size !== roots.length || roots.some((root) => !value.authorizedScopeResourceIds.includes(root))) {
@@ -138,6 +177,36 @@ const growthEvidenceHitSchema = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 
+export const growthClosureFacetProjectionSchema = z.object({
+  facetId: identifierSchema,
+  state: z.enum(["satisfied", "missing", "conflicted", "blocked"]),
+  coverage: z.enum(["complete", "partial", "unknown"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  evidenceIds: z.array(identifierSchema).max(100),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.evidenceIds).size !== value.evidenceIds.length) {
+    context.addIssue({ code: "custom", path: ["evidenceIds"], message: "Closure facet evidence IDs must be unique." });
+  }
+  if (value.state === "satisfied" && value.evidenceIds.length === 0) {
+    context.addIssue({ code: "custom", path: ["evidenceIds"], message: "Satisfied Closure facets require pinned evidence." });
+  }
+});
+
+const growthClosureEvaluationProjectionSchema = z.object({
+  profileId: identifierSchema,
+  revision: z.number().int().min(1).max(1_000_000),
+  profileKind: z.enum(["world_birth", "oc_saga", "story_universe", "mixed_birth"]),
+  deterministicContentReady: z.boolean(),
+  facetResults: z.array(growthClosureFacetProjectionSchema).min(1).max(100),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.facetResults.map((facet) => facet.facetId)).size !== value.facetResults.length) {
+    context.addIssue({ code: "custom", path: ["facetResults"], message: "Closure facet results must be unique." });
+  }
+  if (value.deterministicContentReady !== value.facetResults.every((facet) => facet.state === "satisfied")) {
+    context.addIssue({ code: "custom", path: ["deterministicContentReady"], message: "Closure readiness must match the projected facet results." });
+  }
+});
+
 export const growthRetrieveGraphEvidenceResultSchema = z.object({
   variant: z.literal("growth_v1"),
   receiptRecorded: z.literal(true),
@@ -152,6 +221,67 @@ export const growthRetrieveGraphEvidenceResultSchema = z.object({
     expandedEdges: z.number().int().min(0).max(100_000),
     consumedContentChars: z.number().int().min(0).max(1_000_000),
   }).strict(),
+  closureEvaluation: growthClosureEvaluationProjectionSchema.nullable(),
+}).strict();
+
+export const submitClosureSelfAssessmentArgsSchema = z.object({
+  decision: z.enum(["continue_growing", "ready_for_checker"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+}).strict();
+
+export const submitClosureSelfAssessmentResultSchema = z.object({
+  status: z.enum(["continue_growing", "checker_required"]),
+  deterministicContentReady: z.boolean(),
+  facetResults: z.array(growthClosureFacetProjectionSchema).min(1).max(100),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.facetResults.map((facet) => facet.facetId)).size !== value.facetResults.length) {
+    context.addIssue({ code: "custom", path: ["facetResults"], message: "Closure facet results must be unique." });
+  }
+  if (value.deterministicContentReady !== value.facetResults.every((facet) => facet.state === "satisfied")) {
+    context.addIssue({ code: "custom", path: ["deterministicContentReady"], message: "Closure readiness must match the projected facet results." });
+  }
+  if (value.status === "checker_required" && !value.deterministicContentReady) {
+    context.addIssue({ code: "custom", path: ["status"], message: "Independent Checker review requires deterministic content readiness." });
+  }
+});
+
+const submitClosureCheckerFindingSchema = z.object({
+  localId: localInquiryIdSchema,
+  severity: z.enum(["minor", "major", "blocking"]),
+  category: z.enum([
+    "world_consistency", "story_consistency", "character_consistency", "causality", "continuity",
+    "evidence_gap", "scope_violation", "creator_choice_required",
+  ]),
+  evidenceIds: z.array(identifierSchema).min(1).max(100),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  repairObjective: z.string().trim().min(1).max(2_000),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.evidenceIds).size !== value.evidenceIds.length) {
+    context.addIssue({ code: "custom", path: ["evidenceIds"], message: "Closure finding evidence IDs must be unique." });
+  }
+});
+
+export const submitClosureCheckerReviewArgsSchema = z.object({
+  decision: z.enum(["accepted", "repairs_required", "blocked"]),
+  adverseFindings: z.array(submitClosureCheckerFindingSchema).max(100),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.adverseFindings.map((finding) => finding.localId)).size !== value.adverseFindings.length) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Closure finding local IDs must be unique." });
+  }
+  if (value.decision === "accepted" && value.adverseFindings.length > 0) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Accepted Closure review cannot contain adverse findings." });
+  }
+  if (value.decision === "repairs_required" && !value.adverseFindings.some((finding) => finding.severity === "major" || finding.severity === "blocking")) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Closure repairs require a major or blocking finding." });
+  }
+  if (value.decision === "blocked" && !value.adverseFindings.some((finding) => finding.severity === "blocking")) {
+    context.addIssue({ code: "custom", path: ["adverseFindings"], message: "Blocked Closure review requires a blocking finding." });
+  }
+});
+
+export const submitClosureCheckerReviewResultSchema = z.object({
+  status: z.literal("recorded"),
+  decision: z.enum(["accepted", "repairs_required", "blocked"]),
 }).strict();
 
 const growthIllustrationPlanItemSchema = z.object({
@@ -679,6 +809,8 @@ export const generateImageResultSchema = z.object({
 export const agentToolNameSchema = z.enum([
   "retrieve_graph_evidence",
   "submit_growth_inquiry",
+  "submit_closure_self_assessment",
+  "submit_closure_checker_review",
   "list_project_directory",
   "stat_project_file",
   "glob_project_files",
@@ -763,6 +895,14 @@ export const agentWorkerToolRequestSchema = z.discriminatedUnion("tool", [
     args: submitGrowthInquiryArgsSchema,
   }).strict(),
   z.object({
+    type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema,
+    tool: z.literal("submit_closure_self_assessment"), args: submitClosureSelfAssessmentArgsSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("tool.request"), runId: z.string().min(1).max(120), requestId: requestIdSchema,
+    tool: z.literal("submit_closure_checker_review"), args: submitClosureCheckerReviewArgsSchema,
+  }).strict(),
+  z.object({
     type: z.literal("tool.request"),
     runId: z.string().min(1).max(120),
     requestId: requestIdSchema,
@@ -820,6 +960,8 @@ export const agentToolInternalErrorCodeSchema = z.enum([
   "GROWTH_INQUIRY_REQUIRED",
   "GROWTH_INQUIRY_INVALID",
   "GROWTH_INQUIRY_STALLED",
+  "GROWTH_CLOSURE_NOT_READY",
+  "GROWTH_CLOSURE_SUBMISSION_INVALID",
   "GROWTH_RECONCILIATION_REQUIRED",
   "GROWTH_RUN_FAILED",
   "GREENFIELD_CREATE_EXPLICIT_FREE_REQUIRED",
@@ -885,6 +1027,14 @@ const agentWorkerToolSuccessResponseSchema = z.discriminatedUnion("tool", [
     ok: z.literal(true),
     tool: z.literal("submit_growth_inquiry"),
     result: submitGrowthInquiryResultSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema,
+    ok: z.literal(true), tool: z.literal("submit_closure_self_assessment"), result: submitClosureSelfAssessmentResultSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("tool.response"), runId: z.string().min(1).max(120), requestId: requestIdSchema,
+    ok: z.literal(true), tool: z.literal("submit_closure_checker_review"), result: submitClosureCheckerReviewResultSchema,
   }).strict(),
   z.object({
     type: z.literal("tool.response"),
@@ -1071,6 +1221,11 @@ export type GrowthRetrieveGraphEvidenceArgs = z.infer<typeof growthRetrieveGraph
 export type GrowthRetrieveGraphEvidenceResult = z.infer<typeof growthRetrieveGraphEvidenceResultSchema>;
 export type SubmitGrowthInquiryArgs = z.infer<typeof submitGrowthInquiryArgsSchema>;
 export type SubmitGrowthInquiryResult = z.infer<typeof submitGrowthInquiryResultSchema>;
+export type GrowthClosureFacetProjection = z.infer<typeof growthClosureFacetProjectionSchema>;
+export type SubmitClosureSelfAssessmentArgs = z.infer<typeof submitClosureSelfAssessmentArgsSchema>;
+export type SubmitClosureSelfAssessmentResult = z.infer<typeof submitClosureSelfAssessmentResultSchema>;
+export type SubmitClosureCheckerReviewArgs = z.infer<typeof submitClosureCheckerReviewArgsSchema>;
+export type SubmitClosureCheckerReviewResult = z.infer<typeof submitClosureCheckerReviewResultSchema>;
 export type GrowthIllustrationPlan = z.infer<typeof growthIllustrationPlanSchema>;
 export type AgentRetrieveGraphEvidenceArgs = z.infer<typeof agentRetrieveGraphEvidenceArgsSchema>;
 export type InspectProjectFilesArgs = z.infer<typeof inspectProjectFilesArgsSchema>;
