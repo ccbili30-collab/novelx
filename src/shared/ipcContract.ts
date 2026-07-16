@@ -14,7 +14,11 @@ import type {
   ImageProviderTestRequest,
   ImageProviderTestResult,
 } from "./imageProviderContract";
-import { growthCapabilityVersion, growthContentRefSchema, growthSeedSchema } from "./growthContract";
+import {
+  growthCapabilityVersion,
+  growthContentRefSchema,
+  growthSeedSchema,
+} from "./growthContract";
 
 export const desktopIpcChannels = {
   systemStatus: "novax:system-status",
@@ -1302,6 +1306,31 @@ export const growthPublicEventSchema = z.object({
   targetVersionId: opaqueIdSchema.nullable(),
   contentRef: growthContentRefSchema.nullable(),
 }).strict();
+
+export const growthInquiryEventTargetSchema = z.object({
+  targetKind: z.literal("inquiry"),
+  targetId: opaqueIdSchema,
+  targetVersionId: z.null(),
+  contentRef: z.null(),
+}).strict();
+
+export const growthInquiryPublicEventSchema = z.object({
+  goalId: opaqueIdSchema,
+  cycleId: opaqueIdSchema,
+  runId: z.string().min(1).max(120),
+  sequence: z.number().int().min(1).max(1_000_000),
+  phase: z.enum(["inquiry_selected", "creator_choice_required"]),
+  durableState: z.enum(["running", "blocked"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  ...growthInquiryEventTargetSchema.shape,
+}).strict().superRefine((value, context) => {
+  if (value.phase === "inquiry_selected" && value.durableState !== "running") {
+    context.addIssue({ code: "custom", message: "Selected Inquiry public events require running state." });
+  }
+  if (value.phase === "creator_choice_required" && value.durableState !== "blocked") {
+    context.addIssue({ code: "custom", message: "Creator-choice public events require blocked state." });
+  }
+});
 
 const growthPublicSnapshotSchema = z.object({
   capabilityVersion: z.literal(growthCapabilityVersion),

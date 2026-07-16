@@ -16,6 +16,10 @@ import {
   growthGoalSchema,
   growthInquiryBatchSchema,
   growthInquiryBatchSealSchema,
+  growthInquiryCreatorAnswerCreateSchema,
+  growthInquiryCreatorAnswerSchema,
+  growthInquiryLifecycleAppendSchema,
+  growthInquiryLifecycleSchema,
   growthClosureAssessmentAppendSchema,
   growthClosureAssessmentSchema,
   growthClosureProfileCreateSchema,
@@ -43,6 +47,8 @@ import {
   type GrowthGoal,
   type GrowthGoalCreate,
   type GrowthInquiryBatch,
+  type GrowthInquiryCreatorAnswer,
+  type GrowthInquiryLifecycle,
   type GrowthClosureAssessment,
   type GrowthClosureProfile,
   type GrowthClosureRevision,
@@ -230,28 +236,92 @@ export class GrowthRepository {
   getInquiryBatch(batchId: string): GrowthInquiryBatch | null {
     const row = this.workspace.db.prepare("SELECT * FROM growth_inquiry_batches WHERE id = ?").get(batchId) as Row | undefined;
     if (!row) return null;
-    const questions = (this.workspace.db.prepare(`
-      SELECT * FROM growth_inquiries WHERE batch_id = ? ORDER BY ordinal
-    `).all(batchId) as Row[]).map((question) => {
-      const evidenceLinks = (this.workspace.db.prepare(`
+    try {
+      const contract = this.workspace.db.prepare(`
+        SELECT contract_version, creator_choice_required_inquiry_id
+        FROM growth_inquiry_batch_contracts WHERE batch_id = ?
+      `).get(batchId) as Row | undefined;
+      if (!contract) throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+      const contractVersion = readString(contract, "contract_version");
+      const questionRows = this.workspace.db.prepare(`
+        SELECT * FROM growth_inquiries WHERE batch_id = ? ORDER BY ordinal
+      `).all(batchId) as Row[];
+      if (questionRows.length !== readNumber(row, "question_count")) throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+      const storedSelectedIds = questionRows
+        .filter((question) => readNumber(question, "selected") === 1)
+        .map((question) => readString(question, "id"));
+      const evidenceFor = (inquiryId: string) => (this.workspace.db.prepare(`
         SELECT receipt_id, rank FROM growth_inquiry_evidence_links
         WHERE batch_id = ? AND inquiry_id = ? ORDER BY ordinal
-      `).all(batchId, readString(question, "id")) as Array<{ receipt_id: string; rank: number }>).map((link) => ({
+      `).all(batchId, inquiryId) as Array<{ receipt_id: string; rank: number }>).map((link) => ({
         receiptId: link.receipt_id, rank: link.rank,
       }));
-      return {
-        id: readString(question, "id"), question: readString(question, "question"), evidenceState: readString(question, "evidence_state"),
-        safeSummary: readString(question, "safe_summary"), priority: readNumber(question, "priority"),
-        fingerprint: readString(question, "fingerprint"), selected: readNumber(question, "selected") === 1, evidenceLinks,
+      const common = {
+        id: readString(row, "id"), cycleId: readString(row, "cycle_id"), receiptId: readString(row, "receipt_id"),
+        checkpointId: readString(row, "checkpoint_id"), ruleRevision: readNumber(row, "rule_revision"),
+        idempotencyKey: readString(row, "idempotency_key"), payloadHash: readString(row, "payload_hash"),
+        status: readString(row, "status"), selectedInquiryId: readNullableString(row, "selected_inquiry_id"),
+        sealedAt: readString(row, "sealed_at"),
       };
-    });
-    return growthInquiryBatchSchema.parse({
-      id: readString(row, "id"), cycleId: readString(row, "cycle_id"), receiptId: readString(row, "receipt_id"),
-      checkpointId: readString(row, "checkpoint_id"), ruleRevision: readNumber(row, "rule_revision"),
-      idempotencyKey: readString(row, "idempotency_key"), payloadHash: readString(row, "payload_hash"),
-      status: readString(row, "status"), creatorChoiceBlocked: readNumber(row, "creator_choice_blocked") === 1,
-      selectedInquiryId: readNullableString(row, "selected_inquiry_id"), questions, sealedAt: readString(row, "sealed_at"),
-    });
+      if (contractVersion === "legacy_v24") {
+        const v25OnlyFact = this.workspace.db.prepare(`
+          SELECT 1 AS contaminated FROM (
+            SELECT batch_id FROM growth_inquiry_details WHERE batch_id = ?
+            UNION ALL
+            SELECT batch_id FROM growth_inquiry_lifecycle WHERE batch_id = ?
+            UNION ALL
+            SELECT batch_id FROM growth_inquiry_creator_answers WHERE batch_id = ?
+            UNION ALL
+            SELECT batch_id FROM growth_inquiry_event_sources WHERE batch_id = ?
+          ) LIMIT 1
+        `).get(batchId, batchId, batchId, batchId);
+        if (v25OnlyFact) throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+        const questions = questionRows.map((question) => ({
+          id: readString(question, "id"), question: readString(question, "question"), evidenceState: readString(question, "evidence_state"),
+          safeSummary: readString(question, "safe_summary"), priority: readNumber(question, "priority"),
+          fingerprint: readString(question, "fingerprint"), selected: readNumber(question, "selected") === 1,
+          evidenceLinks: evidenceFor(readString(question, "id")),
+        }));
+        return growthInquiryBatchSchema.parse({
+          ...common, contractVersion, creatorChoiceBlocked: readNumber(row, "creator_choice_blocked") === 1, questions,
+        });
+      }
+      if (contractVersion !== "v25") throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+      const creatorChoiceRequiredInquiryId = readNullableString(contract, "creator_choice_required_inquiry_id");
+      if ((creatorChoiceRequiredInquiryId !== null) !== (readNumber(row, "creator_choice_blocked") === 1)) {
+        throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+      }
+      if (creatorChoiceRequiredInquiryId === null
+        ? storedSelectedIds.length !== 1 || storedSelectedIds[0] !== common.selectedInquiryId
+        : storedSelectedIds.length !== 0 || common.selectedInquiryId !== null) {
+        throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+      }
+      const questions = questionRows.map((question) => {
+        const inquiryId = readString(question, "id");
+        const detail = this.workspace.db.prepare(`
+          SELECT * FROM growth_inquiry_details WHERE batch_id = ? AND inquiry_id = ?
+        `).get(batchId, inquiryId) as Row | undefined;
+        const initial = this.workspace.db.prepare(`
+          SELECT phase FROM growth_inquiry_lifecycle
+          WHERE batch_id = ? AND inquiry_id = ? AND sequence = 1
+        `).get(batchId, inquiryId) as Row | undefined;
+        if (!detail || !initial) throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+        return {
+          id: inquiryId, question: readString(question, "question"), evidenceState: readString(question, "evidence_state"),
+          safeSummary: readString(question, "safe_summary"), proposedAction: readString(detail, "proposed_action"),
+          provisionalAssumption: readNullableString(detail, "provisional_assumption"),
+          requiresCreatorChoice: readNumber(detail, "requires_creator_choice") === 1,
+          priority: readNumber(question, "priority"), fingerprint: readString(question, "fingerprint"),
+          evidenceLinks: evidenceFor(inquiryId), initialState: readString(initial, "phase"),
+        };
+      });
+      return growthInquiryBatchSchema.parse({
+        ...common, contractVersion, creatorChoiceRequiredInquiryId, questions,
+      });
+    } catch (error) {
+      if ((error as { code?: string }).code === "GROWTH_INQUIRY_DATA_CORRUPT") throw error;
+      throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+    }
   }
 
   sealInquiryBatch(input: unknown): GrowthInquiryBatch {
@@ -273,29 +343,27 @@ export class GrowthRepository {
       }
       const cycle = this.#requiredCycle(value.cycleId);
       if (!cycle.receiptId) throw growthError("GROWTH_INQUIRY_RECEIPT_REQUIRED");
-      if (value.creatorChoiceBlocked ? cycle.status !== "blocked" : cycle.status !== "running") {
-        throw growthError("GROWTH_INQUIRY_CYCLE_STATE_INVALID");
-      }
+      if (cycle.status !== "running" || !cycle.runId) throw growthError("GROWTH_INQUIRY_CYCLE_STATE_INVALID");
       const receipt = this.getReceipt(cycle.receiptId);
       if (!receipt || receipt.cycleId !== cycle.id || receipt.checkpointId !== cycle.inputCheckpointId) {
         throw growthError("GROWTH_INQUIRY_RECEIPT_MISMATCH");
       }
       for (const question of value.questions) {
-        if (["known", "conflicted"].includes(question.evidenceState) && question.evidenceLinks.length === 0) {
-          throw growthError("GROWTH_INQUIRY_EVIDENCE_REQUIRED");
-        }
-        if (question.evidenceLinks.some((link) => link.receiptId !== receipt.id)) {
-          throw growthError("GROWTH_INQUIRY_EVIDENCE_RECEIPT_MISMATCH");
+        for (const rank of question.evidenceRanks) {
+          if (!this.workspace.db.prepare(`
+            SELECT 1 FROM growth_retrieval_receipt_links WHERE receipt_id = ? AND rank = ?
+          `).get(receipt.id, rank)) throw growthError("GROWTH_INQUIRY_EVIDENCE_RANK_INVALID");
         }
       }
       const sealedAt = new Date().toISOString();
+      const creatorChoiceBlocked = value.creatorChoiceRequiredInquiryId !== null;
       this.workspace.db.prepare(`
         INSERT INTO growth_inquiry_batches (
           id, cycle_id, receipt_id, checkpoint_id, rule_revision, idempotency_key, payload_hash, status,
           question_count, creator_choice_blocked, selected_inquiry_id, sealed_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'sealed', ?, ?, ?, ?)
       `).run(value.id, cycle.id, receipt.id, cycle.inputCheckpointId, cycle.ruleRevision, value.idempotencyKey,
-        payloadHash, value.questions.length, value.creatorChoiceBlocked ? 1 : 0, value.selectedInquiryId, sealedAt);
+        payloadHash, value.questions.length, creatorChoiceBlocked ? 1 : 0, value.selectedInquiryId, sealedAt);
       const insertQuestion = this.workspace.db.prepare(`
         INSERT INTO growth_inquiries (
           id, batch_id, question, evidence_state, safe_summary, priority, fingerprint, selected, ordinal
@@ -305,15 +373,228 @@ export class GrowthRepository {
         INSERT INTO growth_inquiry_evidence_links (batch_id, inquiry_id, receipt_id, rank, ordinal)
         VALUES (?, ?, ?, ?, ?)
       `);
+      const insertDetail = this.workspace.db.prepare(`
+        INSERT INTO growth_inquiry_details (
+          batch_id, inquiry_id, requires_creator_choice, provisional_assumption, proposed_action
+        ) VALUES (?, ?, ?, ?, ?)
+      `);
+      const insertLifecycle = this.workspace.db.prepare(`
+        INSERT INTO growth_inquiry_lifecycle (
+          batch_id, inquiry_id, sequence, phase, idempotency_key, payload_hash,
+          source_cycle_id, source_receipt_id, source_checkpoint_id, source_rule_revision,
+          successor_inquiry_id, answer_rule_revision, close_reason, created_at
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+      `);
       value.questions.forEach((question, ordinal) => {
         insertQuestion.run(question.id, value.id, question.question, question.evidenceState, question.safeSummary,
           question.priority, question.fingerprint, question.id === value.selectedInquiryId ? 1 : 0, ordinal);
-        question.evidenceLinks.forEach((link, evidenceOrdinal) => {
-          insertEvidence.run(value.id, question.id, link.receiptId, link.rank, evidenceOrdinal);
+        insertDetail.run(value.id, question.id, question.requiresCreatorChoice ? 1 : 0,
+          question.provisionalAssumption, question.proposedAction);
+        question.evidenceRanks.forEach((rank, evidenceOrdinal) => {
+          insertEvidence.run(value.id, question.id, receipt.id, rank, evidenceOrdinal);
         });
+        const phase = question.id === value.selectedInquiryId
+          ? "selected"
+          : question.id === value.creatorChoiceRequiredInquiryId
+            ? "creator_choice_required"
+            : "backlog";
+        const lifecycleIdentity = canonicalAuditHash({ batchId: value.id, inquiryId: question.id, phase });
+        const lifecyclePayloadHash = canonicalAuditHash({
+          batchId: value.id, inquiryId: question.id, phase, sourceCycleId: cycle.id, sourceReceiptId: receipt.id,
+          sourceCheckpointId: cycle.inputCheckpointId, sourceRuleRevision: cycle.ruleRevision,
+        });
+        insertLifecycle.run(value.id, question.id, phase, `growth-inquiry-initial:${lifecycleIdentity}`,
+          lifecyclePayloadHash, cycle.id, receipt.id, cycle.inputCheckpointId, cycle.ruleRevision, sealedAt);
       });
+      this.workspace.db.prepare(`
+        INSERT INTO growth_inquiry_batch_contracts (
+          batch_id, contract_version, creator_choice_required_inquiry_id
+        ) VALUES (?, 'v25', ?)
+      `).run(value.id, value.creatorChoiceRequiredInquiryId);
+
+      const frontierInquiryId = value.creatorChoiceRequiredInquiryId ?? value.selectedInquiryId!;
+      const frontier = value.questions.find((question) => question.id === frontierInquiryId);
+      if (!frontier) throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+      const eventSequenceRow = this.workspace.db.prepare(`
+        SELECT MAX(sequence) AS sequence FROM growth_events WHERE goal_id = ?
+      `).get(cycle.goalId) as { sequence: number | null };
+      const eventSequence = (eventSequenceRow.sequence ?? 0) + 1;
+      if (creatorChoiceBlocked) {
+        this.workspace.db.prepare(`
+          UPDATE growth_cycles
+          SET status = 'blocked', failure_code = 'GROWTH_CREATOR_CHOICE_REQUIRED', updated_at = ?, terminal_at = ?
+          WHERE id = ? AND status = 'running'
+        `).run(sealedAt, sealedAt, cycle.id);
+        this.workspace.db.prepare("UPDATE growth_goals SET status = 'blocked', updated_at = ? WHERE id = ?")
+          .run(sealedAt, cycle.goalId);
+      }
+      const event = growthEventSchema.parse({
+        goalId: cycle.goalId, cycleId: cycle.id, runId: cycle.runId, sequence: eventSequence,
+        safeSummary: frontier.safeSummary,
+        phase: creatorChoiceBlocked ? "creator_choice_required" : "inquiry_selected",
+        targetKind: "inquiry", targetId: frontierInquiryId, targetVersionId: null,
+        durableState: creatorChoiceBlocked ? "blocked" : "running", contentRef: null, createdAt: sealedAt,
+      });
+      this.workspace.db.prepare(`
+        INSERT INTO growth_events (
+          goal_id, cycle_id, run_id, sequence, safe_summary, phase, target_kind, target_id, target_version_id,
+          durable_state, content_ref_kind, content_ref_id, content_ref_version_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?)
+      `).run(event.goalId, event.cycleId, event.runId, event.sequence, event.safeSummary, event.phase,
+        event.targetKind, event.targetId, event.durableState, event.createdAt);
+      this.workspace.db.prepare(`
+        INSERT INTO growth_inquiry_event_sources (
+          goal_id, event_sequence, batch_id, inquiry_id, lifecycle_sequence
+        ) VALUES (?, ?, ?, ?, 1)
+      `).run(event.goalId, event.sequence, value.id, frontierInquiryId);
       this.workspace.db.exec("COMMIT");
       return this.getInquiryBatch(value.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listInquiryLifecycle(inquiryId: string): GrowthInquiryLifecycle[] {
+    const rows = this.workspace.db.prepare(`
+      SELECT * FROM growth_inquiry_lifecycle WHERE inquiry_id = ? ORDER BY sequence
+    `).all(inquiryId) as Row[];
+    if (rows.length === 0 && !this.workspace.db.prepare("SELECT 1 FROM growth_inquiries WHERE id = ?").get(inquiryId)) {
+      throw growthError("GROWTH_INQUIRY_NOT_FOUND");
+    }
+    const lifecycle = rows.map(mapInquiryLifecycle);
+    lifecycle.forEach((entry, index) => {
+      if (entry.sequence !== index + 1) throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+    });
+    return lifecycle;
+  }
+
+  appendInquiryLifecycle(input: unknown): GrowthInquiryLifecycle {
+    const value = growthInquiryLifecycleAppendSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare(`
+        SELECT * FROM growth_inquiry_lifecycle WHERE idempotency_key = ?
+      `).get(value.idempotencyKey) as Row | undefined;
+      if (replay) {
+        if (readString(replay, "payload_hash") !== payloadHash) throw growthError("GROWTH_INQUIRY_LIFECYCLE_REPLAY_MISMATCH");
+        const result = mapInquiryLifecycle(replay);
+        this.workspace.db.exec("COMMIT");
+        return result;
+      }
+      const context = this.#requiredInquiryContext(value.inquiryId);
+      if (context.contractVersion !== "v25") throw growthError("GROWTH_INQUIRY_V25_REQUIRED");
+      const lifecycle = this.listInquiryLifecycle(value.inquiryId);
+      const last = lifecycle.at(-1);
+      if (!last || last.sequence !== value.expectedSequence) throw growthError("GROWTH_INQUIRY_LIFECYCLE_CAS_MISMATCH");
+      if (["promoted", "answered", "closed"].includes(last.phase)) throw growthError("GROWTH_INQUIRY_LIFECYCLE_TERMINAL");
+      if (last.phase === "creator_choice_required") throw growthError("GROWTH_INQUIRY_CREATOR_ANSWER_REQUIRED");
+      const sourceCycle = this.#requiredCycle(value.sourceCycleId);
+      if (sourceCycle.goalId !== context.goalId || !sourceCycle.receiptId) throw growthError("GROWTH_INQUIRY_LIFECYCLE_SOURCE_INVALID");
+      if (sourceCycle.sequence <= context.cycleSequence) throw growthError("GROWTH_INQUIRY_SOURCE_NOT_LATER");
+      const sourceReceipt = this.getReceipt(sourceCycle.receiptId);
+      if (!sourceReceipt || sourceReceipt.cycleId !== sourceCycle.id || sourceReceipt.checkpointId !== sourceCycle.inputCheckpointId) {
+        throw growthError("GROWTH_INQUIRY_LIFECYCLE_SOURCE_INVALID");
+      }
+      if (sourceCycle.id === context.cycleId || sourceReceipt.id === context.receiptId
+        || sourceCycle.inputCheckpointId === context.checkpointId) {
+        throw growthError("GROWTH_INQUIRY_NEW_EVIDENCE_REQUIRED");
+      }
+      let successorInquiryId: string | null = null;
+      if (value.phase === "promoted") {
+        const successor = this.#requiredInquiryContext(value.successorInquiryId);
+        if (successor.contractVersion !== "v25" || successor.goalId !== context.goalId || successor.cycleId !== sourceCycle.id) {
+          throw growthError("GROWTH_INQUIRY_SUCCESSOR_INVALID");
+        }
+        successorInquiryId = value.successorInquiryId;
+      }
+      const sequence = last.sequence + 1;
+      const createdAt = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_inquiry_lifecycle (
+          batch_id, inquiry_id, sequence, phase, idempotency_key, payload_hash,
+          source_cycle_id, source_receipt_id, source_checkpoint_id, source_rule_revision,
+          successor_inquiry_id, answer_rule_revision, close_reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+      `).run(context.batchId, value.inquiryId, sequence, value.phase, value.idempotencyKey, payloadHash,
+        sourceCycle.id, sourceReceipt.id, sourceCycle.inputCheckpointId, sourceCycle.ruleRevision,
+        successorInquiryId, value.phase === "closed" ? value.reason : null, createdAt);
+      const result = mapInquiryLifecycle(this.workspace.db.prepare(`
+        SELECT * FROM growth_inquiry_lifecycle WHERE batch_id = ? AND inquiry_id = ? AND sequence = ?
+      `).get(context.batchId, value.inquiryId, sequence) as Row);
+      this.workspace.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getInquiryCreatorAnswer(inquiryId: string): GrowthInquiryCreatorAnswer | null {
+    const row = this.workspace.db.prepare(`
+      SELECT * FROM growth_inquiry_creator_answers WHERE inquiry_id = ?
+    `).get(inquiryId) as Row | undefined;
+    return row ? mapInquiryCreatorAnswer(row) : null;
+  }
+
+  answerCreatorInquiry(input: unknown): GrowthInquiryCreatorAnswer {
+    const value = growthInquiryCreatorAnswerCreateSchema.parse(input);
+    const payloadHash = canonicalAuditHash(value);
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.workspace.db.prepare(`
+        SELECT * FROM growth_inquiry_creator_answers WHERE idempotency_key = ?
+      `).get(value.idempotencyKey) as Row | undefined;
+      if (replay) {
+        if (readString(replay, "payload_hash") !== payloadHash) throw growthError("GROWTH_INQUIRY_ANSWER_REPLAY_MISMATCH");
+        const answer = mapInquiryCreatorAnswer(replay);
+        this.workspace.db.exec("COMMIT");
+        return answer;
+      }
+      const context = this.#requiredInquiryContext(value.inquiryId);
+      if (context.contractVersion !== "v25" || context.creatorChoiceRequiredInquiryId !== value.inquiryId
+        || !context.requiresCreatorChoice) throw growthError("GROWTH_INQUIRY_CREATOR_CHOICE_REQUIRED");
+      if (this.getInquiryCreatorAnswer(value.inquiryId)) throw growthError("GROWTH_INQUIRY_ALREADY_ANSWERED");
+      const cycle = this.#requiredCycle(context.cycleId);
+      const goal = this.#requiredGoal(context.goalId);
+      if (cycle.status !== "blocked" || cycle.failureCode !== "GROWTH_CREATOR_CHOICE_REQUIRED" || goal.status !== "blocked") {
+        throw growthError("GROWTH_INQUIRY_CREATOR_CHOICE_STATE_INVALID");
+      }
+      const lifecycle = this.listInquiryLifecycle(value.inquiryId);
+      const last = lifecycle.at(-1);
+      if (!last || last.sequence !== value.expectedLifecycleSequence || last.phase !== "creator_choice_required") {
+        throw growthError("GROWTH_INQUIRY_LIFECYCLE_CAS_MISMATCH");
+      }
+      if (goal.currentRuleRevision !== value.expectedRuleRevision) throw growthError("GROWTH_RULE_REVISION_MISMATCH");
+      const ruleRevision = value.expectedRuleRevision + 1;
+      const createdAt = new Date().toISOString();
+      this.workspace.db.prepare(`
+        INSERT INTO growth_goal_rule_revisions (goal_id, revision, rule_text, source_message_id, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(goal.id, ruleRevision, value.answerText, value.sourceMessageId, createdAt);
+      this.workspace.db.prepare(`
+        UPDATE growth_goals SET current_rule_revision = ?, status = 'active', updated_at = ?
+        WHERE id = ? AND current_rule_revision = ? AND status = 'blocked'
+      `).run(ruleRevision, createdAt, goal.id, value.expectedRuleRevision);
+      this.workspace.db.prepare(`
+        INSERT INTO growth_inquiry_creator_answers (
+          inquiry_id, batch_id, goal_id, rule_revision, idempotency_key, payload_hash,
+          answer_text, source_message_id, checkpoint_id, receipt_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(value.inquiryId, context.batchId, goal.id, ruleRevision, value.idempotencyKey, payloadHash,
+        value.answerText, value.sourceMessageId, context.checkpointId, context.receiptId, createdAt);
+      this.workspace.db.prepare(`
+        INSERT INTO growth_inquiry_lifecycle (
+          batch_id, inquiry_id, sequence, phase, idempotency_key, payload_hash,
+          source_cycle_id, source_receipt_id, source_checkpoint_id, source_rule_revision,
+          successor_inquiry_id, answer_rule_revision, close_reason, created_at
+        ) VALUES (?, ?, ?, 'creator_answered', ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)
+      `).run(context.batchId, value.inquiryId, last.sequence + 1, value.idempotencyKey, payloadHash,
+        context.cycleId, context.receiptId, context.checkpointId, context.ruleRevision, ruleRevision, createdAt);
+      const answer = this.getInquiryCreatorAnswer(value.inquiryId) ?? fail("GROWTH_INQUIRY_DATA_CORRUPT");
+      this.workspace.db.exec("COMMIT");
+      return answer;
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
       throw error;
@@ -939,8 +1220,22 @@ export class GrowthRepository {
       if (goal.currentRuleRevision !== value.ruleRevision) throw growthError("GROWTH_RULE_REVISION_MISMATCH");
       if (this.#hasOpenCycle(goal.id)) throw growthError("GROWTH_OPEN_CYCLE_EXISTS");
       const previous = this.workspace.db.prepare("SELECT * FROM growth_cycles WHERE goal_id = ? ORDER BY sequence DESC LIMIT 1").get(goal.id) as Row | undefined;
-      const expectedInput = previous ? readNullableString(previous, "output_checkpoint_id") : this.#getBranchHead(goal.branchId);
-      if (!expectedInput || value.inputCheckpointId !== expectedInput || value.inputCheckpointId !== this.#getBranchHead(goal.branchId)) {
+      const branchHead = this.#getBranchHead(goal.branchId);
+      const previousOutput = previous ? readNullableString(previous, "output_checkpoint_id") : null;
+      const resumesCreatorAnswer = previous
+        ? readString(previous, "status") === "blocked"
+          && readNullableString(previous, "failure_code") === "GROWTH_CREATOR_CHOICE_REQUIRED"
+          && Boolean(this.workspace.db.prepare(`
+            SELECT 1
+            FROM growth_inquiry_batches batches
+            JOIN growth_inquiry_batch_contracts contracts ON contracts.batch_id = batches.id
+            JOIN growth_inquiry_creator_answers answers
+              ON answers.inquiry_id = contracts.creator_choice_required_inquiry_id
+            WHERE batches.cycle_id = ? AND contracts.contract_version = 'v25'
+          `).get(readString(previous, "id")))
+        : false;
+      const expectedInput = previous ? previousOutput ?? (resumesCreatorAnswer ? branchHead : null) : branchHead;
+      if (!expectedInput || value.inputCheckpointId !== expectedInput || value.inputCheckpointId !== branchHead) {
         throw growthError("GROWTH_CYCLE_INPUT_CHECKPOINT_MISMATCH");
       }
       this.#assertCheckpointBranch(value.inputCheckpointId, goal.branchId);
@@ -1120,6 +1415,7 @@ export class GrowthRepository {
 
   appendEvent(input: unknown): GrowthEvent {
     const value = growthEventAppendSchema.parse(input);
+    if (value.targetKind === "inquiry") throw growthError("GROWTH_INQUIRY_EVENT_REPOSITORY_OWNED");
     this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const existingRow = this.workspace.db.prepare("SELECT * FROM growth_events WHERE goal_id = ? AND sequence = ?").get(value.goalId, value.sequence) as Row | undefined;
@@ -1156,6 +1452,43 @@ export class GrowthRepository {
       this.workspace.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  #requiredInquiryContext(inquiryId: string): {
+    batchId: string;
+    cycleId: string;
+    cycleSequence: number;
+    receiptId: string;
+    checkpointId: string;
+    ruleRevision: number;
+    goalId: string;
+    contractVersion: string;
+    creatorChoiceRequiredInquiryId: string | null;
+    requiresCreatorChoice: boolean;
+  } {
+    const row = this.workspace.db.prepare(`
+      SELECT inquiries.batch_id, batches.cycle_id, batches.receipt_id, batches.checkpoint_id,
+        batches.rule_revision, cycles.goal_id, cycles.sequence AS cycle_sequence, contracts.contract_version,
+        contracts.creator_choice_required_inquiry_id, details.requires_creator_choice
+      FROM growth_inquiries inquiries
+      JOIN growth_inquiry_batches batches ON batches.id = inquiries.batch_id
+      JOIN growth_cycles cycles ON cycles.id = batches.cycle_id
+      LEFT JOIN growth_inquiry_batch_contracts contracts ON contracts.batch_id = batches.id
+      LEFT JOIN growth_inquiry_details details
+        ON details.batch_id = inquiries.batch_id AND details.inquiry_id = inquiries.id
+      WHERE inquiries.id = ?
+    `).get(inquiryId) as Row | undefined;
+    if (!row) throw growthError("GROWTH_INQUIRY_NOT_FOUND");
+    if (row.contract_version === null) throw growthError("GROWTH_INQUIRY_DATA_CORRUPT");
+    return {
+      batchId: readString(row, "batch_id"), cycleId: readString(row, "cycle_id"),
+      cycleSequence: readNumber(row, "cycle_sequence"),
+      receiptId: readString(row, "receipt_id"), checkpointId: readString(row, "checkpoint_id"),
+      ruleRevision: readNumber(row, "rule_revision"), goalId: readString(row, "goal_id"),
+      contractVersion: readString(row, "contract_version"),
+      creatorChoiceRequiredInquiryId: readNullableString(row, "creator_choice_required_inquiry_id"),
+      requiresCreatorChoice: row.requires_creator_choice === 1,
+    };
   }
 
   #assertClosureRevisionAuthority(goalId: string, checkpointId: string, ruleRevision: number): void {
@@ -1625,6 +1958,29 @@ function mapRuleRevision(row: Row): GrowthRuleRevision {
   return growthRuleRevisionSchema.parse({
     goalId: readString(row, "goal_id"), revision: readNumber(row, "revision"), ruleText: readString(row, "rule_text"),
     sourceMessageId: readNullableString(row, "source_message_id"), createdAt: readString(row, "created_at"),
+  });
+}
+
+function mapInquiryLifecycle(row: Row): GrowthInquiryLifecycle {
+  return growthInquiryLifecycleSchema.parse({
+    inquiryId: readString(row, "inquiry_id"), sequence: readNumber(row, "sequence"),
+    phase: readString(row, "phase"), idempotencyKey: readString(row, "idempotency_key"),
+    payloadHash: readString(row, "payload_hash"), sourceCycleId: readString(row, "source_cycle_id"),
+    sourceReceiptId: readString(row, "source_receipt_id"), sourceCheckpointId: readString(row, "source_checkpoint_id"),
+    sourceRuleRevision: readNumber(row, "source_rule_revision"),
+    successorInquiryId: readNullableString(row, "successor_inquiry_id"),
+    answerRuleRevision: readNullableNumber(row, "answer_rule_revision"), closeReason: readNullableString(row, "close_reason"),
+    createdAt: readString(row, "created_at"),
+  });
+}
+
+function mapInquiryCreatorAnswer(row: Row): GrowthInquiryCreatorAnswer {
+  return growthInquiryCreatorAnswerSchema.parse({
+    inquiryId: readString(row, "inquiry_id"), goalId: readString(row, "goal_id"),
+    ruleRevision: readNumber(row, "rule_revision"), idempotencyKey: readString(row, "idempotency_key"),
+    payloadHash: readString(row, "payload_hash"), answerText: readString(row, "answer_text"),
+    sourceMessageId: readNullableString(row, "source_message_id"), checkpointId: readString(row, "checkpoint_id"),
+    receiptId: readString(row, "receipt_id"), createdAt: readString(row, "created_at"),
   });
 }
 

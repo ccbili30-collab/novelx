@@ -220,7 +220,11 @@ export const growthRetrievalReceiptSchema = z.object({
 });
 
 export const growthEventPhaseSchema = z.enum([
-  "cycle_planned", "run_attached", "receipt_recorded", "change_set_committed", "cycle_terminal",
+  "cycle_planned", "run_attached", "receipt_recorded", "inquiry_selected", "creator_choice_required",
+  "change_set_committed", "cycle_terminal",
+]);
+export const growthEventTargetKindSchema = z.enum([
+  "document", "resource", "assertion", "relation", "change_set", "inquiry",
 ]);
 export const growthDurableStateSchema = z.enum([
   "planned", "running", "committed", "blocked", "failed", "cancelled", "reconciliation_required",
@@ -238,19 +242,38 @@ const eventInputShape = {
   sequence: z.number().int().min(1).max(1_000_000),
   safeSummary: z.string().trim().min(1).max(1_000),
   phase: growthEventPhaseSchema,
-  targetKind: growthTargetKindSchema,
+  targetKind: growthEventTargetKindSchema,
   targetId: idSchema,
   targetVersionId: idSchema.nullable(),
   durableState: growthDurableStateSchema,
   contentRef: growthContentRefSchema.nullable(),
 };
 
-const refineEvent = (value: { durableState: string; phase: string; targetKind: string }, context: z.RefinementCtx): void => {
+const refineEvent = (value: {
+  durableState: string;
+  phase: string;
+  targetKind: string;
+  targetVersionId: string | null;
+  contentRef: z.infer<typeof growthContentRefSchema> | null;
+}, context: z.RefinementCtx): void => {
   if (value.durableState === "committed" && value.phase !== "change_set_committed") {
     context.addIssue({ code: "custom", message: "Committed state requires Change Set commit phase." });
   }
   if (value.phase === "change_set_committed" && value.targetKind !== "change_set") {
     context.addIssue({ code: "custom", message: "Change Set commit phase requires Change Set target." });
+  }
+  const inquiryPhase = value.phase === "inquiry_selected" || value.phase === "creator_choice_required";
+  if (inquiryPhase !== (value.targetKind === "inquiry")) {
+    context.addIssue({ code: "custom", message: "Inquiry event phases require the event-only Inquiry target." });
+  }
+  if (value.phase === "inquiry_selected" && value.durableState !== "running") {
+    context.addIssue({ code: "custom", message: "Selected Inquiry events require a running Cycle." });
+  }
+  if (value.phase === "creator_choice_required" && value.durableState !== "blocked") {
+    context.addIssue({ code: "custom", message: "Creator-choice Inquiry events require a blocked Cycle." });
+  }
+  if (inquiryPhase && (value.targetVersionId !== null || value.contentRef !== null)) {
+    context.addIssue({ code: "custom", message: "Inquiry events cannot expose a target version or content reference." });
   }
 };
 
@@ -273,7 +296,87 @@ export const growthInquiryEvidenceLinkSchema = z.object({
   rank: z.number().int().min(1).max(100_000),
 }).strict();
 
+const growthInquiryQuestionDetailShape = {
+  id: idSchema,
+  question: z.string().trim().min(1).max(2_000),
+  evidenceState: z.enum(["known", "conflicted", "unknown"]),
+  safeSummary: z.string().trim().min(1).max(1_000),
+  proposedAction: z.string().trim().min(1).max(2_000),
+  provisionalAssumption: z.string().trim().min(1).max(2_000).nullable(),
+  requiresCreatorChoice: z.boolean(),
+  priority: z.number().finite().min(0).max(1_000_000),
+  fingerprint: sha256Schema,
+};
+
+const refineInquiryQuestion = (value: {
+  evidenceState: string;
+  provisionalAssumption: string | null;
+  requiresCreatorChoice: boolean;
+  evidenceRanks: number[];
+}, context: z.RefinementCtx): void => {
+  uniqueValues(value.evidenceRanks.map(String), context, "evidenceRanks");
+  if (value.evidenceState !== "unknown" && value.evidenceRanks.length === 0) {
+    context.addIssue({ code: "custom", path: ["evidenceRanks"], message: "Known or conflicted Inquiry requires pinned evidence." });
+  }
+  if (value.evidenceState === "unknown" && !value.requiresCreatorChoice && value.provisionalAssumption === null) {
+    context.addIssue({ code: "custom", path: ["provisionalAssumption"], message: "A non-blocking unknown Inquiry requires a provisional assumption." });
+  }
+};
+
 export const growthInquiryQuestionCreateSchema = z.object({
+  ...growthInquiryQuestionDetailShape,
+  evidenceRanks: z.array(z.number().int().min(1).max(100_000)).max(100),
+}).strict().superRefine(refineInquiryQuestion);
+
+const refineInquiryBatchDecision = (value: {
+  selectedInquiryId: string | null;
+  creatorChoiceRequiredInquiryId: string | null;
+  questions: Array<{ id: string; priority: number; requiresCreatorChoice: boolean }>;
+}, context: z.RefinementCtx): void => {
+  const selected = value.selectedInquiryId === null
+    ? undefined
+    : value.questions.find((question) => question.id === value.selectedInquiryId);
+  const creatorChoice = value.creatorChoiceRequiredInquiryId === null
+    ? undefined
+    : value.questions.find((question) => question.id === value.creatorChoiceRequiredInquiryId);
+  if ((value.selectedInquiryId === null) === (value.creatorChoiceRequiredInquiryId === null)) {
+    context.addIssue({ code: "custom", message: "Exactly one selected or creator-choice Inquiry is required." });
+  }
+  if (value.selectedInquiryId !== null && !selected) {
+    context.addIssue({ code: "custom", path: ["selectedInquiryId"], message: "Selected Inquiry does not exist." });
+  }
+  if (value.creatorChoiceRequiredInquiryId !== null && !creatorChoice) {
+    context.addIssue({ code: "custom", path: ["creatorChoiceRequiredInquiryId"], message: "Creator-choice Inquiry does not exist." });
+  }
+  const creatorChoiceQuestions = value.questions.filter((question) => question.requiresCreatorChoice);
+  if (value.creatorChoiceRequiredInquiryId === null && creatorChoiceQuestions.length !== 0) {
+    context.addIssue({ code: "custom", path: ["questions"], message: "A normal Batch cannot contain creator-choice questions." });
+  }
+  if (value.creatorChoiceRequiredInquiryId !== null
+    && (creatorChoiceQuestions.length !== 1 || creatorChoiceQuestions[0]?.id !== value.creatorChoiceRequiredInquiryId)) {
+    context.addIssue({ code: "custom", path: ["questions"], message: "A blocked Batch requires one exact creator-choice question." });
+  }
+  const frontier = selected ?? creatorChoice;
+  const highestPriority = Math.max(...value.questions.map((question) => question.priority));
+  if (frontier && frontier.priority !== highestPriority) {
+    context.addIssue({ code: "custom", message: "The chosen Inquiry must have the highest priority." });
+  }
+};
+
+export const growthInquiryBatchSealSchema = z.object({
+  id: idSchema,
+  cycleId: idSchema,
+  idempotencyKey: idSchema,
+  selectedInquiryId: idSchema.nullable(),
+  creatorChoiceRequiredInquiryId: idSchema.nullable(),
+  questions: z.array(growthInquiryQuestionCreateSchema).min(3).max(7),
+}).strict().superRefine((value, context) => {
+  uniqueValues(value.questions.map((question) => question.id), context, "questions");
+  uniqueValues(value.questions.map((question) => question.fingerprint), context, "questions");
+  refineInquiryBatchDecision(value, context);
+});
+
+export const growthLegacyInquirySchema = z.object({
   id: idSchema,
   question: z.string().trim().min(1).max(2_000),
   evidenceState: z.enum(["known", "conflicted", "unknown"]),
@@ -281,33 +384,18 @@ export const growthInquiryQuestionCreateSchema = z.object({
   priority: z.number().finite().min(0).max(1_000_000),
   fingerprint: sha256Schema,
   evidenceLinks: z.array(growthInquiryEvidenceLinkSchema).max(100),
+  selected: z.boolean(),
+}).strict();
+
+export const growthInquirySchema = z.object({
+  ...growthInquiryQuestionDetailShape,
+  evidenceLinks: z.array(growthInquiryEvidenceLinkSchema).max(100),
+  initialState: z.enum(["backlog", "selected", "creator_choice_required"]),
 }).strict().superRefine((value, context) => {
-  const identities = value.evidenceLinks.map((link) => `${link.receiptId}:${link.rank}`);
-  uniqueValues(identities, context, "evidenceLinks");
+  refineInquiryQuestion({ ...value, evidenceRanks: value.evidenceLinks.map((link) => link.rank) }, context);
 });
 
-export const growthInquiryBatchSealSchema = z.object({
-  id: idSchema,
-  cycleId: idSchema,
-  idempotencyKey: idSchema,
-  creatorChoiceBlocked: z.boolean(),
-  selectedInquiryId: idSchema.nullable(),
-  questions: z.array(growthInquiryQuestionCreateSchema).min(3).max(7),
-}).strict().superRefine((value, context) => {
-  uniqueValues(value.questions.map((question) => question.id), context, "questions");
-  uniqueValues(value.questions.map((question) => question.fingerprint), context, "questions");
-  const selectedExists = value.selectedInquiryId !== null
-    && value.questions.some((question) => question.id === value.selectedInquiryId);
-  if (value.creatorChoiceBlocked && value.selectedInquiryId !== null) {
-    context.addIssue({ code: "custom", path: ["selectedInquiryId"], message: "A creator-choice-blocked batch cannot select an inquiry." });
-  }
-  if (!value.creatorChoiceBlocked && !selectedExists) {
-    context.addIssue({ code: "custom", path: ["selectedInquiryId"], message: "A sealed inquiry batch requires exactly one selected inquiry." });
-  }
-});
-
-export const growthInquirySchema = growthInquiryQuestionCreateSchema.extend({ selected: z.boolean() }).strict();
-export const growthInquiryBatchSchema = z.object({
+const growthInquiryBatchCommonShape = {
   id: idSchema,
   cycleId: idSchema,
   receiptId: idSchema,
@@ -316,19 +404,114 @@ export const growthInquiryBatchSchema = z.object({
   idempotencyKey: idSchema,
   payloadHash: sha256Schema,
   status: z.literal("sealed"),
+  sealedAt: timestampSchema,
+};
+
+const growthLegacyInquiryBatchSchema = z.object({
+  ...growthInquiryBatchCommonShape,
+  contractVersion: z.literal("legacy_v24"),
   creatorChoiceBlocked: z.boolean(),
   selectedInquiryId: idSchema.nullable(),
-  questions: z.array(growthInquirySchema).min(3).max(7),
-  sealedAt: timestampSchema,
+  questions: z.array(growthLegacyInquirySchema).min(3).max(7),
 }).strict().superRefine((value, context) => {
   const selected = value.questions.filter((question) => question.selected);
   if (value.creatorChoiceBlocked ? selected.length !== 0 : selected.length !== 1) {
-    context.addIssue({ code: "custom", message: "Persisted inquiry selection is inconsistent." });
+    context.addIssue({ code: "custom", message: "Legacy Inquiry selection is inconsistent." });
   }
-  if (!value.creatorChoiceBlocked && selected[0]?.id !== value.selectedInquiryId) {
-    context.addIssue({ code: "custom", message: "Selected inquiry identity is inconsistent." });
+  if (value.creatorChoiceBlocked ? value.selectedInquiryId !== null : selected[0]?.id !== value.selectedInquiryId) {
+    context.addIssue({ code: "custom", message: "Legacy Inquiry selected identity is inconsistent." });
   }
 });
+
+const growthV25InquiryBatchSchema = z.object({
+  ...growthInquiryBatchCommonShape,
+  contractVersion: z.literal("v25"),
+  selectedInquiryId: idSchema.nullable(),
+  creatorChoiceRequiredInquiryId: idSchema.nullable(),
+  questions: z.array(growthInquirySchema).min(3).max(7),
+}).strict().superRefine((value, context) => {
+  refineInquiryBatchDecision(value, context);
+  value.questions.forEach((question) => {
+    const expected = question.id === value.selectedInquiryId
+      ? "selected"
+      : question.id === value.creatorChoiceRequiredInquiryId
+        ? "creator_choice_required"
+        : "backlog";
+    if (question.initialState !== expected) {
+      context.addIssue({ code: "custom", message: "Persisted Inquiry initial lifecycle is inconsistent." });
+    }
+  });
+});
+
+export const growthInquiryBatchSchema = z.discriminatedUnion("contractVersion", [
+  growthLegacyInquiryBatchSchema,
+  growthV25InquiryBatchSchema,
+]);
+
+export const growthInquiryLifecyclePhaseSchema = z.enum([
+  "backlog", "selected", "creator_choice_required", "creator_answered", "promoted", "answered", "closed",
+]);
+export const growthInquiryCloseReasonSchema = z.enum(["invalidated_by_evidence", "duplicate", "superseded"]);
+
+const inquiryLifecycleAppendShape = {
+  inquiryId: idSchema,
+  idempotencyKey: idSchema,
+  expectedSequence: z.number().int().min(1).max(1_000_000),
+  sourceCycleId: idSchema,
+};
+export const growthInquiryLifecycleAppendSchema = z.discriminatedUnion("phase", [
+  z.object({ ...inquiryLifecycleAppendShape, phase: z.literal("promoted"), successorInquiryId: idSchema }).strict(),
+  z.object({ ...inquiryLifecycleAppendShape, phase: z.literal("answered") }).strict(),
+  z.object({ ...inquiryLifecycleAppendShape, phase: z.literal("closed"), reason: growthInquiryCloseReasonSchema }).strict(),
+]);
+
+export const growthInquiryLifecycleSchema = z.object({
+  inquiryId: idSchema,
+  sequence: z.number().int().min(1).max(1_000_000),
+  phase: growthInquiryLifecyclePhaseSchema,
+  idempotencyKey: idSchema,
+  payloadHash: sha256Schema,
+  sourceCycleId: idSchema,
+  sourceReceiptId: idSchema,
+  sourceCheckpointId: idSchema,
+  sourceRuleRevision: z.number().int().min(1).max(1_000_000),
+  successorInquiryId: idSchema.nullable(),
+  answerRuleRevision: z.number().int().min(1).max(1_000_000).nullable(),
+  closeReason: growthInquiryCloseReasonSchema.nullable(),
+  createdAt: timestampSchema,
+}).strict().superRefine((value, context) => {
+  if ((value.phase === "promoted") !== (value.successorInquiryId !== null)) {
+    context.addIssue({ code: "custom", message: "Only promoted Inquiry lifecycle may link a successor." });
+  }
+  if ((value.phase === "creator_answered") !== (value.answerRuleRevision !== null)) {
+    context.addIssue({ code: "custom", message: "Only creator_answered lifecycle may link the answer Rule Revision." });
+  }
+  if ((value.phase === "closed") !== (value.closeReason !== null)) {
+    context.addIssue({ code: "custom", message: "Only closed Inquiry lifecycle may contain a close reason." });
+  }
+});
+
+export const growthInquiryCreatorAnswerCreateSchema = z.object({
+  inquiryId: idSchema,
+  idempotencyKey: idSchema,
+  expectedRuleRevision: z.number().int().min(1).max(1_000_000),
+  expectedLifecycleSequence: z.number().int().min(1).max(1_000_000),
+  answerText: z.string().trim().min(1).max(12_000),
+  sourceMessageId: idSchema.nullable(),
+}).strict();
+
+export const growthInquiryCreatorAnswerSchema = z.object({
+  inquiryId: idSchema,
+  goalId: idSchema,
+  ruleRevision: z.number().int().min(2).max(1_000_000),
+  idempotencyKey: idSchema,
+  payloadHash: sha256Schema,
+  answerText: z.string().trim().min(1).max(12_000),
+  sourceMessageId: idSchema.nullable(),
+  checkpointId: idSchema,
+  receiptId: idSchema,
+  createdAt: timestampSchema,
+}).strict();
 
 export const growthClosureProfileKindSchema = z.enum(["world_birth", "oc_saga", "story_universe", "mixed_birth"]);
 export const growthClosureFacetCreateSchema = z.object({
@@ -570,6 +753,8 @@ export type GrowthRetrievalReceiptLink = z.infer<typeof growthRetrievalReceiptLi
 export type GrowthEventAppend = z.infer<typeof growthEventAppendSchema>;
 export type GrowthEvent = z.infer<typeof growthEventSchema>;
 export type GrowthInquiryBatch = z.infer<typeof growthInquiryBatchSchema>;
+export type GrowthInquiryLifecycle = z.infer<typeof growthInquiryLifecycleSchema>;
+export type GrowthInquiryCreatorAnswer = z.infer<typeof growthInquiryCreatorAnswerSchema>;
 export type GrowthClosureProfile = z.infer<typeof growthClosureProfileSchema>;
 export type GrowthClosureRevision = z.infer<typeof growthClosureRevisionSchema>;
 export type GrowthClosureAssessment = z.infer<typeof growthClosureAssessmentSchema>;

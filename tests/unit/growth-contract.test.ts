@@ -6,6 +6,8 @@ import {
   growthCycleSchema,
   growthEventAppendSchema,
   growthEventSchema,
+  growthInquiryCreatorAnswerCreateSchema,
+  growthInquiryLifecycleAppendSchema,
   growthRetrievalReceiptCreateSchema,
   growthRetrievalReceiptSchema,
   growthInquiryBatchSealSchema,
@@ -59,10 +61,24 @@ describe("growth persistence contract", () => {
     }).success).toBe(false);
   });
 
-  it("keeps cycle-only event phases and rejects image content references", () => {
+  it("keeps Retrieval targets separate from strict Inquiry event targets", () => {
     expect(growthEventAppendSchema.safeParse({ ...baseEventAppend(), phase: "goal_created" }).success).toBe(false);
     expect(growthEventAppendSchema.safeParse({ ...baseEventAppend(), targetKind: "image" }).success).toBe(false);
     expect(growthEventAppendSchema.safeParse({ ...baseEventAppend(), contentRef: { kind: "image", targetId: "image-1", targetVersionId: "job-1" } }).success).toBe(false);
+    expect(growthRetrievalReceiptCreateSchema.safeParse({
+      ...baseReceiptCreate(), links: [{ ...baseReceiptCreate().links[0], targetKind: "inquiry" }],
+    }).success).toBe(false);
+    const selected = {
+      ...baseEventAppend(), phase: "inquiry_selected" as const, targetKind: "inquiry" as const,
+      targetId: "inquiry-1", targetVersionId: null, contentRef: null,
+    };
+    expect(growthEventAppendSchema.safeParse(selected).success).toBe(true);
+    expect(growthEventAppendSchema.safeParse({ ...selected, durableState: "blocked" }).success).toBe(false);
+    expect(growthEventAppendSchema.safeParse({ ...selected, contentRef: { kind: "resource", targetId: "world", targetVersionId: "v1" } }).success).toBe(false);
+    expect(growthEventAppendSchema.safeParse({
+      ...selected, phase: "creator_choice_required", durableState: "blocked",
+    }).success).toBe(true);
+    expect(growthEventAppendSchema.safeParse({ ...baseEventAppend(), targetKind: "inquiry" }).success).toBe(false);
     expect(growthEventSchema.safeParse({ ...baseEventAppend(), createdAt: now }).success).toBe(true);
   });
 
@@ -78,19 +94,63 @@ describe("growth persistence contract", () => {
     expect(growthCycleBeginSchema.safeParse({ ...input, intent: { ...input.intent, ruleRevision: 2 } }).success).toBe(false);
   });
 
-  it("bounds inquiry batches to 3-7 questions and enforces one selection unless creator choice blocks", () => {
+  it("requires complete v25 Inquiry detail and one exact selected or creator-choice question", () => {
     const questions = Array.from({ length: 3 }, (_, index) => ({
       id: `question-${index}`, question: `Question ${index}?`, evidenceState: "unknown" as const,
-      safeSummary: `Summary ${index}`, priority: 3 - index, fingerprint: String(index).repeat(64), evidenceLinks: [],
+      safeSummary: `Summary ${index}`, proposedAction: `Action ${index}`, provisionalAssumption: `Assumption ${index}`,
+      requiresCreatorChoice: false, priority: 3 - index, fingerprint: String(index).repeat(64), evidenceRanks: [],
     }));
     const batch = {
-      id: "inquiry-1", cycleId: "cycle-1", idempotencyKey: "inquiry-key", creatorChoiceBlocked: false,
-      selectedInquiryId: questions[0].id, questions,
+      id: "inquiry-1", cycleId: "cycle-1", idempotencyKey: "inquiry-key",
+      selectedInquiryId: questions[0].id, creatorChoiceRequiredInquiryId: null, questions,
     };
     expect(growthInquiryBatchSealSchema.safeParse(batch).success).toBe(true);
     expect(growthInquiryBatchSealSchema.safeParse({ ...batch, questions: questions.slice(0, 2) }).success).toBe(false);
     expect(growthInquiryBatchSealSchema.safeParse({ ...batch, selectedInquiryId: null }).success).toBe(false);
-    expect(growthInquiryBatchSealSchema.safeParse({ ...batch, creatorChoiceBlocked: true, selectedInquiryId: null }).success).toBe(true);
+    expect(growthInquiryBatchSealSchema.safeParse({
+      ...batch,
+      selectedInquiryId: null,
+      creatorChoiceRequiredInquiryId: questions[0].id,
+      questions: questions.map((question, index) => index === 0
+        ? { ...question, requiresCreatorChoice: true, provisionalAssumption: null }
+        : question),
+    }).success).toBe(true);
+    expect(growthInquiryBatchSealSchema.safeParse({
+      ...batch, questions: questions.map((question, index) => index === 1
+        ? { ...question, provisionalAssumption: null }
+        : question),
+    }).success).toBe(false);
+    expect(growthInquiryBatchSealSchema.safeParse({
+      ...batch, questions: questions.map((question, index) => index === 0
+        ? { ...question, proposedAction: "" }
+        : question),
+    }).success).toBe(false);
+    expect(growthInquiryBatchSealSchema.safeParse({ ...batch, selectedInquiryId: questions[2].id }).success).toBe(false);
+  });
+
+  it("keeps creator_answered internal and requires strict evidence-driven lifecycle shapes", () => {
+    const common = {
+      inquiryId: "inquiry-1", idempotencyKey: "lifecycle-key", expectedSequence: 1, sourceCycleId: "cycle-2",
+    };
+    expect(growthInquiryLifecycleAppendSchema.safeParse({
+      ...common, phase: "promoted", successorInquiryId: "inquiry-2",
+    }).success).toBe(true);
+    expect(growthInquiryLifecycleAppendSchema.safeParse({ ...common, phase: "answered" }).success).toBe(true);
+    expect(growthInquiryLifecycleAppendSchema.safeParse({
+      ...common, phase: "closed", reason: "superseded",
+    }).success).toBe(true);
+    expect(growthInquiryLifecycleAppendSchema.safeParse({
+      ...common, phase: "closed", reason: "closure_accepted",
+    }).success).toBe(false);
+    expect(growthInquiryLifecycleAppendSchema.safeParse({ ...common, phase: "creator_answered" }).success).toBe(false);
+
+    const answer = {
+      inquiryId: "inquiry-1", idempotencyKey: "answer-key", expectedRuleRevision: 1,
+      expectedLifecycleSequence: 1, answerText: "保留港口自治，但祭司掌握历法。", sourceMessageId: "message-1",
+    };
+    expect(growthInquiryCreatorAnswerCreateSchema.safeParse(answer).success).toBe(true);
+    expect(growthInquiryCreatorAnswerCreateSchema.safeParse({ ...answer, answerText: "" }).success).toBe(false);
+    expect(growthInquiryCreatorAnswerCreateSchema.safeParse({ ...answer, options: ["A", "B"] }).success).toBe(false);
   });
 
   it("requires an OC subject and strict versioned illustration anchor unions", () => {

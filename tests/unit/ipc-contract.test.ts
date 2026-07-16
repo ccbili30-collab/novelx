@@ -16,6 +16,7 @@ import {
   growthGetRequestSchema,
   growthGuideRequestSchema,
   growthGuideResponseSchema,
+  growthInquiryPublicEventSchema,
   growthLiveEventSchema,
   growthStartResponseSchema,
   growthStartRequestSchema,
@@ -76,6 +77,20 @@ describe("desktop IPC contract", () => {
     expect(growthLiveEventSchema.safeParse({
       ...versioned, event: { ...versioned.event, contentRef: { ...versioned.event.contentRef, locator: "unsafe" } },
     }).success).toBe(false);
+    const inquirySelected = {
+      ...event.event, phase: "inquiry_selected", durableState: "running", targetKind: "inquiry",
+      targetId: "inquiry-1", targetVersionId: null, contentRef: null, safeSummary: "正在推演港口制度的连锁影响。",
+    };
+    expect(growthInquiryPublicEventSchema.parse(inquirySelected)).toEqual(inquirySelected);
+    expect(growthInquiryPublicEventSchema.safeParse({ ...inquirySelected, durableState: "blocked" }).success).toBe(false);
+    expect(growthInquiryPublicEventSchema.safeParse({
+      ...inquirySelected, phase: "creator_choice_required", durableState: "blocked",
+    }).success).toBe(true);
+    expect(growthInquiryPublicEventSchema.safeParse({ ...inquirySelected, targetVersionId: "forged-version" }).success).toBe(false);
+    expect(growthInquiryPublicEventSchema.safeParse({
+      ...inquirySelected, contentRef: { kind: "resource", targetId: "world", targetVersionId: "v1" },
+    }).success).toBe(false);
+    expect(growthLiveEventSchema.safeParse({ ...event, event: inquirySelected }).success).toBe(false);
     expect(growthStartResponseSchema.safeParse({
       capabilityVersion: "hackathon-growth-dynamic-v2", strategy: "grow_world_story_oc_dynamic_v2", coordinatorStatus: "awaiting_guidance",
       goal: { id: "goal-1", status: "active", currentCycleSequence: 3 },

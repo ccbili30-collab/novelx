@@ -327,7 +327,7 @@ interface GrowthInquiryBrief {
 4. v25 为每个既有 Batch 写显式 contract/version 标记。新 v25 Batch 的每个问题必须有逐问题 detail；缺标记或 detail 不完整是损坏并失败关闭，不得用“缺少子行”猜成 legacy。
 5. 仅一条最高价值 Inquiry 可成为本 Cycle 的 Growth Frontier；其他问题初始持久为 backlog。`promoted` 必须链接后续 Cycle/Inquiry；`answered/closed` 必须绑定新 checkpoint 和新 Receipt，不能因 Change Set committed 就直接更新。`closed` 只表示在新证据下失效、重复或被替代，不等于 Closure accepted。
 6. `requiresCreatorChoice=true` 只有在多个答案会改变作品身份、核心规则或价值取舍时成立。阻塞 Batch 必须恰好一个具体问题进入 `creator_choice_required`，其余为 backlog，没有 selected；Batch、具体问题、Cycle/Goal blocked 和安全事件必须同事务完成。UI 显示安全问题并接受自由文本指导，不新增或伪造固定选项。
-7. 用户自由文本回答必须在同一事务/CAS 中创建一条 Rule Revision、唯一关联一个阻塞 Inquiry，并追加生命周期事实；实际内容修订归 Task 6。相同 replay 返回原关联，不同 payload 失败关闭。
+7. 用户自由文本回答必须在同一事务/CAS 中创建一条 Rule Revision、唯一关联一个阻塞 Inquiry，并追加内部 `creator_answered` 生命周期事实；该事实绑定原阻塞 Inquiry 的 pinned checkpoint/Receipt 与新 rule revision，只证明创作者已作选择，不证明内容已经应用。Task 6 在新 Cycle 应用规则并取得不同的新 checkpoint/Receipt 后，才允许进入证据意义上的 `answered/closed`。相同 replay 返回原关联，不同 payload 失败关闭。
 8. 普通 unknown 不阻塞：模型必须给出明确标注的 provisional assumption（临时假设），并在后续 Checker review 中保持可追踪；它始终是候选，不是 Canon。
 9. 正常 Inquiry 必须先 durable，再允许同一 Run 继续既有 Fragment，并且恰好一个 Change Set；Creator-choice 分支必须零 Change Set。提交后下一 Cycle 从 output checkpoint 重新检索后，才能用新证据更新 Inquiry 生命周期。
 10. 新增 `inquiry_selected`（仅 `running`）和 `creator_choice_required`（仅 `blocked`）安全事件，`targetKind=inquiry`、`targetId=exact inquiry id`、`contentRef=null`。事件只能从持久事实投影 allowlisted `safeSummary`，不得包含 question draft、proposedAction、provisional assumption、Prompt、token 或原始思维链；persist first、publish second，重开可确定性补事件后缀。

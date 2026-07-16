@@ -382,26 +382,52 @@ describe("GrowthRepository", () => {
     })).toThrowError(expect.objectContaining({ code: "GROWTH_OPEN_CYCLE_EXISTS" }));
   });
 
-  it("seals one evidence-grounded inquiry batch atomically with exact replay and rank foreign keys", () => {
+  it("seals one complete v25 Inquiry batch atomically with exact replay, lifecycle and safe event provenance", () => {
     const setup = createSetup();
     let repository = new GrowthRepository(setup.workspace);
     const { cycle, run } = runningCycle(repository, setup);
     const receipt = repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [receiptLink(setup)] }));
-    const batchInput = inquiryBatchInput(cycle.id, receipt.id);
+    const batchInput = inquiryBatchInput(cycle.id);
 
     expect(() => repository.sealInquiryBatch({
       ...batchInput,
       id: "bad-inquiry-batch",
       idempotencyKey: "bad-inquiry-key",
       questions: batchInput.questions.map((question, index) => index === 0
-        ? { ...question, evidenceLinks: [{ receiptId: receipt.id, rank: 2 }] } : question),
+        ? { ...question, evidenceRanks: [2] } : question),
     })).toThrow();
     expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_inquiry_batches").get()).toEqual({ count: 0 });
 
     const sealed = repository.sealInquiryBatch(batchInput);
-    expect(sealed.questions.filter((question) => question.selected).map((question) => question.id)).toEqual(["question-1"]);
+    expect(sealed).toMatchObject({ contractVersion: "v25", selectedInquiryId: "question-1", creatorChoiceRequiredInquiryId: null });
+    if (sealed.contractVersion !== "v25") throw new Error("Expected v25 Inquiry Batch.");
+    expect(sealed.questions.map((question) => question.initialState)).toEqual(["selected", "backlog", "backlog"]);
+    expect(repository.listInquiryLifecycle("question-1")).toMatchObject([{
+      sequence: 1, phase: "selected", sourceCycleId: cycle.id, sourceReceiptId: receipt.id,
+      sourceCheckpointId: setup.checkpointId, sourceRuleRevision: 1,
+    }]);
+    expect(repository.listEvents(cycle.goalId)).toMatchObject([{
+      phase: "inquiry_selected", durableState: "running", targetKind: "inquiry", targetId: "question-1",
+      targetVersionId: null, contentRef: null, safeSummary: "Known source.",
+    }]);
+    expect(setup.workspace.db.prepare(`
+      SELECT batch_id, inquiry_id, lifecycle_sequence FROM growth_inquiry_event_sources
+    `).get()).toEqual({ batch_id: sealed.id, inquiry_id: "question-1", lifecycle_sequence: 1 });
+    expect(() => repository.appendEvent({
+      goalId: cycle.goalId, cycleId: cycle.id, runId: run.runId, sequence: 2,
+      safeSummary: "forged inquiry event", phase: "inquiry_selected", targetKind: "inquiry",
+      targetId: "question-1", targetVersionId: null, durableState: "running", contentRef: null,
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_EVENT_REPOSITORY_OWNED" }));
     expect(repository.sealInquiryBatch(batchInput)).toEqual(sealed);
-    expect(() => repository.sealInquiryBatch({ ...batchInput, selectedInquiryId: "question-2" }))
+    expect(() => repository.sealInquiryBatch({
+      ...batchInput,
+      selectedInquiryId: "question-2",
+      questions: batchInput.questions.map((question) => question.id === "question-1"
+        ? { ...question, priority: 2 }
+        : question.id === "question-2"
+          ? { ...question, priority: 3 }
+          : question),
+    }))
       .toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_REPLAY_MISMATCH" }));
     expect(repository.getInquiryBatch(sealed.id)).toEqual(sealed);
 
@@ -410,6 +436,146 @@ describe("GrowthRepository", () => {
     setup.workspace = workspace;
     repository = new GrowthRepository(workspace);
     expect(repository.sealInquiryBatch(batchInput)).toEqual(sealed);
+
+    setup.workspace.db.prepare(`
+      UPDATE growth_inquiry_batch_contracts SET contract_version = 'legacy_v24'
+      WHERE batch_id = ?
+    `).run(sealed.id);
+    expect(() => repository.getInquiryBatch(sealed.id))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_DATA_CORRUPT" }));
+    setup.workspace.db.prepare(`
+      UPDATE growth_inquiry_batch_contracts SET contract_version = 'v25'
+      WHERE batch_id = ?
+    `).run(sealed.id);
+    setup.workspace.db.prepare("DELETE FROM growth_inquiry_batch_contracts WHERE batch_id = ?").run(sealed.id);
+    expect(() => repository.getInquiryBatch(sealed.id))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_DATA_CORRUPT" }));
+    setup.workspace.db.prepare(`
+      INSERT INTO growth_inquiry_batch_contracts (
+        batch_id, contract_version, creator_choice_required_inquiry_id
+      ) VALUES (?, 'v25', NULL)
+    `).run(sealed.id);
+    setup.workspace.db.prepare("DELETE FROM growth_inquiry_details WHERE inquiry_id = 'question-2'").run();
+    expect(() => repository.getInquiryBatch(sealed.id))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_DATA_CORRUPT" }));
+  });
+
+  it("blocks on one concrete creator choice atomically and records creator_answered without claiming evidence resolution", () => {
+    const setup = createSetup();
+    let repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
+    const receipt = repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [receiptLink(setup)] }));
+    const batchInput = creatorChoiceBatchInput(cycle.id);
+
+    setup.workspace.db.exec(`
+      CREATE TRIGGER reject_growth_inquiry_event_source
+      BEFORE INSERT ON growth_inquiry_event_sources
+      BEGIN SELECT RAISE(ABORT, 'forced inquiry source failure'); END;
+    `);
+    expect(() => repository.sealInquiryBatch(batchInput)).toThrow("forced inquiry source failure");
+    expect(repository.getCycle(cycle.id)?.status).toBe("running");
+    expect(repository.getGoal(goal.id)?.status).toBe("active");
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_inquiry_batches").get()).toEqual({ count: 0 });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_events").get()).toEqual({ count: 0 });
+    setup.workspace.db.exec("DROP TRIGGER reject_growth_inquiry_event_source");
+
+    const sealed = repository.sealInquiryBatch(batchInput);
+    expect(sealed).toMatchObject({
+      contractVersion: "v25", selectedInquiryId: null, creatorChoiceRequiredInquiryId: "question-1",
+    });
+    if (sealed.contractVersion !== "v25") throw new Error("Expected v25 Inquiry Batch.");
+    expect(sealed.questions.map((question) => question.initialState)).toEqual(["creator_choice_required", "backlog", "backlog"]);
+    expect(repository.getCycle(cycle.id)).toMatchObject({ status: "blocked", failureCode: "GROWTH_CREATOR_CHOICE_REQUIRED" });
+    expect(repository.getGoal(goal.id)?.status).toBe("blocked");
+    expect(repository.listEvents(goal.id)).toMatchObject([{
+      phase: "creator_choice_required", durableState: "blocked", targetKind: "inquiry", targetId: "question-1",
+      targetVersionId: null, contentRef: null, safeSummary: "Creator choice required.",
+    }]);
+
+    const answerInput = {
+      inquiryId: "question-1", idempotencyKey: "creator-answer-key", expectedRuleRevision: 1,
+      expectedLifecycleSequence: 1, answerText: "保留港口自治，但祭司掌握历法。", sourceMessageId: "creator-message-1",
+    };
+    const answer = repository.answerCreatorInquiry(answerInput);
+    expect(answer).toMatchObject({
+      inquiryId: "question-1", goalId: goal.id, ruleRevision: 2, checkpointId: setup.checkpointId,
+      receiptId: receipt.id, answerText: answerInput.answerText,
+    });
+    expect(repository.answerCreatorInquiry(answerInput)).toEqual(answer);
+    expect(repository.getGoal(goal.id)).toMatchObject({ status: "active", currentRuleRevision: 2 });
+    expect(repository.getRuleRevision(goal.id, 2)).toMatchObject({ ruleText: answerInput.answerText, sourceMessageId: answerInput.sourceMessageId });
+    expect(repository.listInquiryLifecycle("question-1").map((entry) => entry.phase))
+      .toEqual(["creator_choice_required", "creator_answered"]);
+    expect(() => repository.answerCreatorInquiry({ ...answerInput, answerText: "改为祭司独裁。" }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_ANSWER_REPLAY_MISMATCH" }));
+    expect(() => repository.answerCreatorInquiry({ ...answerInput, idempotencyKey: "second-answer-key", expectedRuleRevision: 2, expectedLifecycleSequence: 2 }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_ALREADY_ANSWERED" }));
+    expect(() => repository.appendInquiryLifecycle({
+      inquiryId: "question-1", idempotencyKey: "premature-answer-key", expectedSequence: 2,
+      sourceCycleId: cycle.id, phase: "answered",
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_SOURCE_NOT_LATER" }));
+    expect(repository.beginCycle({
+      id: "creator-answer-resume-cycle", goalId: goal.id, idempotencyKey: "creator-answer-resume-key",
+      inputCheckpointId: setup.checkpointId, ruleRevision: 2, intent: cycleIntent(),
+    })).toMatchObject({ status: "planned", ruleRevision: 2, inputCheckpointId: setup.checkpointId });
+
+    workspace?.close();
+    workspace = openWorkspace(root!);
+    setup.workspace = workspace;
+    repository = new GrowthRepository(workspace);
+    expect(repository.answerCreatorInquiry(answerInput)).toEqual(answer);
+  });
+
+  it("appends promoted, answered and closed only from a later pinned Receipt with continuous replay-safe sequence", () => {
+    const setup = createSetup();
+    const repository = new GrowthRepository(setup.workspace);
+    const { goal, cycle, run } = runningCycle(repository, setup);
+    repository.recordReceipt(receiptInput(setup, cycle.id, run, { links: [receiptLink(setup)] }));
+    repository.sealInquiryBatch(inquiryBatchInput(cycle.id));
+    const changeSet = committedChangeSet(setup.workspace, "inquiry-output", "inquiry output");
+    const committed = repository.attachCommittedChangeSet({ cycleId: cycle.id, changeSetId: changeSet.id });
+
+    const nextCycle = repository.beginCycle({
+      id: "cycle-2", goalId: goal.id, idempotencyKey: "cycle-2-key", inputCheckpointId: committed.outputCheckpointId,
+      ruleRevision: 1, intent: cycleIntent(),
+    });
+    const nextRun = seedRun(setup.workspace, setup.branchId, committed.outputCheckpointId!);
+    repository.attachRun({ cycleId: nextCycle.id, runId: nextRun.runId });
+    const nextReceipt = repository.recordReceipt(receiptInput(setup, nextCycle.id, nextRun, {
+      id: "receipt-2", checkpointId: committed.outputCheckpointId, links: [receiptLink(setup)],
+    }));
+    const nextBatch = repository.sealInquiryBatch(inquiryBatchInput(nextCycle.id, "-next"));
+
+    expect(() => repository.appendInquiryLifecycle({
+      inquiryId: "question-next-2", idempotencyKey: "predecessor-source-key", expectedSequence: 1,
+      sourceCycleId: cycle.id, phase: "answered",
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_SOURCE_NOT_LATER" }));
+
+    const promotedInput = {
+      inquiryId: "question-2", idempotencyKey: "promote-question-2", expectedSequence: 1,
+      sourceCycleId: nextCycle.id, phase: "promoted" as const, successorInquiryId: nextBatch.questions[0].id,
+    };
+    const promoted = repository.appendInquiryLifecycle(promotedInput);
+    expect(promoted).toMatchObject({
+      sequence: 2, phase: "promoted", sourceCycleId: nextCycle.id, sourceReceiptId: nextReceipt.id,
+      sourceCheckpointId: committed.outputCheckpointId, successorInquiryId: nextBatch.questions[0].id,
+    });
+    expect(repository.appendInquiryLifecycle(promotedInput)).toEqual(promoted);
+    expect(() => repository.appendInquiryLifecycle({ ...promotedInput, successorInquiryId: nextBatch.questions[1].id }))
+      .toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_LIFECYCLE_REPLAY_MISMATCH" }));
+
+    expect(repository.appendInquiryLifecycle({
+      inquiryId: "question-1", idempotencyKey: "answer-question-1", expectedSequence: 1,
+      sourceCycleId: nextCycle.id, phase: "answered",
+    })).toMatchObject({ sequence: 2, phase: "answered", sourceReceiptId: nextReceipt.id });
+    expect(repository.appendInquiryLifecycle({
+      inquiryId: "question-3", idempotencyKey: "close-question-3", expectedSequence: 1,
+      sourceCycleId: nextCycle.id, phase: "closed", reason: "superseded",
+    })).toMatchObject({ sequence: 2, phase: "closed", closeReason: "superseded" });
+    expect(() => repository.appendInquiryLifecycle({
+      inquiryId: "question-3", idempotencyKey: "close-question-3-again", expectedSequence: 2,
+      sourceCycleId: nextCycle.id, phase: "closed", reason: "duplicate",
+    })).toThrowError(expect.objectContaining({ code: "GROWTH_INQUIRY_LIFECYCLE_TERMINAL" }));
   });
 
   it("keeps Steward and Checker assessments invocation-bound and reopens accepted closure through a new revision", () => {
@@ -718,18 +884,40 @@ function seedRun(workspace: WorkspaceDatabase, branchId: string, checkpointId: s
   return { runId, invocationId, toolInvocationId };
 }
 
-function inquiryBatchInput(cycleId: string, receiptId: string) {
+function inquiryBatchInput(cycleId: string, suffix = "") {
+  const questionId = (sequence: number) => `question${suffix}-${sequence}`;
   return {
-    id: "inquiry-batch", cycleId, idempotencyKey: "inquiry-batch-key", creatorChoiceBlocked: false,
-    selectedInquiryId: "question-1",
+    id: `inquiry-batch${suffix}`, cycleId, idempotencyKey: `inquiry-batch-key${suffix}`,
+    selectedInquiryId: questionId(1), creatorChoiceRequiredInquiryId: null,
     questions: [
-      { id: "question-1", question: "What is known?", evidenceState: "known" as const, safeSummary: "Known source.", priority: 3,
-        fingerprint: "1".repeat(64), evidenceLinks: [{ receiptId, rank: 1 }] },
-      { id: "question-2", question: "What conflicts?", evidenceState: "unknown" as const, safeSummary: "No conflict evidence.", priority: 2,
-        fingerprint: "2".repeat(64), evidenceLinks: [] },
-      { id: "question-3", question: "What remains?", evidenceState: "unknown" as const, safeSummary: "An open frontier.", priority: 1,
-        fingerprint: "3".repeat(64), evidenceLinks: [] },
+      { id: questionId(1), question: "What is known?", evidenceState: "known" as const, safeSummary: "Known source.",
+        proposedAction: "Use the pinned fact.", provisionalAssumption: null, requiresCreatorChoice: false, priority: 3,
+        fingerprint: suffix ? "4".repeat(64) : "1".repeat(64), evidenceRanks: [1] },
+      { id: questionId(2), question: "What conflicts?", evidenceState: "unknown" as const, safeSummary: "No conflict evidence.",
+        proposedAction: "Test one provisional consequence.", provisionalAssumption: "No conflict is present yet.",
+        requiresCreatorChoice: false, priority: 2, fingerprint: suffix ? "5".repeat(64) : "2".repeat(64), evidenceRanks: [] },
+      { id: questionId(3), question: "What remains?", evidenceState: "unknown" as const, safeSummary: "An open frontier.",
+        proposedAction: "Trace the next consequence.", provisionalAssumption: "The frontier remains unresolved.",
+        requiresCreatorChoice: false, priority: 1, fingerprint: suffix ? "6".repeat(64) : "3".repeat(64), evidenceRanks: [] },
     ],
+  };
+}
+
+function creatorChoiceBatchInput(cycleId: string) {
+  const input = inquiryBatchInput(cycleId);
+  return {
+    ...input,
+    selectedInquiryId: null,
+    creatorChoiceRequiredInquiryId: "question-1",
+    questions: input.questions.map((question, index) => index === 0
+      ? {
+        ...question,
+        question: "Should the port remain autonomous?",
+        safeSummary: "Creator choice required.",
+        proposedAction: "Wait for the creator's free-text guidance.",
+        requiresCreatorChoice: true,
+      }
+      : question),
   };
 }
 

@@ -22,9 +22,15 @@ export function openWorkspace(rootPathInput: string): WorkspaceDatabase {
     PRAGMA trusted_schema = OFF;
     PRAGMA busy_timeout = 5000;
   `);
-  migrate(db);
-  ensureOptionalRetrievalIndex(db);
-  const state = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get() as { workspace_id: string };
+  let state: { workspace_id: string };
+  try {
+    migrate(db);
+    ensureOptionalRetrievalIndex(db);
+    state = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get() as { workspace_id: string };
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 
   return {
     db,
@@ -236,7 +242,11 @@ function migrate(db: DatabaseSync): void {
     migrateInteractiveGrowthSchema(db);
     schema = { version: 24 };
   }
-  if (schema.version !== 24) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 24) {
+    migrateGrowthInquiryV25Schema(db);
+    schema = { version: 25 };
+  }
+  if (schema.version !== 25) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -850,6 +860,154 @@ function migrateInteractiveGrowthSchema(db: DatabaseSync): void {
 
       UPDATE schema_meta SET version = 24 WHERE singleton = 1;
     `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateGrowthInquiryV25Schema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      ALTER TABLE growth_events RENAME TO growth_events_v24;
+      CREATE TABLE growth_events (
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        cycle_id TEXT NOT NULL REFERENCES growth_cycles(id) ON DELETE CASCADE,
+        run_id TEXT REFERENCES agent_runs(id),
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        safe_summary TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK (phase IN (
+          'goal_created', 'rule_appended', 'cycle_planned', 'run_attached', 'receipt_recorded',
+          'inquiry_selected', 'creator_choice_required', 'change_set_committed', 'cycle_terminal'
+        )),
+        target_kind TEXT NOT NULL CHECK (target_kind IN (
+          'document', 'resource', 'assertion', 'relation', 'image', 'change_set', 'inquiry'
+        )),
+        target_id TEXT NOT NULL,
+        target_version_id TEXT,
+        durable_state TEXT NOT NULL CHECK (durable_state IN ('planned', 'running', 'committed', 'blocked', 'failed', 'cancelled', 'reconciliation_required')),
+        content_ref_kind TEXT CHECK (content_ref_kind IN ('document', 'resource', 'assertion', 'relation', 'image', 'change_set')),
+        content_ref_id TEXT,
+        content_ref_version_id TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (goal_id, sequence),
+        CHECK (
+          (content_ref_kind IS NULL AND content_ref_id IS NULL AND content_ref_version_id IS NULL)
+          OR (content_ref_kind IS NOT NULL AND content_ref_id IS NOT NULL AND content_ref_version_id IS NOT NULL)
+        ),
+        CHECK (durable_state <> 'committed' OR phase = 'change_set_committed'),
+        CHECK (phase <> 'change_set_committed' OR target_kind = 'change_set')
+      );
+      INSERT INTO growth_events (
+        goal_id, cycle_id, run_id, sequence, safe_summary, phase, target_kind, target_id, target_version_id,
+        durable_state, content_ref_kind, content_ref_id, content_ref_version_id, created_at
+      ) SELECT
+        goal_id, cycle_id, run_id, sequence, safe_summary, phase, target_kind, target_id, target_version_id,
+        durable_state, content_ref_kind, content_ref_id, content_ref_version_id, created_at
+      FROM growth_events_v24;
+      DROP TABLE growth_events_v24;
+      CREATE INDEX growth_events_cycle_idx ON growth_events(cycle_id, sequence);
+
+      CREATE UNIQUE INDEX growth_cycles_inquiry_source_idx
+        ON growth_cycles(id, receipt_id, input_checkpoint_id, rule_revision);
+      CREATE UNIQUE INDEX growth_inquiry_batches_id_cycle_idx
+        ON growth_inquiry_batches(id, cycle_id);
+
+      CREATE TABLE growth_inquiry_batch_contracts (
+        batch_id TEXT PRIMARY KEY REFERENCES growth_inquiry_batches(id) ON DELETE CASCADE,
+        contract_version TEXT NOT NULL CHECK (contract_version IN ('legacy_v24', 'v25')),
+        creator_choice_required_inquiry_id TEXT,
+        FOREIGN KEY (batch_id, creator_choice_required_inquiry_id)
+          REFERENCES growth_inquiries(batch_id, id) DEFERRABLE INITIALLY DEFERRED,
+        CHECK (contract_version = 'v25' OR creator_choice_required_inquiry_id IS NULL)
+      );
+      INSERT INTO growth_inquiry_batch_contracts (batch_id, contract_version, creator_choice_required_inquiry_id)
+        SELECT id, 'legacy_v24', NULL FROM growth_inquiry_batches;
+
+      CREATE TABLE growth_inquiry_details (
+        batch_id TEXT NOT NULL,
+        inquiry_id TEXT NOT NULL,
+        requires_creator_choice INTEGER NOT NULL CHECK (requires_creator_choice IN (0, 1)),
+        provisional_assumption TEXT,
+        proposed_action TEXT NOT NULL CHECK (length(trim(proposed_action)) > 0),
+        PRIMARY KEY (batch_id, inquiry_id),
+        FOREIGN KEY (batch_id, inquiry_id) REFERENCES growth_inquiries(batch_id, id) ON DELETE CASCADE,
+        CHECK (provisional_assumption IS NULL OR length(trim(provisional_assumption)) > 0)
+      );
+
+      CREATE TABLE growth_inquiry_lifecycle (
+        batch_id TEXT NOT NULL,
+        inquiry_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        phase TEXT NOT NULL CHECK (phase IN (
+          'backlog', 'selected', 'creator_choice_required', 'creator_answered', 'promoted', 'answered', 'closed'
+        )),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        source_cycle_id TEXT NOT NULL,
+        source_receipt_id TEXT NOT NULL,
+        source_checkpoint_id TEXT NOT NULL,
+        source_rule_revision INTEGER NOT NULL CHECK (source_rule_revision >= 1),
+        successor_inquiry_id TEXT REFERENCES growth_inquiries(id),
+        answer_rule_revision INTEGER,
+        close_reason TEXT CHECK (close_reason IN ('invalidated_by_evidence', 'duplicate', 'superseded')),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (batch_id, inquiry_id, sequence),
+        FOREIGN KEY (batch_id, inquiry_id) REFERENCES growth_inquiries(batch_id, id) ON DELETE CASCADE,
+        FOREIGN KEY (source_cycle_id, source_receipt_id, source_checkpoint_id, source_rule_revision)
+          REFERENCES growth_cycles(id, receipt_id, input_checkpoint_id, rule_revision),
+        FOREIGN KEY (inquiry_id, answer_rule_revision)
+          REFERENCES growth_inquiry_creator_answers(inquiry_id, rule_revision),
+        CHECK (
+          (phase IN ('backlog', 'selected', 'creator_choice_required') AND sequence = 1
+            AND successor_inquiry_id IS NULL AND answer_rule_revision IS NULL AND close_reason IS NULL)
+          OR (phase = 'creator_answered' AND sequence >= 2
+            AND successor_inquiry_id IS NULL AND answer_rule_revision IS NOT NULL AND close_reason IS NULL)
+          OR (phase = 'promoted' AND sequence >= 2
+            AND successor_inquiry_id IS NOT NULL AND answer_rule_revision IS NULL AND close_reason IS NULL)
+          OR (phase = 'answered' AND sequence >= 2
+            AND successor_inquiry_id IS NULL AND answer_rule_revision IS NULL AND close_reason IS NULL)
+          OR (phase = 'closed' AND sequence >= 2
+            AND successor_inquiry_id IS NULL AND answer_rule_revision IS NULL AND close_reason IS NOT NULL)
+        )
+      );
+
+      CREATE TABLE growth_inquiry_creator_answers (
+        inquiry_id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        goal_id TEXT NOT NULL,
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 2),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        answer_text TEXT NOT NULL CHECK (length(trim(answer_text)) > 0),
+        source_message_id TEXT,
+        checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        receipt_id TEXT NOT NULL REFERENCES growth_retrieval_receipts(id),
+        created_at TEXT NOT NULL,
+        UNIQUE (goal_id, rule_revision),
+        UNIQUE (inquiry_id, rule_revision),
+        FOREIGN KEY (batch_id, inquiry_id) REFERENCES growth_inquiries(batch_id, id),
+        FOREIGN KEY (goal_id, rule_revision) REFERENCES growth_goal_rule_revisions(goal_id, revision)
+      );
+
+      CREATE TABLE growth_inquiry_event_sources (
+        goal_id TEXT NOT NULL,
+        event_sequence INTEGER NOT NULL,
+        batch_id TEXT NOT NULL,
+        inquiry_id TEXT NOT NULL,
+        lifecycle_sequence INTEGER NOT NULL,
+        PRIMARY KEY (goal_id, event_sequence),
+        FOREIGN KEY (goal_id, event_sequence) REFERENCES growth_events(goal_id, sequence) ON DELETE CASCADE,
+        FOREIGN KEY (batch_id, inquiry_id, lifecycle_sequence)
+          REFERENCES growth_inquiry_lifecycle(batch_id, inquiry_id, sequence)
+      );
+
+      UPDATE schema_meta SET version = 25 WHERE singleton = 1;
+    `);
+    const violations = db.prepare("PRAGMA foreign_key_check").all();
+    if (violations.length > 0) throw new Error("Growth Inquiry v25 migration produced foreign key violations.");
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
