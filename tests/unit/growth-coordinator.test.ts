@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChangeSetPolicyEvaluator } from "../../src/domain/changeSet/changeSetService";
 import { ApplicationRegistryRepository } from "../../src/domain/application/applicationRegistryRepository";
@@ -336,6 +336,159 @@ describe("GrowthCoordinator", () => {
     expect(workers).toHaveLength(4);
     supervisor.cancel(snapshot.cycles[3]!.runId!);
     await vi.waitFor(() => expect(repository.getCycle(cycles[3]!.id)?.status).toBe("cancelled"));
+  });
+
+  it("automatically repairs one Checker finding, rechecks the new checkpoint, and completes only after acceptance", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const request = growthRequest(setup);
+    const started = coordinator.start(request);
+
+    await completeCycle(setup.workspace, workers[0]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    await completeCycle(setup.workspace, workers[1]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(3));
+    await completeCycle(setup.workspace, workers[2]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(4));
+
+    const firstEvaluation = await sealCoordinatorClosureEvaluation(
+      setup.workspace, workers[3]!, "repairs_required", "repair-before",
+    );
+    workers[3]!.receive({
+      type: "run.completed", runId: runId(workers[3]!), outcome: "completed",
+      message: "repair required", changeSetState: "none", artifacts: [],
+    });
+    await vi.waitFor(() => expect(workers).toHaveLength(5));
+
+    const repairWorker = workers[4]!;
+    repairWorker.spawn();
+    await vi.waitFor(() => expect(repairWorker.sent).toHaveLength(1));
+    const repairRunId = runId(repairWorker);
+    const repairCommand = repairWorker.sent[0] as {
+      growthBinding: {
+        kind: string;
+        closureProfile: null;
+        closureRepair: {
+          originalReviewId: string;
+          selectedFindingId: string;
+          selectedFindingFingerprint: string;
+          targetEvidenceIds: string[];
+        };
+      };
+    };
+    expect(repairCommand.growthBinding).toMatchObject({
+      kind: "repair", closureProfile: null,
+      closureRepair: {
+        originalReviewId: firstEvaluation.review.id,
+        selectedFindingId: firstEvaluation.finding!.id,
+        selectedFindingFingerprint: firstEvaluation.finding!.fingerprint,
+        targetEvidenceIds: [firstEvaluation.targetEvidenceId],
+      },
+    });
+    repairWorker.receive({ type: "run.started", runId: repairRunId });
+    beginStewardInvocation(setup.workspace, repairRunId);
+    requestCoordinatorRetrieval(repairWorker, repairRunId, "repair target");
+    await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({
+      ok: true, result: { evidence: [expect.objectContaining({ evidenceId: firstEvaluation.targetEvidenceId })] },
+    }));
+    const worldResourceId = new ResourceRepository(setup.workspace).listCurrent()
+      .find((resource) => resource.objectKind === "world")!.id;
+    repairWorker.receive({
+      type: "tool.request", runId: repairRunId, requestId: randomUUID(), tool: "propose_change_set",
+      args: {
+        summary: "Apply only the reviewed world correction.",
+        items: [{
+          id: "repair-reviewed-world", dependsOn: [], kind: "resource.put",
+          payload: {
+            resourceId: worldResourceId, create: false, type: "world", objectKind: "world",
+            title: "The Reviewed Tidemark", parentId: setup.scopeId, state: "active", sortOrder: 0,
+          },
+        }],
+      },
+    });
+    await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({
+      ok: true, result: { status: "committed", changeSetId: expect.any(String) },
+    }));
+    repairWorker.receive({
+      type: "run.completed", runId: repairRunId, outcome: "completed",
+      message: "repair committed", changeSetState: "committed", artifacts: [],
+    });
+    await vi.waitFor(() => expect(workers).toHaveLength(6));
+
+    const repository = new GrowthRepository(setup.workspace);
+    const repairCycle = repository.listCycles(started.goal.id).find((cycle) => (
+      repository.getCycleIntent(cycle.id).kind === "repair"
+    ))!;
+    const repairLineage = repository.getClosureRepairLineageForCycle(repairCycle.id)!;
+    expect(repairCycle).toMatchObject({
+      status: "committed", changeSetId: expect.any(String), outputCheckpointId: expect.any(String),
+    });
+    expect(repairLineage.resolutionState).toBe("planned");
+    const recheckCycle = repository.listCycles(started.goal.id).at(-1)!;
+    expect(repository.getCycleIntent(recheckCycle.id)).toMatchObject({
+      kind: "closure_evaluation", revision: 2, checkpointId: repairCycle.outputCheckpointId,
+    });
+    expect(recheckCycle.inputCheckpointId).toBe(repairCycle.outputCheckpointId);
+
+    await sealCoordinatorClosureEvaluation(setup.workspace, workers[5]!, "accepted", "repair-after");
+    workers[5]!.receive({
+      type: "run.completed", runId: runId(workers[5]!), outcome: "completed",
+      message: "accepted", changeSetState: "none", artifacts: [],
+    });
+    await vi.waitFor(() => expect(coordinator.get({
+      projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id,
+    }).coordinatorStatus).toBe("completed"));
+    expect(repository.getClosureRepairLineage(repairLineage.id)?.resolutionState).toBe("resolved");
+    expect(repository.listCycles(started.goal.id).map((cycle) => cycle.status)).toEqual([
+      "committed", "committed", "committed", "evaluated", "committed", "evaluated",
+    ]);
+    expect(workers).toHaveLength(6);
+  });
+
+  it("stops without another Worker when the same Checker finding survives the repair recheck", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const started = coordinator.start(growthRequest(setup));
+
+    await completeCycle(setup.workspace, workers[0]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    await completeCycle(setup.workspace, workers[1]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(3));
+    await completeCycle(setup.workspace, workers[2]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(4));
+    await sealCoordinatorClosureEvaluation(setup.workspace, workers[3]!, "repairs_required", "stall-before");
+    workers[3]!.receive({
+      type: "run.completed", runId: runId(workers[3]!), outcome: "completed",
+      message: "repair required", changeSetState: "none", artifacts: [],
+    });
+    await vi.waitFor(() => expect(workers).toHaveLength(5));
+    await completeCoordinatorRepair(setup.workspace, workers[4]!, setup.scopeId, "The First Reviewed Tidemark");
+    await vi.waitFor(() => expect(workers).toHaveLength(6));
+
+    await sealCoordinatorClosureEvaluation(setup.workspace, workers[5]!, "repairs_required", "stall-after");
+    workers[5]!.receive({
+      type: "run.completed", runId: runId(workers[5]!), outcome: "completed",
+      message: "same finding remains", changeSetState: "none", artifacts: [],
+    });
+    await vi.waitFor(() => expect(coordinator.get({
+      projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id,
+    }).coordinatorStatus).toBe("blocked"));
+
+    const repository = new GrowthRepository(setup.workspace);
+    const cycles = repository.listCycles(started.goal.id);
+    expect(cycles.at(-1)).toMatchObject({
+      status: "blocked", runId: null, changeSetId: null, outputCheckpointId: null,
+      failureCode: "GROWTH_CLOSURE_REPAIR_STALLED",
+    });
+    const lineages = cycles
+      .map((cycle) => repository.getClosureRepairLineageForCycle(cycle.id))
+      .filter((lineage) => lineage !== null);
+    expect(lineages.map((lineage) => lineage.resolutionState)).toEqual(["no_progress", "stalled"]);
+    expect(workers).toHaveLength(6);
   });
 
   it("stops after a failed Cycle and recovers a running Cycle to reconciliation", async () => {
@@ -705,5 +858,162 @@ function beginStewardInvocation(workspace: WorkspaceDatabase, runId: string): vo
     toolPolicyId: "novax.steward.tools", toolPolicyVersion: "1.0.0", toolPolicySha256: hash,
     authorizedTools: ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"], handoffContractId: null,
     handoffVersion: null, handoffPayloadSha256: null, inputSha256: hash,
+  });
+}
+
+function requestCoordinatorRetrieval(worker: FakeWorker, runId: string, query: string): void {
+  worker.receive({
+    type: "tool.request", runId, requestId: randomUUID(), tool: "retrieve_graph_evidence",
+    args: {
+      variant: "growth_v1", query, aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
+      expansionBudget: 20, resultBudget: 20, tokenBudget: 1000, contentBudgetChars: 4000,
+      policyVersion: "graph-retrieval-v1",
+    },
+  });
+}
+
+async function completeCoordinatorRepair(
+  workspace: WorkspaceDatabase,
+  worker: FakeWorker,
+  worldRootId: string,
+  title: string,
+): Promise<void> {
+  if (worker.sent.length === 0) worker.spawn();
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(1));
+  const id = runId(worker);
+  const binding = (worker.sent[0] as {
+    growthBinding: { kind: string; closureRepair: { targetEvidenceIds: string[] } };
+  }).growthBinding;
+  expect(binding).toMatchObject({ kind: "repair", closureRepair: { targetEvidenceIds: [expect.any(String)] } });
+  worker.receive({ type: "run.started", runId: id });
+  beginStewardInvocation(workspace, id);
+  requestCoordinatorRetrieval(worker, id, "repeat repair target");
+  await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+    ok: true, result: { evidence: [expect.objectContaining({ evidenceId: binding.closureRepair.targetEvidenceIds[0] })] },
+  }));
+  const worldResourceId = new ResourceRepository(workspace).listCurrent()
+    .find((resource) => resource.objectKind === "world")!.id;
+  worker.receive({
+    type: "tool.request", runId: id, requestId: randomUUID(), tool: "propose_change_set",
+    args: {
+      summary: "Apply the selected repair only.",
+      items: [{
+        id: "repair-reviewed-world", dependsOn: [], kind: "resource.put",
+        payload: {
+          resourceId: worldResourceId, create: false, type: "world", objectKind: "world",
+          title, parentId: worldRootId, state: "active", sortOrder: 0,
+        },
+      }],
+    },
+  });
+  await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+    ok: true, result: { status: "committed", changeSetId: expect.any(String) },
+  }));
+  worker.receive({
+    type: "run.completed", runId: id, outcome: "completed",
+    message: "repair committed", changeSetState: "committed", artifacts: [],
+  });
+}
+
+async function sealCoordinatorClosureEvaluation(
+  workspace: WorkspaceDatabase,
+  worker: FakeWorker,
+  decision: "accepted" | "repairs_required",
+  suffix: string,
+) {
+  if (worker.sent.length === 0) worker.spawn();
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(1));
+  const id = runId(worker);
+  const command = worker.sent[0] as {
+    growthBinding: {
+      cycleId: string;
+      kind: string;
+      closureProfile: { profileId: string; revision: number };
+    };
+  };
+  expect(command.growthBinding.kind).toBe("closure_evaluation");
+  worker.receive({ type: "run.started", runId: id });
+  beginStewardInvocation(workspace, id);
+  requestCoordinatorRetrieval(worker, id, `closure ${suffix}`);
+  await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+
+  const repository = new GrowthRepository(workspace);
+  const cycle = repository.getCycle(command.growthBinding.cycleId)!;
+  const receipt = repository.getReceipt(cycle.receiptId!)!;
+  expect(receipt.links.length).toBeGreaterThan(0);
+  const targetEvidenceId = receipt.links[0]!.targetVersionId;
+  const profile = repository.getClosureProfile(command.growthBinding.closureProfile.profileId)!;
+  const revision = repository.getClosureRevision(profile.id, command.growthBinding.closureProfile.revision)!;
+  const stewardOutputHash = createHash("sha256").update(`steward-${suffix}`, "utf8").digest("hex");
+  const checkerOutputHash = createHash("sha256").update(`checker-${suffix}`, "utf8").digest("hex");
+  terminalizeCoordinatorInvocation(workspace, id, `${id}:steward`, stewardOutputHash);
+  const checkerInvocationId = beginCoordinatorCheckerInvocation(workspace, id, checkerOutputHash);
+  const facetResults = revision.facets.map((facet) => ({
+    facetId: facet.id, state: "satisfied" as const, coverage: "complete" as const,
+    safeSummary: `${facet.id} is present but still receives independent consistency review.`,
+    evidence: [{ receiptId: receipt.id, rank: 1 }],
+  }));
+  const finding = decision === "repairs_required" ? {
+    id: `finding-${suffix}`, fingerprint: "f".repeat(64), severity: "major" as const,
+    category: "world_consistency" as const,
+    targetEvidence: [{ receiptId: receipt.id, rank: 1 }],
+    safeSummary: "The reviewed world identity is too generic.",
+    repairObjective: "Give the existing world a distinctive title without changing unrelated nodes.",
+  } : null;
+  const steward = repository.appendClosureStewardSubmission({
+    id: `steward-${suffix}`, profileId: profile.id, revision: revision.revision, role: "steward",
+    decision: "ready_for_checker", cycleId: cycle.id, checkpointId: cycle.inputCheckpointId,
+    ruleRevision: cycle.ruleRevision, receiptId: receipt.id, agentInvocationId: `${id}:steward`,
+    outputSha256: stewardOutputHash, idempotencyKey: `steward-${suffix}-key`, facetResults,
+  });
+  const checker = repository.appendClosureCheckerSubmission({
+    id: `checker-${suffix}`, profileId: profile.id, revision: revision.revision, role: "checker",
+    decision, cycleId: cycle.id, checkpointId: cycle.inputCheckpointId,
+    ruleRevision: cycle.ruleRevision, receiptId: receipt.id, agentInvocationId: checkerInvocationId,
+    outputSha256: checkerOutputHash, idempotencyKey: `checker-${suffix}-key`,
+    adverseFindings: finding ? [finding] : [],
+  });
+  const review = repository.sealClosureReviewV4({
+    id: `review-${suffix}`, profileId: profile.id, revision: revision.revision,
+    stewardAssessmentId: steward.id, checkerAssessmentId: checker.id,
+    idempotencyKey: `review-${suffix}-key`, facetResults, adverseFindings: finding ? [finding] : [],
+  });
+  const outcome = repository.sealClosureEvaluationOutcome({
+    id: `outcome-${suffix}`, cycleId: cycle.id, profileId: profile.id, revision: revision.revision,
+    receiptId: receipt.id, stewardAssessmentId: steward.id, checkerAssessmentId: checker.id,
+    reviewId: review.id, decision, idempotencyKey: `outcome-${suffix}-key`,
+  });
+  return { outcome, review, finding, targetEvidenceId };
+}
+
+function beginCoordinatorCheckerInvocation(workspace: WorkspaceDatabase, runId: string, outputSha256: string): string {
+  const hash = "b".repeat(64);
+  const invocationId = `${runId}:checker`;
+  new AgentAuditRepository(workspace).beginInvocation({
+    invocationId, runId, parentInvocationId: `${runId}:steward`, role: "checker",
+    promptId: "novax.checker", promptVersion: "1.9.0", promptSha256: hash,
+    agentProfileId: "novax.checker", agentProfileVersion: "1.9.0", agentProfileSha256: hash,
+    providerId: "provider", requestedModelId: "model", providerConfigSha256: hash,
+    toolPolicyId: "novax.checker.tools", toolPolicyVersion: "1.0.0", toolPolicySha256: hash,
+    authorizedTools: [], handoffContractId: "novax.closure-review", handoffVersion: "1.0.0",
+    handoffPayloadSha256: hash, inputSha256: hash,
+  });
+  terminalizeCoordinatorInvocation(workspace, runId, invocationId, outputSha256);
+  return invocationId;
+}
+
+function terminalizeCoordinatorInvocation(
+  workspace: WorkspaceDatabase,
+  runId: string,
+  invocationId: string,
+  outputSha256: string,
+): void {
+  new AgentAuditRepository(workspace).appendInvocationTerminal({
+    runId, invocationId, eventType: "completed", errorCode: null, actualProviderId: "provider",
+    actualModelId: "model", responseIdSha256: createHash("sha256").update(`${invocationId}:response`, "utf8").digest("hex"),
+    stopReason: "stop", inputTokens: 10, outputTokens: 10, totalTokens: 20,
+    contextPolicyVersion: "test", maxChargedInputBytes: 100, configuredContextWindow: 1000,
+    safetyReserve: 100, outputReserve: 100, correctionAttempts: 0, structuredSubmissionCount: 1,
+    outputSha256,
   });
 }
