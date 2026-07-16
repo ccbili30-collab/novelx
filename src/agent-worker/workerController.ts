@@ -1,7 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { AgentArtifact, AgentRunEvent } from "../shared/ipcContract";
 import type { StewardOutput } from "./contracts/roleOutputs";
-import type { AgentWorkerAuditOperation, AgentWorkerRunStartCommand } from "../shared/agentWorkerProtocol";
+import { growthRunBindingSchema, type AgentWorkerAuditOperation, type AgentWorkerRunStartCommand } from "../shared/agentWorkerProtocol";
 import { toPublicError } from "../shared/publicErrors";
 import { createRoleOutputTool, type RoleOutputToolCapture } from "./contracts/roleOutputTool";
 import { createOpenAiCompatiblePiAdapter } from "./pi/NovaxPiRuntimeAdapter";
@@ -78,7 +78,7 @@ export async function handleAgentWorkerCommand(
         ...(command.scopeResourceIds ?? []),
         ...(command.collaborationContext?.handoffs ?? []).flatMap((handoff) => handoff.scopeResourceIds),
       ])],
-      growthBinding: command.growthBinding,
+      growthBinding: command.growthBinding ? growthRunBindingSchema.parse(command.growthBinding) : undefined,
       providerProfile,
       prompt: stewardPrompt,
       adapter,

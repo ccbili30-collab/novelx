@@ -27,7 +27,7 @@ export const growthRunBindingSchema = z.object({
   capabilityVersion: z.literal(growthCapabilityVersion),
   goalId: identifierSchema,
   cycleId: identifierSchema,
-  kind: z.enum(["expand", "revision", "closure_evaluation"]),
+  kind: z.enum(["expand", "revision", "closure_evaluation", "repair"]),
   focusKinds: z.array(z.enum(["world", "story", "oc"])).max(3),
   resumeFrontier: z.array(z.enum(["world", "story", "oc"])).max(3),
   inputCheckpointId: identifierSchema,
@@ -45,7 +45,17 @@ export const growthRunBindingSchema = z.object({
     componentProfiles: z.array(z.enum(["world_birth", "oc_saga", "story_universe"])).max(3),
     focusOcResourceId: identifierSchema.nullable(),
     requiredContentFacetIds: z.array(identifierSchema).min(1).max(100),
-  }).strict().nullable(),
+  }).strict().nullable().default(null),
+  closureRepair: z.object({
+    profileId: identifierSchema,
+    revision: z.number().int().min(1).max(1_000_000),
+    originalReviewId: identifierSchema,
+    selectedFindingId: identifierSchema,
+    selectedFindingFingerprint: sha256Schema,
+    safeSummary: z.string().trim().min(1).max(1_000),
+    repairObjective: z.string().trim().min(1).max(2_000),
+    targetEvidenceIds: z.array(identifierSchema).min(1).max(100),
+  }).strict().nullable().default(null),
 }).strict().superRefine((value, context) => {
   if (new Set(value.authorizedScopeResourceIds).size !== value.authorizedScopeResourceIds.length) {
     context.addIssue({ code: "custom", path: ["authorizedScopeResourceIds"], message: "Growth binding scopes must be unique." });
@@ -61,10 +71,15 @@ export const growthRunBindingSchema = z.object({
   }
   if (value.kind === "closure_evaluation") {
     if (value.focusKinds.length > 0 || value.resumeFrontier.length > 0 || value.greenfieldCreateAuthorized
-      || value.priorInquiries.length > 0 || value.closureProfile === null) {
+      || value.priorInquiries.length > 0 || value.closureProfile === null || value.closureRepair !== null) {
       context.addIssue({ code: "custom", path: ["kind"], message: "Closure evaluation bindings cannot carry content-growth authority." });
     }
-  } else if (value.focusKinds.length === 0 || value.closureProfile !== null) {
+  } else if (value.kind === "repair") {
+    if (value.focusKinds.length > 0 || value.resumeFrontier.length > 0 || value.greenfieldCreateAuthorized
+      || value.priorInquiries.length > 0 || value.closureProfile !== null || value.closureRepair === null) {
+      context.addIssue({ code: "custom", path: ["kind"], message: "Closure repair bindings require only trusted repair authority." });
+    }
+  } else if (value.focusKinds.length === 0 || value.closureProfile !== null || value.closureRepair !== null) {
     context.addIssue({ code: "custom", path: ["focusKinds"], message: "Content-growth bindings require focus kinds and cannot carry Closure authority." });
   }
   const closure = value.closureProfile;
@@ -88,6 +103,9 @@ export const growthRunBindingSchema = z.object({
     } else if (closure.componentProfiles.length > 0 || closure.focusOcResourceId !== null) {
       context.addIssue({ code: "custom", path: ["closureProfile"], message: "Only mixed Closure may bind component profiles or a focus OC." });
     }
+  }
+  if (value.closureRepair && new Set(value.closureRepair.targetEvidenceIds).size !== value.closureRepair.targetEvidenceIds.length) {
+    context.addIssue({ code: "custom", path: ["closureRepair", "targetEvidenceIds"], message: "Closure repair evidence IDs must be unique." });
   }
   const roots = Object.values(value.domainRootResourceIds);
   if (new Set(roots).size !== roots.length || roots.some((root) => !value.authorizedScopeResourceIds.includes(root))) {

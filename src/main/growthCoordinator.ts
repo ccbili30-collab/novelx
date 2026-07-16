@@ -48,6 +48,10 @@ interface GrowthAdvanceRequest {
   seed: GrowthStartRequest["seed"];
 }
 
+type GrowthCycleIntentCreate<T = GrowthCycleIntent> = T extends GrowthCycleIntent
+  ? Omit<T, "cycleId" | "provenance">
+  : never;
+
 const strategy = "grow_world_story_oc_closure_v4" as const;
 interface DeliveryRoute {
   growth?: (event: GrowthLiveEvent) => void;
@@ -163,7 +167,9 @@ export class GrowthCoordinator {
     }
     if (current?.status === "committed" && this.#activeCycleRuns.has(current.id)) return;
     if (current?.status === "evaluated") {
-      this.#releaseListeners(input.goal.id);
+      const outcome = input.repository.getClosureEvaluationOutcomeForCycle(current.id);
+      if (!outcome) throw coordinatorError("GROWTH_CLOSURE_OUTCOME_MISSING");
+      this.#advanceEvaluated(input, current, outcome);
       return;
     }
     if (current && ["blocked", "failed", "cancelled", "reconciliation_required"].includes(current.status)) {
@@ -175,6 +181,10 @@ export class GrowthCoordinator {
       return;
     }
     const projectedIntent = current?.status === "committed" ? input.repository.getCycleIntent(current.id) : null;
+    if (current?.status === "committed" && projectedIntent?.kind === "repair") {
+      this.#advanceCommittedRepair(input, current, projectedIntent);
+      return;
+    }
     const latestIntent = projectedIntent && isContentIntent(projectedIntent) ? projectedIntent : null;
     const decision = planGrowthFrontier({
       seedKinds: seedKinds(input.context, input.goal),
@@ -189,12 +199,21 @@ export class GrowthCoordinator {
       if (decision.state === "awaiting_guidance"
         && current?.status === "committed"
         && current.ruleRevision === input.goal.currentRuleRevision) {
-        ensureDefaultMixedClosureProfile(
+        const profile = ensureDefaultMixedClosureProfile(
           input.context.workspace,
           input.repository,
           input.goal,
           current.outputCheckpointId!,
         );
+        if (profile) {
+          const evaluation = this.#createPlannedCycle({
+            goal: input.goal, repository: input.repository, inputCheckpointId: current.outputCheckpointId!,
+            intent: { kind: "closure_evaluation", profileId: profile.id, revision: profile.currentRevision,
+              checkpointId: current.outputCheckpointId! },
+          });
+          this.#startPlanned(input, evaluation);
+          return;
+        }
       }
       if (decision.state === "content_closed") this.#releaseListeners(input.goal.id);
       return;
@@ -211,10 +230,12 @@ export class GrowthCoordinator {
   #createPlannedCycle(input: {
     goal: GrowthGoal;
     repository: GrowthRepository;
-    intent: { kind: "expand"; focusKinds: [GrowthFocusKind]; resumeFrontier: GrowthFocusKind[] };
+    intent: GrowthCycleIntentCreate;
     inputCheckpointId: string;
   }): GrowthCycle {
     const sequence = input.goal.currentCycleSequence + 1;
+    const isClosureEvaluation = input.intent.kind === "closure_evaluation";
+    const isClosureRepair = input.intent.kind === "repair";
     const cycle = input.repository.beginCycle({
       id: `${input.goal.id}:cycle:${sequence}`,
       goalId: input.goal.id,
@@ -229,7 +250,11 @@ export class GrowthCoordinator {
         cycleId: cycle.id,
         runId: null,
         sequence: nextEventSequence(input.repository, input.goal.id),
-        safeSummary: "Growth Cycle 已计划，等待绑定 Agent Run。",
+        safeSummary: isClosureEvaluation
+          ? "闭环评估 Cycle 已计划，等待绑定独立检查 Run。"
+          : isClosureRepair
+          ? "闭环返工 Cycle 已计划，等待绑定修复 Run。"
+          : "Growth Cycle 已计划，等待绑定 Agent Run。",
         phase: "cycle_planned",
         targetKind: "resource",
         targetId: input.goal.authorizedScopeResourceIds[0],
@@ -256,6 +281,131 @@ export class GrowthCoordinator {
     return cycle;
   }
 
+  #advanceCommittedRepair(
+    input: { request: GrowthAdvanceRequest; goal: GrowthGoal; context: GrowthWorkspaceContext; repository: GrowthRepository },
+    cycle: GrowthCycle,
+    intent: Extract<GrowthCycleIntent, { kind: "repair" }>,
+  ): void {
+    if (!cycle.outputCheckpointId || !input.repository.getClosureRepairLineageForCycle(cycle.id)) {
+      throw coordinatorError("GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID");
+    }
+    const profile = input.repository.getClosureProfile(intent.profileId);
+    const revision = input.repository.getClosureRevision(intent.profileId, intent.revision);
+    if (!profile || !revision || profile.goalId !== input.goal.id || profile.currentRevision < intent.revision) {
+      throw coordinatorError("GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID");
+    }
+    const nextRevision = input.repository.appendClosureRevision({
+      profileId: profile.id,
+      expectedRevision: intent.revision,
+      idempotencyKey: `closure-revision-after:${cycle.id}`,
+      checkpointId: cycle.outputCheckpointId,
+      ruleRevision: cycle.ruleRevision,
+      componentProfiles: revision.componentProfiles,
+      focusOcResourceId: revision.focusOcResourceId,
+      contractGeneration: "v26",
+      facets: revision.facets,
+    });
+    const evaluation = this.#createPlannedCycle({
+      goal: input.goal, repository: input.repository, inputCheckpointId: cycle.outputCheckpointId,
+      intent: { kind: "closure_evaluation", profileId: profile.id, revision: nextRevision.revision,
+        checkpointId: cycle.outputCheckpointId },
+    });
+    this.#startPlanned(input, evaluation);
+  }
+
+  #advanceEvaluated(
+    input: { request: GrowthAdvanceRequest; goal: GrowthGoal; context: GrowthWorkspaceContext; repository: GrowthRepository },
+    cycle: GrowthCycle,
+    outcome: NonNullable<ReturnType<GrowthRepository["getClosureEvaluationOutcomeForCycle"]>>,
+  ): void {
+    const intent = input.repository.getCycleIntent(cycle.id);
+    if (intent.kind !== "closure_evaluation" || intent.profileId !== outcome.profileId || intent.revision !== outcome.revision) {
+      throw coordinatorError("GROWTH_CLOSURE_OUTCOME_MISSING");
+    }
+    this.#settlePriorRepair(input.repository, input.goal.id, cycle, outcome.decision);
+    if (outcome.decision !== "repairs_required") {
+      this.#releaseListeners(input.goal.id);
+      return;
+    }
+    const review = outcome.reviewId ? input.repository.getClosureReviewV4(outcome.reviewId) : null;
+    const selected = review?.adverseFindings.find((finding) => finding.severity === "blocking")
+      ?? review?.adverseFindings.find((finding) => finding.severity === "major")
+      ?? null;
+    if (!review || !selected || review.profileId !== intent.profileId || review.revision !== intent.revision) {
+      throw coordinatorError("GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID");
+    }
+    const repairCycle = this.#createPlannedCycle({
+      goal: input.goal, repository: input.repository, inputCheckpointId: cycle.inputCheckpointId,
+      intent: {
+        kind: "repair", profileId: review.profileId, revision: review.revision,
+        originalReviewId: review.id, selectedFindingId: selected.id,
+        selectedFindingFingerprint: selected.fingerprint,
+      },
+    });
+    let lineage;
+    try {
+      lineage = input.repository.createClosureRepairLineage({
+        id: stableCoordinatorId("repair-lineage", repairCycle.id),
+        profileId: review.profileId, revision: review.revision, originalReviewId: review.id,
+        selectedFindingId: selected.id, selectedFindingFingerprint: selected.fingerprint,
+        repairCycleId: repairCycle.id,
+        backlogFindingIds: review.adverseFindings.filter((finding) => finding.id !== selected.id).map((finding) => finding.id),
+        idempotencyKey: stableCoordinatorId("repair-lineage-key", repairCycle.id),
+      });
+    } catch {
+      const terminal = input.repository.terminalizeCycle({
+        cycleId: repairCycle.id, status: "failed", failureCode: "GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID",
+      });
+      this.#appendTerminalEvent(input, terminal, "Closure repair lineage could not be persisted.");
+      this.#releaseListeners(input.goal.id);
+      return;
+    }
+    if (lineage.resolutionState === "stalled") {
+      const terminal = input.repository.terminalizeCycle({
+        cycleId: repairCycle.id, status: "blocked", failureCode: "GROWTH_CLOSURE_REPAIR_STALLED",
+      });
+      this.#appendTerminalEvent(input, terminal, "Closure repair stopped after repeated no-progress findings.");
+      this.#releaseListeners(input.goal.id);
+      return;
+    }
+    this.#startPlanned(input, repairCycle);
+  }
+
+  #settlePriorRepair(
+    repository: GrowthRepository,
+    goalId: string,
+    evaluationCycle: GrowthCycle,
+    decision: "continue_growing" | "accepted" | "repairs_required" | "blocked",
+  ): void {
+    const prior = repository.listCycles(goalId).find((candidate) => candidate.sequence === evaluationCycle.sequence - 1);
+    if (!prior || repository.getCycleIntent(prior.id).kind !== "repair") return;
+    const lineage = repository.getClosureRepairLineageForCycle(prior.id);
+    if (!lineage) throw coordinatorError("GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID");
+    if (decision === "accepted") {
+      if (lineage.resolutionState === "resolved") return;
+      if (lineage.resolutionState === "planned") repository.markClosureRepairResolution(lineage.id, "committed");
+      repository.markClosureRepairResolution(lineage.id, "resolved");
+      return;
+    }
+    if (lineage.resolutionState === "planned") repository.markClosureRepairResolution(lineage.id, "no_progress");
+  }
+
+  #appendTerminalEvent(
+    input: { goal: GrowthGoal; repository: GrowthRepository },
+    cycle: GrowthCycle,
+    safeSummary: string,
+  ): void {
+    try {
+      const event = input.repository.appendEvent({
+        goalId: input.goal.id, cycleId: cycle.id, runId: cycle.runId,
+        sequence: nextEventSequence(input.repository, input.goal.id), safeSummary,
+        phase: "cycle_terminal", targetKind: "resource", targetId: input.goal.authorizedScopeResourceIds[0],
+        targetVersionId: null, durableState: cycle.status, contentRef: null,
+      });
+      this.#publish(event);
+    } catch { /* Cycle terminal state remains authoritative. */ }
+  }
+
   #startPlanned(input: {
     request: GrowthAdvanceRequest;
     goal: GrowthGoal;
@@ -265,13 +415,14 @@ export class GrowthCoordinator {
     const lifecycle = new GrowthRunLifecycle(input.context.workspace, this.supervisor);
     const pinnedRule = input.repository.getRuleRevision(input.goal.id, cycle.ruleRevision);
     const intent = input.repository.getCycleIntent(cycle.id);
+    const repairBrief = intent.kind === "repair" ? requiredRepairBrief(input.repository, intent) : null;
     const runId = lifecycle.start({
       goalId: input.goal.id,
       cycleId: cycle.id,
       request: {
         projectId: input.request.projectId,
         sessionId: input.request.sessionId,
-        userInput: stagePrompt(cycle.sequence, intent, input.request.seed, pinnedRule.ruleText),
+        userInput: stagePrompt(cycle.sequence, intent, input.request.seed, pinnedRule.ruleText, repairBrief),
         mode: "free",
         scopeResourceIds: [],
       },
@@ -323,6 +474,10 @@ export class GrowthCoordinator {
         this.#publish(persisted);
       } catch { /* Terminal state is authoritative even if event repair storage is unavailable. */ }
       this.#releaseListeners(input.goal.id);
+      return;
+    }
+    if (cycle.status === "evaluated") {
+      this.#advance({ ...input, goal: input.repository.getGoal(input.goal.id) ?? input.goal });
       return;
     }
     if (cycle.status !== "committed") {
@@ -403,6 +558,21 @@ export class GrowthCoordinator {
 }
 
 function goalIdFor(requestId: string): string { return `growth-goal:${requestId}`; }
+function stableCoordinatorId(kind: string, value: string): string {
+  return `growth-${kind}:${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 40)}`;
+}
+function requiredRepairBrief(
+  repository: GrowthRepository,
+  intent: Extract<GrowthCycleIntent, { kind: "repair" }>,
+): { safeSummary: string; repairObjective: string } {
+  const review = repository.getClosureReviewV4(intent.originalReviewId);
+  const finding = review?.adverseFindings.find((candidate) => candidate.id === intent.selectedFindingId);
+  if (!review || !finding || review.profileId !== intent.profileId || review.revision !== intent.revision
+    || finding.fingerprint !== intent.selectedFindingFingerprint) {
+    throw coordinatorError("GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID");
+  }
+  return { safeSummary: finding.safeSummary, repairObjective: finding.repairObjective };
+}
 function nextEventSequence(repository: GrowthRepository, goalId: string): number {
   const last = repository.listEvents(goalId).at(-1);
   return last ? last.sequence + 1 : 1;
@@ -414,9 +584,19 @@ function projectEvent(event: GrowthEvent) {
     targetKind: event.targetKind, targetId: event.targetId, targetVersionId: event.targetVersionId, contentRef: event.contentRef,
   };
 }
-function stagePrompt(sequence: number, intent: GrowthCycleIntent, seed: GrowthStartRequest["seed"], initialRuleText: string): string {
-  if (!isContentIntent(intent)) {
-    return `Growth 策略 ${strategy}，第 ${sequence} 个 Cycle。Closure evaluation/repair 尚未接入 Worker，必须失败关闭。`;
+function stagePrompt(
+  sequence: number,
+  intent: GrowthCycleIntent,
+  seed: GrowthStartRequest["seed"],
+  initialRuleText: string,
+  repairBrief: { safeSummary: string; repairObjective: string } | null,
+): string {
+  if (intent.kind === "closure_evaluation") {
+    return `Growth 策略 ${strategy}，第 ${sequence} 个 Cycle。锁定规则：${initialRuleText}\n从固定 checkpoint 检索闭环证据，先提交 Steward 自检；仅在确定性内容维度全部满足时调用独立 Checker。不得修改项目内容。`;
+  }
+  if (intent.kind === "repair") {
+    if (!repairBrief) throw coordinatorError("GROWTH_CLOSURE_REPAIR_LINEAGE_INVALID");
+    return `Growth 策略 ${strategy}，第 ${sequence} 个 Cycle。锁定规则：${initialRuleText}\n闭环检查发现：${repairBrief.safeSummary}\n本轮只修复：${repairBrief.repairObjective}\n先检索固定 checkpoint 的目标证据，再提交恰好一个原子 Change Set；不得扩大到无关节点或生成图片。`;
   }
   const seedText = seed.kind === "text" ? `\n用户种子：${seed.text}` : "\n用户种子已保存为授权资料；先检索后创作。";
   return `Growth 策略 ${strategy}，第 ${sequence} 个 Cycle。锁定规则：${initialRuleText}\n持久 Intent：${intent.kind}；有序 focus：${intent.focusKinds.join("、")}；后续 frontier：${intent.resumeFrontier.join("、") || "等待闭环证据"}。先使用 growth_v1 检索证据，再提交一次 3–7 条证据化自询；只有 durable selected 后，本 Cycle 才可经一个现有 Change Set 持久化模型生成内容。需要创作者取舍时必须零 Change Set 并安全阻塞。${seedText}`;
@@ -430,7 +610,13 @@ function coordinatorStatus(
 ): "running" | "awaiting_guidance" | "completed" | "blocked" | "failed" | "cancelled" | "reconciliation_required" {
   const current = cycles.at(-1);
   if (hasActiveRun || current?.status === "planned" || current?.status === "running") return "running";
-  if (current?.status === "evaluated") return "awaiting_guidance";
+  if (current?.status === "evaluated") {
+    const outcome = repository.getClosureEvaluationOutcomeForCycle(current.id);
+    if (!outcome) return "reconciliation_required";
+    if (outcome.decision === "accepted") return "completed";
+    if (outcome.decision === "blocked") return "blocked";
+    return "awaiting_guidance";
+  }
   if (current && current.status !== "committed") return current.status;
   const projectedIntent = current ? repository.getCycleIntent(current.id) : null;
   const latestIntent = projectedIntent && isContentIntent(projectedIntent) ? projectedIntent : null;
@@ -495,25 +681,26 @@ function ensureDefaultMixedClosureProfile(
   repository: GrowthRepository,
   goal: GrowthGoal,
   checkpointId: string,
-): void {
+): ReturnType<GrowthRepository["getClosureProfile"]> {
   const currentProfiles = repository.listClosureStates(goal.id)
     .map((state) => repository.getClosureProfile(state.profileId))
     .filter((profile) => profile?.contractGeneration === "v26");
-  if (currentProfiles.length > 0) return;
+  if (currentProfiles.length > 1) throw coordinatorError("GROWTH_CLOSURE_PROFILE_AMBIGUOUS");
+  if (currentProfiles[0]) return currentProfiles[0];
   const resources = new ResourceRepository(workspace).listAtCheckpoint(checkpointId);
   const worlds = resources.filter((resource) => resource.objectKind === "world");
   const stories = resources.filter((resource) => resource.objectKind === "story");
   const ocs = resources.filter((resource) => resource.objectKind === "oc");
-  if (worlds.length !== 1 || stories.length !== 1 || ocs.length === 0) return;
+  if (worlds.length !== 1 || stories.length !== 1 || ocs.length === 0) return null;
   const focusOcResourceId = resolveCommittedFocusOcResourceId(workspace, repository, goal.id, checkpointId);
-  if (!focusOcResourceId) return;
+  if (!focusOcResourceId) return null;
   const facets = [
     ...Object.values(GROWTH_CLOSURE_FACETS.world),
     ...Object.values(GROWTH_CLOSURE_FACETS.story),
     ...Object.values(GROWTH_CLOSURE_FACETS.oc),
   ].map((id) => ({ id, kind: "content" as const, required: true }));
   const identity = createHash("sha256").update(goal.id, "utf8").digest("hex").slice(0, 40);
-  repository.createClosureProfile({
+  return repository.createClosureProfile({
     id: `growth-closure:${identity}`,
     idempotencyKey: `growth-closure-create:${identity}`,
     goalId: goal.id,

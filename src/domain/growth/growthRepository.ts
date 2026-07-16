@@ -1092,6 +1092,14 @@ export class GrowthRepository {
     }) : null;
   }
 
+  getClosureEvaluationOutcomeForCycle(cycleId: string): GrowthClosureEvaluationOutcome | null {
+    const rows = this.workspace.db.prepare(`
+      SELECT id FROM growth_closure_evaluation_outcomes WHERE cycle_id = ? ORDER BY created_at, id
+    `).all(cycleId) as Array<{ id: string }>;
+    if (rows.length > 1) throw growthError("GROWTH_DATA_INVALID");
+    return rows[0] ? this.getClosureEvaluationOutcome(rows[0].id) ?? fail("GROWTH_DATA_INVALID") : null;
+  }
+
   sealClosureEvaluationOutcome(input: unknown): GrowthClosureEvaluationOutcome {
     const value = growthClosureEvaluationOutcomeSealSchema.parse(input);
     const payloadHash = canonicalAuditHash(value);
@@ -1243,6 +1251,14 @@ export class GrowthRepository {
     });
   }
 
+  getClosureRepairLineageForCycle(repairCycleId: string): GrowthClosureRepairLineage | null {
+    const rows = this.workspace.db.prepare(`
+      SELECT id FROM growth_closure_repair_lineage WHERE repair_cycle_id = ? ORDER BY created_at, id
+    `).all(repairCycleId) as Array<{ id: string }>;
+    if (rows.length > 1) throw growthError("GROWTH_DATA_INVALID");
+    return rows[0] ? this.getClosureRepairLineage(rows[0].id) ?? fail("GROWTH_DATA_INVALID") : null;
+  }
+
   markClosureRepairResolution(
     lineageId: string,
     resolutionState: "committed" | "resolved" | "no_progress",
@@ -1313,14 +1329,20 @@ export class GrowthRepository {
   getClosureRepairStallState(profileId: string, revision: number, fingerprint: string): {
     stalled: boolean; sameFingerprintAttempts: number; noProgressAttempts: number;
   } {
+    const closureRevision = this.getClosureRevision(profileId, revision);
+    if (!closureRevision) throw growthError("GROWTH_CLOSURE_REVISION_NOT_FOUND");
     const same = this.workspace.db.prepare(`
-      SELECT COUNT(*) AS count FROM growth_closure_repair_lineage
-      WHERE profile_id = ? AND revision = ? AND selected_finding_fingerprint = ?
-    `).get(profileId, revision, fingerprint) as { count: number };
+      SELECT COUNT(*) AS count FROM growth_closure_repair_lineage lineage
+      JOIN growth_cycles cycles ON cycles.id = lineage.repair_cycle_id
+      WHERE lineage.profile_id = ? AND lineage.revision <= ?
+        AND lineage.selected_finding_fingerprint = ? AND cycles.rule_revision = ?
+    `).get(profileId, revision, fingerprint, closureRevision.ruleRevision) as { count: number };
     const noProgress = this.workspace.db.prepare(`
-      SELECT COUNT(*) AS count FROM growth_closure_repair_lineage
-      WHERE profile_id = ? AND revision = ? AND resolution_state IN ('no_progress', 'stalled')
-    `).get(profileId, revision) as { count: number };
+      SELECT COUNT(*) AS count FROM growth_closure_repair_lineage lineage
+      JOIN growth_cycles cycles ON cycles.id = lineage.repair_cycle_id
+      WHERE lineage.profile_id = ? AND lineage.revision <= ?
+        AND lineage.resolution_state IN ('no_progress', 'stalled') AND cycles.rule_revision = ?
+    `).get(profileId, revision, closureRevision.ruleRevision) as { count: number };
     return {
       stalled: same.count >= 2 || noProgress.count >= 2,
       sameFingerprintAttempts: same.count,

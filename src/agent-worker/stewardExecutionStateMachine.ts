@@ -175,6 +175,13 @@ function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
       steps: ["retrieve_graph_evidence", "submit_closure_self_assessment"],
     };
   }
+  if (binding.kind === "repair") {
+    return {
+      objective: "change_set",
+      scopeResourceIds: [...binding.authorizedScopeResourceIds],
+      steps: ["retrieve_graph_evidence", "propose_change_set"],
+    };
+  }
   const focus = growthFocus(binding);
   return {
     objective: "change_set",
@@ -189,7 +196,7 @@ function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
 
 function growthFocus(binding: GrowthRunBinding | undefined): "world" | "story" | "oc" | null {
   if (!binding) return null;
-  if (binding.kind === "closure_evaluation") return null;
+  if (binding.kind === "closure_evaluation" || binding.kind === "repair") return null;
   if (binding.kind === "revision") throw stateError("STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED");
   return binding.focusKinds[0] ?? null;
 }
@@ -341,6 +348,8 @@ export function createStewardExecutionStateMachine(input: {
     } : input.growthBinding?.kind === "closure_evaluation" && original.name === "submit_closure_checker_review" ? {
       description: "Record the immediately preceding independent Checker result. Parameters are compiled by the Harness; do not supply findings, evidence, scope, checkpoint, profile, hashes, or authority fields.",
       parameters: Type.Object({}, { additionalProperties: false }),
+    } : input.growthBinding?.kind === "repair" && original.name === "propose_change_set" ? {
+      description: `Submit exactly one source-bound Change Set for the selected Closure repair. Repair only this objective: ${input.growthBinding.closureRepair?.repairObjective ?? "the selected finding"}. Do not rewrite unrelated resources, add images, or broaden the task.`,
     } : growthFocus(input.growthBinding) === "story" && original.name === "writer" ? {
       description: "Create a candidate formal story opening from a high-level Story Brief and the pinned formal-world evidence. Supply only the creative brief: premise, opening situation, central tension, point of view, tone, required/avoided elements, and target length. This is Creator authoring, not a player or GM turn. Do not supply source material, evidence IDs, GM resolutions, resource IDs, or authority fields.",
       parameters: growthStoryBriefParameters,
@@ -595,7 +604,8 @@ export function createStewardExecutionStateMachine(input: {
     if (name === "submit_closure_checker_review" && input.growthBinding?.kind === "closure_evaluation" && !closureCheckerOutput) {
       throw stateError("STEWARD_CLOSURE_CHECKER_REQUIRED");
     }
-    if (["writer", "propose_change_set", "generate_image"].includes(name) && input.growthBinding && !growthInquirySelected) {
+    if (["writer", "propose_change_set", "generate_image"].includes(name) && input.growthBinding
+      && input.growthBinding.kind !== "repair" && !growthInquirySelected) {
       throw stateError("STEWARD_GROWTH_INQUIRY_REQUIRED");
     }
     if (name === "writer" && growthFocus(input.growthBinding) === "story" && !trustedStoryWorld) throw stateError("STEWARD_WRITER_EVIDENCE_REQUIRED");

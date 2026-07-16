@@ -2,7 +2,7 @@
 
 日期：2026-07-16
 
-状态：产品负责人和 Main Head（主线负责人）已接受决策门禁；v24 持久化与 Task 3 动态 Intent 路由已实现并通过定向验收。Task 4A 的 schema 25、Inquiry 生命周期合同和唯一 `GrowthRepository` 持久化权威已实现；Task 4B 的同 Cycle Worker/Main 工具链、dynamic-v3 升版、Main 一次性副作用门禁与 Renderer 安全摘要投影也已实现并通过定向验收。Creator Choice（创作者取舍）的自由文本回答已能持久关联，但将新 Rule Revision（规则修订）应用到后续内容仍属 Task 6。Task 5 已接入确定性的 Closure evaluation Worker/Main/Domain 路径；自动 repair→recheck、Coordinator 调度和真实 Provider 验收仍未完成，Task 6–7 尚未接入。
+状态：产品负责人和 Main Head（主线负责人）已接受决策门禁；v24 持久化与 Task 3 动态 Intent 路由已实现并通过定向验收。Task 4A 的 schema 25、Inquiry 生命周期合同和唯一 `GrowthRepository` 持久化权威已实现；Task 4B 的同 Cycle Worker/Main 工具链、dynamic-v3 升版、Main 一次性副作用门禁与 Renderer 安全摘要投影也已实现并通过定向验收。Creator Choice（创作者取舍）的自由文本回答已能持久关联，但将新 Rule Revision（规则修订）应用到后续内容仍属 Task 6。Task 5 已接入确定性的 Closure evaluation 与受信任单 finding repair Worker/Main/Domain 路径，并能由 Coordinator 自动创建 evaluation Cycle；完整 repair→recheck 跨组件回归、Longform（长文）编排和真实 Provider 验收仍未完成，Task 6–7 尚未接入。
 
 ## 决策范围
 
@@ -69,9 +69,9 @@ Main Head 于 2026-07-16 以 `approve-with-conditions` 批准 Schema 26 与 Clos
 
 Closure v4 必须持久化严格类型的 submission，不能只留 output hash。Facet Result 与 Checker adverse finding 分离：前者保存 `satisfied/missing/conflicted/blocked` 与 coverage/evidence；后者保存 severity、category、目标证据、safe summary、repair objective 与 Main 计算的稳定 fingerprint。`accepted` 要求所有必需 Facet Result 满足、Steward 为 `ready_for_checker`、Checker 通过且零 adverse finding。Repair Intent 必须绑定原 Review、一个选中 blocking finding/fingerprint 与 Repair Cycle，其他 finding 保持 backlog；重复 finding 或连续两个无进展 repair Cycle 进入 `GROWTH_CLOSURE_REPAIR_STALLED`。`mixed_birth` 显式保存用户要求的 component profiles；包含 `oc_saga` 时必须绑定 focus OC，不得从 facet ID 猜测。
 
-实现收口（2026-07-16）：Schema 26 与上述持久化不变量已经落地；Review 本身不再驱动 `closed/blocked`，只有同事务封存并使 Cycle 进入 `evaluated` 的 durable outcome 才能驱动 Closure 状态。旧 `legacy_pre_v26` accepted Review 仅供历史读取，当前投影保持 `growing`。Repair 只有在绑定 Cycle 已原子提交 Change Set 后才能进入 `committed/no_progress`；`resolved` 还要求该输出 checkpoint 上的新 Closure revision 获得后续独立 accepted outcome。当前公开 capability/strategy 已升为 v4。`closure_evaluation` 已接入 Worker/Main/Domain：Main 固定 Profile、revision、rule revision、checkpoint 与同一 Retrieval Receipt，把 evaluator 选中的目标版本强制纳入该 Receipt；Steward 与 Checker 使用同一 Run 中角色匹配的不同 invocation，并以其终态输出 hash 持久化严格 submission、Review 与原子 outcome。完整结果进入 `evaluated`，部分持久化或结果不明进入 `reconciliation_required`，不伪造 accepted。`repair` Worker 路径、Coordinator 自动 Profile/evaluation/repair→recheck 调度与真实 Provider 验收仍未完成并保持失败关闭。
+实现收口（2026-07-16）：Schema 26 与上述持久化不变量已经落地；Review 本身不再驱动 `closed/blocked`，只有同事务封存并使 Cycle 进入 `evaluated` 的 durable outcome 才能驱动 Closure 状态。旧 `legacy_pre_v26` accepted Review 仅供历史读取，当前投影保持 `growing`。Repair 只有在绑定 Cycle 已原子提交 Change Set 后才能进入 `committed/no_progress`；`resolved` 还要求该输出 checkpoint 上的新 Closure revision 获得后续独立 accepted outcome。当前公开 capability/strategy 已升为 v4。`closure_evaluation` 已接入 Worker/Main/Domain：Main 固定 Profile、revision、rule revision、checkpoint 与同一 Retrieval Receipt，把 evaluator 选中的目标版本强制纳入该 Receipt；Steward 与 Checker 使用同一 Run 中角色匹配的不同 invocation，并以其终态输出 hash 持久化严格 submission、Review 与原子 outcome。完整结果进入 `evaluated`，部分持久化或结果不明进入 `reconciliation_required`，不伪造 accepted。Coordinator 现会在初始内容前沿结束后创建默认 mixed Profile 与独立 evaluation Cycle；`repairs_required` 只选择一个 blocking/major finding，Repair Run 只取得该 finding 的固定证据并只允许一个 Change Set，提交后创建新 Closure revision 与下一 evaluation Cycle。尚未完成单条跨组件的 accepted/stalled 返工回归、Longform 编排与真实 Provider 验收，不能据此宣称内容已闭环。
 
-Task 5B2b 的确定性验收覆盖 10 个 Vitest 文件、170/170 通过，`npm run typecheck` 与 `git diff --check` 通过；本批未使用 Provider（模型服务）、Electron、生产构建或全量测试，因此只证明 Closure evaluation 的确定性运行与持久化边界，不证明自动闭环或 Live（真实运行）。
+最新确定性验收覆盖合同、状态机、仓储、评估 Run 与 Coordinator 的 6 个 Vitest 文件、145/145 通过，`npm run typecheck` 与 `git diff --check` 通过；本批未使用 Provider（模型服务）、Electron、生产构建或全量测试，因此只证明 Closure evaluation、自动调度和受信任 repair 的分层边界，不证明完整自动闭环或 Live（真实运行）。
 
 ## Illustration
 

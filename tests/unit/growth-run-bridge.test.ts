@@ -343,6 +343,148 @@ describe("Growth Run bridge", () => {
     await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).getCycle(evaluation.id)?.status).toBe("cancelled"));
   });
 
+  it("binds one evidence-pinned Closure repair Run and commits exactly one Change Set", async () => {
+    const setup = createSetup();
+    const prior = await commitPriorResourceCycle(
+      setup, setup.cycleId, "world", "world", setup.scopeId, "closure-repair-world",
+    );
+    const { growth, profile, evaluation } = createClosureEvaluation(
+      setup, prior.outputCheckpointId, GROWTH_CLOSURE_FACETS.world.resource, "repair",
+    );
+    const evaluationWorker = new FakeWorker();
+    const evaluationLifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, evaluationWorker));
+    const evaluationRunId = evaluationLifecycle.start({
+      goalId: setup.goalId, cycleId: evaluation.id,
+      request: {
+        projectId: "project-1", sessionId: "closure-repair-evaluation",
+        userInput: "evaluate repair boundary", mode: "free",
+      },
+      emit: () => undefined,
+    });
+    evaluationWorker.spawn();
+    beginStewardInvocation(setup.workspace, evaluationRunId);
+    requestGrowthRetrieval(evaluationWorker, evaluationRunId, randomUUID(), "closure-repair-world", 20);
+    await vi.waitFor(() => expect(evaluationWorker.sent.at(-1)).toMatchObject({
+      ok: true, result: { closureEvaluation: { deterministicContentReady: true } },
+    }));
+    const retrieval = evaluationWorker.sent.at(-1) as {
+      result: { evidence: Array<{ evidenceId: string }> };
+    };
+    expect(retrieval.result.evidence).not.toHaveLength(0);
+    const targetEvidenceId = retrieval.result.evidence[0]!.evidenceId;
+    evaluationWorker.receive({
+      type: "tool.request", runId: evaluationRunId, requestId: randomUUID(),
+      tool: "submit_closure_self_assessment",
+      args: { decision: "ready_for_checker", safeSummary: "The world exists and needs one bounded correction." },
+    });
+    await vi.waitFor(() => expect(evaluationWorker.sent.at(-1)).toMatchObject({
+      ok: true, result: { status: "checker_required" },
+    }));
+    const checkerInvocationId = beginCheckerInvocation(setup.workspace, evaluationRunId);
+    terminalizeInvocation(setup.workspace, evaluationRunId, checkerInvocationId, "checker-repair-output");
+    evaluationWorker.receive({
+      type: "tool.request", runId: evaluationRunId, requestId: randomUUID(),
+      tool: "submit_closure_checker_review",
+      args: {
+        decision: "repairs_required",
+        adverseFindings: [{
+          localId: "repair-world-title", severity: "major", category: "world_consistency",
+          evidenceIds: [targetEvidenceId], safeSummary: "The world title is too generic.",
+          repairObjective: "Give the existing world a distinctive title without changing unrelated nodes.",
+        }],
+      },
+    });
+    await vi.waitFor(() => expect(evaluationWorker.sent.at(-1)).toMatchObject({
+      ok: true, result: { status: "recorded", decision: "repairs_required" },
+    }));
+    terminalizeInvocation(setup.workspace, evaluationRunId, `${evaluationRunId}:steward`, "steward-repair-output");
+    evaluationWorker.receive({
+      type: "run.completed", runId: evaluationRunId, outcome: "completed",
+      message: "evaluated", changeSetState: "none", artifacts: [],
+    });
+    await vi.waitFor(() => expect(growth.getCycle(evaluation.id)?.status).toBe("evaluated"));
+
+    const outcome = growth.getClosureEvaluationOutcomeForCycle(evaluation.id)!;
+    const review = growth.getClosureReviewV4(outcome.reviewId!)!;
+    const finding = review.adverseFindings[0]!;
+    const repairCycle = growth.beginCycle({
+      id: "closure-repair-cycle", goalId: setup.goalId, idempotencyKey: "closure-repair-cycle-key",
+      inputCheckpointId: prior.outputCheckpointId, ruleRevision: 1,
+      intent: {
+        kind: "repair", profileId: profile.id, revision: 1, originalReviewId: review.id,
+        selectedFindingId: finding.id, selectedFindingFingerprint: finding.fingerprint,
+      },
+    });
+    const lineage = growth.createClosureRepairLineage({
+      id: "closure-repair-lineage", profileId: profile.id, revision: 1, originalReviewId: review.id,
+      selectedFindingId: finding.id, selectedFindingFingerprint: finding.fingerprint,
+      repairCycleId: repairCycle.id, backlogFindingIds: [], idempotencyKey: "closure-repair-lineage-key",
+    });
+    const repairWorker = new FakeWorker();
+    const repairLifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, repairWorker));
+    const repairRunId = repairLifecycle.start({
+      goalId: setup.goalId, cycleId: repairCycle.id,
+      request: {
+        projectId: "project-1", sessionId: "closure-repair-run",
+        userInput: "apply bounded repair", mode: "free",
+      },
+      emit: () => undefined,
+    });
+    repairWorker.spawn();
+    const repairCommand = repairWorker.sent[0] as {
+      growthBinding: {
+        kind: string;
+        closureProfile: null;
+        closureRepair: { repairObjective: string; targetEvidenceIds: string[] };
+      };
+    };
+    expect(repairCommand.growthBinding).toMatchObject({
+      kind: "repair", closureProfile: null,
+      closureRepair: {
+        repairObjective: "Give the existing world a distinctive title without changing unrelated nodes.",
+        targetEvidenceIds: [targetEvidenceId],
+      },
+    });
+    beginStewardInvocation(setup.workspace, repairRunId);
+    requestGrowthRetrieval(repairWorker, repairRunId, randomUUID(), "bounded repair", 1);
+    await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({
+      ok: true, result: { evidence: [expect.objectContaining({ evidenceId: targetEvidenceId })] },
+    }));
+    repairWorker.receive({
+      type: "tool.request", runId: repairRunId, requestId: randomUUID(), tool: "propose_change_set",
+      args: {
+        summary: "Rename the reviewed world only.",
+        items: [{
+          id: "repair-world", dependsOn: [], kind: "resource.put",
+          payload: {
+            resourceId: prior.resourceId, create: false, type: "world", objectKind: "world",
+            title: "The Tidemarked Reach", parentId: setup.scopeId, state: "active", sortOrder: 0,
+          },
+        }],
+      },
+    });
+    await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({
+      ok: true, result: { status: "committed", changeSetId: expect.any(String) },
+    }));
+    const committed = growth.getCycle(repairCycle.id)!;
+    expect(committed).toMatchObject({
+      status: "committed", receiptId: expect.any(String), changeSetId: expect.any(String),
+      outputCheckpointId: expect.any(String), failureCode: null,
+    });
+    expect(growth.getClosureRepairLineage(lineage.id)?.resolutionState).toBe("planned");
+    const changeSetCount = setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get();
+    repairWorker.receive({
+      type: "tool.request", runId: repairRunId, requestId: randomUUID(), tool: "propose_change_set",
+      args: { summary: "must not run twice", items: [] },
+    });
+    await vi.waitFor(() => expect(repairWorker.sent.at(-1)).toMatchObject({ ok: false }));
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toEqual(changeSetCount);
+    repairWorker.receive({
+      type: "run.completed", runId: repairRunId, outcome: "completed",
+      message: "repaired", changeSetState: "committed", artifacts: [],
+    });
+  });
+
   it("pins a source-document seed to its owning resource without exposing source content", async () => {
     const setup = createSourceDocumentSetup();
     const worker = new FakeWorker();

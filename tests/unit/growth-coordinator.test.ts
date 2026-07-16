@@ -130,7 +130,7 @@ describe("GrowthCoordinator", () => {
     expect(workers).toHaveLength(1);
   });
 
-  it("persists two consecutive CAS guidance revisions after committed frontier exhaustion without creating Cycle 4", async () => {
+  it("persists guidance while the automatic Closure evaluation is running without creating Cycle 5", async () => {
     const setup = createSetup();
     const workers: FakeWorker[] = [];
     const supervisor = createSupervisor(setup, workers);
@@ -142,45 +142,37 @@ describe("GrowthCoordinator", () => {
     await vi.waitFor(() => expect(workers).toHaveLength(3));
 
     await completeCycle(setup.workspace, workers[2]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(4));
     const getRequest = { projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id };
     const routed: Array<{ event: { cycleId: string; phase: string } }> = [];
     const initiallyAwaiting = coordinator.get(getRequest, { growth: (event) => routed.push(event) });
-    expect(initiallyAwaiting.coordinatorStatus).toBe("awaiting_guidance");
-    expect(initiallyAwaiting.cycles).toHaveLength(3);
+    expect(initiallyAwaiting.coordinatorStatus).toBe("running");
+    expect(initiallyAwaiting.cycles).toHaveLength(4);
+    expect(new GrowthRepository(setup.workspace).getCycleIntent(initiallyAwaiting.cycles[3]!.id))
+      .toMatchObject({ kind: "closure_evaluation", provenance: "persisted_v26" });
     const response = coordinator.guide({
       goalId: started.goal.id, expectedRevision: 1, ruleText: "Save revision two.",
       requestId: "99999999-9999-4999-8999-999999999999",
     });
-    expect(response).toMatchObject({ nextCycleSequence: 4, nextCycleKind: "revision", persistedRevision: 2 });
+    expect(response).toMatchObject({ nextCycleSequence: 5, nextCycleKind: "revision", persistedRevision: 2 });
     const afterRevisionTwo = coordinator.get(getRequest);
-    expect(afterRevisionTwo.coordinatorStatus).toBe("awaiting_guidance");
-    expect(afterRevisionTwo.cycles).toHaveLength(3);
-    expect(workers).toHaveLength(3);
+    expect(afterRevisionTwo.coordinatorStatus).toBe("running");
+    expect(afterRevisionTwo.cycles).toHaveLength(4);
+    expect(workers).toHaveLength(4);
     expect(coordinator.guide({
       goalId: started.goal.id, expectedRevision: 2, ruleText: "Save revision three.",
       requestId: "88888888-8888-4888-8888-888888888888",
-    })).toMatchObject({ nextCycleSequence: 4, nextCycleKind: "revision", persistedRevision: 3 });
+    })).toMatchObject({ nextCycleSequence: 5, nextCycleKind: "revision", persistedRevision: 3 });
     const afterRevisionThree = coordinator.get(getRequest);
-    expect(afterRevisionThree.coordinatorStatus).toBe("awaiting_guidance");
-    expect(afterRevisionThree.cycles).toHaveLength(3);
+    expect(afterRevisionThree.coordinatorStatus).toBe("running");
+    expect(afterRevisionThree.cycles).toHaveLength(4);
     const repository = new GrowthRepository(setup.workspace);
-    expect(repository.listCycles(started.goal.id).map((cycle) => cycle.status)).toEqual(["committed", "committed", "committed"]);
+    expect(repository.listCycles(started.goal.id).map((cycle) => cycle.status)).toEqual(["committed", "committed", "committed", "running"]);
     expect(repository.listRuleRevisions(started.goal.id, { limit: 10 }).map((rule) => rule.revision)).toEqual([1, 2, 3]);
-    expect(workers).toHaveLength(3);
+    expect(workers).toHaveLength(4);
     expect(routed).toEqual([]);
-
-    const latest = repository.listCycles(started.goal.id).at(-1)!;
-    const futureRevision = repository.beginCycle({
-      id: `${started.goal.id}:cycle:4`, goalId: started.goal.id, idempotencyKey: `${started.goal.id}:cycle:4`,
-      inputCheckpointId: latest.outputCheckpointId, ruleRevision: 3,
-      intent: { kind: "revision", focusKinds: ["world"], resumeFrontier: [] },
-    });
-    expect(() => coordinator.get(getRequest))
-      .toThrowError(expect.objectContaining({ code: "GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED" }));
-    expect(routed).toEqual(expect.arrayContaining([
-      expect.objectContaining({ event: expect.objectContaining({ cycleId: futureRevision.id, phase: "cycle_terminal" }) }),
-    ]));
-    expect(workers).toHaveLength(3);
+    supervisor.cancel(initiallyAwaiting.cycles[3]!.runId!);
+    await vi.waitFor(() => expect(repository.getCycle(initiallyAwaiting.cycles[3]!.id)?.status).toBe("cancelled"));
   });
 
   it("rebuilds active workspace authority after restart and rejects unknown or cross-project Goals", async () => {
@@ -278,7 +270,7 @@ describe("GrowthCoordinator", () => {
     await vi.waitFor(() => expect(repository.getCycle(snapshot.cycles[1]!.id)?.status).toBe("cancelled"));
   });
 
-  it("runs three persisted, sequential Cycle/Run pairs from one idempotent start", async () => {
+  it("runs three content cycles then automatically starts one persisted Closure evaluation", async () => {
     const setup = createSetup();
     const workers: FakeWorker[] = [];
     const supervisor = new AgentProcessSupervisor("worker.js", {
@@ -302,22 +294,23 @@ describe("GrowthCoordinator", () => {
     await vi.waitFor(() => expect(workers).toHaveLength(3));
     await completeCycle(setup.workspace, workers[2]!);
 
-    await vi.waitFor(() => expect(coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: initial.goal.id }).cycles).toHaveLength(3));
+    await vi.waitFor(() => expect(coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: initial.goal.id }).cycles).toHaveLength(4));
     const snapshot = coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: initial.goal.id });
     expect(snapshot.goal.status).toBe("active");
-    expect(snapshot.coordinatorStatus).toBe("awaiting_guidance");
+    expect(snapshot.coordinatorStatus).toBe("running");
     expect(snapshot.activeCycleRuleRevision).toBe(1);
-    expect(snapshot.cycles.map((cycle) => cycle.status)).toEqual(["committed", "committed", "committed"]);
-    expect(snapshot.cycles.map((cycle) => cycle.runId)).toEqual(expect.arrayContaining([expect.any(String)]));
-    expect(new Set(snapshot.cycles.map((cycle) => cycle.runId)).size).toBe(3);
+    expect(snapshot.cycles.map((cycle) => cycle.status)).toEqual(["committed", "committed", "committed", "running"]);
+    expect(snapshot.cycles.slice(0, 3).map((cycle) => cycle.runId)).toEqual(expect.arrayContaining([expect.any(String)]));
+    expect(new Set(snapshot.cycles.slice(0, 3).map((cycle) => cycle.runId)).size).toBe(3);
     const repository = new GrowthRepository(setup.workspace);
     const cycles = repository.listCycles(initial.goal.id);
-    expect(repository.listCycleIntents(initial.goal.id).every((intent) => (
+    expect(repository.listCycleIntents(initial.goal.id).slice(0, 3).every((intent) => (
       (intent.kind === "expand" || intent.kind === "revision") && intent.focusKinds.length === 1
     ))).toBe(true);
+    expect(repository.listCycleIntents(initial.goal.id)[3]).toMatchObject({ kind: "closure_evaluation", provenance: "persisted_v26" });
     expect(cycles[1]!.inputCheckpointId).toBe(cycles[0]!.outputCheckpointId);
     expect(cycles[2]!.inputCheckpointId).toBe(cycles[1]!.outputCheckpointId);
-    expect(cycles.every((cycle) => cycle.receiptId && cycle.changeSetId && cycle.outputCheckpointId)).toBe(true);
+    expect(cycles.slice(0, 3).every((cycle) => cycle.receiptId && cycle.changeSetId && cycle.outputCheckpointId)).toBe(true);
     const closureStates = repository.listClosureStates(initial.goal.id);
     expect(closureStates).toHaveLength(1);
     const closureProfile = repository.getClosureProfile(closureStates[0]!.profileId);
@@ -339,8 +332,10 @@ describe("GrowthCoordinator", () => {
     expect(live).toEqual(expect.arrayContaining(snapshot.events.map((event) => expect.objectContaining({ event }))));
     expect(agentEvents.map((event) => event.type)).toEqual(expect.arrayContaining(["run.started", "run.activity", "run.completed"]));
     expect(agentEvents.every((event) => event.sessionId === setup.sessionId)).toBe(true);
-    expect(coordinator.start(request).cycles).toHaveLength(3);
-    expect(workers).toHaveLength(3);
+    expect(coordinator.start(request).cycles).toHaveLength(4);
+    expect(workers).toHaveLength(4);
+    supervisor.cancel(snapshot.cycles[3]!.runId!);
+    await vi.waitFor(() => expect(repository.getCycle(cycles[3]!.id)?.status).toBe("cancelled"));
   });
 
   it("stops after a failed Cycle and recovers a running Cycle to reconciliation", async () => {
@@ -418,10 +413,13 @@ describe("GrowthCoordinator", () => {
     await completeCycle(setup.workspace, workers[1]!);
     await vi.waitFor(() => expect(workers).toHaveLength(3));
     await completeCycle(setup.workspace, workers[2]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(4));
     const snapshot = coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: goalIdForRequest(request) });
-    expect(snapshot.coordinatorStatus).toBe("awaiting_guidance");
+    expect(snapshot.coordinatorStatus).toBe("running");
     expect(new Set(delivered).size).toBe(delivered.length);
     expect(new GrowthRepository(setup.workspace).listEvents(snapshot.goal.id)).toHaveLength(snapshot.events.length);
+    supervisor.cancel(snapshot.cycles[3]!.runId!);
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).getCycle(snapshot.cycles[3]!.id)?.status).toBe("cancelled"));
   });
 
   it("compensates a failed cycle_planned event without starting a Worker", () => {

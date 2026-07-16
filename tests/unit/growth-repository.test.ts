@@ -815,6 +815,8 @@ describe("GrowthRepository", () => {
       decision: "accepted", idempotencyKey: "outcome-accepted-key",
     } as const;
     const outcome = repository.sealClosureEvaluationOutcome(outcomeInput);
+    expect(repository.getClosureEvaluationOutcomeForCycle(evaluationCycle.id)).toEqual(outcome);
+    expect(repository.getClosureEvaluationOutcomeForCycle(cycle.id)).toBeNull();
     const { facetResults: _facetResults, ...legacyAssessmentInput } = stewardSubmissionInput;
     expect(() => repository.appendClosureAssessment(legacyAssessmentInput))
       .toThrowError(expect.objectContaining({ code: "GROWTH_CLOSURE_LEGACY_WRITE_FORBIDDEN" }));
@@ -833,6 +835,7 @@ describe("GrowthRepository", () => {
     expect(repository.appendClosureCheckerSubmission(checkerSubmissionInput)).toEqual(checkerAssessment);
     expect(repository.sealClosureReviewV4(reviewInput)).toEqual(review);
     expect(repository.sealClosureEvaluationOutcome(outcomeInput)).toEqual(outcome);
+    expect(repository.getClosureEvaluationOutcomeForCycle(evaluationCycle.id)).toEqual(outcome);
     expect(repository.getClosureState(profile.id)).toMatchObject({ contentState: "closed", visualState: "planning", revision: 1 });
 
     const visualRequest = repository.createIllustrationRequest({

@@ -78,7 +78,7 @@ describe("Steward tool handoff state machine", () => {
       authorizedScopeResourceIds: ["world-1"],
       growthBinding: {
         capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], inputCheckpointId: "checkpoint-1",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null,
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
       },
       operationalTools: [retrieve, selectedInquiryTool(), propose],
       resultCapture: createRoleOutputTool("steward"),
@@ -309,7 +309,7 @@ describe("Steward tool handoff state machine", () => {
       authorizedScopeResourceIds: ["world-root"],
       growthBinding: {
         capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], inputCheckpointId: "checkpoint",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized, priorInquiries: [], closureProfile: null,
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized, priorInquiries: [], closureProfile: null, closureRepair: null,
       },
       operationalTools: [retrieve, selectedInquiryTool(), propose], resultCapture: createRoleOutputTool("steward"),
     });
@@ -348,7 +348,7 @@ describe("Steward tool handoff state machine", () => {
     };
     const binding = {
       capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", kind: "expand" as const, focusKinds: ["world" as const], resumeFrontier: ["story" as const, "oc" as const], inputCheckpointId: "checkpoint",
-        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: true, priorInquiries: [], closureProfile: null,
+        ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [], domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: true, priorInquiries: [], closureProfile: null, closureRepair: null,
     };
     const retrieve = successfulTool("retrieve_graph_evidence", emptyReceipt);
     let attempts = 0;
@@ -860,6 +860,27 @@ describe("Steward tool handoff state machine", () => {
     ]);
   });
 
+  it("runs one trusted Closure repair from pinned evidence without an Inquiry or image step", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", growthRetrievalResult());
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "repair-change", mode: "free", status: "committed", gateStatus: "ready", blockedReason: null,
+      itemCount: 1, committedOutputs: [{ itemId: "repair-document", kind: "document_version", outputId: "repair-version" }],
+    });
+    const machine = createRepairMachine([retrieve, propose]);
+    expect(machine.snapshot().plan).toEqual({
+      objective: "change_set", scopeResourceIds: ["world-root", "oc-root", "story-root"],
+      steps: ["retrieve_graph_evidence", "propose_change_set"],
+    });
+    expect(machine.tools.some((candidate) => candidate.name === "submit_growth_inquiry")).toBe(false);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("repair-retrieve", growthRetrieveArgs());
+    expect(machine.requiredNextTool()).toBe("propose_change_set");
+    await tool(machine.tools, "propose_change_set").execute("repair-propose", {
+      summary: "Repair only the selected continuity finding.", items: [],
+    });
+    expect(propose.execute).toHaveBeenCalledTimes(1);
+    expect(machine.snapshot().executions.map((entry) => entry.tool)).toEqual(["retrieve_graph_evidence", "propose_change_set"]);
+  });
+
 });
 
 function createMachine(mode: "free" | "assist", operationalTools: AgentTool[]) {
@@ -1082,7 +1103,7 @@ function createGrowthMachine(focus: "world" | "story" | "oc", operationalTools: 
     growthBinding: {
       capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: `cycle-${focus}`, kind, focusKinds: [focus], resumeFrontier: [], inputCheckpointId: "checkpoint",
       ruleRevision: 1, authorizedScopeResourceIds: ["world-1", "oc-root", "story-root"], seedResourceIds: [],
-      domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null,
+      domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
     },
     operationalTools: growthTools,
     resultCapture: createRoleOutputTool("steward"),
@@ -1104,6 +1125,29 @@ function createClosureMachine(operationalTools: AgentTool[]) {
         profileId: "profile", revision: 1, profileKind: "mixed_birth", subjectResourceId: null,
         componentProfiles: ["world_birth", "story_universe", "oc_saga"], focusOcResourceId: "oc-1",
         requiredContentFacetIds: ["closure.world.structure.resource"],
+      },
+      closureRepair: null,
+    },
+    operationalTools,
+    resultCapture: createRoleOutputTool("steward"),
+  });
+}
+
+function createRepairMachine(operationalTools: AgentTool[]) {
+  return createStewardExecutionStateMachine({
+    mode: "free",
+    userInput: "Repair the selected Closure finding.",
+    authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
+    growthBinding: {
+      capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle-repair",
+      kind: "repair", focusKinds: [], resumeFrontier: [], inputCheckpointId: "checkpoint",
+      ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [],
+      domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+      greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null,
+      closureRepair: {
+        profileId: "profile", revision: 1, originalReviewId: "review", selectedFindingId: "finding",
+        selectedFindingFingerprint: "f".repeat(64), safeSummary: "One continuity edge is unsupported.",
+        repairObjective: "Add one source-bound causal bridge.", targetEvidenceIds: ["world-growth"],
       },
     },
     operationalTools,

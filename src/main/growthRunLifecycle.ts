@@ -5,6 +5,7 @@ import {
   growthCapabilityVersion,
   type GrowthClosureFacetResult,
   type GrowthCycle,
+  type GrowthCycleIntent,
   type GrowthEvent,
   type GrowthGoal,
 } from "../shared/growthContract";
@@ -91,14 +92,6 @@ export class GrowthRunLifecycle {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
     const intent = repository.getCycleIntent(cycle.id);
-    if (intent.kind === "repair") {
-      const terminal = repository.terminalizeCycle({
-        cycleId: cycle.id, status: "blocked", failureCode: "GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED",
-      });
-      const event = repairTerminalEvent(repository, goal, terminal, "Closure evaluation/repair 执行路径尚未接入，已安全阻塞。");
-      if (event) notifyPersistedEvent(input.onPersistedEvent, event);
-      throw growthRunError("GROWTH_CLOSURE_EXECUTION_NOT_IMPLEMENTED");
-    }
     if (intent.kind === "expand" && intent.focusKinds.length !== 1) {
       throw growthRunError("GROWTH_BINDING_INVALID");
     }
@@ -111,32 +104,37 @@ export class GrowthRunLifecycle {
       throw growthRunError("GROWTH_REVISION_EXECUTION_NOT_IMPLEMENTED");
     }
     const isClosureEvaluation = intent.kind === "closure_evaluation";
-    if (isClosureEvaluation && input.request.mode !== "free") throw growthRunError("GROWTH_BINDING_INVALID");
+    const isClosureRepair = intent.kind === "repair";
+    if ((isClosureEvaluation || isClosureRepair) && input.request.mode !== "free") throw growthRunError("GROWTH_BINDING_INVALID");
     const closureAuthority = isClosureEvaluation
       ? trustedClosureAuthority(repository, goal, cycle, intent.profileId, intent.revision, intent.checkpointId)
       : null;
-    const intentAnchors = isClosureEvaluation
+    const repairAuthority = isClosureRepair
+      ? trustedClosureRepairAuthority(repository, goal, cycle, intent)
+      : null;
+    const intentAnchors = isClosureEvaluation || isClosureRepair
       ? []
       : trustedIntentAnchors(this.workspace, repository, goal, cycle, intent.focusKinds[0]!);
-    const priorInquiryAuthority = isClosureEvaluation ? [] : trustedPriorInquiryAuthority(repository, goal.id);
+    const priorInquiryAuthority = isClosureEvaluation || isClosureRepair ? [] : trustedPriorInquiryAuthority(repository, goal.id);
     const binding = growthRunBindingSchema.parse({
       capabilityVersion: growthCapabilityVersion,
       goalId: goal.id,
       cycleId: cycle.id,
       kind: intent.kind,
-      focusKinds: intent.kind === "closure_evaluation" ? [] : intent.focusKinds,
-      resumeFrontier: intent.kind === "closure_evaluation" ? [] : intent.resumeFrontier,
+      focusKinds: intent.kind === "closure_evaluation" || intent.kind === "repair" ? [] : intent.focusKinds,
+      resumeFrontier: intent.kind === "closure_evaluation" || intent.kind === "repair" ? [] : intent.resumeFrontier,
       inputCheckpointId: cycle.inputCheckpointId,
       ruleRevision: cycle.ruleRevision,
       authorizedScopeResourceIds: goal.authorizedScopeResourceIds,
       seedResourceIds: trustedSeedResourceIds(this.workspace, goal, cycle.inputCheckpointId),
       domainRootResourceIds: trustedDomainRoots(this.workspace, cycle.inputCheckpointId, goal.authorizedScopeResourceIds),
-      greenfieldCreateAuthorized: !isClosureEvaluation && input.request.mode === "free"
+      greenfieldCreateAuthorized: !isClosureEvaluation && !isClosureRepair && input.request.mode === "free"
         && cycle.sequence === 1
         && intent.focusKinds[0] === "world"
         && isGreenfieldWorkspaceEmpty(this.workspace),
       priorInquiries: priorInquiryAuthority.map(({ inquiryId: _inquiryId, lifecycleSequence: _sequence, ...inquiry }) => inquiry),
       closureProfile: closureAuthority,
+      closureRepair: repairAuthority,
     });
     const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent, intentAnchors, priorInquiryAuthority);
     return this.supervisor.start(
@@ -407,6 +405,11 @@ class BoundGrowthRun implements AgentRunInternalBinding {
   }
 
   #requiredClosureTargetVersionIds(): string[] {
+    if (this.workerBinding.kind === "repair") {
+      const repair = this.workerBinding.closureRepair;
+      if (!repair) throw growthRunError("GROWTH_BINDING_INVALID");
+      return [...repair.targetEvidenceIds];
+    }
     const closure = this.workerBinding.closureProfile;
     if (this.workerBinding.kind !== "closure_evaluation") return [];
     if (!closure) throw growthRunError("GROWTH_BINDING_INVALID");
@@ -663,7 +666,10 @@ class BoundGrowthRun implements AgentRunInternalBinding {
   }
 
   async #propose(gateway: AgentToolGateway, args: ProposeChangeSetArgs, context: AgentToolInvocationContext): Promise<ProposeChangeSetResult> {
-    if (!this.#runMatches(context) || !this.#receiptRecorded || !this.#inquirySelected) throw growthRunError("GROWTH_INQUIRY_REQUIRED");
+    const contentInquiryRequired = this.workerBinding.kind === "expand" || this.workerBinding.kind === "revision";
+    if (!this.#runMatches(context) || !this.#receiptRecorded || (contentInquiryRequired && !this.#inquirySelected)) {
+      throw growthRunError(contentInquiryRequired ? "GROWTH_INQUIRY_REQUIRED" : "GROWTH_BINDING_INVALID");
+    }
     if (this.#proposalExecutionStarted) throw growthRunError("GROWTH_RUN_FAILED");
     this.#requiredCycle();
     this.#proposalExecutionStarted = true;
@@ -904,6 +910,49 @@ function trustedClosureAuthority(
     componentProfiles: [...revision.componentProfiles],
     focusOcResourceId: revision.focusOcResourceId,
     requiredContentFacetIds,
+  };
+}
+
+function trustedClosureRepairAuthority(
+  repository: GrowthRepository,
+  goal: GrowthGoal,
+  cycle: GrowthCycle,
+  intent: Extract<GrowthCycleIntent, { kind: "repair" }>,
+): NonNullable<GrowthRunBinding["closureRepair"]> {
+  const profile = repository.getClosureProfile(intent.profileId);
+  const revision = repository.getClosureRevision(intent.profileId, intent.revision);
+  const review = repository.getClosureReviewV4(intent.originalReviewId);
+  const checker = review ? repository.getClosureCheckerSubmission(review.checkerAssessmentId) : null;
+  const finding = review?.adverseFindings.find((candidate) => candidate.id === intent.selectedFindingId) ?? null;
+  const receipt = checker ? repository.getReceipt(checker.receiptId) : null;
+  if (!profile || !revision || !review || !checker || !finding || !receipt
+    || profile.goalId !== goal.id || profile.currentRevision !== intent.revision
+    || profile.contractGeneration !== "v26" || revision.contractGeneration !== "v26"
+    || revision.checkpointId !== cycle.inputCheckpointId || revision.ruleRevision !== cycle.ruleRevision
+    || review.profileId !== profile.id || review.revision !== revision.revision || review.checkerDecision !== "repairs_required"
+    || checker.decision !== "repairs_required" || checker.checkpointId !== cycle.inputCheckpointId
+    || checker.receiptId !== receipt.id || receipt.checkpointId !== cycle.inputCheckpointId
+    || finding.fingerprint !== intent.selectedFindingFingerprint || !["major", "blocking"].includes(finding.severity)) {
+    throw growthRunError("GROWTH_BINDING_INVALID");
+  }
+  const targetEvidenceIds = finding.targetEvidence.map((link) => {
+    if (link.receiptId !== receipt.id) throw growthRunError("GROWTH_BINDING_INVALID");
+    const target = receipt.links[link.rank - 1];
+    if (!target || target.rank !== link.rank) throw growthRunError("GROWTH_BINDING_INVALID");
+    return target.targetVersionId;
+  });
+  if (targetEvidenceIds.length === 0 || new Set(targetEvidenceIds).size !== targetEvidenceIds.length) {
+    throw growthRunError("GROWTH_BINDING_INVALID");
+  }
+  return {
+    profileId: profile.id,
+    revision: revision.revision,
+    originalReviewId: review.id,
+    selectedFindingId: finding.id,
+    selectedFindingFingerprint: finding.fingerprint,
+    safeSummary: finding.safeSummary,
+    repairObjective: finding.repairObjective,
+    targetEvidenceIds,
   };
 }
 

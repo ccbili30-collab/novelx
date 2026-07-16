@@ -26,7 +26,7 @@ describe("agent worker fail-closed contract", () => {
       inputCheckpointId: "checkpoint-1", ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
       kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"], seedResourceIds: ["seed-resource"],
       domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false,
-      priorInquiries: [], closureProfile: null,
+      priorInquiries: [], closureProfile: null, closureRepair: null,
     };
     expect(growthRunBindingSchema.parse(binding)).toEqual(binding);
     expect(growthRunBindingSchema.safeParse({ ...binding, seedResourceIds: ["seed-resource", "seed-resource"] }).success).toBe(false);
@@ -137,6 +137,31 @@ describe("agent worker fail-closed contract", () => {
     expect(submitClosureCheckerReviewArgsSchema.safeParse({ decision: "accepted", adverseFindings: [finding] }).success).toBe(false);
     expect(submitClosureCheckerReviewArgsSchema.safeParse({
       decision: "repairs_required", adverseFindings: [{ ...finding, receiptId: "forged" }],
+    }).success).toBe(false);
+  });
+
+  it("keeps Closure repair authority internal, unique, and separate from content growth", () => {
+    const binding = {
+      capabilityVersion: "hackathon-growth-closure-v4" as const, goalId: "goal-1", cycleId: "cycle-repair",
+      kind: "repair" as const, focusKinds: [], resumeFrontier: [], inputCheckpointId: "checkpoint-2",
+      ruleRevision: 3, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [],
+      domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+      greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null,
+      closureRepair: {
+        profileId: "profile-1", revision: 2, originalReviewId: "review-1", selectedFindingId: "finding-1",
+        selectedFindingFingerprint: "a".repeat(64), safeSummary: "One causal link is unsupported.",
+        repairObjective: "Add one source-bound causal bridge.", targetEvidenceIds: ["evidence-1"],
+      },
+    };
+    expect(growthRunBindingSchema.safeParse(binding).success).toBe(true);
+    expect(growthRunBindingSchema.safeParse({ ...binding, focusKinds: ["world"] }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, closureProfile: { forged: true } }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({ ...binding, closureRepair: null }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({
+      ...binding, closureRepair: { ...binding.closureRepair, targetEvidenceIds: ["evidence-1", "evidence-1"] },
+    }).success).toBe(false);
+    expect(growthRunBindingSchema.safeParse({
+      ...binding, closureRepair: { ...binding.closureRepair, checkpointId: "forged" },
     }).success).toBe(false);
   });
 

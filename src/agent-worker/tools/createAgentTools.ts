@@ -339,6 +339,8 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
             priorInquiries: options.growthBinding?.priorInquiries ?? [],
             novaxInstruction: options.growthBinding?.kind === "closure_evaluation"
               ? "This pinned Closure Receipt and deterministic facet projection are recorded. Do not repeat retrieval or propose changes. Submit exactly one Closure self-assessment next."
+              : options.growthBinding?.kind === "repair"
+              ? `This pinned Receipt contains the evidence for one authorized Closure repair. Apply only this safe objective: ${options.growthBinding.closureRepair?.repairObjective ?? "repair the selected finding"}. Submit exactly one Change Set; do not broaden the repair or repeat retrieval.`
               : options.growthBinding
               ? "This pinned Growth Receipt is recorded. Do not repeat retrieval. Submit exactly one 3-7 item Growth Inquiry Brief next. Cite only returned evidence IDs; use the trusted priorInquiries local IDs only for explicit allowlisted transitions."
               : "Do not repeat the same retrieval. If the user requested a Change Set and evidence is sufficient, call propose_change_set. If the evidence conflicts or the user requested validation, call checker. Otherwise submit the final structured result.",
@@ -562,6 +564,7 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
 
   const growthTools = options.growthBinding?.kind === "closure_evaluation"
     ? [submitClosureSelfAssessment, submitClosureCheckerReview]
+    : options.growthBinding?.kind === "repair" ? []
     : options.growthBinding ? [submitInquiry] : [];
   return [retrieve, ...growthTools, listDirectory, statFile, globFiles, searchFiles, readFile, saveNote, listNotes, inspectFiles, generateImage, propose];
 }
