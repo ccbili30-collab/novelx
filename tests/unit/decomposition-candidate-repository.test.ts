@@ -6,6 +6,7 @@ import { DecompositionCandidateRepository } from "../../src/domain/import/decomp
 import { ImportJobRepository } from "../../src/domain/import/importJobRepository";
 import { SourceLibraryRepository } from "../../src/domain/import/sourceLibraryRepository";
 import { TextSourceParserService } from "../../src/domain/import/textSourceParserService";
+import { removePostV22GrowthSchema } from "../support/legacyWorkspaceFixture";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
 
 let workspace: WorkspaceDatabase | null = null;
@@ -66,8 +67,10 @@ describe("DecompositionCandidateRepository", () => {
       candidates: [{ kind: "style", sourceChunkIds: [chunk.id], confidence: 0.7, payload: { description: "克制" } }], unresolvedSourceChunkIds: [],
     } });
     workspace.db.prepare("DELETE FROM decomposition_candidate_revisions WHERE candidate_id = ?").run(candidate!.id);
+    removePostV22GrowthSchema(workspace.db);
     workspace.db.prepare("UPDATE schema_meta SET version = 13 WHERE singleton = 1").run();
     workspace.close();
+    workspace = null;
     workspace = openWorkspace(root);
 
     expect(new DecompositionCandidateRepository(workspace).getRequired(candidate!.id)).toMatchObject({

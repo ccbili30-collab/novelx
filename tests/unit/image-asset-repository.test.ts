@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ImageAssetRepository } from "../../src/domain/asset/imageAssetRepository";
+import { removePostV22GrowthSchema } from "../support/legacyWorkspaceFixture";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
 
 let workspace: WorkspaceDatabase | null = null;
@@ -77,9 +78,10 @@ describe("ImageAssetRepository", () => {
   it("upgrades an existing v20 workspace to the current image schema", () => {
     const repository = openRepository();
     expect(repository.createOrGetJob(jobInput()).status).toBe("queued");
+    removePostV22GrowthSchema(workspace!.db);
     workspace!.db.exec("DROP TABLE image_assets; DROP TABLE image_generation_jobs; UPDATE schema_meta SET version = 20 WHERE singleton = 1;");
-    workspace!.close(); workspace = openWorkspace(root);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 22 });
+    workspace!.close(); workspace = null; workspace = openWorkspace(root);
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
     expect(new ImageAssetRepository(workspace).createOrGetJob(jobInput("after-upgrade")).status).toBe("queued");
   });
 
@@ -91,11 +93,12 @@ describe("ImageAssetRepository", () => {
     const asset = repository.complete(portrait.id, assetInput());
     const scene = repository.createOrGetJob(jobInput("scene-v21"));
 
+    removePostV22GrowthSchema(workspace!.db);
     workspace!.db.prepare("UPDATE schema_meta SET version = 21 WHERE singleton = 1").run();
-    workspace!.close(); workspace = openWorkspace(root);
+    workspace!.close(); workspace = null; workspace = openWorkspace(root);
     const migrated = new ImageAssetRepository(workspace);
 
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 22 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
     expect(migrated.getRequiredJob(portrait.id)).toMatchObject({
       idempotencyKey: portrait.idempotencyKey,
       purpose: "character_portrait",

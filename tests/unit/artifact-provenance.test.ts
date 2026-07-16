@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { removePostV22GrowthSchema } from "../support/legacyWorkspaceFixture";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentAuditRepository } from "../../src/domain/audit/agentAuditRepository";
 import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
@@ -204,11 +205,12 @@ describe("Artifact provenance", () => {
     expect(countRows(workspace, "change_set_outputs")).toBe(0);
   });
 
-  it("migrates a schema v3 workspace through v21 without inventing provenance", () => {
+  it("migrates a schema v3 workspace to the current schema without inventing provenance", () => {
     const { root, workspace } = createWorkspace();
     closeWorkspace(workspace);
     const databasePath = path.join(root, ".novax", "workspace.db");
     const legacy = new DatabaseSync(databasePath);
+    removePostV22GrowthSchema(legacy);
     legacy.exec("DROP TABLE change_set_outputs");
     legacy.exec("ALTER TABLE change_sets DROP COLUMN producer_tool_invocation_id");
     legacy.exec("ALTER TABLE agent_audit_events DROP COLUMN correction_attempts");
@@ -217,7 +219,7 @@ describe("Artifact provenance", () => {
 
     const migrated = openTrackedWorkspace(root);
     expect(migrated.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toMatchObject({ version: 21 });
+      .toMatchObject({ version: 26 });
     const columns = migrated.db.prepare("PRAGMA table_info(change_sets)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toContain("producer_tool_invocation_id");
     expect(migrated.db.prepare(`

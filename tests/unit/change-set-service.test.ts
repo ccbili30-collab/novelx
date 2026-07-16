@@ -281,7 +281,7 @@ describe("Change Set service contract", () => {
     expect(() => service.finalizeAssist(pending.id, {
       expectedHeadCheckpointId: beforeHead,
       label: "应当完整回滚",
-    })).toThrowError("injected contract failure");
+    })).toThrowError(expect.objectContaining({ code: "CHANGE_SET_APPLY_FAILED" }));
     expect(currentHead()).toBe(beforeHead);
     expect(new AssertionRepository(workspace!).listCurrent()).toEqual([]);
     expect(service.getRequired(pending.id).status).toBe("failed");

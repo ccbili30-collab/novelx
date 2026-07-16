@@ -9,6 +9,7 @@ const vitestCli = path.join(appRoot, "node_modules", "vitest", "vitest.mjs");
 const stages = [
   { name: "unit", directory: path.join(testsRoot, "unit"), config: "vitest.config.ts" },
   { name: "integration", directory: path.join(testsRoot, "integration"), config: "vitest.integration.config.ts" },
+  { name: "e2e-support", directory: path.join(testsRoot, "e2e", "support"), config: "tests/e2e/support/growthWatcher.vitest.config.ts" },
 ];
 
 const summary = {
