@@ -42,7 +42,7 @@
 黑客松执行进度：1/7 阶段已验收，剩余 6 阶段
 [x] 0. 模块化基线与全量测试
 [ ] 1. Repair 权限与领域正确性
-[ ] 2. 用户规则影响分析与修订
+[x] 2. 用户规则影响分析与修订
 [ ] 3. OC 万字 Longform 自动循环
 [ ] 4. 通用插图队列
 [ ] 5. 生长过程与图文图鉴 UI
@@ -181,9 +181,9 @@ git diff --check
 
 ---
 
-## 5. 阶段 2：用户规则影响分析与修订 [ ]
+## 5. 阶段 2：用户规则影响分析与修订 [x]
 
-**状态：** `not_started`
+**状态：** `completed`
 **目标：** 用户保存新规则后，下一安全 Revision Cycle（修订轮）从最新 checkpoint 重新检索，分析受影响节点，并用一个原子 Change Set 修改世界、故事、OC 与关系。
 
 ### 文件所有权
@@ -235,21 +235,21 @@ interface GrowthImpactBrief {
 
 ### 实现步骤
 
-1. [ ] 严格 schema 测试：未知 evidence、重复目标、空摘要、伪造权限字段失败关闭。
-2. [ ] Revision Fragment 测试：创作内容来自模型；ID、owner、版本、来源和依赖由编译器产生。
-3. [ ] 跨领域测试：一条规则在同一 Change Set 更新 world、story、OC 和关系。
-4. [ ] preserve 测试：未选择修改的用户事实保持字节不变。
-5. [ ] stale 测试：来源变化只登记受影响图片，不污染无关 Asset。
-6. [ ] 实现 Revision handler：`retrieve → inquiry → impact → propose`。
-7. [ ] 注册 handler；不得把 Revision 细节写回 Steward 顶层主体。
-8. [ ] Main resolver 从最新 revision、Receipt 和 checkpoint 映射权威对象。
-9. [ ] Coordinator 仅在安全终态后创建一个 revision Intent。
-10. [ ] 连续指导保留全部 revision 审计；下一轮可使用最新 revision 合并处理。
-11. [ ] Change Set 失败即停止；结果未知进入 `reconciliation_required`，不得重提。
-12. [ ] 发布安全影响摘要，不发布原始思维链。
-13. [ ] UI 区分“已保存”“等待边界”“正在分析”“已修改”。
-14. [ ] 覆盖重开、取消、CAS 冲突、重复请求和终态事件恰好一次。
-15. [ ] 固定示例：“轻小说叙事风格、无真实日本元素、原创西幻世界”。
+1. [x] 严格 schema 测试：未知 evidence、重复目标、空摘要、伪造权限字段失败关闭。
+2. [x] Revision Fragment 测试：创作内容来自模型；ID、owner、版本、来源和依赖由编译器产生。
+3. [x] 跨领域测试：一条规则在同一 Change Set 更新 world、story、OC 和关系。
+4. [x] preserve 测试：未选择修改的用户事实保持字节不变。
+5. [x] stale 测试：来源变化只登记受影响图片，不污染无关 Asset。
+6. [x] 实现 Revision handler：`retrieve → inquiry → impact → propose`。
+7. [x] 注册 handler；Revision 的模型工具、authority 状态、编译与纠正留在阶段私有 runtime。
+8. [x] Main resolver 从最新 revision、Receipt 和 checkpoint 映射权威对象。
+9. [x] Coordinator 仅在安全终态后创建一个 revision Intent。
+10. [x] 连续指导保留全部 revision 审计；下一轮使用最新 revision 合并处理。
+11. [x] Change Set 失败即停止；结果未知进入 `reconciliation_required`，不得重提。
+12. [x] 发布安全影响摘要，不发布原始思维链。
+13. [x] UI 区分“已保存”“等待边界”“正在分析”“已修改”。
+14. [x] 覆盖重开、取消、CAS 冲突、重复请求和终态事件恰好一次。
+15. [x] 固定示例：“轻小说叙事风格、无真实日本元素、原创西幻世界”。
 
 ### 定向验收
 
@@ -260,16 +260,16 @@ npm run verify:prompt-publication
 git diff --check
 ```
 
-- [ ] 最新 Rule Revision 只在 Cycle 边界生效。
-- [ ] Revision Cycle 必须重新检索。
-- [ ] world/story/OC 可在一个 Change Set 中共同修改。
-- [ ] preserve、失败、取消、重开和结果未知通过。
-- [ ] UI 不提前显示规则已应用。
-- [ ] 提交：`feat(growth): revise graph-backed content from new rules`。
+- [x] 最新 Rule Revision 只在 Cycle 边界生效。
+- [x] Revision Cycle 必须重新检索。
+- [x] world/story/OC 可在一个 Change Set 中共同修改。
+- [x] preserve、失败、取消、重开和结果未知通过。
+- [x] UI 不提前显示规则已应用。
+- [x] 提交：`3a39df5 feat(growth): revise graph-backed content from new rules`。
 
 **停止条件：** 内部 binding 无法安全表达 authority、需要不兼容协议/迁移，或问题需要创作者价值取舍。
 
-**完成证据：** Commit / Tests / Remaining 待填。
+**完成证据：** Commit `3a39df5`；Vitest 11 files / 146 passed / 0 skipped；typecheck、Prompt publication、diff check passed。未运行真实 Provider、Electron、生产构建或全量测试；当前只证明 Revision 的确定性闭环，真实交互式 Live 留到阶段 6。
 
 ---
 
@@ -599,6 +599,7 @@ npm run verify:installer
 | --- | --- | --- | --- | --- | --- |
 | 2026-07-16 | 0 模块化基线 | completed | `a666f07` | `npm test` 756/756；typecheck/build passed | 未运行 Provider/打包 |
 | 2026-07-16 | 1 Repair 权限 | completed | `410fea7` | Vitest 93/93；typecheck/Prompt gate/diff passed | 未运行 Provider；真实 Live 留到阶段 6 |
+| 2026-07-16 | 2 用户规则修订 | completed | `3a39df5` | Vitest 146/146；typecheck/Prompt gate/diff passed | 未运行 Provider/Electron/build/full suite |
 
 只追加经验证的行，不把计划或中间态写成完成。
 
@@ -606,14 +607,14 @@ npm run verify:installer
 
 ## 13. 当前对话进度板
 
-**已验收：2/7 阶段｜剩余：5 阶段**
+**已验收：3/7 阶段｜剩余：4 阶段**
 
 - [x] 0. 模块化基线与全量测试
 - [x] 1. Repair 权限与领域正确性
-- [ ] 2. 用户规则影响分析与修订
+- [x] 2. 用户规则影响分析与修订
 - [ ] 3. OC 万字 Longform 自动循环
 - [ ] 4. 通用插图队列
 - [ ] 5. 生长过程与图文图鉴 UI
 - [ ] 6. 真实 Live、打包与冻结验收
 
-**下一执行入口：** 阶段 2。先用现有 Revision Intent 的失败关闭测试确定可复用合同，再写 Impact Brief 的第一条失败测试。
+**下一执行入口：** 阶段 3。先复核已有 Longform outline/section/progress 的冻结边界与当前测试，再以测试先行补齐自动 outline → 分节写作 → 10,000 字 → Closure 复检循环。
