@@ -784,6 +784,82 @@ describe("Steward tool handoff state machine", () => {
     );
   });
 
+  it("runs a trusted Closure self-assessment and independent Checker without mutation tools", async () => {
+    const facetResults = [{
+      facetId: "closure.world.structure.resource", state: "satisfied" as const, coverage: "complete" as const,
+      safeSummary: "The formal world is pinned.", evidenceIds: ["world-evidence"],
+    }];
+    const retrieve = successfulTool("retrieve_graph_evidence", closureRetrievalResult(facetResults, true));
+    const assessment = successfulTool("submit_closure_self_assessment", {
+      status: "checker_required", deterministicContentReady: true, facetResults,
+    });
+    const checker = successfulTool("checker", {
+      status: "closure_review", decision: "accepted", adverseFindings: [],
+    });
+    const review = successfulTool("submit_closure_checker_review", { status: "recorded", decision: "accepted" });
+    const machine = createClosureMachine([retrieve, assessment, checker, review]);
+
+    expect(machine.requiredNextTool()).toBe("retrieve_graph_evidence");
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    expect(machine.requiredNextTool()).toBe("submit_closure_self_assessment");
+    await tool(machine.tools, "submit_closure_self_assessment").execute("assessment", {
+      decision: "ready_for_checker", safeSummary: "The required pinned facets are ready.",
+    });
+    expect(machine.requiredNextTool()).toBe("checker");
+    await tool(machine.tools, "checker").execute("checker", {});
+    expect(checker.execute).toHaveBeenCalledWith("checker", expect.objectContaining({
+      evaluationKind: "closure_v4", profileKind: "mixed_birth", evidenceIds: ["world-evidence"], facetResults,
+    }), undefined, undefined);
+    expect(machine.requiredNextTool()).toBe("submit_closure_checker_review");
+    await tool(machine.tools, "submit_closure_checker_review").execute("review", {});
+    expect(review.execute).toHaveBeenCalledWith("review", { decision: "accepted", adverseFindings: [] }, undefined, undefined);
+    expect(machine.requiredNextTool()).toBe("submit_steward_result");
+    expect(machine.snapshot().executions).toEqual([
+      { tool: "retrieve_graph_evidence", status: "succeeded" },
+      { tool: "submit_closure_self_assessment", status: "succeeded" },
+      { tool: "checker", status: "succeeded" },
+      { tool: "submit_closure_checker_review", status: "succeeded" },
+    ]);
+    expect(machine.tools.some((candidate) => candidate.name === "propose_change_set" || candidate.name === "generate_image")).toBe(false);
+  });
+
+  it("finishes Closure evaluation without Checker when deterministic facets are missing", async () => {
+    const facetResults = [{
+      facetId: "closure.world.structure.resource", state: "missing" as const, coverage: "complete" as const,
+      safeSummary: "The formal world is missing.", evidenceIds: [],
+    }];
+    const assessment = successfulTool("submit_closure_self_assessment", {
+      status: "continue_growing", deterministicContentReady: false, facetResults,
+    });
+    const machine = createClosureMachine([
+      successfulTool("retrieve_graph_evidence", closureRetrievalResult(facetResults, false)),
+      assessment,
+      successfulTool("checker", { status: "closure_review", decision: "accepted", adverseFindings: [] }),
+      successfulTool("submit_closure_checker_review", { status: "recorded", decision: "accepted" }),
+    ]);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await expect(tool(machine.tools, "submit_closure_self_assessment").execute("not-ready", {
+      decision: "ready_for_checker", safeSummary: "Attempt to skip missing evidence.",
+    })).rejects.toMatchObject({ code: "STEWARD_CLOSURE_NOT_READY" });
+    expect(assessment.execute).not.toHaveBeenCalled();
+
+    const retry = createClosureMachine([
+      successfulTool("retrieve_graph_evidence", closureRetrievalResult(facetResults, false)),
+      assessment,
+      successfulTool("checker", { status: "closure_review", decision: "accepted", adverseFindings: [] }),
+      successfulTool("submit_closure_checker_review", { status: "recorded", decision: "accepted" }),
+    ]);
+    await tool(retry.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await tool(retry.tools, "submit_closure_self_assessment").execute("continue", {
+      decision: "continue_growing", safeSummary: "The missing facet requires another content cycle.",
+    });
+    expect(retry.requiredNextTool()).toBe("submit_steward_result");
+    expect(retry.snapshot().executions).toEqual([
+      { tool: "retrieve_graph_evidence", status: "succeeded" },
+      { tool: "submit_closure_self_assessment", status: "succeeded" },
+    ]);
+  });
+
 });
 
 function createMachine(mode: "free" | "assist", operationalTools: AgentTool[]) {
@@ -1011,6 +1087,50 @@ function createGrowthMachine(focus: "world" | "story" | "oc", operationalTools: 
     operationalTools: growthTools,
     resultCapture: createRoleOutputTool("steward"),
   });
+}
+
+function createClosureMachine(operationalTools: AgentTool[]) {
+  return createStewardExecutionStateMachine({
+    mode: "free",
+    userInput: "Evaluate the pinned Closure facets.",
+    authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
+    growthBinding: {
+      capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle-closure",
+      kind: "closure_evaluation", focusKinds: [], resumeFrontier: [], inputCheckpointId: "checkpoint",
+      ruleRevision: 1, authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: [],
+      domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+      greenfieldCreateAuthorized: false, priorInquiries: [],
+      closureProfile: {
+        profileId: "profile", revision: 1, profileKind: "mixed_birth", subjectResourceId: null,
+        componentProfiles: ["world_birth", "story_universe", "oc_saga"], focusOcResourceId: "oc-1",
+        requiredContentFacetIds: ["closure.world.structure.resource"],
+      },
+    },
+    operationalTools,
+    resultCapture: createRoleOutputTool("steward"),
+  });
+}
+
+function closureRetrievalResult(
+  facetResults: Array<{
+    facetId: string; state: "satisfied" | "missing" | "conflicted" | "blocked";
+    coverage: "complete" | "partial" | "unknown"; safeSummary: string; evidenceIds: string[];
+  }>,
+  deterministicContentReady: boolean,
+) {
+  return {
+    variant: "growth_v1" as const, receiptRecorded: true,
+    evidence: deterministicContentReady ? [{
+      evidenceId: "world-evidence", kind: "resource" as const, label: "Formal world", excerpt: null,
+      resource: { resourceId: "world-1", type: "world" as const, objectKind: "world" as const },
+    }] : [],
+    coverage: { state: "complete" as const, searchedScopeCount: 3, omittedCount: 0, truncated: false },
+    diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
+    closureEvaluation: {
+      profileId: "profile", revision: 1, profileKind: "mixed_birth" as const,
+      deterministicContentReady, facetResults,
+    },
+  };
 }
 
 function ocFragment(profile: string) {

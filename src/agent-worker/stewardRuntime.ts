@@ -9,7 +9,7 @@ import type { SafePiEvent } from "./pi/eventProjection";
 import { auditProviderProtocolStage, providerProtocolError } from "./pi/providerProtocolStage";
 import type { RuntimeAdapter } from "./pi/runtimeAdapterContract";
 import type { PublishedPrompt } from "./promptRegistry";
-import { createStewardExecutionStateMachine, type GeneratedImageReference, type InspectedProjectFileReference, type RetrievedDocumentReference } from "./stewardExecutionStateMachine";
+import { createStewardExecutionStateMachine, type GeneratedImageReference, type InspectedProjectFileReference, type RetrievedDocumentReference, type StewardExecutionSnapshot } from "./stewardExecutionStateMachine";
 
 export interface StewardRuntimeAudit {
   record(runId: string, operation: AgentWorkerAuditOperation, signal?: AbortSignal): Promise<void>;
@@ -157,7 +157,7 @@ export function resolveLongReadMaxChars(contextWindow: number): number {
 
 function attachPublicTrace(
   cause: unknown,
-  executions: Array<{ tool: "retrieve_graph_evidence" | "submit_growth_inquiry" | "inspect_project_files" | "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "save_task_note" | "list_task_notes" | "generate_image" | "propose_change_set" | "writer" | "checker"; status: "succeeded" | "failed" }>,
+  executions: StewardExecutionSnapshot["executions"],
 ): unknown {
   if (!cause || typeof cause !== "object") return cause;
   return Object.assign(cause, { publicToolOutcomes: executions.map((execution) => ({ ...execution })) });

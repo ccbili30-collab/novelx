@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type TSchema } from "typebox";
 import { z } from "zod";
 import type { RoleOutputToolCapture } from "./contracts/roleOutputTool";
-import { stewardOutputSchema, writerOutputSchema, type StewardOutput } from "./contracts/roleOutputs";
+import { checkerOutputSchema, stewardOutputSchema, writerOutputSchema, type CheckerOutput, type StewardOutput } from "./contracts/roleOutputs";
 import { compileGrowthOcFragment, growthOcFragmentParameters } from "./growth/growthOcFragment";
 import { compileGrowthStoryBrief, growthStoryBriefParameters, type TrustedStoryWorldEvidence } from "./growth/growthStoryBrief";
 import { compileGrowthStoryFragment, growthStoryFragmentParameters } from "./growth/growthStoryFragment";
@@ -31,12 +31,19 @@ import {
   generateImageArgsSchema,
   generateImageResultSchema,
   submitGrowthInquiryResultSchema,
+  submitClosureSelfAssessmentArgsSchema,
+  submitClosureSelfAssessmentResultSchema,
+  submitClosureCheckerReviewArgsSchema,
+  submitClosureCheckerReviewResultSchema,
+  type GrowthClosureFacetProjection,
   type GrowthRunBinding,
 } from "../shared/agentWorkerProtocol";
 
 const operationalToolNames = [
   "retrieve_graph_evidence",
   "submit_growth_inquiry",
+  "submit_closure_self_assessment",
+  "submit_closure_checker_review",
   "inspect_project_files",
   "list_project_directory",
   "stat_project_file",
@@ -161,6 +168,13 @@ const planSchema = z.object({
 type StewardPlan = z.infer<typeof planSchema>;
 
 function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
+  if (binding.kind === "closure_evaluation") {
+    return {
+      objective: "orchestrate",
+      scopeResourceIds: [...binding.authorizedScopeResourceIds],
+      steps: ["retrieve_graph_evidence", "submit_closure_self_assessment"],
+    };
+  }
   const focus = growthFocus(binding);
   return {
     objective: "change_set",
@@ -175,6 +189,7 @@ function trustedGrowthPlan(binding: GrowthRunBinding): StewardPlan {
 
 function growthFocus(binding: GrowthRunBinding | undefined): "world" | "story" | "oc" | null {
   if (!binding) return null;
+  if (binding.kind === "closure_evaluation") return null;
   if (binding.kind === "revision") throw stateError("STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED");
   return binding.focusKinds[0] ?? null;
 }
@@ -265,6 +280,9 @@ export function createStewardExecutionStateMachine(input: {
   let trustedOcStory: { evidenceId: string; resourceId: string } | null = null;
   let trustedWorldMapSources: TrustedGrowthWorldMapSources | null = null;
   let writerCandidate: { text: string; evidenceIds: string[] } | null = null;
+  let closureEvaluation: NonNullable<z.infer<typeof growthRetrieveGraphEvidenceResultSchema>["closureEvaluation"]> | null = null;
+  let closureCheckerOutput: Extract<CheckerOutput, { status: "closure_review" }> | null = null;
+  const closureEvidenceById = new Map<string, unknown>();
   let greenfieldProposalCorrectionAttempts = 0;
   const committedOutputIds = new Set<string>();
   const forbiddenExternalEchoTokens = extractExternalEchoTokens(input.userInput);
@@ -317,7 +335,13 @@ export function createStewardExecutionStateMachine(input: {
 
   const wrappedOperationalTools = input.operationalTools.map((original): AgentTool => ({
     ...original,
-    ...(growthFocus(input.growthBinding) === "story" && original.name === "writer" ? {
+    ...(input.growthBinding?.kind === "closure_evaluation" && original.name === "checker" ? {
+      description: "Independently review the trusted pinned Closure facet assessment. Parameters are compiled by the Harness from the recorded Receipt; do not supply content, evidence, scope, checkpoint, profile, or authority fields.",
+      parameters: Type.Object({}, { additionalProperties: false }),
+    } : input.growthBinding?.kind === "closure_evaluation" && original.name === "submit_closure_checker_review" ? {
+      description: "Record the immediately preceding independent Checker result. Parameters are compiled by the Harness; do not supply findings, evidence, scope, checkpoint, profile, hashes, or authority fields.",
+      parameters: Type.Object({}, { additionalProperties: false }),
+    } : growthFocus(input.growthBinding) === "story" && original.name === "writer" ? {
       description: "Create a candidate formal story opening from a high-level Story Brief and the pinned formal-world evidence. Supply only the creative brief: premise, opening situation, central tension, point of view, tone, required/avoided elements, and target length. This is Creator authoring, not a player or GM turn. Do not supply source material, evidence IDs, GM resolutions, resource IDs, or authority fields.",
       parameters: growthStoryBriefParameters,
     } : growthFocus(input.growthBinding) === "story" && original.name === "propose_change_set" ? {
@@ -352,7 +376,11 @@ export function createStewardExecutionStateMachine(input: {
         : normalizeOperationalParams(name, params);
       requireCurrentStep(name, effectiveParams);
       try {
-        const compiledParams = growthFocus(input.growthBinding) === "story" && name === "writer"
+        const compiledParams = input.growthBinding?.kind === "closure_evaluation" && name === "checker"
+          ? compileClosureCheckerInput()
+          : input.growthBinding?.kind === "closure_evaluation" && name === "submit_closure_checker_review"
+          ? compileClosureCheckerSubmission()
+          : growthFocus(input.growthBinding) === "story" && name === "writer"
           ? compileGrowthStoryBrief(effectiveParams, trustedStoryWorld ?? { evidenceId: "", label: "", excerpt: null, resourceId: "" })
           : growthFocus(input.growthBinding) === "story" && name === "propose_change_set"
           ? compileGrowthStoryFragment(effectiveParams, {
@@ -552,6 +580,21 @@ export function createStewardExecutionStateMachine(input: {
         throw stateError("STEWARD_GROWTH_INQUIRY_REQUIRED");
       }
     }
+    if (name === "submit_closure_self_assessment") {
+      const assessment = submitClosureSelfAssessmentArgsSchema.safeParse(params);
+      if (input.growthBinding?.kind !== "closure_evaluation" || !growthReceiptRecorded || !closureEvaluation || !assessment.success) {
+        throw stateError("STEWARD_CLOSURE_ASSESSMENT_REQUIRED");
+      }
+      if (assessment.data.decision === "ready_for_checker" && !closureEvaluation.deterministicContentReady) {
+        throw stateError("STEWARD_CLOSURE_NOT_READY");
+      }
+    }
+    if (name === "checker" && input.growthBinding?.kind === "closure_evaluation" && !closureEvaluation?.deterministicContentReady) {
+      throw stateError("STEWARD_CLOSURE_NOT_READY");
+    }
+    if (name === "submit_closure_checker_review" && input.growthBinding?.kind === "closure_evaluation" && !closureCheckerOutput) {
+      throw stateError("STEWARD_CLOSURE_CHECKER_REQUIRED");
+    }
     if (["writer", "propose_change_set", "generate_image"].includes(name) && input.growthBinding && !growthInquirySelected) {
       throw stateError("STEWARD_GROWTH_INQUIRY_REQUIRED");
     }
@@ -633,8 +676,20 @@ export function createStewardExecutionStateMachine(input: {
         growthReceiptRecorded = true;
         for (const evidence of retrieval.data.evidence) {
           allowedEvidenceIds.add(evidence.evidenceId);
+          if (input.growthBinding.kind === "closure_evaluation") closureEvidenceById.set(evidence.evidenceId, evidence);
           if (evidence.kind === "resource" && evidence.resource.type === "world" && evidence.resource.objectKind === "world") growthWorldsByEvidenceId.set(evidence.evidenceId, evidence.resource.resourceId);
           if (evidence.kind === "resource" && evidence.resource.type === "story" && evidence.resource.objectKind === "story") growthStoriesByEvidenceId.set(evidence.evidenceId, evidence.resource.resourceId);
+        }
+        if (input.growthBinding.kind === "closure_evaluation") {
+          const projected = retrieval.data.closureEvaluation;
+          const profile = input.growthBinding.closureProfile;
+          if (!projected || !profile || projected.profileId !== profile.profileId || projected.revision !== profile.revision
+            || projected.profileKind !== profile.profileKind
+            || !sameStringSets(projected.facetResults.map((facet) => facet.facetId), profile.requiredContentFacetIds)
+            || projected.facetResults.flatMap((facet) => facet.evidenceIds).some((id) => !allowedEvidenceIds.has(id))) {
+            throw stateError("STEWARD_CLOSURE_EVIDENCE_MISMATCH");
+          }
+          closureEvaluation = projected;
         }
         if (growthFocus(input.growthBinding) === "story") {
           const worlds = retrieval.data.evidence
@@ -651,7 +706,7 @@ export function createStewardExecutionStateMachine(input: {
           if (stories.length !== 1) { growthPostInquiryMissingSource = true; }
           else trustedOcStory = stories[0]!;
         }
-        if (retrieval.data.evidence.length === 0 && !input.growthBinding.greenfieldCreateAuthorized) {
+        if (retrieval.data.evidence.length === 0 && input.growthBinding.kind !== "closure_evaluation" && !input.growthBinding.greenfieldCreateAuthorized) {
           growthPostInquiryMissingSource = true;
         }
         return;
@@ -694,6 +749,18 @@ export function createStewardExecutionStateMachine(input: {
         blockReason = "missing_source";
       } else {
         growthInquirySelected = true;
+      }
+      return;
+    }
+    if (name === "submit_closure_self_assessment") {
+      const assessment = submitClosureSelfAssessmentResultSchema.safeParse(details);
+      if (!assessment.success || !closureEvaluation
+        || stableStringify(assessment.data.facetResults) !== stableStringify(closureEvaluation.facetResults)) {
+        throw stateError("STEWARD_TOOL_RESULT_INVALID");
+      }
+      if (assessment.data.status === "checker_required") {
+        if (!assessment.data.deterministicContentReady) throw stateError("STEWARD_CLOSURE_NOT_READY");
+        insertClosureCheckerSteps();
       }
       return;
     }
@@ -812,6 +879,18 @@ export function createStewardExecutionStateMachine(input: {
       return;
     }
     if (name === "checker") {
+      if (input.growthBinding?.kind === "closure_evaluation") {
+        const checker = checkerOutputSchema.safeParse(details);
+        if (!checker.success || checker.data.status !== "closure_review" || !closureEvaluation) {
+          throw stateError("STEWARD_TOOL_RESULT_INVALID");
+        }
+        const allowed = new Set(closureEvaluation.facetResults.flatMap((facet) => facet.evidenceIds));
+        if (checker.data.adverseFindings.flatMap((finding) => finding.evidenceIds).some((id) => !allowed.has(id))) {
+          throw stateError("STEWARD_CLOSURE_EVIDENCE_MISMATCH");
+        }
+        closureCheckerOutput = checker.data;
+        return;
+      }
       const checker = readCheckerResult(details);
       if (checker?.status === "findings" && checker.findings.some((finding) => (
         finding.severity === "major" && finding.category === "fact_conflict"
@@ -822,6 +901,56 @@ export function createStewardExecutionStateMachine(input: {
         blockReason = "major_conflict";
       }
     }
+    if (name === "submit_closure_checker_review") {
+      const result = submitClosureCheckerReviewResultSchema.safeParse(details);
+      if (!result.success || !closureCheckerOutput || result.data.decision !== closureCheckerOutput.decision) {
+        throw stateError("STEWARD_TOOL_RESULT_INVALID");
+      }
+    }
+  }
+
+  function insertClosureCheckerSteps(): void {
+    if (!plan || plan.steps.includes("checker") || plan.steps.includes("submit_closure_checker_review")) return;
+    if (!input.operationalTools.some((tool) => tool.name === "checker")
+      || !input.operationalTools.some((tool) => tool.name === "submit_closure_checker_review")) {
+      throw stateError("STEWARD_CLOSURE_CHECKER_REQUIRED");
+    }
+    plan.steps.splice(nextStepIndex + 1, 0, "checker", "submit_closure_checker_review");
+  }
+
+  function compileClosureCheckerInput(): Record<string, unknown> {
+    const binding = input.growthBinding;
+    if (binding?.kind !== "closure_evaluation" || !binding.closureProfile || !closureEvaluation) {
+      throw stateError("STEWARD_CLOSURE_CHECKER_REQUIRED");
+    }
+    const evidenceIds = [...new Set(closureEvaluation.facetResults.flatMap((facet) => facet.evidenceIds))];
+    const sourceMaterial = JSON.stringify({
+      evidence: evidenceIds.map((evidenceId) => closureEvidenceById.get(evidenceId)),
+      facetResults: closureEvaluation.facetResults,
+    });
+    if (evidenceIds.length === 0 || evidenceIds.some((id) => !closureEvidenceById.has(id)) || sourceMaterial.length > 160_000) {
+      throw stateError("STEWARD_CLOSURE_EVIDENCE_MISMATCH");
+    }
+    return {
+      evaluationKind: "closure_v4",
+      profileKind: binding.closureProfile.profileKind,
+      sourceMaterial,
+      evidenceIds,
+      facetResults: closureEvaluation.facetResults,
+      constraints: [
+        "Review only the pinned facet results and cited evidence IDs.",
+        "Do not invent missing facts, rewrite creative content, or grant Canon authority.",
+        "Return accepted only when no adverse finding remains.",
+      ],
+    };
+  }
+
+  function compileClosureCheckerSubmission(): z.infer<typeof submitClosureCheckerReviewArgsSchema> {
+    if (!closureCheckerOutput) throw stateError("STEWARD_CLOSURE_CHECKER_REQUIRED");
+    return submitClosureCheckerReviewArgsSchema.parse({
+      decision: closureCheckerOutput.decision,
+      adverseFindings: closureCheckerOutput.adverseFindings,
+    });
   }
 
   function registerLongReadFiles(entries: Array<{ path: string; kind: "file" | "directory" }>): void {
