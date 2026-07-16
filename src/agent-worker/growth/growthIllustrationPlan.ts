@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import { z } from "zod";
+import { canonicalAuditHash } from "../../domain/audit/canonicalAuditHash";
 import {
   growthIllustrationPlanSchema,
   type GrowthIllustrationPlan,
@@ -51,6 +51,9 @@ const trustedSourceSchema = z.discriminatedUnion("kind", [
 const trustedEvidenceBindingSchema = z.object({
   evidenceRef: z.string().trim().min(1).max(240),
   scopeResourceId: z.string().trim().min(1).max(240),
+  defaultCoverageRole: z.enum([
+    "world", "place_or_faction", "story", "major_oc", "important_detail", "supporting",
+  ]),
   source: trustedSourceSchema,
   authorizedFacts: z.string().trim().min(1).max(8_000),
   targetAnchorInput: growthIllustrationAnchorSchema,
@@ -122,6 +125,8 @@ export type GrowthIllustrationPlanErrorCode =
   | "GROWTH_ILLUSTRATION_TARGET_ANCHOR_INVALID"
   | "GROWTH_ILLUSTRATION_STYLE_OVERRIDE_UNAUTHORIZED"
   | "GROWTH_ILLUSTRATION_STYLE_OVERRIDE_MISMATCH"
+  | "GROWTH_ILLUSTRATION_DEFAULT_COVERAGE_INCOMPLETE"
+  | "GROWTH_ILLUSTRATION_COVERAGE_INCOMPLETE"
   | "GROWTH_ILLUSTRATION_PROMPT_TOO_LONG";
 
 export function compileGrowthIllustrationPlan(
@@ -162,7 +167,36 @@ export function compileGrowthIllustrationPlan(
   const items = [...parsedPlan.data.items]
     .sort((left, right) => compareStableStrings(left.variantKey, right.variantKey))
     .map((item) => compileItem(parsedPlan.data.coverageMode, item, trusted, bindings, perImageOverrides));
+  assertCoverage(parsedPlan.data.coverageMode, parsedPlan.data.items, trusted.evidenceBindings);
   return { coverageMode: parsedPlan.data.coverageMode, items };
+}
+
+function assertCoverage(
+  coverageMode: GrowthIllustrationPlan["coverageMode"],
+  items: GrowthIllustrationPlan["items"],
+  bindings: readonly TrustedEvidenceBinding[],
+): void {
+  if (coverageMode === "custom") return;
+  const targeted = new Map<string, Set<GrowthIllustrationPlan["items"][number]["purpose"]>>();
+  for (const item of items) {
+    const purposes = targeted.get(item.targetEvidenceRef) ?? new Set();
+    purposes.add(item.purpose);
+    targeted.set(item.targetEvidenceRef, purposes);
+  }
+  for (const binding of bindings) {
+    const purposes = targeted.get(binding.evidenceRef) ?? new Set();
+    if (coverageMode === "all_visible_nodes" && purposes.size === 0) {
+      throw illustrationError("GROWTH_ILLUSTRATION_COVERAGE_INCOMPLETE");
+    }
+    if (coverageMode !== "default") continue;
+    const requiredPurpose = binding.defaultCoverageRole === "world" ? "world_map"
+      : binding.defaultCoverageRole === "major_oc" ? "character_portrait"
+        : ["place_or_faction", "story"].includes(binding.defaultCoverageRole) ? "scene"
+          : null;
+    if (requiredPurpose && !purposes.has(requiredPurpose)) {
+      throw illustrationError("GROWTH_ILLUSTRATION_DEFAULT_COVERAGE_INCOMPLETE");
+    }
+  }
 }
 
 function compileItem(
@@ -216,7 +250,7 @@ function compileItem(
     variantKey: item.variantKey,
     resolvedStyle,
     promptText,
-    promptSha256: sha256(promptText),
+    promptSha256: canonicalAuditHash(promptText),
     promptHashInput,
     normalizedSources,
     targetAnchorInput: targetBinding.targetAnchorInput,
@@ -240,6 +274,7 @@ function validateModelStyleDeclaration(
 
 function validateAnchorMatchesSource(binding: TrustedEvidenceBinding): void {
   const { source, targetAnchorInput: anchor } = binding;
+  if (anchor.kind === "working_text_snapshot" || anchor.kind === "conversation_text_snapshot") return;
   const valid = source.kind === "resource"
     ? anchor.kind === "resource" && anchor.resourceId === source.resourceId && anchor.resourceVersionId === source.resourceVersionId
     : anchor.kind === "stable_text_span" && anchor.documentId === source.documentId && anchor.documentVersionId === source.documentVersionId;
@@ -296,10 +331,6 @@ function compilePromptText(input: GrowthIllustrationPromptHashInput): string {
     ...(input.resolvedStyle.negative.length > 0 ? input.resolvedStyle.negative.map((value) => `- ${value}`) : ["- none specified"]),
     "Do not add creative facts that are absent from authorized evidence.",
   ].join("\n");
-}
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function compareStableStrings(left: string, right: string): number {

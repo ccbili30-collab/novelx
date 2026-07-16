@@ -84,6 +84,8 @@ export interface AgentToolInvocationContext {
   greenfieldCreateRequested?: boolean;
   /** Main-only authority set after a Longform proposal is deterministically recompiled. */
   longformCreateAuthorized?: boolean;
+  /** Main-only authority for one persisted Illustration Queue item; never model- or Renderer-controlled. */
+  illustrationQueueItemId?: string;
   onImageProgress?: (progress: ImageGenerationProgress) => void;
   signal: AbortSignal;
 }

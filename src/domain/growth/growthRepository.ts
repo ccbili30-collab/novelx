@@ -1464,6 +1464,16 @@ export class GrowthRepository {
     });
   }
 
+  listIllustrationItems(requestId: string): GrowthIllustrationItem[] {
+    return (this.workspace.db.prepare(`
+      SELECT items.id FROM growth_illustration_items items
+      JOIN growth_illustration_request_batches batches ON batches.id = items.batch_id
+      WHERE items.request_id = ?
+      ORDER BY batches.sequence, items.rowid
+    `).all(requestId) as Array<{ id: string }>).map((row) =>
+      this.getIllustrationItem(row.id) ?? fail("GROWTH_DATA_INVALID"));
+  }
+
   getIllustrationBatch(batchId: string): GrowthIllustrationBatch | null {
     const row = this.workspace.db.prepare("SELECT * FROM growth_illustration_request_batches WHERE id = ?").get(batchId) as Row | undefined;
     if (!row) return null;
@@ -1479,10 +1489,50 @@ export class GrowthRepository {
     });
   }
 
+  listIllustrationBatches(requestId: string): GrowthIllustrationBatch[] {
+    return (this.workspace.db.prepare(`
+      SELECT id FROM growth_illustration_request_batches WHERE request_id = ? ORDER BY sequence
+    `).all(requestId) as Array<{ id: string }>).map((row) =>
+      this.getIllustrationBatch(row.id) ?? fail("GROWTH_DATA_INVALID"));
+  }
+
+  persistIllustrationPlan(input: { request: unknown; batches: unknown[] }): GrowthIllustrationRequest {
+    const request = growthIllustrationRequestCreateSchema.parse(input.request);
+    const batches = input.batches.map((batch) => growthIllustrationBatchSealSchema.parse(batch));
+    if (batches.length === 0
+      || batches.some((batch, index) => batch.requestId !== request.id || batch.sequence !== index + 1)
+      || batches.some((batch, index) => batch.cursor !== (index === 0 ? null : batches[index - 1]!.nextCursor))
+      || batches.some((batch, index) => (index === batches.length - 1) !== (batch.nextCursor === null))) {
+      throw growthError("GROWTH_ILLUSTRATION_PLAN_INVALID");
+    }
+    if (this.workspace.db.isTransaction) throw growthError("GROWTH_TRANSACTION_ALREADY_ACTIVE");
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const persisted = this.createIllustrationRequest(request);
+      for (const batch of batches) this.sealIllustrationBatch(batch);
+      const counts = this.workspace.db.prepare(`
+        SELECT COUNT(DISTINCT batches.id) AS batch_count, COUNT(items.id) AS item_count
+        FROM growth_illustration_request_batches batches
+        LEFT JOIN growth_illustration_items items ON items.batch_id = batches.id
+        WHERE batches.request_id = ?
+      `).get(request.id) as { batch_count: number; item_count: number };
+      const expectedItems = batches.reduce((total, batch) => total + batch.items.length, 0);
+      if (counts.batch_count !== batches.length || counts.item_count !== expectedItems) {
+        throw growthError("GROWTH_ILLUSTRATION_PLAN_REPLAY_MISMATCH");
+      }
+      this.workspace.db.exec("COMMIT");
+      return this.getIllustrationRequest(persisted.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      if (this.workspace.db.isTransaction) this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   createIllustrationRequest(input: unknown): GrowthIllustrationRequest {
     const value = growthIllustrationRequestCreateSchema.parse(input);
     const payloadHash = canonicalAuditHash(value);
-    this.workspace.db.exec("BEGIN IMMEDIATE");
+    const ownsTransaction = !this.workspace.db.isTransaction;
+    if (ownsTransaction) this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const replay = this.workspace.db.prepare("SELECT id, payload_hash FROM growth_illustration_requests WHERE idempotency_key = ?")
         .get(value.idempotencyKey) as { id: string; payload_hash: string } | undefined;
@@ -1490,7 +1540,7 @@ export class GrowthRepository {
         if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_ILLUSTRATION_REQUEST_REPLAY_MISMATCH");
         const request = this.getIllustrationRequest(replay.id);
         if (!request) throw growthError("GROWTH_DATA_INVALID");
-        this.workspace.db.exec("COMMIT");
+        if (ownsTransaction) this.workspace.db.exec("COMMIT");
         return request;
       }
       if (this.workspace.db.prepare("SELECT 1 FROM growth_illustration_requests WHERE id = ?").get(value.id)) {
@@ -1513,10 +1563,10 @@ export class GrowthRepository {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
       `).run(value.id, value.idempotencyKey, payloadHash, value.goalId, value.cycleId, value.ruleRevision,
         value.coverageMode, value.closureProfileId, value.closureRevision, now, now);
-      this.workspace.db.exec("COMMIT");
+      if (ownsTransaction) this.workspace.db.exec("COMMIT");
       return this.getIllustrationRequest(value.id) ?? fail("GROWTH_DATA_INVALID");
     } catch (error) {
-      this.workspace.db.exec("ROLLBACK");
+      if (ownsTransaction && this.workspace.db.isTransaction) this.workspace.db.exec("ROLLBACK");
       throw error;
     }
   }
@@ -1524,7 +1574,8 @@ export class GrowthRepository {
   sealIllustrationBatch(input: unknown): GrowthIllustrationBatch {
     const value = growthIllustrationBatchSealSchema.parse(input);
     const payloadHash = canonicalAuditHash(value);
-    this.workspace.db.exec("BEGIN IMMEDIATE");
+    const ownsTransaction = !this.workspace.db.isTransaction;
+    if (ownsTransaction) this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const replay = this.workspace.db.prepare(`
         SELECT id, payload_hash FROM growth_illustration_request_batches WHERE idempotency_key = ?
@@ -1533,7 +1584,7 @@ export class GrowthRepository {
         if (replay.payload_hash !== payloadHash) throw growthError("GROWTH_ILLUSTRATION_BATCH_REPLAY_MISMATCH");
         const batch = this.getIllustrationBatch(replay.id);
         if (!batch) throw growthError("GROWTH_DATA_INVALID");
-        this.workspace.db.exec("COMMIT");
+        if (ownsTransaction) this.workspace.db.exec("COMMIT");
         return batch;
       }
       if (this.workspace.db.prepare("SELECT 1 FROM growth_illustration_request_batches WHERE id = ?").get(value.id)) {
@@ -1607,10 +1658,10 @@ export class GrowthRepository {
         });
       }
       this.#syncIllustrationAggregates(request.id, now);
-      this.workspace.db.exec("COMMIT");
+      if (ownsTransaction) this.workspace.db.exec("COMMIT");
       return this.getIllustrationBatch(value.id) ?? fail("GROWTH_DATA_INVALID");
     } catch (error) {
-      this.workspace.db.exec("ROLLBACK");
+      if (ownsTransaction && this.workspace.db.isTransaction) this.workspace.db.exec("ROLLBACK");
       throw error;
     }
   }
@@ -1675,12 +1726,38 @@ export class GrowthRepository {
       if (item.status !== "stale") {
         const now = new Date().toISOString();
         this.workspace.db.prepare("UPDATE growth_illustration_items SET status = 'stale', updated_at = ? WHERE id = ?").run(now, item.id);
+        if (item.imageJobId) {
+          this.workspace.db.prepare(`
+            UPDATE image_assets SET status = 'stale', updated_at = ? WHERE job_id = ? AND status = 'ready'
+          `).run(now, item.imageJobId);
+        }
         this.#syncIllustrationAggregates(item.requestId, now);
       }
       this.workspace.db.exec("COMMIT");
       return this.getIllustrationItem(item.id) ?? fail("GROWTH_DATA_INVALID");
     } catch (error) {
       this.workspace.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  cancelIllustrationItem(itemId: string): GrowthIllustrationItem {
+    this.workspace.db.exec("BEGIN IMMEDIATE");
+    try {
+      const item = this.getIllustrationItem(itemId);
+      if (!item) throw growthError("GROWTH_ILLUSTRATION_ITEM_NOT_FOUND");
+      if (item.imageJobId || item.status !== "planned") {
+        throw growthError("GROWTH_ILLUSTRATION_ITEM_NOT_CANCELLABLE");
+      }
+      const now = new Date().toISOString();
+      this.workspace.db.prepare(`
+        UPDATE growth_illustration_items SET status = 'cancelled', updated_at = ? WHERE id = ?
+      `).run(now, item.id);
+      this.#syncIllustrationAggregates(item.requestId, now);
+      this.workspace.db.exec("COMMIT");
+      return this.getIllustrationItem(item.id) ?? fail("GROWTH_DATA_INVALID");
+    } catch (error) {
+      if (this.workspace.db.isTransaction) this.workspace.db.exec("ROLLBACK");
       throw error;
     }
   }
@@ -2428,13 +2505,13 @@ export class GrowthRepository {
     if (!item) throw growthError("GROWTH_ILLUSTRATION_ITEM_NOT_FOUND");
     if (!item.imageJobId) throw growthError("GROWTH_ILLUSTRATION_JOB_NOT_BOUND");
     if (item.status === "stale") return item;
-    const job = this.workspace.db.prepare("SELECT status FROM image_generation_jobs WHERE id = ?").get(item.imageJobId) as Row | undefined;
+    const job = this.workspace.db.prepare("SELECT status, error_code FROM image_generation_jobs WHERE id = ?").get(item.imageJobId) as Row | undefined;
     if (!job) throw growthError("GROWTH_ILLUSTRATION_JOB_NOT_FOUND");
     const jobStatus = readString(job, "status");
     let status: GrowthIllustrationItem["status"];
     if (jobStatus === "queued") status = "queued";
     else if (jobStatus === "running") status = "running";
-    else if (jobStatus === "failed") status = "failed";
+    else if (jobStatus === "failed") status = readNullableString(job, "error_code") === "IMAGE_JOB_CANCELLED" ? "cancelled" : "failed";
     else if (jobStatus === "reconciliation_required") status = "reconciliation_required";
     else {
       const asset = this.workspace.db.prepare("SELECT status FROM image_assets WHERE job_id = ?").get(item.imageJobId) as Row | undefined;
@@ -2748,7 +2825,7 @@ function deriveIllustrationAggregateStatus(statuses: readonly string[]): "planne
   if (statuses.some((status) => ["queued", "running"].includes(status))) return "running";
   if (statuses.includes("failed")) return "failed";
   if (statuses.every((status) => status === "ready")) return "completed";
-  if (statuses.every((status) => status === "cancelled")) return "cancelled";
+  if (statuses.every((status) => ["ready", "cancelled"].includes(status)) && statuses.includes("cancelled")) return "cancelled";
   return "planned";
 }
 

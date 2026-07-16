@@ -11,6 +11,7 @@ import {
   saveTaskNoteResultSchema,
   listTaskNotesResultSchema,
   generateImageResultSchema,
+  type GenerateImageArgs,
   type ProposeChangeSetArgs,
 } from "../shared/agentWorkerProtocol";
 import {
@@ -21,6 +22,7 @@ import {
   type ChangeSetPolicyEvaluator,
 } from "../domain/changeSet/changeSetService";
 import { AgentAuditRepository } from "../domain/audit/agentAuditRepository";
+import { canonicalAuditHash } from "../domain/audit/canonicalAuditHash";
 import { ContextPacketService } from "../domain/retrieval/contextPacketService";
 import { CheckpointRepository } from "../domain/version/checkpointRepository";
 import type { WorkspaceDatabase } from "../domain/workspace/workspaceRepository";
@@ -35,6 +37,8 @@ import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeS
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
 import { CreativeDocumentRepository } from "../domain/workspace/creativeDocumentRepository";
 import { DocumentRepository } from "../domain/workspace/documentRepository";
+import { GrowthRepository } from "../domain/growth/growthRepository";
+import { growthIllustrationItemIdempotencyKey } from "./growth/illustration/growthIllustrationCoordinator";
 
 interface WorkspaceAgentToolGatewayOptions {
   getImageProviderProfile?(): ImageProviderRuntimeProfile | null;
@@ -120,17 +124,23 @@ export function createWorkspaceAgentToolGateway(
     },
     generateImage: async (args, context) => {
       assertAvailable(context.signal);
-      new AgentAuditRepository(workspace).assertToolInvocation({
-        toolInvocationId: context.requestId,
-        runId: context.runId,
-        invocationId: context.invocationId,
-        toolName: "generate_image",
-      });
+      if (context.illustrationQueueItemId) {
+        assertIllustrationQueueImageArgs(workspace, context.illustrationQueueItemId, args);
+      } else {
+        new AgentAuditRepository(workspace).assertToolInvocation({
+          toolInvocationId: context.requestId,
+          runId: context.runId,
+          invocationId: context.invocationId,
+          toolName: "generate_image",
+        });
+      }
       const configuredProfile = options.getImageProviderProfile?.() ?? null;
       if (!configuredProfile) throw gatewayError("IMAGE_PROVIDER_REQUIRED", "A configured image Provider is required.");
       const profile = { ...configuredProfile };
       const repository = new ImageAssetRepository(workspace);
-      const idempotencyKey = `steward:${args.idempotencyKey}`;
+      const idempotencyKey = context.illustrationQueueItemId
+        ? `illustration:${args.idempotencyKey}`
+        : `steward:${args.idempotencyKey}`;
       if (args.purpose === "world_map") assertCurrentWorldMapSources(workspace, args);
       const service = options.createImageGenerationService?.(workspace)
         ?? new ImageGenerationService(repository, new ImageAssetStore(workspace.rootPath));
@@ -219,6 +229,48 @@ export function createWorkspaceAgentToolGateway(
       });
     },
   };
+}
+
+function assertIllustrationQueueImageArgs(
+  workspace: WorkspaceDatabase,
+  itemId: string,
+  args: GenerateImageArgs,
+): void {
+  const item = new GrowthRepository(workspace).getIllustrationItem(itemId);
+  if (!item || !["planned", "queued", "running", "ready"].includes(item.status)) {
+    throw gatewayError("GROWTH_ILLUSTRATION_QUEUE_AUTHORITY_INVALID", "Illustration Queue authority is unavailable.");
+  }
+  const resourceIds: string[] = [];
+  const versionIds: string[] = [];
+  for (const source of item.sources) {
+    versionIds.push(source.kind === "resource" ? source.resourceVersionId : source.documentVersionId);
+    if (source.kind === "resource") {
+      resourceIds.push(source.resourceId);
+    } else {
+      const owner = workspace.db.prepare(`
+        SELECT resource_id FROM document_versions WHERE id = ? AND creative_document_id = ?
+      `).get(source.documentVersionId, source.documentId) as { resource_id: string } | undefined;
+      if (!owner) throw gatewayError("GROWTH_ILLUSTRATION_QUEUE_AUTHORITY_INVALID", "Illustration source is unavailable.");
+      resourceIds.push(owner.resource_id);
+    }
+  }
+  const promptHash = canonicalAuditHash(args.prompt);
+  const valid = args.idempotencyKey === growthIllustrationItemIdempotencyKey(item.requestId, item.id)
+    && args.title === item.title
+    && args.purpose === item.purpose
+    && promptHash === item.compiledPromptSha256
+    && sameStringSet(args.sourceResourceIds, resourceIds)
+    && sameStringSet(args.sourceVersionIds, versionIds);
+  if (!valid) {
+    throw gatewayError("GROWTH_ILLUSTRATION_QUEUE_ARGS_INVALID", "Illustration Queue arguments do not match persisted authority.");
+  }
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const normalizedLeft = [...new Set(left)].sort();
+  const normalizedRight = [...new Set(right)].sort();
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index]);
 }
 
 function assertCurrentWorldMapSources(

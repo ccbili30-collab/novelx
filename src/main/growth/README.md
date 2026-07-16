@@ -30,6 +30,7 @@
 npx --no-install vitest run --config vitest.config.ts tests/unit/growth-run-bridge.test.ts tests/unit/growth-longform-progress.test.ts
 npx --no-install vitest run --config vitest.config.ts tests/unit/growth-longform-coordinator.test.ts tests/unit/growth-coordinator.test.ts
 npx --no-install vitest run --config vitest.config.ts tests/unit/growth-revision-authority.test.ts tests/unit/growth-coordinator.test.ts
+npx --no-install vitest run --config vitest.config.ts tests/unit/growth-illustration-coordinator.test.ts tests/unit/growth-illustration-plan.test.ts tests/unit/growth-visual-style-policy.test.ts tests/unit/image-workspace-recovery.test.ts
 npm run typecheck
 git diff --check
 ```

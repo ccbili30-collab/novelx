@@ -97,6 +97,8 @@ Item 只保存编译后 Prompt 哈希，不保存 Prompt 原文、凭证或 Prov
 
 Request 不设 Item 总量约束；每个持久批次最多 20 项并保存 sequence、cursor、item count、状态、幂等键和负载哈希。Request/Batch 状态由 Item 聚合刷新，因此已完成请求在任一 Item 变 stale 后会重新进入 stale。
 
+Illustration Queue 实现收口（2026-07-16）：Main-only Coordinator 会先在一个 SQLite 事务中持久化完整 Request 与全部 Batch/Item，再允许第一项 Provider 副作用；第二批写入失败会回滚整份计划。默认覆盖由 Main 派生的 evidence role 约束，要求世界地图、主要地点/势力风貌、故事场景及每个主要 OC 立绘；`all_visible_nodes` 要求每个可见 binding 均有目标，`custom` 保留一段文字多图和多变体自由。队列没有产品总量上限，固定每批 20、并发 1。Main 以 Item 的 Prompt 哈希、purpose、来源集合和稳定幂等键向既有 `generate_image` Gateway 证明内部 authority，Renderer 和模型不能提供该 authority。单项失败不删除后续项；部分完成后取消只取消未发送 Item。重开时未发送的 running Job 回到 queued，已发送的未知结果进入 `reconciliation_required`；来源版本变化会同时把 Item 与既有 ready Asset 标记 stale。工作文本和会话文本只能以项目内不可变 snapshot/hash 作为 anchor，同时仍要求正式 source version 提供事实上下文。当前只完成确定性 Main/SQLite/Gateway 队列边界；Renderer 接入和真实多图 Provider Live 尚未完成。
+
 ## 迁移、崩溃与恢复
 
 v23→v24 只创建新表、索引、外键和检查约束，不改写 Growth、Change Set、document、Assertion、relation、Image Job、Asset 或既有哈希，不创建默认 Profile、Inquiry、Intent、Illustration 或假历史行。

@@ -28,6 +28,7 @@ function trusted(): TrustedGrowthIllustrationCompileInput {
       {
         evidenceRef: "setting",
         scopeResourceId: "world-scope",
+        defaultCoverageRole: "supporting",
         source: { kind: "document", documentId: "setting-doc", documentVersionId: "setting-v3", contentSha256: shaA },
         authorizedFacts: "The western coast contains a tidal harbor documented in the current setting.",
         targetAnchorInput: {
@@ -38,6 +39,7 @@ function trusted(): TrustedGrowthIllustrationCompileInput {
       {
         evidenceRef: "world",
         scopeResourceId: "world-scope",
+        defaultCoverageRole: "world",
         source: { kind: "resource", resourceId: "world-1", resourceVersionId: "world-v2" },
         authorizedFacts: "The world is governed by documented tidal cycles.",
         targetAnchorInput: { kind: "resource", resourceId: "world-1", resourceVersionId: "world-v2" },
@@ -89,6 +91,25 @@ describe("Growth Illustration Plan compiler", () => {
     expect(item.promptText).toContain("The western coast contains a tidal harbor documented in the current setting.");
   });
 
+  it("allows immutable working and conversation text snapshots while retaining formal context sources", () => {
+    for (const kind of ["working_text_snapshot", "conversation_text_snapshot"] as const) {
+      const context = trusted();
+      context.evidenceBindings[0] = {
+        ...context.evidenceBindings[0]!,
+        targetAnchorInput: { kind, sourceSnapshotId: `${kind}-1`, textSha256: shaA },
+      };
+      const compiled = compileGrowthIllustrationPlan({
+        coverageMode: "custom",
+        items: [{
+          ...plan.items[0]!, targetEvidenceRef: "setting", evidenceRefs: ["setting"],
+          purpose: "scene", variantKey: `${kind}_scene`,
+        }],
+      }, context);
+      expect(compiled.items[0]?.targetAnchorInput).toEqual({ kind, sourceSnapshotId: `${kind}-1`, textSha256: shaA });
+      expect(compiled.items[0]?.normalizedSources[0]).toMatchObject({ kind: "document", documentVersionId: "setting-v3" });
+    }
+  });
+
   it("requires model-declared user override metadata to match trusted style authority", () => {
     const context = trusted();
     context.currentRuleRevision.visualOverride = {
@@ -136,6 +157,41 @@ describe("Growth Illustration Plan compiler", () => {
       items: [{ ...plan.items[0]!, purpose: "location_portrait" }],
     }).success).toBe(false);
     expect((growthIllustrationPlanParameters.properties.items as { maxItems?: number }).maxItems).toBeUndefined();
+  });
+
+  it("requires the default map, representative scenes, story scene, and every major OC portrait", () => {
+    const context = trusted();
+    context.evidenceBindings.push(
+      {
+        ...context.evidenceBindings[0]!, evidenceRef: "capital", defaultCoverageRole: "place_or_faction",
+        source: { kind: "resource", resourceId: "capital-1", resourceVersionId: "capital-v1" },
+        targetAnchorInput: { kind: "resource", resourceId: "capital-1", resourceVersionId: "capital-v1" },
+      },
+      {
+        ...context.evidenceBindings[0]!, evidenceRef: "story", defaultCoverageRole: "story",
+        source: { kind: "resource", resourceId: "story-1", resourceVersionId: "story-v1" },
+        targetAnchorInput: { kind: "resource", resourceId: "story-1", resourceVersionId: "story-v1" },
+      },
+      {
+        ...context.evidenceBindings[0]!, evidenceRef: "hero", defaultCoverageRole: "major_oc",
+        source: { kind: "resource", resourceId: "hero-1", resourceVersionId: "hero-v1" },
+        targetAnchorInput: { kind: "resource", resourceId: "hero-1", resourceVersionId: "hero-v1" },
+      },
+    );
+    const complete = {
+      coverageMode: "default" as const,
+      items: [
+        ...plan.items,
+        { ...plan.items[0]!, targetEvidenceRef: "capital", evidenceRefs: ["capital"], purpose: "scene" as const, variantKey: "capital_scene" },
+        { ...plan.items[0]!, targetEvidenceRef: "story", evidenceRefs: ["story"], purpose: "scene" as const, variantKey: "story_scene" },
+        { ...plan.items[0]!, targetEvidenceRef: "hero", evidenceRefs: ["hero"], purpose: "character_portrait" as const, variantKey: "hero_portrait" },
+      ],
+    };
+    expect(compileGrowthIllustrationPlan(complete, context).items).toHaveLength(4);
+    expectCode(
+      () => compileGrowthIllustrationPlan({ ...complete, items: complete.items.filter((item) => item.variantKey !== "hero_portrait") }, context),
+      "GROWTH_ILLUSTRATION_DEFAULT_COVERAGE_INCOMPLETE",
+    );
   });
 
   it("is byte-stable across trusted binding and evidence-ref order without injecting creative facts", () => {
