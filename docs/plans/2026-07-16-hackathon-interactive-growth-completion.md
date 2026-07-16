@@ -491,9 +491,51 @@ git diff --check
 
 ---
 
-## 9. 阶段 6：真实 Live、打包与冻结验收 [ ]
+## 9. 阶段 5.5：自动默认配图接线 [ ]
 
-**状态：** `not_started`
+**状态：** `completed`
+**目标：** 补齐阶段 4 只完成队列能力、但未接入自动 Growth 主链的缺口；在最终 Closure accepted 后，依据最终 checkpoint 自动选择世界风貌、故事场景和主要 OC 立绘，幂等进入既有来源绑定队列。既有 world_map 继续作为地图覆盖，不重复生成。
+
+### 边界与不变量
+
+- Main 只从 accepted Closure、最终 checkpoint、授权 scope 和当前正式资源派生默认目标；Renderer 和模型不能提供 authority。
+- 确定性代码只选择目标并给出固定构图任务，不创造世界事实；图片内容由真实 Image Provider 基于来源证据生成。
+- 默认覆盖所有当前主要 OC、故事，以及地点/势力风貌；不设产品总量上限，用户仍可继续为任意稳定文本或图谱节点追加任意数量插图。
+- Request ID、Item ID 和 Job idempotency key 稳定；重复 `growth.get`、重开或事件重放不得二次收费。
+- Provider 缺失、失败或结果未知必须分别进入 failed/reconciliation，不能生成本地替代图。
+- 新实现位于 `src/main/growth/illustration/` 阶段目录；不得继续扩张 Worker 顶层状态机、`growthRunLifecycle.ts`、公开协议或数据库 Schema。
+
+### 文件所有权
+
+- `src/main/growth/illustration/growthDefaultIllustrationPlan.ts`（新）
+- `src/main/growth/illustration/growthIllustrationApplicationService.ts`
+- `src/main/growthCoordinator.ts`（仅 accepted 后一次委派）
+- `src/main/growth/illustration/README.md`
+- 相邻默认规划、Coordinator、恢复与投影测试
+- 本计划状态与证据字段
+
+### 验收
+
+- [x] 默认目标至少覆盖一个地点/势力风貌、一个故事场景和每个主要 OC 立绘；世界地图由既有 ready world_map 覆盖。
+- [x] accepted 前不创建 Request；accepted 后恰好一个默认 Request。
+- [x] 重放与重开不产生第二 Request、Item、Job 或 Provider 调用。
+- [x] 部分失败不丢后续项；结果未知不自动重试收费。
+- [x] `growth-presentation-v1` 能投影自动 Request，用户追加自由配图路径不回归。
+- [x] 定向 Vitest、typecheck、Prompt publication、build、diff check 与无 Provider 失败关闭通过。
+
+**停止条件：** 需要新公开协议、Schema、权限、A2.2 变更，或只能由测试脚本/Renderer 伪造自动队列。
+
+**完成证据：** Commit `76dba6a`；自动规划只读取本 Goal 已提交 Change Set 的当前
+`resource_revision` outputs，并把最终世界设定作为每项只读上下文，不扫描同项目无关对象。定向 Vitest
+13 files / 142 passed / 0 skipped；`npm run typecheck`、三组 Prompt publication、`npm run build`、
+`git diff --check` 通过；Electron E2E 2 files / 5 passed，残留进程 0。未使用真实 Provider；真实多图
+ready、重开和计费幂等留到阶段 6 唯一 Live。
+
+---
+
+## 10. 阶段 6：真实 Live、打包与冻结验收 [ ]
+
+**状态：** `in_progress`
 **目标：** 在冻结代码上证明真实交互式世界生长、万字 OC 故事、多图生成、重开恢复和 Windows 可运行包。
 
 ### 文件所有权
@@ -576,7 +618,7 @@ npm run verify:installer
 
 ---
 
-## 10. 全局验收矩阵
+## 11. 全局验收矩阵
 
 | 能力 | 单元 | 持久化/跨组件 | 无 Provider UI | 真实 Live | 重开 | 打包 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -593,7 +635,7 @@ npm run verify:installer
 
 ---
 
-## 11. 影响半径与停止规则
+## 12. 影响半径与停止规则
 
 每个阶段理想范围：一个阶段目录、一个 Main resolver/coordinator、相邻测试和必要接线。出现以下情况必须停止：
 
@@ -607,7 +649,7 @@ npm run verify:installer
 
 ---
 
-## 12. 执行记录
+## 13. 执行记录
 
 | 日期 | 阶段 | 状态 | Commit | 验收 | 首失败/风险 |
 | --- | --- | --- | --- | --- | --- |
@@ -616,21 +658,24 @@ npm run verify:installer
 | 2026-07-16 | 2 用户规则修订 | completed | `3a39df5` | Vitest 146/146；typecheck/Prompt gate/diff passed | 未运行 Provider/Electron/build/full suite |
 | 2026-07-16 | 3 OC 万字 Longform | completed | `089ee99` | Vitest 132/132；typecheck/Prompt gate/diff passed | 未运行 Provider/Electron/build/full suite |
 | 2026-07-16 | 4 通用插图队列 | completed | `6ed78e2` | Vitest 106/106；typecheck/Prompt gate/build/diff passed | 未运行 Provider/Renderer E2E/full suite |
+| 2026-07-16 | 5 生长 UI | completed | `3663d96` | Vitest 142/142；Electron E2E 5/5；typecheck/build passed | 未运行 Provider；真实 Live 留到阶段 6 |
+| 2026-07-16 | 5.5 自动默认配图 | completed | `76dba6a` | Vitest 142/142；Electron E2E 5/5；typecheck/Prompt gate/build/diff passed | 未运行 Provider；真实多图 ready 留到阶段 6 |
 
 只追加经验证的行，不把计划或中间态写成完成。
 
 ---
 
-## 13. 当前对话进度板
+## 14. 当前对话进度板
 
-**已验收：5/7 阶段｜剩余：2 阶段**
+**已验收：7/8 阶段｜剩余：1 阶段**
 
 - [x] 0. 模块化基线与全量测试
 - [x] 1. Repair 权限与领域正确性
 - [x] 2. 用户规则影响分析与修订
 - [x] 3. OC 万字 Longform 自动循环
 - [x] 4. 通用插图队列
-- [ ] 5. 生长过程与图文图鉴 UI
+- [x] 5. 生长过程与图文图鉴 UI
+- [x] 5.5 自动默认配图接线
 - [ ] 6. 真实 Live、打包与冻结验收
 
-**下一执行入口：** 阶段 5。只读取 Renderer 的 Growth 时间线、右栏创作面板、Showcase 与现有安全事件投影；接入真实 Rule Revision、Closure、Longform 和 Illustration Queue 状态，不让 Renderer 推断提交或直接调用 Provider。
+**下一执行入口：** 阶段 6。生产代码冻结；先迁移真实验收脚本到当前 Closure/Longform/Revision/默认插图语义并跑全量测试、typecheck、build 和无 Provider UI，随后只运行一次真实交互式 Live。首次真实失败保存安全证据并停止，不在 Live 后修改生产逻辑或降低门槛。
