@@ -356,7 +356,7 @@ interface GrowthInquiryBrief {
 - Test: `tests/unit/growth-run-bridge.test.ts`
 - Test: `tests/unit/steward-execution-state-machine.test.ts`
 
-**Decision gate:** Task 1 只允许 Closure assessment 在 `running` evaluation Cycle 中评估它的 pinned input checkpoint；Receipt、Cycle input、Closure revision 与 assessment checkpoint 必须完全一致。编码本任务前，必须先冻结“Checker accepted 且无需 Change Set”时 evaluation Cycle 的真实成功终态。不得把它伪装成 `blocked/cancelled`，也不得提交空 Change Set。若现有状态合同无法表达该终态，停止并返回产品负责人/Main Head 决策，不得在本任务中静默改 schema。
+**Decision gate (approved 2026-07-16):** Main Head 批准 SQLite schema 26、Closure Contract v4、专用 `closure_evaluation` Intent 与 `evaluated` 终态。`evaluated` 要求 Run/Receipt/terminal time，不含 Change Set、output checkpoint 或 failure code；它仅表示存在唯一 durable evaluation outcome，不自动等于 accepted 或 Goal completed。Cycle input、Receipt、Closure revision 与 assessment checkpoint/rule revision 必须完全一致，outcome 与终态同事务，事件可幂等补尾，结果不明仍 `reconciliation_required`。同时批准严格类型 submission、Facet Result/Checker adverse finding 分离、Repair lineage、mixed component/focus OC 绑定与 pinned-checkpoint relation 查询的窄范围扩展。版本升为 contract `1.1.0`、capability `hackathon-growth-closure-v4`、strategy `grow_world_story_oc_closure_v4`；v3 不得伪装兼容 v4。详细迁移与恢复不变量见配套 ADR。
 
 **Closure profiles:**
 
