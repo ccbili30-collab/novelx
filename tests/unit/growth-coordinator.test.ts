@@ -14,6 +14,7 @@ import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspac
 import { AgentProcessSupervisor, type AgentWorkerProcess } from "../../src/main/agentProcessSupervisor";
 import { GrowthCoordinator } from "../../src/main/growthCoordinator";
 import { GrowthRunLifecycle } from "../../src/main/growthRunLifecycle";
+import { GrowthPresentationProjector } from "../../src/main/growth/growthPresentationProjector";
 import { assertGrowthLongformProposalAllowed } from "../../src/main/growth/phases/longform/growthLongformProposalPolicy";
 import { planGrowthFrontier } from "../../src/main/growthFrontierPlanner";
 import { WorkspaceSession } from "../../src/main/workspaceIpc";
@@ -451,6 +452,25 @@ describe("GrowthCoordinator", () => {
       projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id,
     }).coordinatorStatus).toBe("completed"));
     expect(workers).toHaveLength(10);
+    const defaultIllustrations = repository.listIllustrationRequests(started.goal.id);
+    expect(defaultIllustrations).toHaveLength(1);
+    expect(defaultIllustrations[0]).toMatchObject({ coverageMode: "default", closureProfileId: expect.any(String) });
+    expect(repository.listIllustrationItems(defaultIllustrations[0]!.id).map((item) => item.purpose)).toEqual([
+      "character_portrait", "character_portrait", "scene", "scene", "scene",
+    ]);
+    await vi.waitFor(() => expect(repository.listIllustrationItems(defaultIllustrations[0]!.id)
+      .every((item) => item.status === "failed")).toBe(true));
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
+    expect(new GrowthPresentationProjector(setup.workspace).project({
+      goalId: started.goal.id,
+      checkpointId: cycles[9]!.inputCheckpointId,
+    }).illustrationRequests).toEqual([
+      expect.objectContaining({ id: defaultIllustrations[0]!.id, coverageMode: "default", itemCount: 5, readyCount: 0 }),
+    ]);
+    coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id });
+    expect(repository.listIllustrationRequests(started.goal.id)).toHaveLength(1);
+    expect(repository.listIllustrationItems(defaultIllustrations[0]!.id)).toHaveLength(5);
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
   });
 
   it("automatically repairs one Checker finding, rechecks the new checkpoint, and completes only after acceptance", async () => {

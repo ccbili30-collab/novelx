@@ -406,6 +406,14 @@ export class GrowthCoordinator {
         return;
       }
     }
+    if (outcome.decision === "accepted") {
+      this.#illustrationService(input.context).ensureDefaultForAcceptedClosure({
+        goalId: input.goal.id,
+        cycleId: cycle.id,
+      }, input.context);
+      this.#releaseListeners(input.goal.id);
+      return;
+    }
     if (outcome.decision !== "repairs_required") {
       this.#releaseListeners(input.goal.id);
       return;

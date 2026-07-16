@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { compileGrowthIllustrationPlan, type TrustedGrowthIllustrationCompileInput } from "../../../agent-worker/growth/growthIllustrationPlan";
+import { ChangeSetRepository } from "../../../domain/changeSet/changeSetRepository";
 import { GrowthRepository } from "../../../domain/growth/growthRepository";
-import { CreativeDocumentRepository } from "../../../domain/workspace/creativeDocumentRepository";
 import { DocumentRepository } from "../../../domain/workspace/documentRepository";
 import { ResourceRepository } from "../../../domain/workspace/resourceRepository";
 import { SemanticGraphService } from "../../../domain/graph/semanticGraphService";
@@ -9,7 +9,13 @@ import type { WorkspaceDatabase } from "../../../domain/workspace/workspaceRepos
 import type { GrowthIllustrationCreateRequest } from "../../../shared/growthPresentationContract";
 import type { AgentToolGateway } from "../../agentProcessSupervisor";
 import { resolveAuthorizedGrowthResources } from "../growthCreatorScope";
+import { compileDefaultGrowthIllustrationPlan } from "./growthDefaultIllustrationPlan";
 import { GrowthIllustrationCoordinator, type GrowthIllustrationSnapshotInput } from "./growthIllustrationCoordinator";
+import {
+  currentResourceRevisionId,
+  illustrationCoverageRole,
+  resolveResourceIllustrationEvidence,
+} from "./growthIllustrationEvidenceResolver";
 
 interface IllustrationApplicationContext {
   checkpointId: string;
@@ -51,6 +57,7 @@ export class GrowthIllustrationApplicationService {
         plan: compiled.plan,
         snapshots: compiled.snapshots,
       });
+      this.#execute(existing.id, compiled.plan);
       return;
     }
     const goal = this.#growth.getGoal(input.goalId);
@@ -78,11 +85,48 @@ export class GrowthIllustrationApplicationService {
       plan: compiled.plan,
       snapshots: compiled.snapshots,
     });
-    const controller = new AbortController();
-    this.#controllers.set(input.requestId, controller);
-    void this.#coordinator.execute({ requestId: input.requestId, plan: compiled.plan, signal: controller.signal })
-      .catch(() => undefined)
-      .finally(() => this.#controllers.delete(input.requestId));
+    this.#execute(input.requestId, compiled.plan);
+  }
+
+  ensureDefaultForAcceptedClosure(input: { goalId: string; cycleId: string }, context: IllustrationApplicationContext): void {
+    const goal = this.#growth.getGoal(input.goalId);
+    const cycle = this.#growth.getCycle(input.cycleId);
+    if (!goal || !cycle || cycle.goalId !== goal.id || goal.branchId !== context.branchId
+      || !sameStrings(goal.authorizedScopeResourceIds, context.authorizedScopeResourceIds)) {
+      throw applicationError("GROWTH_ILLUSTRATION_REQUEST_AUTHORITY_MISMATCH");
+    }
+    const intent = this.#growth.getCycleIntent(cycle.id);
+    const outcome = this.#growth.getClosureEvaluationOutcomeForCycle(cycle.id);
+    if (cycle.status !== "evaluated" || intent.kind !== "closure_evaluation"
+      || outcome?.decision !== "accepted" || outcome.profileId !== intent.profileId || outcome.revision !== intent.revision) {
+      throw applicationError("GROWTH_ILLUSTRATION_ACCEPTED_CLOSURE_REQUIRED");
+    }
+    const requestId = `growth-default-illustrations:${sha256(`${goal.id}:${cycle.id}`)}`;
+    const changeSets = new ChangeSetRepository(this.workspace);
+    const resourceRevisionOutputIds = this.#growth.listCycles(goal.id).flatMap((candidate) => candidate.changeSetId
+      ? changeSets.listOutputs(candidate.changeSetId)
+        .filter((output) => output.kind === "resource_revision")
+        .map((output) => output.outputId)
+      : []);
+    const plan = compileDefaultGrowthIllustrationPlan(this.workspace, {
+      checkpointId: cycle.inputCheckpointId,
+      authorizedScopeResourceIds: goal.authorizedScopeResourceIds,
+      ruleRevision: cycle.ruleRevision,
+      resourceRevisionOutputIds,
+    });
+    this.#coordinator.persist({
+      request: {
+        id: requestId,
+        goalId: goal.id,
+        cycleId: cycle.id,
+        ruleRevision: cycle.ruleRevision,
+        closureProfileId: intent.profileId,
+        closureRevision: intent.revision,
+        idempotencyKey: `growth-default-illustrations:${goal.id}:${cycle.id}`,
+      },
+      plan,
+    });
+    this.#execute(requestId, plan);
   }
 
   cancel(input: { goalId: string; requestId: string }): void {
@@ -99,6 +143,15 @@ export class GrowthIllustrationApplicationService {
   dispose(): void {
     for (const controller of this.#controllers.values()) controller.abort();
     this.#controllers.clear();
+  }
+
+  #execute(requestId: string, plan: ReturnType<typeof compileGrowthIllustrationPlan>): void {
+    if (this.#controllers.has(requestId)) return;
+    const controller = new AbortController();
+    this.#controllers.set(requestId, controller);
+    void this.#coordinator.execute({ requestId, plan, signal: controller.signal })
+      .catch(() => undefined)
+      .finally(() => this.#controllers.delete(requestId));
   }
 
   #compile(input: GrowthIllustrationCreateRequest, context: IllustrationApplicationContext, ruleRevision: number) {
@@ -152,7 +205,7 @@ function resolveTarget(
     return {
       targetEvidenceRef: "target",
       evidenceBindings: [{
-        evidenceRef: "target", scopeResourceId: owner.scopeRootId, defaultCoverageRole: coverageRole(owner.resource.objectKind),
+        evidenceRef: "target", scopeResourceId: owner.scopeRootId, defaultCoverageRole: illustrationCoverageRole(owner.resource.objectKind),
         source: { kind: "resource", resourceId: owner.resource.id, resourceVersionId: revisionId },
         authorizedFacts: text,
         targetAnchorInput: { kind: "working_text_snapshot", sourceSnapshotId: snapshotId, textSha256 },
@@ -186,6 +239,16 @@ function resolveTarget(
   const resourceId = input.target.kind === "resource" ? input.target.resourceId : input.target.sourceResourceId;
   const owner = authorized.get(resourceId);
   if (!owner) throw applicationError("GROWTH_ILLUSTRATION_SOURCE_NOT_VISIBLE");
+  if (input.target.kind === "resource") {
+    const resolved = resolveResourceIllustrationEvidence({
+      workspace,
+      owner,
+      checkpointId,
+      targetEvidenceRef: "target",
+      documentEvidenceRef: (index) => `document-${index + 1}`,
+    });
+    return { ...resolved, snapshots: [] };
+  }
   const revisionId = currentResourceRevisionId(workspace, resourceId, checkpointId);
   if (!revisionId) throw applicationError("GROWTH_ILLUSTRATION_SOURCE_NOT_VISIBLE");
   if (input.target.kind === "working_text_snapshot" || input.target.kind === "conversation_text_snapshot") {
@@ -205,46 +268,7 @@ function resolveTarget(
     };
   }
 
-  const evidenceBindings: TrustedGrowthIllustrationCompileInput["evidenceBindings"] = [{
-    evidenceRef: "target", scopeResourceId: owner.scopeRootId, defaultCoverageRole: coverageRole(owner.resource.objectKind),
-    source: { kind: "resource", resourceId, resourceVersionId: revisionId },
-    authorizedFacts: `${owner.resource.title}（${owner.resource.objectKind}）`,
-    targetAnchorInput: { kind: "resource", resourceId, resourceVersionId: revisionId },
-  }];
-  const creativeDocuments = new CreativeDocumentRepository(workspace).listAtCheckpoint(checkpointId, resourceId);
-  for (const [index, document] of creativeDocuments.entries()) {
-    const version = documents.getStableForCreativeDocumentAtCheckpoint(document.id, checkpointId);
-    if (!version || !version.content.trim()) continue;
-    evidenceBindings.push({
-      evidenceRef: `document-${index + 1}`, scopeResourceId: owner.scopeRootId, defaultCoverageRole: "supporting",
-      source: { kind: "document", documentId: document.id, documentVersionId: version.id, contentSha256: version.contentHash },
-      authorizedFacts: Array.from(version.content).slice(0, 8_000).join(""),
-      targetAnchorInput: { kind: "stable_text_span", documentId: document.id, documentVersionId: version.id,
-        startCodePoint: 0, endCodePoint: Math.min(Array.from(version.content).length, 8_000),
-        textSha256: sha256(Array.from(version.content).slice(0, 8_000).join("")) },
-    });
-  }
-  return { targetEvidenceRef: "target", evidenceBindings, snapshots: [] };
-}
-
-function currentResourceRevisionId(workspace: WorkspaceDatabase, resourceId: string, checkpointId: string): string | null {
-  const row = workspace.db.prepare(`
-    WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
-      SELECT ?, 0 UNION ALL
-      SELECT checkpoints.parent_checkpoint_id, ancestry.depth + 1 FROM checkpoints
-      JOIN ancestry ON checkpoints.id = ancestry.checkpoint_id WHERE checkpoints.parent_checkpoint_id IS NOT NULL
-    ), ranked AS (
-      SELECT revisions.id, revisions.state, ROW_NUMBER() OVER (ORDER BY ancestry.depth, revisions.created_at DESC, revisions.rowid DESC) AS revision_rank
-      FROM resource_revisions revisions JOIN ancestry ON ancestry.checkpoint_id = revisions.created_checkpoint_id
-      WHERE revisions.resource_id = ?
-    ) SELECT id FROM ranked WHERE revision_rank = 1 AND state = 'active'
-  `).get(checkpointId, resourceId) as { id: string } | undefined;
-  return row?.id ?? null;
-}
-
-function coverageRole(kind: string): "world" | "place_or_faction" | "story" | "major_oc" | "important_detail" | "supporting" {
-  return kind === "world" ? "world" : kind === "location" || kind === "faction" ? "place_or_faction"
-    : kind === "story" || kind === "volume" ? "story" : kind === "oc" ? "major_oc" : "supporting";
+  throw applicationError("GROWTH_ILLUSTRATION_SOURCE_NOT_VISIBLE");
 }
 
 function sameStrings(left: string[], right: string[]): boolean {

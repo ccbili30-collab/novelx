@@ -6,6 +6,7 @@
 - 固定每批最多 20 项、执行并发 1，但不限制 Request 总量。
 - 每项通过既有 `generate_image` Gateway（网关）与 Image Job/Asset（图片任务/资产）权威链执行。
 - `growthIllustrationApplicationService.ts` 将 Creator（创作者）在 UI 选择的资源、稳定文本片段或受限文本快照编译为同一来源绑定计划；Renderer 不提供 checkpoint、scope、版本 authority 或 Prompt。
+- 最终 Closure（闭环检查）accepted 后，`growthDefaultIllustrationPlan.ts` 只从本 Goal 已提交 Change Set（变更集）的当前 `resource_revision` outputs 选择地点/势力、故事和主要 OC；既有世界地图作为地图覆盖，不重复生成。
 - 从持久 Item、Job、Asset 和当前 source version 恢复状态；来源变化时把旧 Item/Asset 标记为 `stale`。
 - 未发送的中断 Job 可重排队；已发送但结果未知的 Job 进入 `reconciliation_required`，不得自动重试收费。
 
@@ -19,6 +20,8 @@
 
 - 队列编排：`growthIllustrationCoordinator.ts`
 - Creator UI 应用边界：`growthIllustrationApplicationService.ts`
+- 自动默认目标与编译：`growthDefaultIllustrationPlan.ts`
+- 资源/稳定文档证据解析：`growthIllustrationEvidenceResolver.ts`
 - 重启与来源 currentness：`growthIllustrationRecovery.ts`
 - 模型高层规划和默认覆盖：`src/agent-worker/growth/growthIllustrationPlan.ts`
 - 持久化不变量：`src/domain/growth/growthRepository.ts`
@@ -40,3 +43,4 @@ git diff --check
 - 单个 UI 请求最多 100 个变体是 IPC 消息边界，不是产品总预算；用户可以继续创建新 Request，队列仍按 20 项一批、并发 1 执行。
 - Provider 未配置或 Gateway 在 Job 前拒绝时，Item/Request 必须持久化为 failed，不能无限停留 planned，也不能生成本地替代图。
 - 不增加公开 IPC、数据库迁移、Provider 协议或产品数量上限。
+- 授权 scope 只定义“可见”，不能替代 Goal lineage；自动默认队列禁止扫描并配图同项目中与本 Goal 无关的旧对象。
