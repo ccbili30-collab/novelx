@@ -68,7 +68,7 @@ SQLite + Artifact Store
 | 判断当前完成度 | `docs/project/current-state-and-routes.md` + 对应 `notes/status/` |
 | 接手长远 Runtime | `docs/runtime-v2/product-baseline.md` + `notes/status/2026-07-13-runtime-v2-a2-2-freeze.md` |
 | 接手黑客松 | `docs/plans/2026-07-13-hackathon-visual-creation-loop.md` + `notes/status/2026-07-14-hackathon-creative-showcase.md` |
-| 修改 Growth 阶段或 Longform | `src/agent-worker/growth/README.md` + 对应阶段文件与定向测试 |
+| 修改 Growth 阶段、Longform 或 Closure | `src/agent-worker/growth/README.md` + `src/main/growth/README.md` + 对应阶段文件与定向测试 |
 | 新会话交接 | `docs/project/session-handoff-template.md` |
 | 验证新会话是否真正理解 | `docs/project/new-session-understanding-audit.md` |
 

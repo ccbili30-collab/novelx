@@ -6,12 +6,13 @@
 
 | 任务 | 先读 | 相邻权威 |
 | --- | --- | --- |
-| 修改阶段工具顺序 | `core/growthPhaseRegistry.ts` | `stewardExecutionStateMachine.ts` 中的顶层门禁 |
+| 修改阶段工具顺序 | `core/growthPhaseRegistry.ts`、`core/growthPhaseHandler.ts` | `stewardExecutionStateMachine.ts` 中的顶层门禁 |
 | 修改世界生成 | `growthWorldFragment.ts`、`growthWorldMapBrief.ts` | 世界 Fragment/地图定向测试 |
 | 修改故事生成 | `growthStoryBrief.ts`、`growthStoryFragment.ts` | Story Fragment/Brief 定向测试 |
 | 修改 OC 生成 | `growthOcFragment.ts` | `creativeRelationPolicy.ts`、OC Fragment 定向测试 |
 | 修改证据化自询 | `growthInquiryBrief.ts` | pinned Receipt 与 Inquiry 定向测试 |
-| 修改 OC 个人长篇 | `growthLongformOutline.ts`、`growthLongformSection.ts` | `growthLongformProgress.ts`、Longform 定向测试 |
+| 修改 OC 个人长篇 | `phases/longform/growthLongformPhase.ts` | `growthLongformOutline.ts`、`growthLongformSection.ts`、Longform 定向测试 |
+| 修改 Closure/Repair Worker 行为 | `phases/closure/growthClosurePhase.ts` | Closure 阶段测试、顶层原子提交门禁 |
 | 修改默认插图规划 | `growthIllustrationPlan.ts` | Image Job/Asset 与来源绑定测试 |
 
 ## 稳定不变量
@@ -26,8 +27,8 @@
 
 ## 当前冻结债务
 
-- `stewardExecutionStateMachine.ts` 仍包含多个阶段的参数替换、结果解释和重试分支；当前只抽出了计划路由，尚未完成 `GrowthPhaseHandler` 迁移。
-- `growthRunLifecycle.ts` 仍集中解析 Closure（闭环）、Repair（返工）和 Longform authority（内部权威）。后续应先提取只读 resolver，不改变协议或数据库。
+- `GrowthPhaseHandler` 已负责阶段匹配与工具计划；Longform、Closure/Repair 的 Worker 编译/展示已迁入阶段目录。顶层状态机仍保留跨阶段的运行时状态、工具分派和原子副作用门禁，尚未把 world/story/OC 迁入同一接口。
+- Longform 与 Closure/Repair 的 Main authority 已迁入 `src/main/growth/phases/`；`growthRunLifecycle.ts` 仍保留 Receipt 投影、Closure 结果持久化、提交与恢复，这是后续维护的主要剩余体积。
 - 用户 Cycle 间指导已有一次真实失败边界：规则修订被持久化并用于后续 Cycle，但图谱 Story scope 验收未完成。不得称交互式 Growth 已闭环。
 - Longform 的确定性编译、身份和 pinned progress 已存在；自动 outline→section→recheck 协调尚未冻结，不得继续向 Coordinator 添加未经规则边界验证的分支。
 
@@ -35,6 +36,7 @@
 
 ```powershell
 npx --no-install vitest run --config vitest.config.ts tests/unit/growth-phase-registry.test.ts tests/unit/steward-execution-state-machine.test.ts
+npx --no-install vitest run --config vitest.config.ts tests/unit/growth-longform-phase.test.ts tests/unit/growth-closure-phase.test.ts
 npx --no-install vitest run --config vitest.config.ts tests/unit/growth-longform-progress.test.ts tests/unit/growth-run-bridge.test.ts
 npx --no-install vitest run --config vitest.config.ts tests/unit/creative-relation-policy.test.ts tests/unit/creative-relation-repository.test.ts
 npm run typecheck
