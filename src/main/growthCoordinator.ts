@@ -1,5 +1,7 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { GrowthRepository } from "../domain/growth/growthRepository";
+import { GROWTH_CLOSURE_FACETS } from "../domain/growth/growthClosureEvaluator";
 import type { ApplicationRegistryRepository } from "../domain/application/applicationRegistryRepository";
 import {
   growthCapabilityVersion,
@@ -183,6 +185,16 @@ export class GrowthCoordinator {
       closureStates: input.repository.listClosureStates(input.goal.id),
     });
     if (decision.state !== "plan") {
+      if (decision.state === "awaiting_guidance"
+        && current?.status === "committed"
+        && current.ruleRevision === input.goal.currentRuleRevision) {
+        ensureDefaultMixedClosureProfile(
+          input.context.workspace,
+          input.repository,
+          input.goal,
+          current.outputCheckpointId!,
+        );
+      }
       if (decision.state === "content_closed") this.#releaseListeners(input.goal.id);
       return;
     }
@@ -475,4 +487,40 @@ function exactRuleReplay(repository: GrowthRepository, input: GrowthGuideRequest
 
 function isContentIntent(intent: GrowthCycleIntent): intent is GrowthContentCycleIntent {
   return intent.kind === "expand" || intent.kind === "revision";
+}
+
+function ensureDefaultMixedClosureProfile(
+  workspace: GrowthWorkspaceContext["workspace"],
+  repository: GrowthRepository,
+  goal: GrowthGoal,
+  checkpointId: string,
+): void {
+  const currentProfiles = repository.listClosureStates(goal.id)
+    .map((state) => repository.getClosureProfile(state.profileId))
+    .filter((profile) => profile?.contractGeneration === "v26");
+  if (currentProfiles.length > 0) return;
+  const resources = new ResourceRepository(workspace).listAtCheckpoint(checkpointId);
+  const worlds = resources.filter((resource) => resource.objectKind === "world");
+  const stories = resources.filter((resource) => resource.objectKind === "story");
+  const ocs = resources.filter((resource) => resource.objectKind === "oc");
+  if (worlds.length !== 1 || stories.length !== 1 || ocs.length === 0) return;
+  const facets = [
+    ...Object.values(GROWTH_CLOSURE_FACETS.world),
+    ...Object.values(GROWTH_CLOSURE_FACETS.story),
+    ...Object.values(GROWTH_CLOSURE_FACETS.oc),
+  ].map((id) => ({ id, kind: "content" as const, required: true }));
+  const identity = createHash("sha256").update(goal.id, "utf8").digest("hex").slice(0, 40);
+  repository.createClosureProfile({
+    id: `growth-closure:${identity}`,
+    idempotencyKey: `growth-closure-create:${identity}`,
+    goalId: goal.id,
+    profileKind: "mixed_birth",
+    subjectResourceId: null,
+    componentProfiles: ["world_birth", "story_universe", "oc_saga"],
+    focusOcResourceId: ocs[0]!.id,
+    contractGeneration: "v26",
+    checkpointId,
+    ruleRevision: goal.currentRuleRevision,
+    facets,
+  });
 }

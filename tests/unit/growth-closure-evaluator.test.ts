@@ -80,6 +80,27 @@ describe("GrowthClosureEvaluator", () => {
       .toMatchObject({ state: "missing", evidence: [] });
   });
 
+  it("requires the typed focus-OC personal-story binding as its own facet", () => {
+    const setup = createCompleteSetup("文".repeat(9_999) + "🌊");
+    const checkpoints = new CheckpointRepository(setup.workspace);
+    const nextCheckpoint = checkpoints.appendCheckpoint(checkpoints.getActiveBranch().id, "remove personal story binding");
+    new AssertionRepository(setup.workspace).putVersion({
+      assertionId: "personal-story-binding", checkpointId: nextCheckpoint,
+      scopeType: "resource", scopeId: setup.ocId, subject: setup.ocId,
+      predicate: GROWTH_CLOSURE_FACETS.oc.personalStoryBinding,
+      object: { storyResourceId: setup.storyId }, status: "superseded",
+      source: { kind: "document_version", ref: setup.settingVersionId },
+    });
+
+    const result = new GrowthClosureEvaluator(setup.workspace).evaluate({
+      checkpointId: nextCheckpoint, profileKind: "oc_saga", subjectResourceId: setup.ocId,
+    });
+    expect(result.deterministicContentReady).toBe(false);
+    expect(result.facetResults.find((facet) => facet.facetId === GROWTH_CLOSURE_FACETS.oc.personalStoryBinding))
+      .toMatchObject({ state: "missing", evidence: [] });
+    expect(result.ocPersonalStoryCodePoints).toBe(0);
+  });
+
   it("fails closed for malformed profile shapes at the runtime boundary", () => {
     const setup = createCompleteSetup("文".repeat(9_999) + "🌊");
     const evaluator = new GrowthClosureEvaluator(setup.workspace);

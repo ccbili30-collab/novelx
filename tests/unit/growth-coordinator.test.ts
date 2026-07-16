@@ -318,6 +318,21 @@ describe("GrowthCoordinator", () => {
     expect(cycles[1]!.inputCheckpointId).toBe(cycles[0]!.outputCheckpointId);
     expect(cycles[2]!.inputCheckpointId).toBe(cycles[1]!.outputCheckpointId);
     expect(cycles.every((cycle) => cycle.receiptId && cycle.changeSetId && cycle.outputCheckpointId)).toBe(true);
+    const closureStates = repository.listClosureStates(initial.goal.id);
+    expect(closureStates).toHaveLength(1);
+    const closureProfile = repository.getClosureProfile(closureStates[0]!.profileId);
+    expect(closureProfile).toMatchObject({
+      profileKind: "mixed_birth",
+      contractGeneration: "v26",
+      componentProfiles: ["world_birth", "story_universe", "oc_saga"],
+      focusOcResourceId: expect.any(String),
+    });
+    expect(repository.getClosureRevision(closureProfile!.id, 1)?.facets).toEqual(expect.arrayContaining([
+      { id: "closure.world.fact.history_timeline", kind: "content", required: true },
+      { id: "closure.story.fact.stage_resolution", kind: "content", required: true },
+      { id: "closure.oc.structure.personal_story_10000", kind: "content", required: true },
+      { id: "closure.oc.binding.personal_story", kind: "content", required: true },
+    ]));
     expect(snapshot.events.map((event) => event.sequence)).toEqual([...snapshot.events.keys()].map((index) => index + 1));
     expect(snapshot.events.find((event) => event.phase === "receipt_recorded")).toHaveProperty("targetVersionId");
     expect(snapshot.events.find((event) => event.phase === "receipt_recorded")).toHaveProperty("contentRef", null);

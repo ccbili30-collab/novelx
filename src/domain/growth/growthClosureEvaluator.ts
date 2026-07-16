@@ -194,6 +194,11 @@ export class GrowthClosureEvaluator {
       ], storyBindings.length > 0 && worldBindings.length > 0),
     ];
     for (const facetId of ocFactFacetIds) results.push(assertionFacet(facetId, snapshot.assertions, oc?.id ?? null));
+    results.push(assertionFacet(
+      GROWTH_CLOSURE_FACETS.oc.personalStoryBinding,
+      snapshot.assertions,
+      oc?.id ?? null,
+    ));
     results.push(structureFacet(GROWTH_CLOSURE_FACETS.oc.personalStory, personalStoryDocuments.map(documentEvidence), codePoints >= 10_000));
     return { results, codePoints };
   }
