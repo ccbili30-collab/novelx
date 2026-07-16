@@ -27,6 +27,8 @@ export interface GrowthLongformSectionAuthority {
   outline: GrowthLongformOutline;
   checkpointId: string;
   receiptId: string;
+  availableEvidenceIds: readonly string[];
+  priorProseEvidenceIds: readonly string[];
   completedSectionIds: readonly string[];
   priorContentSha256: readonly string[];
 }
@@ -48,6 +50,7 @@ export type GrowthLongformSectionErrorCode =
   | "GROWTH_LONGFORM_SECTION_OUTLINE_MISMATCH"
   | "GROWTH_LONGFORM_SECTION_EVIDENCE_MISMATCH"
   | "GROWTH_LONGFORM_SECTION_LENGTH_INVALID"
+  | "GROWTH_LONGFORM_SECTION_PRIOR_PROSE_REQUIRED"
   | "GROWTH_LONGFORM_SECTION_PADDING_REJECTED"
   | "GROWTH_LONGFORM_SECTION_FILLER_REJECTED"
   | "GROWTH_LONGFORM_SECTION_REPLAY";
@@ -65,10 +68,13 @@ export function compileGrowthLongformSection(
   }
   if (!identifier.safeParse(authority.checkpointId).success
     || !identifier.safeParse(authority.receiptId).success
-    || authority.outline.checkpointId !== authority.checkpointId
-    || authority.outline.receiptId !== authority.receiptId
+    || authority.availableEvidenceIds.some((id) => !identifier.safeParse(id).success)
+    || authority.priorProseEvidenceIds.some((id) => !identifier.safeParse(id).success)
     || authority.completedSectionIds.some((id) => !localId.safeParse(id).success)
-    || authority.priorContentSha256.some((hash) => !sha256.safeParse(hash).success)) {
+    || authority.priorContentSha256.some((hash) => !sha256.safeParse(hash).success)
+    || new Set(authority.availableEvidenceIds).size !== authority.availableEvidenceIds.length
+    || new Set(authority.priorProseEvidenceIds).size !== authority.priorProseEvidenceIds.length
+    || authority.priorProseEvidenceIds.some((id) => !authority.availableEvidenceIds.includes(id))) {
     throw sectionError("GROWTH_LONGFORM_SECTION_AUTHORITY_MISMATCH");
   }
   const outlineSection = authority.outline.sections.find((section) => section.localId === parsed.data.outlineSectionId);
@@ -76,8 +82,12 @@ export function compileGrowthLongformSection(
   if (authority.completedSectionIds.includes(outlineSection.localId)) {
     throw sectionError("GROWTH_LONGFORM_SECTION_REPLAY");
   }
-  if (!sameSet(outlineSection.evidenceIds, parsed.data.evidenceIds)) {
+  if (!sameSet(outlineSection.evidenceIds, parsed.data.evidenceIds)
+    || parsed.data.evidenceIds.some((id) => !authority.availableEvidenceIds.includes(id))) {
     throw sectionError("GROWTH_LONGFORM_SECTION_EVIDENCE_MISMATCH");
+  }
+  if (authority.completedSectionIds.length > 0 && authority.priorProseEvidenceIds.length === 0) {
+    throw sectionError("GROWTH_LONGFORM_SECTION_PRIOR_PROSE_REQUIRED");
   }
   const rawPoints = Array.from(parsed.data.candidateText).length;
   const semanticPoints = Array.from(parsed.data.candidateText.trim()).length;

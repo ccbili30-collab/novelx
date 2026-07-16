@@ -325,7 +325,7 @@ describe("GrowthCoordinator", () => {
       profileKind: "mixed_birth",
       contractGeneration: "v26",
       componentProfiles: ["world_birth", "story_universe", "oc_saga"],
-      focusOcResourceId: expect.any(String),
+      focusOcResourceId: `oc-${runId(workers[2]!)}`,
     });
     expect(repository.getClosureRevision(closureProfile!.id, 1)?.facets).toEqual(expect.arrayContaining([
       { id: "closure.world.fact.history_timeline", kind: "content", required: true },
@@ -663,7 +663,21 @@ async function commitCycleWithoutRunTerminal(workspace: WorkspaceDatabase, worke
         })),
         relations: [],
       }, { cycleId: command.growthBinding.cycleId, worldRootResourceId: scopeId }).items
-    : [{
+    : focus === "oc" ? [{
+        id: `resource-${id}`, dependsOn: [], kind: "resource.put" as const,
+        payload: {
+          resourceId: `${focus}-${id}`, create: true,
+          type: focus, objectKind: focus,
+          title: `${focus} primary fixture`, parentId: scopeId, state: "active" as const, sortOrder: 1,
+        },
+      }, {
+        id: `resource-0-secondary-${id}`, dependsOn: [], kind: "resource.put" as const,
+        payload: {
+          resourceId: `${focus}-secondary-${id}`, create: true,
+          type: focus, objectKind: focus,
+          title: `${focus} secondary fixture`, parentId: scopeId, state: "active" as const, sortOrder: 0,
+        },
+      }] : [{
         id: `resource-${id}`, dependsOn: [], kind: "resource.put" as const,
         payload: {
           resourceId: `${focus}-${id}`, create: true,

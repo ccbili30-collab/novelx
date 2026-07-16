@@ -296,6 +296,7 @@ describe("Steward tool handoff state machine", () => {
       evidence: [],
       coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
       diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
+      closureEvaluation: null,
     };
     const retrieve = successfulTool("retrieve_graph_evidence", emptyGrowthReceipt);
     const propose = successfulTool("propose_change_set", {
@@ -343,6 +344,7 @@ describe("Steward tool handoff state machine", () => {
       variant: "growth_v1" as const, receiptRecorded: true, evidence: [],
       coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
       diagnostics: { expandedEdges: 0, consumedContentChars: 0 },
+      closureEvaluation: null,
     };
     const binding = {
       capabilityVersion: growthCapabilityVersion, goalId: "goal", cycleId: "cycle", kind: "expand" as const, focusKinds: ["world" as const], resumeFrontier: ["story" as const, "oc" as const], inputCheckpointId: "checkpoint",
@@ -965,6 +967,7 @@ function growthRetrievalResult() {
     }],
     coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
     diagnostics: { expandedEdges: 0, consumedContentChars: 12 },
+    closureEvaluation: null,
   };
 }
 
@@ -981,6 +984,7 @@ function growthStoryRetrievalResult(storyIds = ["story-growth"]) {
     })),
     coverage: { state: "complete" as const, searchedScopeCount: 1, omittedCount: 0, truncated: false },
     diagnostics: { expandedEdges: 0, consumedContentChars: 12 },
+    closureEvaluation: null,
   };
 }
 

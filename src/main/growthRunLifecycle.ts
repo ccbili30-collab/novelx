@@ -119,6 +119,7 @@ export class GrowthRunLifecycle {
         && intent.focusKinds[0] === "world"
         && isGreenfieldWorkspaceEmpty(this.workspace),
       priorInquiries: priorInquiryAuthority.map(({ inquiryId: _inquiryId, lifecycleSequence: _sequence, ...inquiry }) => inquiry),
+      closureProfile: null,
     });
     const internal = new BoundGrowthRun(this.workspace, binding, goal.branchId, input.onPersistedEvent, intentAnchors, priorInquiryAuthority);
     return this.supervisor.start(
@@ -302,6 +303,7 @@ class BoundGrowthRun implements AgentRunInternalBinding {
         expandedEdges: result.diagnostics.expandedEdges,
         consumedContentChars: result.diagnostics.consumedContentChars,
       },
+      closureEvaluation: null,
     });
   }
 

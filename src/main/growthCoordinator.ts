@@ -32,6 +32,7 @@ import type { AgentProcessSupervisor } from "./agentProcessSupervisor";
 import type { WorkspaceSession } from "./workspaceIpc";
 import { DocumentRepository } from "../domain/workspace/documentRepository";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
+import { ChangeSetRepository, type ChangeSetItemRecord } from "../domain/changeSet/changeSetRepository";
 
 interface GrowthWorkspaceContext {
   workspace: import("../domain/workspace/workspaceRepository").WorkspaceDatabase;
@@ -504,6 +505,8 @@ function ensureDefaultMixedClosureProfile(
   const stories = resources.filter((resource) => resource.objectKind === "story");
   const ocs = resources.filter((resource) => resource.objectKind === "oc");
   if (worlds.length !== 1 || stories.length !== 1 || ocs.length === 0) return;
+  const focusOcResourceId = resolveCommittedFocusOcResourceId(workspace, repository, goal.id, checkpointId);
+  if (!focusOcResourceId) return;
   const facets = [
     ...Object.values(GROWTH_CLOSURE_FACETS.world),
     ...Object.values(GROWTH_CLOSURE_FACETS.story),
@@ -517,10 +520,42 @@ function ensureDefaultMixedClosureProfile(
     profileKind: "mixed_birth",
     subjectResourceId: null,
     componentProfiles: ["world_birth", "story_universe", "oc_saga"],
-    focusOcResourceId: ocs[0]!.id,
+    focusOcResourceId,
     contractGeneration: "v26",
     checkpointId,
     ruleRevision: goal.currentRuleRevision,
     facets,
   });
+}
+
+function resolveCommittedFocusOcResourceId(
+  workspace: GrowthWorkspaceContext["workspace"],
+  repository: GrowthRepository,
+  goalId: string,
+  checkpointId: string,
+): string | null {
+  const cycle = repository.listCycles(goalId).find((candidate) => {
+    if (candidate.status !== "committed" || !candidate.changeSetId || candidate.outputCheckpointId !== checkpointId) return false;
+    const intent = repository.getCycleIntent(candidate.id);
+    return isContentIntent(intent) && intent.focusKinds.includes("oc");
+  });
+  if (!cycle?.changeSetId) return null;
+  const changeSetRepository = new ChangeSetRepository(workspace);
+  const changeSet = changeSetRepository.get(cycle.changeSetId);
+  if (!changeSet || changeSet.status !== "committed" || changeSet.committedCheckpointId !== checkpointId) return null;
+  const declaredOcItem = changeSet.items.find(isCreatedOcResourceItem);
+  if (!declaredOcItem) return null;
+  const revisionOutput = changeSetRepository.listOutputs(changeSet.id).find((output) => (
+    output.itemId === declaredOcItem.id && output.kind === "resource_revision"
+  ));
+  if (!revisionOutput) return null;
+  const resource = new ResourceRepository(workspace)
+    .getVisibleByRevisionIdAtCheckpoint(revisionOutput.outputId, checkpointId);
+  return resource?.type === "oc" && resource.objectKind === "oc" ? resource.id : null;
+}
+
+function isCreatedOcResourceItem(item: ChangeSetItemRecord): boolean {
+  if (item.kind !== "resource.put" || !item.payload || typeof item.payload !== "object" || Array.isArray(item.payload)) return false;
+  const payload = item.payload as Record<string, unknown>;
+  return payload.create === true && payload.type === "oc" && payload.objectKind === "oc";
 }

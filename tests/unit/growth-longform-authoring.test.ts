@@ -53,7 +53,7 @@ describe("Growth longform authoring", () => {
   it("rejects wrong authority, section, evidence, padding, length, and prior replay", () => {
     const outline = compileOutline(validOutlineInput);
     const candidateText = uniqueText(5_000);
-    expect(() => compileGrowthLongformSection({ outlineSectionId: "origin", candidateText, evidenceIds: evidence }, { ...authority(outline), checkpointId: "other" }))
+    expect(() => compileGrowthLongformSection({ outlineSectionId: "origin", candidateText, evidenceIds: evidence }, { ...authority(outline), checkpointId: "" }))
       .toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_SECTION_AUTHORITY_MISMATCH" }));
     expect(() => compileGrowthLongformSection({ outlineSectionId: "missing", candidateText, evidenceIds: evidence }, authority(outline)))
       .toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_SECTION_OUTLINE_MISMATCH" }));
@@ -67,6 +67,33 @@ describe("Growth longform authoring", () => {
     expect(() => compileGrowthLongformSection({ outlineSectionId: "origin", candidateText, evidenceIds: evidence }, {
       ...authority(outline), completedSectionIds: ["origin"], priorContentSha256: [compiled.contentSha256],
     })).toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_SECTION_REPLAY" }));
+  });
+
+  it("continues the same outline from a newer pinned checkpoint and requires prior prose evidence", () => {
+    const outline = compileOutline(validOutlineInput);
+    const candidateText = uniqueText(5_000);
+    const currentEvidence = [...evidence, "prior-prose-version"];
+    const nextAuthority = {
+      ...authority(outline),
+      checkpointId: "checkpoint-2",
+      receiptId: "receipt-2",
+      availableEvidenceIds: currentEvidence,
+      priorProseEvidenceIds: ["prior-prose-version"],
+      completedSectionIds: ["origin"],
+    };
+    const compiled = compileGrowthLongformSection({
+      outlineSectionId: "reckoning", candidateText, evidenceIds: evidence,
+    }, nextAuthority);
+    expect(compiled).toMatchObject({ checkpointId: "checkpoint-2", receiptId: "receipt-2" });
+
+    expect(() => compileGrowthLongformSection({
+      outlineSectionId: "reckoning", candidateText, evidenceIds: evidence,
+    }, { ...nextAuthority, priorProseEvidenceIds: [] }))
+      .toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_SECTION_PRIOR_PROSE_REQUIRED" }));
+    expect(() => compileGrowthLongformSection({
+      outlineSectionId: "reckoning", candidateText, evidenceIds: evidence,
+    }, { ...nextAuthority, availableEvidenceIds: ["prior-prose-version"] }))
+      .toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_SECTION_EVIDENCE_MISMATCH" }));
   });
 
   it("rejects repeated paragraphs, sentences, and periodic filler", () => {
@@ -104,7 +131,15 @@ function compileOutline(input: unknown) {
 }
 
 function authority(outline: ReturnType<typeof compileOutline>) {
-  return { outline, checkpointId: "checkpoint-1", receiptId: "receipt-1", completedSectionIds: [], priorContentSha256: [] };
+  return {
+    outline,
+    checkpointId: "checkpoint-1",
+    receiptId: "receipt-1",
+    availableEvidenceIds: evidence,
+    priorProseEvidenceIds: [],
+    completedSectionIds: [],
+    priorContentSha256: [],
+  };
 }
 
 function expectCode(input: unknown, code: string): void {
