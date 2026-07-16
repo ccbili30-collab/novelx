@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import { z } from "zod";
+import { proposeChangeSetArgsSchema, type ProposeChangeSetArgs } from "../../shared/agentWorkerProtocol";
 import type { GrowthLongformOutline } from "./growthLongformOutline";
 
 const identifier = z.string().trim().min(1).max(240);
@@ -31,6 +32,12 @@ export interface GrowthLongformSectionAuthority {
   priorProseEvidenceIds: readonly string[];
   completedSectionIds: readonly string[];
   priorContentSha256: readonly string[];
+}
+
+export interface GrowthLongformSectionChangeSetAuthority extends GrowthLongformSectionAuthority {
+  storyResourceId: string;
+  sectionDocumentId: string;
+  sectionSortOrder: number;
 }
 
 export interface GrowthLongformSection {
@@ -111,6 +118,52 @@ export function compileGrowthLongformSection(
     codePoints: semanticPoints,
     contentSha256,
   };
+}
+
+export function compileGrowthLongformSectionChangeSet(
+  input: unknown,
+  authority: GrowthLongformSectionChangeSetAuthority,
+): ProposeChangeSetArgs {
+  const section = compileGrowthLongformSection(input, authority);
+  const storyResourceId = identifier.safeParse(authority.storyResourceId);
+  const sectionDocumentId = identifier.safeParse(authority.sectionDocumentId);
+  const sectionSortOrder = z.number().int().min(0).max(2_147_483_647).safeParse(authority.sectionSortOrder);
+  if (!storyResourceId.success || !sectionDocumentId.success || !sectionSortOrder.success) {
+    throw sectionError("GROWTH_LONGFORM_SECTION_AUTHORITY_MISMATCH");
+  }
+  const outlineSection = authority.outline.sections.find((candidate) => candidate.localId === section.outlineSectionId)!;
+  const prefix = `growth-${createHash("sha256").update(`${section.outlineId}:${section.outlineSectionId}`).digest("hex").slice(0, 20)}`;
+  const creativeItemId = `${prefix}-creative-document`;
+  const documentItemId = `${prefix}-document`;
+  return proposeChangeSetArgsSchema.parse({
+    summary: `写入长篇章节：${outlineSection.title}`,
+    items: [
+      {
+        id: creativeItemId,
+        dependsOn: [],
+        kind: "creative_document.put",
+        payload: {
+          documentId: sectionDocumentId.data,
+          create: true,
+          resourceId: storyResourceId.data,
+          kind: "prose",
+          title: outlineSection.title,
+          state: "active",
+          sortOrder: sectionSortOrder.data,
+        },
+      },
+      {
+        id: documentItemId,
+        dependsOn: [creativeItemId],
+        kind: "document.put",
+        payload: {
+          resourceId: storyResourceId.data,
+          creativeDocumentId: sectionDocumentId.data,
+          content: section.candidateText,
+        },
+      },
+    ],
+  });
 }
 
 function hasRepeatedFiller(text: string): boolean {

@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import { Value } from "typebox/value";
 import {
   compileGrowthLongformOutline,
+  compileGrowthLongformOutlineChangeSet,
   growthLongformOutlineParameters,
 } from "../../src/agent-worker/growth/growthLongformOutline";
 import {
   compileGrowthLongformSection,
+  compileGrowthLongformSectionChangeSet,
   growthLongformSectionParameters,
 } from "../../src/agent-worker/growth/growthLongformSection";
 
@@ -29,6 +31,37 @@ describe("Growth longform authoring", () => {
     expect(outline.sections.reduce((total, item) => total + item.estimatedCodePoints.min, 0)).toBe(10_000);
   });
 
+  it("compiles the outline into one sourced writing-constraints document and OC story binding", () => {
+    const proposal = compileGrowthLongformOutlineChangeSet(validOutlineInput, {
+      outlineId: "outline-1",
+      checkpointId: "checkpoint-1",
+      receiptId: "receipt-1",
+      availableEvidenceIds: evidence,
+      storyResourceId: "story-personal-1",
+      focusOcResourceId: "oc-focus-1",
+      outlineDocumentId: "document-outline-1",
+    });
+    expect(proposal.items.map((item) => item.kind)).toEqual([
+      "creative_document.put", "document.put", "assertion.put",
+    ]);
+    const document = proposal.items.find((item) => item.kind === "document.put")!;
+    expect(JSON.parse(document.payload.content)).toEqual(validOutlineInput);
+    expect(proposal.items.find((item) => item.kind === "assertion.put")).toMatchObject({
+      payload: {
+        scopeId: "oc-focus-1",
+        subject: "oc-focus-1",
+        predicate: "closure.oc.binding.personal_story",
+        object: { storyResourceId: "story-personal-1" },
+        evidenceIds: [expect.stringMatching(/^greenfield_document_output:/)],
+      },
+    });
+    expect(() => compileGrowthLongformOutlineChangeSet(validOutlineInput, {
+      outlineId: "outline-1", checkpointId: "checkpoint-1", receiptId: "receipt-1",
+      availableEvidenceIds: evidence, storyResourceId: "", focusOcResourceId: "oc-focus-1",
+      outlineDocumentId: "document-outline-1",
+    })).toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_OUTLINE_AUTHORITY_INVALID" }));
+  });
+
   it("rejects duplicate section/evidence values, invalid ranges, insufficient target, and foreign evidence", () => {
     expectCode({ ...validOutlineInput, sections: [section("origin", 5_000, 5_500), section("origin", 5_000, 5_500)] }, "GROWTH_LONGFORM_OUTLINE_DUPLICATE_SECTION");
     expectCode({ ...validOutlineInput, sections: [{ ...section("origin", 5_000, 5_500), evidenceIds: ["world-evidence", "world-evidence"] }, section("reckoning", 5_000, 5_500)] }, "GROWTH_LONGFORM_OUTLINE_DUPLICATE_VALUE");
@@ -48,6 +81,32 @@ describe("Growth longform authoring", () => {
     expect(Value.Check(growthLongformSectionParameters, { outlineSectionId: "origin", candidateText, evidenceIds: evidence })).toBe(true);
     expect(compiled.candidateText).toBe(candidateText);
     expect(compiled.codePoints).toBe(200);
+  });
+
+  it("compiles one section into one stable prose document without changing Writer bytes", () => {
+    const outline = compileOutline({
+      ...validOutlineInput,
+      sections: [section("origin", 200, 500), section("middle", 4_900, 5_500), section("reckoning", 4_900, 5_500)],
+    });
+    const candidateText = uniqueText(200);
+    const proposal = compileGrowthLongformSectionChangeSet({
+      outlineSectionId: "origin", candidateText, evidenceIds: evidence,
+    }, {
+      ...authority(outline),
+      storyResourceId: "story-personal-1",
+      sectionDocumentId: "document-section-origin",
+      sectionSortOrder: 1,
+    });
+    expect(proposal.items.map((item) => item.kind)).toEqual(["creative_document.put", "document.put"]);
+    expect(proposal.items.find((item) => item.kind === "creative_document.put")).toMatchObject({
+      payload: {
+        documentId: "document-section-origin",
+        resourceId: "story-personal-1",
+        kind: "prose",
+        sortOrder: 1,
+      },
+    });
+    expect(proposal.items.find((item) => item.kind === "document.put")?.payload.content).toBe(candidateText);
   });
 
   it("rejects wrong authority, section, evidence, padding, length, and prior replay", () => {

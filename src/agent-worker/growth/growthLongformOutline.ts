@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import { z } from "zod";
+import { proposeChangeSetArgsSchema, type ProposeChangeSetArgs } from "../../shared/agentWorkerProtocol";
 
 const identifier = z.string().trim().min(1).max(240);
 const localId = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
@@ -60,6 +62,12 @@ export interface GrowthLongformOutlineAuthority {
   availableEvidenceIds: readonly string[];
 }
 
+export interface GrowthLongformOutlineChangeSetAuthority extends GrowthLongformOutlineAuthority {
+  storyResourceId: string;
+  focusOcResourceId: string;
+  outlineDocumentId: string;
+}
+
 export interface GrowthLongformOutline {
   outlineId: string;
   checkpointId: string;
@@ -103,6 +111,67 @@ export function compileGrowthLongformOutline(
     summary: parsed.data.summary,
     sections: parsed.data.sections,
   };
+}
+
+export function compileGrowthLongformOutlineChangeSet(
+  input: unknown,
+  authority: GrowthLongformOutlineChangeSetAuthority,
+): ProposeChangeSetArgs {
+  const outline = compileGrowthLongformOutline(input, authority);
+  const storyResourceId = identifier.safeParse(authority.storyResourceId);
+  const focusOcResourceId = identifier.safeParse(authority.focusOcResourceId);
+  const outlineDocumentId = identifier.safeParse(authority.outlineDocumentId);
+  if (!storyResourceId.success || !focusOcResourceId.success || !outlineDocumentId.success) {
+    throw outlineError("GROWTH_LONGFORM_OUTLINE_AUTHORITY_INVALID");
+  }
+  const prefix = `growth-${createHash("sha256").update(`${outline.outlineId}:outline`).digest("hex").slice(0, 20)}`;
+  const creativeItemId = `${prefix}-creative-document`;
+  const documentItemId = `${prefix}-document`;
+  const assertionItemId = `${prefix}-personal-story-binding`;
+  const content = JSON.stringify({ summary: outline.summary, sections: outline.sections });
+  return proposeChangeSetArgsSchema.parse({
+    summary: outline.summary,
+    items: [
+      {
+        id: creativeItemId,
+        dependsOn: [],
+        kind: "creative_document.put",
+        payload: {
+          documentId: outlineDocumentId.data,
+          create: true,
+          resourceId: storyResourceId.data,
+          kind: "writing_constraints",
+          title: "长篇结构",
+          state: "active",
+          sortOrder: 0,
+        },
+      },
+      {
+        id: documentItemId,
+        dependsOn: [creativeItemId],
+        kind: "document.put",
+        payload: {
+          resourceId: storyResourceId.data,
+          creativeDocumentId: outlineDocumentId.data,
+          content,
+        },
+      },
+      {
+        id: assertionItemId,
+        dependsOn: [documentItemId],
+        kind: "assertion.put",
+        payload: {
+          assertionId: `${prefix}-personal-story-binding`,
+          scopeType: "oc",
+          scopeId: focusOcResourceId.data,
+          subject: focusOcResourceId.data,
+          predicate: "closure.oc.binding.personal_story",
+          object: { storyResourceId: storyResourceId.data },
+          evidenceIds: [`greenfield_document_output:${documentItemId}`],
+        },
+      },
+    ],
+  });
 }
 
 function firstOutlineCode(messages: string[]): GrowthLongformOutlineErrorCode {
