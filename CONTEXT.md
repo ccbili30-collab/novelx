@@ -68,10 +68,15 @@ SQLite + Artifact Store
 | 判断当前完成度 | `docs/project/current-state-and-routes.md` + 对应 `notes/status/` |
 | 接手长远 Runtime | `docs/runtime-v2/product-baseline.md` + `notes/status/2026-07-13-runtime-v2-a2-2-freeze.md` |
 | 接手黑客松 | `docs/plans/2026-07-13-hackathon-visual-creation-loop.md` + `notes/status/2026-07-14-hackathon-creative-showcase.md` |
+| 修改 Growth 阶段或 Longform | `src/agent-worker/growth/README.md` + 对应阶段文件与定向测试 |
 | 新会话交接 | `docs/project/session-handoff-template.md` |
 | 验证新会话是否真正理解 | `docs/project/new-session-understanding-audit.md` |
 
-## 6. 当前事实（2026-07-14）
+## 6. 当前事实
+
+具体实现状态以 `docs/project/current-state-and-routes.md` 顶部的最新覆盖区和对应 `notes/status/` 为准。下列 2026-07-14 条目是迁移基线，不是当前完成声明。
+
+### 迁移基线（2026-07-14）
 
 - 桌面端版本：`0.2.7`。
 - 产品与架构基线：`a119da8`，标签 `novelx-desktop-baseline-2026-07-14`；其中最后一个完成全量验收的代码头为 `8bb1695`，联合创作展台实现提交为 `c5526d1`。

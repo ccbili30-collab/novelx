@@ -1,7 +1,22 @@
 # NovelX Desktop 当前状态与双轨路线
 
-状态日期：2026-07-14
+状态日期：2026-07-16
 用途：区分已验证实现、进行中代码、长期计划和黑客松计划。每次可提交批次后更新。
+
+## 0. 最新状态覆盖（优先于下方迁移历史）
+
+- 黑客松分支：`codex/hackathon-10day`。
+- 本次维护基线：`8bbf632`。该哈希之后的状态必须重新核对，不能沿用本节的测试结论。
+- 真实 Growth 最高视觉边界记录在 `notes/status/2026-07-15-hackathon-growth-live-text-boundary.md`：空工作区经真实 `gpt-5.4` 与 `gpt-image-2` 完成世界→故事→OC 三个 committed Cycle、世界地图、自动 Showcase 和后续 research-only 检索。
+- 该 Live 不覆盖 Player/GM 回合、小说提取、导出、全量测试、安装包或升级链，不能称为完整 NovelX 闭环。
+- Cycle 间用户指导已有 failure-only 证据：规则 revision 2 已持久化并由后续 Cycle 使用，但 Story scope 图谱验收失败；交互式 Growth 尚未闭环。
+- Longform 已具备 outline/section 编译器、稳定身份、pinned progress resolver 和 Main→Worker authority 绑定的定向证据；自动 outline→section→recheck 协调尚未冻结。
+- `story` 与 `volume` 的关系语义已集中到 `src/domain/workspace/creativeRelationPolicy.ts`：二者均可作为 `uses_world` / `uses_oc` 的叙事源，`chapter` 不可。
+- Growth 计划工具序列已从顶层状态机提取到 `src/agent-worker/growth/core/growthPhaseRegistry.ts`；其余阶段参数与结果分支仍在巨型状态机中，是冻结维护债务。
+- Growth 的最短 AI 阅读路径为 `src/agent-worker/growth/README.md`。维护目标是缩小上下文和修改半径，不是继续增加战术功能。
+- 当前全量 `npm test`、生产安装包和升级/重开验收尚未在本维护基线上运行；定向测试不得冒充全量验收。
+
+下方内容保存 2026-07-14 的迁移与冻结历史。若与本节冲突，以本节和日期更新的 `notes/status/` 为准。
 
 ## 1. 仓库事实
 
