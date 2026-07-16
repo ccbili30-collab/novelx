@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { resolveGrowthPhasePlan } from "../../src/agent-worker/growth/core/growthPhaseRegistry";
+import {
+  createGrowthPhaseRegistry,
+  fixedGrowthPhaseHandler,
+} from "../../src/agent-worker/growth/core/growthPhaseHandler";
 import { growthRunBindingSchema, type GrowthRunBinding } from "../../src/shared/agentWorkerProtocol";
 
 describe("Growth phase registry characterization", () => {
@@ -48,6 +52,36 @@ describe("Growth phase registry characterization", () => {
     expect(() => resolveGrowthPhasePlan(binding({ kind: "revision", focusKinds: ["oc"] })))
       .toThrow(expect.objectContaining({ code: "STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED" }));
     expect(() => resolveGrowthPhasePlan(binding({ focusKinds: ["world", "oc"] })))
+      .toThrow(expect.objectContaining({ code: "GROWTH_PHASE_REGISTRY_INVALID" }));
+  });
+
+  it("registers a test phase without changing the top-level Steward state machine", () => {
+    const registry = createGrowthPhaseRegistry([
+      fixedGrowthPhaseHandler(
+        "test_phase",
+        (candidate) => candidate.kind === "expand" && candidate.focusKinds[0] === "world",
+        "orchestrate",
+        ["retrieve_graph_evidence"],
+      ),
+    ]);
+    expect(registry.resolve(binding())).toEqual({
+      phaseId: "test_phase",
+      objective: "orchestrate",
+      steps: ["retrieve_graph_evidence"],
+    });
+  });
+
+  it("rejects duplicate handlers and ambiguous matches before phase behavior can leak", () => {
+    expect(() => createGrowthPhaseRegistry([
+      fixedGrowthPhaseHandler("duplicate", () => true, "orchestrate", ["retrieve_graph_evidence"]),
+      fixedGrowthPhaseHandler("duplicate", () => false, "change_set", ["propose_change_set"]),
+    ])).toThrow(expect.objectContaining({ code: "GROWTH_PHASE_REGISTRY_INVALID" }));
+
+    const registry = createGrowthPhaseRegistry([
+      fixedGrowthPhaseHandler("first", () => true, "orchestrate", ["retrieve_graph_evidence"]),
+      fixedGrowthPhaseHandler("second", () => true, "change_set", ["propose_change_set"]),
+    ]);
+    expect(() => registry.resolve(binding()))
       .toThrow(expect.objectContaining({ code: "GROWTH_PHASE_REGISTRY_INVALID" }));
   });
 });

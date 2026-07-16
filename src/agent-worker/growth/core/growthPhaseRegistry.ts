@@ -1,4 +1,11 @@
 import type { GrowthRunBinding } from "../../../shared/agentWorkerProtocol";
+import {
+  createGrowthPhaseRegistry,
+  fixedGrowthPhaseHandler,
+  type GrowthPhaseHandler,
+  type GrowthPhasePlan,
+  type GrowthPhaseToolName,
+} from "./growthPhaseHandler";
 
 export type GrowthPhaseId =
   | "closure_evaluation"
@@ -9,31 +16,9 @@ export type GrowthPhaseId =
   | "story"
   | "oc";
 
-export type GrowthPhaseToolName =
-  | "retrieve_graph_evidence"
-  | "submit_growth_inquiry"
-  | "submit_closure_self_assessment"
-  | "writer"
-  | "propose_change_set"
-  | "generate_image";
+export type { GrowthPhaseHandler, GrowthPhasePlan, GrowthPhaseToolName } from "./growthPhaseHandler";
 
-export interface GrowthPhasePlan {
-  phaseId: GrowthPhaseId;
-  objective: "change_set" | "orchestrate";
-  steps: GrowthPhaseToolName[];
-}
-
-/**
- * Narrow internal seam for phase-local behavior. The registry currently owns
- * plan routing; tool schemas and compilers migrate behind this interface next.
- */
-export interface GrowthPhaseHandler {
-  readonly id: GrowthPhaseId;
-  matches(binding: GrowthRunBinding): boolean;
-  plan(binding: GrowthRunBinding): Omit<GrowthPhasePlan, "phaseId">;
-}
-
-const handlers: readonly GrowthPhaseHandler[] = [
+const handlers: readonly GrowthPhaseHandler<GrowthPhaseId>[] = [
   fixedHandler("closure_evaluation", (binding) => binding.kind === "closure_evaluation", "orchestrate", [
     "retrieve_graph_evidence", "submit_closure_self_assessment",
   ]),
@@ -51,12 +36,11 @@ const handlers: readonly GrowthPhaseHandler[] = [
   contentHandler("oc", ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"]),
 ];
 
-export function resolveGrowthPhasePlan(binding: GrowthRunBinding): GrowthPhasePlan {
+const registry = createGrowthPhaseRegistry(handlers);
+
+export function resolveGrowthPhasePlan(binding: GrowthRunBinding): GrowthPhasePlan<GrowthPhaseId> {
   if (binding.kind === "revision") throw phaseError("STEWARD_GROWTH_REVISION_NOT_IMPLEMENTED");
-  const matches = handlers.filter((handler) => handler.matches(binding));
-  if (matches.length !== 1) throw phaseError("GROWTH_PHASE_REGISTRY_INVALID");
-  const handler = matches[0]!;
-  return { phaseId: handler.id, ...handler.plan(binding) };
+  return registry.resolve(binding);
 }
 
 function fixedHandler(
@@ -64,11 +48,14 @@ function fixedHandler(
   matches: (binding: GrowthRunBinding) => boolean,
   objective: GrowthPhasePlan["objective"],
   steps: GrowthPhaseToolName[],
-): GrowthPhaseHandler {
-  return { id, matches, plan: () => ({ objective, steps: [...steps] }) };
+): GrowthPhaseHandler<GrowthPhaseId> {
+  return fixedGrowthPhaseHandler(id, matches, objective, steps);
 }
 
-function contentHandler(id: "world" | "story" | "oc", steps: GrowthPhaseToolName[]): GrowthPhaseHandler {
+function contentHandler(
+  id: "world" | "story" | "oc",
+  steps: GrowthPhaseToolName[],
+): GrowthPhaseHandler<GrowthPhaseId> {
   return fixedHandler(
     id,
     (binding) => binding.kind === "expand" && !binding.longformAuthority
