@@ -410,8 +410,17 @@ git diff --check
 
 ## 8. 阶段 5：生长过程与图文图鉴 UI [ ]
 
-**状态：** `not_started`
+**状态：** `blocked`
 **目标：** 中央对话流展示可展开的安全推演过程，右栏展示真实编辑对象，展台以“文字＋图片＋图谱”呈现世界生长结果。
+
+**当前阻塞（2026-07-16）：** Renderer（渲染层）接入前的只读审计证明，当前生产入口只有
+`growth.start/get/guide/subscribe`；`GrowthIllustrationCoordinator` 只在确定性测试中实例化，未被 Main
+生产路径调用。`growth.get` 也未投影插图 Request/Batch/Item、Longform 当前章节与累计字符、Closure
+finding/repair target 等安全持久状态。因此步骤 5–8 若只改 Renderer，只能从日志猜测或创建无真实入口的
+死 UI，违反本阶段停止条件与产品不变量。继续需要产品负责人明确授权一个版本化、最小、Creator Lens
+限定的 Main→Preload→Renderer Growth 内部 IPC 扩展；不得把 Domain 内部 Schema 直接暴露给 Renderer。
+
+**阻塞副作用边界：** 未改生产代码、未改公开协议、未运行测试或 Provider；仅更新本计划状态。
 
 ### 文件所有权
 
