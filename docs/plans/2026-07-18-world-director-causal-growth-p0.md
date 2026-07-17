@@ -551,11 +551,13 @@ unknown side effect -> reconciliation_required
 
 **Additive tables:**
 
-- [ ] `causal_relations`
-- [ ] `causal_relation_versions`
-- [ ] `causal_relation_sources`
+- [x] `causal_relations`
+- [x] `causal_relation_versions`
+- [x] `causal_relation_sources`
 
 **Invariants:** checkpoint ancestry, immutable identity, current/conflict/deleted projection, source visibility, endpoint assertion visibility, branch isolation and exact replay.
+
+**Task 8 evidence (2026-07-18):** additive SQLite v29 stores immutable causal identities, checkpointed versions and exact source links. `CausalRelationRepository` validates both assertion endpoints and every source against the target checkpoint ancestry, preserves branch isolation, projects the nearest `current|conflict` version, applies `deleted` tombstones without rewriting history and rejects identity/idempotency conflicts. The v28→v29 migration is transactional, additive, byte-preserves stable v28 rows, reopens idempotently and rolls back fully on collision. Repository + persistence suites passed 21/21 with zero skips; `npm run typecheck` passed. No Provider was run. Task 9 Change Set integration and product graph projection remain unimplemented.
 
 ### Task 9: Extend atomic Change Set support
 

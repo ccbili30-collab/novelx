@@ -258,7 +258,11 @@ function migrate(db: DatabaseSync): void {
     migrateGrowthEditorialV28Schema(db);
     schema = { version: 28 };
   }
-  if (schema.version !== 28) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 28) {
+    migrateCausalRelationsV29Schema(db);
+    schema = { version: 29 };
+  }
+  if (schema.version !== 29) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -1581,6 +1585,75 @@ function migrateGrowthEditorialV28Schema(db: DatabaseSync): void {
     const integrity = db.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
     if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok") {
       throw new Error("Growth Editorial v28 migration failed integrity check.");
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateCausalRelationsV29Schema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE causal_relations (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN (
+          'causes', 'enables', 'constrains', 'prevents', 'amplifies', 'mitigates', 'depends_on'
+        )),
+        cause_assertion_id TEXT NOT NULL CHECK (length(trim(cause_assertion_id)) > 0),
+        effect_assertion_id TEXT NOT NULL CHECK (length(trim(effect_assertion_id)) > 0),
+        created_at TEXT NOT NULL,
+        UNIQUE (kind, cause_assertion_id, effect_assertion_id),
+        CHECK (cause_assertion_id <> effect_assertion_id)
+      );
+      CREATE INDEX causal_relations_cause_idx ON causal_relations(cause_assertion_id, kind);
+      CREATE INDEX causal_relations_effect_idx ON causal_relations(effect_assertion_id, kind);
+
+      CREATE TABLE causal_relation_versions (
+        id TEXT PRIMARY KEY,
+        relation_id TEXT NOT NULL REFERENCES causal_relations(id) ON DELETE CASCADE,
+        created_checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        mechanism TEXT NOT NULL CHECK (length(trim(mechanism)) > 0),
+        conditions_json TEXT NOT NULL CHECK (
+          json_valid(conditions_json) AND json_type(conditions_json) = 'array' AND json_array_length(conditions_json) >= 1
+        ),
+        temporal_scope TEXT NOT NULL CHECK (length(trim(temporal_scope)) > 0),
+        polarity_strength_summary TEXT NOT NULL CHECK (length(trim(polarity_strength_summary)) > 0),
+        epistemic_status TEXT NOT NULL CHECK (epistemic_status IN ('confirmed', 'inferred', 'disputed')),
+        status TEXT NOT NULL CHECK (status IN ('current', 'conflict', 'deleted')),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        created_at TEXT NOT NULL,
+        UNIQUE (relation_id, created_checkpoint_id)
+      );
+      CREATE INDEX causal_relation_versions_relation_checkpoint_idx
+        ON causal_relation_versions(relation_id, created_checkpoint_id);
+      CREATE INDEX causal_relation_versions_checkpoint_status_idx
+        ON causal_relation_versions(created_checkpoint_id, status, relation_id);
+
+      CREATE TABLE causal_relation_sources (
+        relation_version_id TEXT NOT NULL REFERENCES causal_relation_versions(id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL REFERENCES source_records(id),
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('document', 'evidence', 'assertion')),
+        source_version_id TEXT NOT NULL CHECK (length(trim(source_version_id)) > 0),
+        stable_locator TEXT NOT NULL CHECK (length(trim(stable_locator)) > 0),
+        source_sha256 TEXT NOT NULL CHECK (length(source_sha256) = 64),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (relation_version_id, source_id, stable_locator),
+        UNIQUE (relation_version_id, ordinal)
+      );
+      CREATE INDEX causal_relation_sources_source_idx
+        ON causal_relation_sources(source_id, relation_version_id);
+
+      UPDATE schema_meta SET version = 29 WHERE singleton = 1;
+    `);
+    const violations = db.prepare("PRAGMA foreign_key_check").all();
+    if (violations.length > 0) throw new Error("Causal Relations v29 migration produced foreign key violations.");
+    const integrity = db.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
+    if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok") {
+      throw new Error("Causal Relations v29 migration failed integrity check.");
     }
     db.exec("COMMIT");
   } catch (error) {
