@@ -1,0 +1,564 @@
+{
+  "schemaVersion": 1,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "imageProvider": {
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [
+    {
+      "id": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:1",
+      "sequence": 1,
+      "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+      "status": "committed"
+    },
+    {
+      "id": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:2",
+      "sequence": 2,
+      "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+      "status": "committed"
+    },
+    {
+      "id": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:3",
+      "sequence": 3,
+      "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+      "status": "blocked"
+    }
+  ],
+  "research": null,
+  "player": null,
+  "ordering": {
+    "playerPublicBeforeFirstAppClose": {
+      "storyProfile": false,
+      "playthrough": false,
+      "turn": false
+    },
+    "growthAndPlayerInspectedAfterFirstAppClose": false,
+    "researchCompletedAfterPlayer": false
+  },
+  "counts": null,
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "visual": {
+    "userMessageVisible": true,
+    "timelineVisible": true,
+    "maximumTimelineRows": 3,
+    "mapLifecycleSequenceObserved": true,
+    "rightReadyWorldMapObserved": true,
+    "autoShowcaseObserved": false,
+    "autoShowcaseOpenCount": 0,
+    "finalTimelineStatus": "blocked",
+    "finalTimelineTerminalCategory": "blocked",
+    "rightWorldMapStatus": "ready",
+    "manualActionPresent": false,
+    "manualDomClickDispatched": true,
+    "manualShowcaseObserved": true,
+    "manualShowcaseOpenCount": 1,
+    "finalRouteAgent": false,
+    "finalRouteShowcase": true,
+    "route": "showcase",
+    "finalReadyMapEvidenced": false,
+    "screenshots": {}
+  },
+  "goalId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25",
+  "preTermination": {
+    "elapsedMs": 512486,
+    "cycles": [
+      {
+        "id": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:1",
+        "sequence": 1,
+        "status": "committed",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0"
+      },
+      {
+        "id": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:2",
+        "sequence": 2,
+        "status": "committed",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf"
+      },
+      {
+        "id": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:3",
+        "sequence": 3,
+        "status": "blocked",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f"
+      }
+    ],
+    "growthEvents": [
+      {
+        "sequence": 1,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:1",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 2,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:1",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 3,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:1",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 4,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:1",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 5,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:2",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 6,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:2",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 7,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:2",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 8,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:2",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 9,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:3",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 10,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:3",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 11,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:3",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 12,
+        "cycleId": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:3",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+        "phase": "cycle_terminal",
+        "durableState": "blocked"
+      }
+    ],
+    "agentEvents": [
+      {
+        "type": "run.started",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "生成世界地图",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "世界地图排队中",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "生成世界地图",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "世界地图已生成",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "生成世界地图",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf"
+      },
+      {
+        "type": "run.activity",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "activityLabel": "调用写手",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f"
+      },
+      {
+        "type": "run.activity",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+        "outcome": "blocked",
+        "changeSetState": "none"
+      }
+    ]
+  },
+  "failureCode": "AUTO_SHOWCASE_NOT_OBSERVED",
+  "postTermination": {
+    "cycles": [
+      {
+        "id": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:1",
+        "sequence": 1,
+        "status": "committed",
+        "failureCode": null,
+        "runId": "0eafebd5-cb76-491a-aa6a-4eeb3764acc0",
+        "receiptId": "growth-receipt-bbeb89c1-2c4c-448b-9041-d87a7bd5ba8c",
+        "changeSetId": "d74ba51d-3156-4d63-bc15-b2c3c6df9a33",
+        "inputCheckpointId": "3b74d424-9533-4945-a629-512aeaea536d",
+        "outputCheckpointId": "92933991-bf5e-4dcd-9d58-49096eefa236",
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "completed",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "generate_image",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "id": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:2",
+        "sequence": 2,
+        "status": "committed",
+        "failureCode": null,
+        "runId": "2975147a-9973-45f9-8fbb-87268d075bdf",
+        "receiptId": "growth-receipt-ce08f8c1-ce34-4c56-8670-c66316bc75dc",
+        "changeSetId": "43fd9554-331e-47c8-bf9f-d83434eacce7",
+        "inputCheckpointId": "92933991-bf5e-4dcd-9d58-49096eefa236",
+        "outputCheckpointId": "8d7a9d02-2cd8-4ec9-b457-ed5028e47b8b",
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "completed",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "writer",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "id": "growth-goal:0df67b2f-e253-45b3-90e9-e38dc1ff8d25:cycle:3",
+        "sequence": 3,
+        "status": "blocked",
+        "failureCode": "GROWTH_CHANGE_SET_NOT_COMMITTED",
+        "runId": "9ac48703-d24b-4a77-98a4-b18fc9079c7f",
+        "receiptId": "growth-receipt-db09fd67-d142-4af3-8121-6269e0a427c8",
+        "changeSetId": null,
+        "inputCheckpointId": "8d7a9d02-2cd8-4ec9-b457-ed5028e47b8b",
+        "outputCheckpointId": null,
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "blocked",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "blocked",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "counts": {
+      "resources": 7,
+      "documents": 6,
+      "assertions": 6,
+      "worldSubtreeAssertions": null,
+      "relations": 5
+    },
+    "changeSets": {
+      "total": 2,
+      "byStatus": [
+        {
+          "status": "committed",
+          "count": 2
+        }
+      ],
+      "outputCount": 30,
+      "checkpointCount": 3,
+      "checkpointDeltaFromInitial": 2
+    }
+  }
+}

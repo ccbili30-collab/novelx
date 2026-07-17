@@ -1,0 +1,663 @@
+{
+  "schemaVersion": 3,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "imageProvider": {
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "failureCode": "GROWTH_LIVE_ACCEPTANCE_FAILED",
+  "postTermination": {
+    "cycles": [
+      {
+        "sequence": 1,
+        "status": "committed",
+        "ruleRevision": 1,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 0,
+        "audit": {
+          "terminalCount": 6,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_growth_inquiry",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "propose_change_set",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "generate_image",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": true,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 2,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 8,
+        "audit": {
+          "terminalCount": 5,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_growth_inquiry",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "propose_change_set",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 3,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 8,
+        "audit": {
+          "terminalCount": 7,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_growth_inquiry",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "propose_change_set",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 4,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 12,
+        "audit": {
+          "terminalCount": 5,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_growth_inquiry",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "propose_change_set",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 5,
+        "status": "evaluated",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": false,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": false,
+        "receiptLinkCount": 19,
+        "audit": {
+          "terminalCount": 4,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_closure_self_assessment",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": false,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 6,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 20,
+        "audit": {
+          "terminalCount": 5,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_growth_inquiry",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "propose_change_set",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 7,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 20,
+        "audit": {
+          "terminalCount": 11,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_growth_inquiry",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "propose_change_set",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 8,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 20,
+        "audit": {
+          "terminalCount": 11,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_growth_inquiry",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "propose_change_set",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 9,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 10,
+        "audit": {
+          "terminalCount": 11,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_growth_inquiry",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "writer",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "propose_change_set",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 10,
+        "status": "evaluated",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": false,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": false,
+        "receiptLinkCount": 21,
+        "audit": {
+          "terminalCount": 4,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_closure_self_assessment",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": false,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 11,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 48,
+        "audit": {
+          "terminalCount": 5,
+          "terminalErrorCodes": [],
+          "toolOutcomes": [
+            {
+              "toolName": "retrieve_graph_evidence",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "submit_growth_inquiry",
+              "status": "succeeded"
+            },
+            {
+              "toolName": "propose_change_set",
+              "status": "succeeded"
+            }
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "diagnostics": [
+      {
+        "cycleSequence": 2,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_REVISION_FRAGMENT_RELATION_ENDPOINT_REF_INVALID",
+        "toolName": "propose_change_set",
+        "attempt": 1,
+        "maxAttempts": 5,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 2,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_correction",
+        "code": "GROWTH_REVISION_FRAGMENT_RELATION_ENDPOINT_REF_INVALID",
+        "toolName": "propose_change_set",
+        "attempt": 2,
+        "maxAttempts": 5,
+        "sideEffectState": "none",
+        "disposition": "corrected",
+        "retryability": "do_not_retry"
+      },
+      {
+        "cycleSequence": 6,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_OUTLINE_TARGET_TOO_SHORT",
+        "toolName": "propose_change_set",
+        "attempt": 1,
+        "maxAttempts": 3,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 7,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_SECTION_TOO_LONG",
+        "toolName": "propose_change_set",
+        "attempt": 1,
+        "maxAttempts": 3,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 7,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_SECTION_TOO_SHORT",
+        "toolName": "propose_change_set",
+        "attempt": 2,
+        "maxAttempts": 3,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 8,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_SECTION_TOO_LONG",
+        "toolName": "propose_change_set",
+        "attempt": 1,
+        "maxAttempts": 3,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 8,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_SECTION_TOO_SHORT",
+        "toolName": "propose_change_set",
+        "attempt": 2,
+        "maxAttempts": 3,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 9,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_SECTION_TOO_LONG",
+        "toolName": "propose_change_set",
+        "attempt": 1,
+        "maxAttempts": 3,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 9,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_SECTION_TOO_SHORT",
+        "toolName": "propose_change_set",
+        "attempt": 2,
+        "maxAttempts": 3,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      }
+    ],
+    "counts": {
+      "resources": 11,
+      "documents": 15,
+      "assertions": 9,
+      "relations": 15
+    },
+    "changeSets": {
+      "total": 9,
+      "byStatus": [
+        {
+          "status": "committed",
+          "count": 9
+        }
+      ],
+      "outputCount": 65,
+      "checkpointCount": 10,
+      "checkpointDeltaFromInitial": 9
+    },
+    "closure": {
+      "profileCount": 1,
+      "decisions": [
+        "continue_growing",
+        "continue_growing"
+      ]
+    },
+    "longform": {
+      "status": "blocked",
+      "complete": false,
+      "totalCodePoints": 0,
+      "sectionCount": 0
+    },
+    "illustrations": {
+      "requests": [],
+      "itemStatuses": [],
+      "jobs": [
+        {
+          "purpose": "world_map",
+          "status": "succeeded",
+          "requestSent": true,
+          "errorCode": null
+        }
+      ],
+      "imageJobCount": 1,
+      "imageAssetCount": 1
+    }
+  }
+}

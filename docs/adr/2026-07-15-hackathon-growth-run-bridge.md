@@ -32,6 +32,14 @@ original proposal executor once; only a committed Free Change Set can be bound
 to the Cycle's output checkpoint. Pending review, blocked, and failed proposals
 cannot commit a Cycle.
 
+When a persisted Inquiry result is `creator_choice_required`, Main treats that
+durable result as the authoritative Run boundary. After the Inquiry tool success
+is audited, `AgentProcessSupervisor` terminalizes every still-open invocation
+and the Run as `blocked`, publishes exactly one blocked Agent terminal, releases
+the lease, and stops the Worker. It does not wait for the model to submit an
+additional final-result tool call. A later creator answer starts a new bounded
+Cycle/Run; it does not resume the terminated Provider request.
+
 ## Consequences
 
 - A single Cycle has one Main-attached Run and one durable Receipt.
@@ -44,6 +52,9 @@ cannot commit a Cycle.
   after restart; it can also backfill exactly one missing safe terminal event
   for every terminal Cycle (including an already-proven committed Cycle)
   without inventing a new Change Set.
+- A creator-choice block cannot leave a Provider invocation or Agent Run open.
+  Late Worker messages are ignored after Main removes the active Run, so they
+  cannot duplicate the public terminal, a Change Set, or another tool effect.
 - Terminal failure metadata is allowlisted rather than a raw Provider or Worker
   error echo: configuration, Provider runtime, Provider protocol, tool, and
   Agent runtime categories remain distinct; unknown codes use the generic safe

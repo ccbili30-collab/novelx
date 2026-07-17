@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 3,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "imageProvider": {
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "failureCode": "GROWTH_GUIDANCE_CYCLE_ONE_WINDOW_MISSED",
+  "postTermination": {
+    "cycles": [
+      {
+        "sequence": 1,
+        "status": "reconciliation_required",
+        "ruleRevision": 1,
+        "failureCode": "GROWTH_RUN_INTERRUPTED",
+        "hasRun": true,
+        "hasReceipt": false,
+        "hasChangeSet": false,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": false,
+        "audit": {
+          "terminalCount": 2,
+          "terminalErrorCodes": [
+            "AGENT_WORKER_INTERRUPTED",
+            "AGENT_WORKER_INTERRUPTED"
+          ],
+          "retrieveSucceeded": false,
+          "proposeSucceeded": false,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "counts": {
+      "resources": 0,
+      "documents": 0,
+      "assertions": 0,
+      "relations": 0
+    },
+    "changeSets": {
+      "total": 0,
+      "byStatus": [],
+      "outputCount": 0,
+      "checkpointCount": 1,
+      "checkpointDeltaFromInitial": 0
+    },
+    "closure": {
+      "profileCount": 0,
+      "decisions": []
+    },
+    "longform": {
+      "status": "unavailable",
+      "complete": false,
+      "totalCodePoints": 0,
+      "sectionCount": 0
+    },
+    "illustrations": {
+      "requests": [],
+      "itemStatuses": [],
+      "imageJobCount": 0,
+      "imageAssetCount": 0
+    }
+  }
+}

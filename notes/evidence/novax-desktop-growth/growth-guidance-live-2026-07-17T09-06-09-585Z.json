@@ -1,0 +1,978 @@
+{
+  "schemaVersion": 3,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "imageProvider": {
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [
+    {
+      "sequence": 1,
+      "status": "committed"
+    },
+    {
+      "sequence": 2,
+      "status": "committed"
+    },
+    {
+      "sequence": 3,
+      "status": "committed"
+    },
+    {
+      "sequence": 4,
+      "status": "committed"
+    },
+    {
+      "sequence": 5,
+      "status": "evaluated"
+    },
+    {
+      "sequence": 6,
+      "status": "committed"
+    },
+    {
+      "sequence": 7,
+      "status": "committed"
+    },
+    {
+      "sequence": 8,
+      "status": "blocked"
+    }
+  ],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "guidance": {
+    "formEnabledOnCycle1": true,
+    "preSaveAcknowledgementAbsent": true,
+    "persistedRevision": 2,
+    "currentCycleRevisionAtSave": 1,
+    "nextCycleSequence": 2,
+    "nextCycleRevisionBoundary": true,
+    "pendingBoundaryVisible": true,
+    "notShownAsAppliedBeforeBoundary": true,
+    "screenshotSha256": "449f20f7db60d679eb6f86d4dac0f78c213464599371462595dc0e7b1b7a2d6b"
+  },
+  "preTermination": {
+    "cycles": [
+      {
+        "sequence": 1,
+        "status": "committed",
+        "hasRun": true
+      },
+      {
+        "sequence": 2,
+        "status": "committed",
+        "hasRun": true
+      },
+      {
+        "sequence": 3,
+        "status": "committed",
+        "hasRun": true
+      },
+      {
+        "sequence": 4,
+        "status": "committed",
+        "hasRun": true
+      },
+      {
+        "sequence": 5,
+        "status": "evaluated",
+        "hasRun": true
+      },
+      {
+        "sequence": 6,
+        "status": "committed",
+        "hasRun": true
+      },
+      {
+        "sequence": 7,
+        "status": "committed",
+        "hasRun": true
+      },
+      {
+        "sequence": 8,
+        "status": "blocked",
+        "hasRun": true
+      }
+    ],
+    "growthEvents": [
+      {
+        "sequence": 1,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 2,
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 3,
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 4,
+        "phase": "inquiry_selected",
+        "durableState": "running"
+      },
+      {
+        "sequence": 5,
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 6,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 7,
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 8,
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 9,
+        "phase": "inquiry_selected",
+        "durableState": "running"
+      },
+      {
+        "sequence": 10,
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 11,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 12,
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 13,
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 14,
+        "phase": "inquiry_selected",
+        "durableState": "running"
+      },
+      {
+        "sequence": 15,
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 16,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 17,
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 18,
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 19,
+        "phase": "inquiry_selected",
+        "durableState": "running"
+      },
+      {
+        "sequence": 20,
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 21,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 22,
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 23,
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 24,
+        "phase": "cycle_evaluated",
+        "durableState": "evaluated"
+      },
+      {
+        "sequence": 25,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 26,
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 27,
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 28,
+        "phase": "inquiry_selected",
+        "durableState": "running"
+      },
+      {
+        "sequence": 29,
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 30,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 31,
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 32,
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 33,
+        "phase": "inquiry_selected",
+        "durableState": "running"
+      },
+      {
+        "sequence": 34,
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 35,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 36,
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 37,
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 38,
+        "phase": "inquiry_selected",
+        "durableState": "running"
+      },
+      {
+        "sequence": 39,
+        "phase": "cycle_terminal",
+        "durableState": "blocked"
+      }
+    ],
+    "agentEvents": [
+      {
+        "type": "run.started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "outcome": "completed",
+        "changeSetState": "none"
+      },
+      {
+        "type": "run.started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "outcome": "blocked",
+        "changeSetState": "none",
+        "escalationCodes": [
+          "tool_failed"
+        ]
+      }
+    ]
+  },
+  "failureCode": "GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED",
+  "postTermination": {
+    "cycles": [
+      {
+        "sequence": 1,
+        "status": "committed",
+        "ruleRevision": 1,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 1,
+        "audit": {
+          "terminalCount": 6,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": true,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 2,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 8,
+        "audit": {
+          "terminalCount": 5,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 3,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 1,
+        "audit": {
+          "terminalCount": 7,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 4,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 10,
+        "audit": {
+          "terminalCount": 5,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 5,
+        "status": "evaluated",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": false,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": false,
+        "receiptLinkCount": 16,
+        "audit": {
+          "terminalCount": 4,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": false,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 6,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 25,
+        "audit": {
+          "terminalCount": 5,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 7,
+        "status": "committed",
+        "ruleRevision": 2,
+        "failureCode": null,
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": true,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": true,
+        "receiptLinkCount": 20,
+        "audit": {
+          "terminalCount": 7,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": true,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 8,
+        "status": "blocked",
+        "ruleRevision": 2,
+        "failureCode": "GROWTH_CHANGE_SET_NOT_COMMITTED",
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": false,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": false,
+        "receiptLinkCount": 20,
+        "audit": {
+          "terminalCount": 8,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": false,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "diagnostics": [
+      {
+        "cycleSequence": 6,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_OUTLINE_TARGET_TOO_SHORT",
+        "toolName": "propose_change_set",
+        "attempt": 1,
+        "maxAttempts": 3,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 8,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_SECTION_LENGTH_INVALID",
+        "toolName": "propose_change_set",
+        "attempt": 1,
+        "maxAttempts": 2,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 8,
+        "operationKind": "tool_call",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_LONGFORM_SECTION_LENGTH_INVALID",
+        "toolName": "propose_change_set",
+        "attempt": 2,
+        "maxAttempts": 2,
+        "sideEffectState": "none",
+        "disposition": "terminal",
+        "retryability": "do_not_retry"
+      },
+      {
+        "cycleSequence": 8,
+        "operationKind": "growth_cycle",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_CHANGE_SET_NOT_COMMITTED",
+        "toolName": null,
+        "attempt": null,
+        "maxAttempts": null,
+        "sideEffectState": "none",
+        "disposition": "terminal",
+        "retryability": "do_not_retry"
+      }
+    ],
+    "counts": {
+      "resources": 9,
+      "documents": 9,
+      "assertions": 7,
+      "relations": 11
+    },
+    "changeSets": {
+      "total": 6,
+      "byStatus": [
+        {
+          "status": "committed",
+          "count": 6
+        }
+      ],
+      "outputCount": 45,
+      "checkpointCount": 7,
+      "checkpointDeltaFromInitial": 6
+    },
+    "closure": {
+      "profileCount": 1,
+      "decisions": [
+        "continue_growing"
+      ]
+    },
+    "longform": {
+      "status": "ready",
+      "complete": false,
+      "totalCodePoints": 2781,
+      "sectionCount": 1
+    },
+    "illustrations": {
+      "requests": [],
+      "itemStatuses": [],
+      "jobs": [
+        {
+          "purpose": "world_map",
+          "status": "succeeded",
+          "requestSent": true,
+          "errorCode": null
+        }
+      ],
+      "imageJobCount": 1,
+      "imageAssetCount": 1
+    }
+  }
+}

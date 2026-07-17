@@ -1,0 +1,603 @@
+{
+  "schemaVersion": 1,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "imageProvider": {
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [
+    {
+      "id": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:1",
+      "sequence": 1,
+      "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+      "status": "committed"
+    },
+    {
+      "id": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:2",
+      "sequence": 2,
+      "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+      "status": "committed"
+    },
+    {
+      "id": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:3",
+      "sequence": 3,
+      "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+      "status": "committed"
+    }
+  ],
+  "research": null,
+  "player": null,
+  "counts": null,
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "visual": {
+    "userMessageVisible": true,
+    "timelineVisible": true,
+    "maximumTimelineRows": 3,
+    "mapLifecycleSequenceObserved": true,
+    "rightReadyWorldMapObserved": true,
+    "autoShowcaseObserved": true,
+    "autoShowcaseOpenCount": 1,
+    "finalTimelineStatus": "completed",
+    "finalTimelineTerminalCategory": "completed",
+    "rightWorldMapStatus": "ready",
+    "manualActionPresent": false,
+    "manualDomClickDispatched": false,
+    "manualShowcaseObserved": false,
+    "manualShowcaseOpenCount": 0,
+    "finalRouteAgent": false,
+    "finalRouteShowcase": true,
+    "route": "showcase",
+    "finalReadyMapEvidenced": true,
+    "screenshots": {
+      "agentStage": {
+        "sha256": "f94e217aecb38412cc72fc41b4f5fcb91541d806b151699d20ffb56a374d98a0"
+      },
+      "showcase": {
+        "sha256": "69d796692660c563e431b53d1b62421989162d2cfe53f63804b3a1ee125bce85"
+      }
+    },
+    "showcase": {
+      "readyWorldMapCount": 1,
+      "proseDocumentCount": 1,
+      "characterCardCount": 4,
+      "graphNodeCount": 2,
+      "failureBannerVisible": false
+    }
+  },
+  "goalId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a",
+  "preTermination": {
+    "elapsedMs": 309493,
+    "cycles": [
+      {
+        "id": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:1",
+        "sequence": 1,
+        "status": "committed",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db"
+      },
+      {
+        "id": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:2",
+        "sequence": 2,
+        "status": "committed",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78"
+      },
+      {
+        "id": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:3",
+        "sequence": 3,
+        "status": "committed",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf"
+      }
+    ],
+    "growthEvents": [
+      {
+        "sequence": 1,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:1",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 2,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:1",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 3,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:1",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 4,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:1",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 5,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:2",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 6,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:2",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 7,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:2",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 8,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:2",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      },
+      {
+        "sequence": 9,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:3",
+        "runId": null,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 10,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:3",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 11,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:3",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 12,
+        "cycleId": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:3",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "phase": "change_set_committed",
+        "durableState": "committed"
+      }
+    ],
+    "agentEvents": [
+      {
+        "type": "run.started",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "生成世界地图",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "世界地图排队中",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "生成世界地图",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "世界地图已生成",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "生成世界地图",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "整理最终结果",
+        "phase": "failed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "activityLabel": "调用写手",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "activityLabel": "调用写手",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      },
+      {
+        "type": "run.started",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf"
+      },
+      {
+        "type": "run.activity",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "activityLabel": "检索项目事实",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "activityLabel": "检索项目事实",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "activityLabel": "生成候选变更",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "activityLabel": "生成候选变更",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "activityLabel": "整理最终结果",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "activityLabel": "整理最终结果",
+        "phase": "completed"
+      },
+      {
+        "type": "run.completed",
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "outcome": "completed",
+        "changeSetState": "committed"
+      }
+    ]
+  },
+  "failureCode": "GROWTH_LIVE_ACCEPTANCE_FAILED",
+  "postTermination": {
+    "cycles": [
+      {
+        "id": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:1",
+        "sequence": 1,
+        "status": "committed",
+        "failureCode": null,
+        "runId": "0ff4ff7e-e395-4f66-bee0-66dc7e9ba4db",
+        "receiptId": "growth-receipt-cc816d55-387b-4021-9389-de76ca3b989b",
+        "changeSetId": "9719d91a-6a60-4b7d-8aa1-09140b8e7100",
+        "inputCheckpointId": "7e509125-d4ae-479d-9d7c-45fe653ea1f2",
+        "outputCheckpointId": "88f7808a-9380-4d9f-82ea-f2d6d785112d",
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "completed",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "generate_image",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "id": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:2",
+        "sequence": 2,
+        "status": "committed",
+        "failureCode": null,
+        "runId": "0a6ed38c-335d-4867-970c-fbc5da831e78",
+        "receiptId": "growth-receipt-7bdc675f-6802-4aba-aad8-51114df0471c",
+        "changeSetId": "a9224388-7798-4501-bc89-118faf1972f0",
+        "inputCheckpointId": "88f7808a-9380-4d9f-82ea-f2d6d785112d",
+        "outputCheckpointId": "2c02171e-3062-43be-a6cc-0c61f440b3a1",
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "completed",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "writer",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      },
+      {
+        "id": "growth-goal:39af6592-efc4-45ab-84ad-ba12b1feb62a:cycle:3",
+        "sequence": 3,
+        "status": "committed",
+        "failureCode": null,
+        "runId": "65597373-72fd-477e-8b6c-c1f8404fd0bf",
+        "receiptId": "growth-receipt-12499b68-9905-4128-a120-813a2542b71b",
+        "changeSetId": "73883a76-6f86-4e6a-b657-ed3870a745ca",
+        "inputCheckpointId": "2c02171e-3062-43be-a6cc-0c61f440b3a1",
+        "outputCheckpointId": "fab4eda0-9ce6-4cfa-8647-082b6814f78e",
+        "audit": {
+          "terminal": [
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "tool",
+              "eventType": "succeeded",
+              "errorCode": null
+            },
+            {
+              "entityType": "invocation",
+              "eventType": "completed",
+              "errorCode": null
+            },
+            {
+              "entityType": "run",
+              "eventType": "completed",
+              "errorCode": null
+            }
+          ],
+          "tools": [
+            {
+              "name": "retrieve_graph_evidence",
+              "outcomes": [
+                "succeeded"
+              ]
+            },
+            {
+              "name": "propose_change_set",
+              "outcomes": [
+                "succeeded"
+              ]
+            }
+          ],
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "counts": {
+      "resources": 10,
+      "documents": 8,
+      "assertions": 1,
+      "relations": 14
+    },
+    "changeSets": {
+      "total": 3,
+      "byStatus": [
+        {
+          "status": "committed",
+          "count": 3
+        }
+      ],
+      "outputCount": 41,
+      "checkpointCount": 4,
+      "checkpointDeltaFromInitial": 3
+    }
+  }
+}

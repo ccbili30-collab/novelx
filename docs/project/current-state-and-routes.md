@@ -1,22 +1,26 @@
 # NovelX Desktop 当前状态与双轨路线
 
-状态日期：2026-07-16
+状态日期：2026-07-17
 用途：区分已验证实现、进行中代码、长期计划和黑客松计划。每次可提交批次后更新。
 
 ## 0. 最新状态覆盖（优先于下方迁移历史）
 
+- World Director 因果 Growth P0 已完成 Phase A / Task 2 的绿色 pre-feature 基线：代码冻结提交 `ce8378e9deb9ad86dbbacc6eefe1bd2afbb8e4d5`；18 个定向文件 190/190、最终全量 141 文件 915/915、零跳过，typecheck、生产 build、Prompt publication 与 diff checks 通过。唯一发现的回归是安全诊断目录测试漏列一个已有生产用途的 Closure policy code，已通过最小测试修复。详细证据见 `notes/status/2026-07-18-world-director-task-2-green-baseline.md`。这不是 Provider Live、Electron、安装包或最终世界包验收；下一入口是 Phase B / Task 3。
+- World Director 因果 Growth P0 已完成 Phase A / Task 1 的只读脏基线盘点；精确路径分类、状态哈希、JSON 解析/凭据标记检查和最高 Live 边界见 `notes/status/2026-07-18-world-director-task-1-dirty-baseline.md`。盘点快照为 `codex/hackathon-10day` @ `60b097e`、81 个已跟踪修改、106 个未跟踪、暂存区 0；盘点后新增的 Task 1 状态文档不属于该冻结计数。下一入口是 Task 2 的定向测试与绿色基线恢复，尚未开始 World Director、因果图谱或 SQLite v28 实现。
 - 黑客松分支：`codex/hackathon-10day`。
-- 当前最新阶段实现头：`6ed78e2`。Repair、Revision、Longform 与 Illustration Queue 只完成各自定向验收；全量测试结论仍固定在模块化基线 `a666f07`，不得跨头沿用。当前头的生产构建已通过。
+- 当前提交头：`60b097e`。Repair、Revision、Longform、通用/默认 Illustration Queue 与 Growth UI 已完成确定性实现；阶段 6 的 E2E、计划和新失败证据尚未提交。
 - 真实 Growth 最高视觉边界记录在 `notes/status/2026-07-15-hackathon-growth-live-text-boundary.md`：空工作区经真实 `gpt-5.4` 与 `gpt-image-2` 完成世界→故事→OC 三个 committed Cycle、世界地图、自动 Showcase 和后续 research-only 检索。
 - 该 Live 不覆盖 Player/GM 回合、小说提取、导出、全量测试、安装包或升级链，不能称为完整 NovelX 闭环。
-- Cycle 间用户指导的确定性 Revision 路径已接通：规则仅在安全边界进入新 Cycle，重新检索 pinned checkpoint，以模型 Impact Brief 和一个受 Main authority 二次验证的 Change Set 修改 world/story/OC，并只将受影响插图标记 stale。当前实现尚无真实 Provider Live，交互式 Growth 仍未闭环。
-- Longform 已具备 outline/section 编译器、稳定身份、pinned progress resolver、Main→Worker authority 与自动 `outline → section → recheck` 协调的确定性证据。每节独立检索和提交；累计 10,000 Unicode 字符后进入独立 Closure recheck。章节运行中收到新规则时，先完成当前原子提交，再执行 Revision/recheck，最后以新规则继续。当前实现尚无真实 Provider Live。
-- 通用 Illustration Queue 已有 Main-only 的完整计划原子持久化、每批 20/并发 1/无总量上限、既有图片 Gateway 执行、来源 stale、取消、部分失败和重开 reconciliation 的确定性证据。默认覆盖要求地图、主要风貌、故事场景与每个主要 OC 立绘；任意稳定文本、working/conversation snapshot 可多图、多变体。Renderer 接入和真实多图 Live 尚未完成。
+- Cycle 间用户指导的 Revision 路径已有新的真实提交证据。R3 修正了“合法 Revision 同批新文档证据被误判为 Greenfield”的内部权限漂移；最终 Live 的 Cycle 1/Cycle 2 均 committed，持久化 2 个 Change Set 和 2 次 checkpoint 前移，世界地图 Job/Asset 成功。随后 Cycle 3 仅持久化为 planned，`growth.get` 以公开聚合错误 `Growth Run bridge failed` 终止且没有安全诊断，因此 Closure/Longform/后续插图/reopen/research 尚未闭环。当前边界见 `notes/status/2026-07-17-safe-diagnostic-pipeline-v1.md`。
+- Longform 已具备 outline/section 编译器、稳定身份、pinned progress resolver、Main→Worker authority 与自动 `outline → section → recheck` 协调的确定性证据。每节独立检索和提交；累计 10,000 Unicode 字符后进入独立 Closure recheck。章节运行中收到新规则时，先完成当前原子提交，再执行 Revision/recheck，最后以新规则继续。当前实现尚无这一完整路径的真实 Provider Live。
+- 通用 Illustration Queue 已有 Main-only 的完整计划原子持久化、每批 20/并发 1/无总量上限、既有图片 Gateway 执行、来源 stale、取消、部分失败和重开 reconciliation 的确定性证据。Renderer 已接入图文图鉴；默认覆盖和自由配图的当前实现尚无完整真实多图 Live。
 - `story` 与 `volume` 的关系语义已集中到 `src/domain/workspace/creativeRelationPolicy.ts`：二者均可作为 `uses_world` / `uses_oc` 的叙事源，`chapter` 不可。
 - Growth 计划工具序列与稳定 `GrowthPhaseHandler` seam 已位于 `src/agent-worker/growth/core/`；新增测试阶段不需要修改顶层 Steward 状态机主体。
 - Longform 与 Closure/Repair 的 Worker 编译/工具展示分别位于 `src/agent-worker/growth/phases/longform/`、`phases/closure/`；对应 Main authority resolver 位于 `src/main/growth/phases/`。顶层仍保留跨阶段工具分派、副作用门禁、恢复和终态。
 - Growth 的最短 AI 阅读路径为 `src/agent-worker/growth/README.md` 与 `src/main/growth/README.md`。维护目标是缩小上下文和修改半径，不是继续增加战术功能。
-- 模块化基线 `a666f07` 已运行完整 `npm test`：Unit 728/728、Integration 22/22、e2e-support 6/6，零跳过。Illustration Queue 头 `6ed78e2` 的 9 个定向文件 106/106、typecheck、3 组 active Prompt publication 与生产 build 通过；完整冻结验收仍留到执行计划阶段 6。
+- Safe Diagnostic Pipeline v1 已实现内部严格合同、SQLite 仓储、Main/Worker 诊断目录和失败关闭展示。Revision Main policy 现在保留十类精确本地错误，而 Worker 公开错误仍保持聚合；仍未覆盖最终 Live 暴露的 planned-Cycle `growth.get` bridge 失败。
+- 当前 R3 冻结工作树已运行完整 `npm test`：Unit 842/842、Integration 22/22、e2e-support 8/8，共 872/872、零跳过；typecheck、3 个 active Agent Prompt publication、生产 build、diff checks 与 Electron 残留检查通过。该证据是当前混合未提交工作树的本地验收，不是提交或安装包验收。
+- Windows 解包目录、包验证和 NSIS 生成已通过；解包应用已真实启动/退出。安装器为未签名的 0.2.7 x64 包。首次隔离安装因检测到用户已有 `D:\NovelX` 正式安装而安全阻断；产品负责人确认无数据并授权覆盖后，官方卸载器 exit 0，隔离安装/双启动/卸载/用户数据保留全部通过，当前 0.2.7 已重新安装到 `D:\NovelX` 并启动/退出通过。旧安装无 Growth 数据，安装后重开已有 Growth workspace 尚无证据。
 
 下方内容保存 2026-07-14 的迁移与冻结历史。若与本节冲突，以本节和日期更新的 `notes/status/` 为准。
 
@@ -80,6 +84,15 @@ A2.2 只证明一批可靠性地基：Bound Lease、Provider legacy 封口、bin
 5. 证明玩家上下文固定世界、故事和真实 OC bindings，且不泄漏 Creator Lens。
 6. 连续运行三次完整演示脚本和失败场景。
 7. 验证 Windows 安装、非 C 盘安装、升级保留配置和测试进程清理。
+
+### 5.1 2026-07-17 当前 Growth 恢复入口
+
+- 连续诊断标准：`docs/plans/2026-07-17-continuous-growth-diagnosis-repair-standard.md`。
+- 最新完整冻结：136 个测试文件、877 项测试通过、零跳过；typecheck、active Prompt gates、生产 build 和 diff checks 通过。
+- 已修复并确定性覆盖：planned Cycle 启动前阶段诊断、Growth Inquiry 三次有界纠正、Inquiry Brief 安全原因分类、Revision existing-document alias → pinned evidenceId 转换。
+- 当前硬停止不是模型或图片失败：`creator_choice_required` 已把 Cycle 权威状态持久化为 blocked，但 Worker 仍依赖模型再调用最终结果工具；真实运行没有投影 Agent terminal，最终为 `GROWTH_AGENT_TERMINAL_PROJECTION_TIMEOUT`。
+- 恢复前必须决定：是否授权 Main 在 creator-choice 事件成功落盘后主动停止对应 Worker，并发布 authoritative blocked terminal。不得通过放宽真实 E2E 断言掩盖悬挂 Run。
+- 当前代码和证据仍在混合未暂存工作树；没有提交、推送、package 或 installer 验收。
 
 ## 6. 已完成的目录迁移
 

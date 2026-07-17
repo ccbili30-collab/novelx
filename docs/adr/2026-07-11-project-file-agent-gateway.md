@@ -29,7 +29,7 @@ Change Set 新增：
 - `project_file.put`
 - `project_file.delete`
 
-已有文件必须携带读取时的 SHA-256，防止覆盖并发修改。新文件要求 `expectedSha256: null`。覆盖和删除属于 elevated（较高风险），必须在 Assist（协助）审查；Free（自由）只允许低风险新建文件自动提交。
+已有文件必须携带读取时的 SHA-256，防止覆盖并发修改。新文件要求 `expectedSha256: null`。覆盖和删除仍记录为 elevated（较高风险）。2026-07-17 的产品决定取消 Free（自由）模式的人工审查边界：Free 下通过 SHA、scope、权限、领域规则、重大冲突和事务校验的文件变更直接提交；任何校验失败仍然失败关闭。Assist（协助）继续使用逐项确认。
 
 文件版本使用 `.novax/file-snapshots/<sha256>` 内容寻址快照，数据库 `project_file_versions` 记录检查点、相对路径、状态和内容哈希。首次跟踪时把修改前状态挂到父检查点，检查点恢复会重建所有已跟踪文件。数据库提交失败时，磁盘修改按相反顺序回滚。
 

@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 3,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "imageProvider": {
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "failureCode": "GROWTH_LIVE_ACCEPTANCE_FAILED",
+  "postTermination": {
+    "cycles": [
+      {
+        "sequence": 1,
+        "status": "blocked",
+        "ruleRevision": 1,
+        "failureCode": "GROWTH_CREATOR_CHOICE_REQUIRED",
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": false,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": false,
+        "receiptLinkCount": 0,
+        "audit": {
+          "terminalCount": 4,
+          "terminalErrorCodes": [
+            "GROWTH_CREATOR_CHOICE_REQUIRED",
+            "GROWTH_CREATOR_CHOICE_REQUIRED"
+          ],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": false,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [],
+          "actualModelIds": []
+        }
+      },
+      {
+        "sequence": 2,
+        "status": "planned",
+        "ruleRevision": 3,
+        "failureCode": null,
+        "hasRun": false,
+        "hasReceipt": false,
+        "hasChangeSet": false,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": false,
+        "receiptLinkCount": null,
+        "audit": null
+      }
+    ],
+    "diagnostics": [
+      {
+        "cycleSequence": 1,
+        "operationKind": "growth_cycle",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_CREATOR_CHOICE_REQUIRED",
+        "toolName": null,
+        "attempt": null,
+        "maxAttempts": null,
+        "sideEffectState": "none",
+        "disposition": "terminal",
+        "retryability": "user_action"
+      },
+      {
+        "cycleSequence": 2,
+        "operationKind": "growth_cycle",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_RUN_START_REVISION_AUTHORITY_INVALID",
+        "toolName": null,
+        "attempt": null,
+        "maxAttempts": null,
+        "sideEffectState": "none",
+        "disposition": "terminal",
+        "retryability": "do_not_retry"
+      }
+    ],
+    "counts": {
+      "resources": 0,
+      "documents": 0,
+      "assertions": 0,
+      "relations": 0
+    },
+    "changeSets": {
+      "total": 0,
+      "byStatus": [],
+      "outputCount": 0,
+      "checkpointCount": 1,
+      "checkpointDeltaFromInitial": 0
+    },
+    "closure": {
+      "profileCount": 0,
+      "decisions": []
+    },
+    "longform": {
+      "status": "unavailable",
+      "complete": false,
+      "totalCodePoints": 0,
+      "sectionCount": 0
+    },
+    "illustrations": {
+      "requests": [],
+      "itemStatuses": [],
+      "jobs": [],
+      "imageJobCount": 0,
+      "imageAssetCount": 0
+    }
+  }
+}

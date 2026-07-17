@@ -23,7 +23,7 @@
 - 每个内容 Cycle 在提出 Change Set 前执行 Evidence-grounded Inquiry（证据化自询）：从当前图谱/文档提出 3–7 个高价值问题，标注相关节点与 known/conflicted/unknown 状态，去重后只选择最高价值问题继续推演。自询是正式 Harness 步骤，不是 Prompt 中的“多想想”。
 - 自询不保存或展示原始思维链；只持久化问题、安全摘要、证据引用、选择结果和后续行动。只有不同答案会改变作品身份、规则或创作者价值取舍时才暂停询问用户，否则采用明确标注的临时假设继续生长。
 - World Closure：具有自洽的宇宙/天文与时间框架、地理和自然环境、连续历史、国家/政治与社会组织、文化/信仰/经济、力量或技术规则、当前冲突、地图和代表性视觉。
-- OC Closure：默认选择一个焦点主角，形成完整来历、人格、动机、能力/限制、关系和与世界的相互影响，并至少生成一篇累计不少于 10,000 个 Unicode 字符的个人故事；其他主要 OC 仍需完整角色档案、来历、关系和较短个人经历。用户可将任意其他 OC 提升为焦点角色，再启动其独立万字故事闭环。
+- OC Closure：默认选择一个焦点主角，形成完整来历、人格、动机、能力/限制、关系和与世界的相互影响，并至少生成一篇累计不少于 7,000 个 Unicode 字符（通常约 7–8 千字）的个人故事；其他主要 OC 仍需完整角色档案、来历、关系和较短个人经历。用户可将任意其他 OC 提升为焦点角色，再启动其独立长篇故事闭环。
 - Story Closure：具有清晰的世界历史背景、主要人物来历、冲突起因、发展、关键转折和阶段性结局；故事、世界和主要 OC 的来源与关系可由图谱检索。
 - 最终“世界诞生”必须同时满足内容闭环与默认视觉集合 ready；如果图片仍在生成，只能显示“内容已闭环，视觉生成中”。
 - 指导先持久化为新的 Rule Revision；正在运行的 Cycle 保持原规则版本，下一安全 Cycle 使用最新版本。
@@ -344,7 +344,7 @@ interface GrowthInquiryBrief {
 
 ---
 
-## Task 5：Closure Evaluator 与万字长文分段写作
+## Task 5：Closure Evaluator 与 OC 长篇分段写作
 
 **Files:**
 - Create: `src/domain/growth/growthClosureEvaluator.ts`
@@ -360,12 +360,12 @@ interface GrowthInquiryBrief {
 
 **Decision gate (approved 2026-07-16):** Main Head 批准 SQLite schema 26、Closure Contract v4、专用 `closure_evaluation` Intent 与 `evaluated` 终态。`evaluated` 要求 Run/Receipt/terminal time，不含 Change Set、output checkpoint 或 failure code；它仅表示存在唯一 durable evaluation outcome，不自动等于 accepted 或 Goal completed。Cycle input、Receipt、Closure revision 与 assessment checkpoint/rule revision 必须完全一致，outcome 与终态同事务，事件可幂等补尾，结果不明仍 `reconciliation_required`。同时批准严格类型 submission、Facet Result/Checker adverse finding 分离、Repair lineage、mixed component/focus OC 绑定与 pinned-checkpoint relation 查询的窄范围扩展。版本升为 contract `1.1.0`、capability `hackathon-growth-closure-v4`、strategy `grow_world_story_oc_closure_v4`；v3 不得伪装兼容 v4。详细迁移与恢复不变量见配套 ADR。
 
-**Implementation status (2026-07-16, evaluation and bounded repair runtime integrated):** SQLite schema 26、Closure Contract v4、`closure_evaluation`/`repair` Intent、`evaluated` 终态、严格 Steward/Checker submission、durable outcome、Repair lineage、旧 accepted Review 的历史-only 投影、pinned-checkpoint relation 查询与纯确定性 Closure evaluator 已实现。当前 evaluator 已证明 Unicode code point 的 9,999/10,000 边界、当前稳定 prose 跨文档累计、superseded 排除与“正文关键词不能冒充类型化来源”。Coordinator 在内容前沿结束后创建默认 mixed Closure Profile 并自动启动独立 evaluation Cycle；Main/Worker 已接入受信任的单 finding repair authority、固定证据重检、唯一原子 Change Set、lineage 与后续新 revision/evaluation 调度。跨组件回归已分别证明 `repairs_required → repair committed → revision 2 recheck → accepted` 与相同 finding 在复检后进入 `no_progress/stalled` 且不再启动 Worker，并验证六个 Cycle 的 checkpoint/Intent/lineage 终态。Longform 的纯编译边界现会创建主线 story 下独立的个人故事 `volume`，建立 `uses_world`/`uses_oc` 和有来源的 OC→个人故事绑定，再把 outline 写入稳定 `writing_constraints` 文档、把每个 Writer section 原字节写入独立稳定 `prose` 文档；主线正文不能冒充 OC 万字故事。模型不能提供资源权威、文档 ID、父级或来源占位符。未使用 Provider、Electron、构建或全量测试。尚未完成：Longform Runtime 分段调度、跨 checkpoint 检索和真实 Provider 验收。因此本状态仍不能称 Task 5 完成或内容闭环。
+**Implementation status (2026-07-16, evaluation and bounded repair runtime integrated):** SQLite schema 26、Closure Contract v4、`closure_evaluation`/`repair` Intent、`evaluated` 终态、严格 Steward/Checker submission、durable outcome、Repair lineage、旧 accepted Review 的历史-only 投影、pinned-checkpoint relation 查询与纯确定性 Closure evaluator 已实现。当前 evaluator 已证明 Unicode code point 的 6,999/7,000 边界、当前稳定 prose 跨文档累计、superseded 排除与“正文关键词不能冒充类型化来源”。Coordinator 在内容前沿结束后创建默认 mixed Closure Profile 并自动启动独立 evaluation Cycle；Main/Worker 已接入受信任的单 finding repair authority、固定证据重检、唯一原子 Change Set、lineage 与后续新 revision/evaluation 调度。跨组件回归已分别证明 `repairs_required → repair committed → revision 2 recheck → accepted` 与相同 finding 在复检后进入 `no_progress/stalled` 且不再启动 Worker，并验证六个 Cycle 的 checkpoint/Intent/lineage 终态。Longform 的纯编译边界现会创建主线 story 下独立的个人故事 `volume`，建立 `uses_world`/`uses_oc` 和有来源的 OC→个人故事绑定，再把 outline 写入稳定 `writing_constraints` 文档、把每个 Writer section 原字节写入独立稳定 `prose` 文档；主线正文不能冒充 OC 长篇故事。模型不能提供资源权威、文档 ID、父级或来源占位符。未使用 Provider、Electron、构建或全量测试。尚未完成：Longform Runtime 分段调度、跨 checkpoint 检索和真实 Provider 验收。因此本状态仍不能称 Task 5 完成或内容闭环。
 
 **Closure profiles:**
 
 1. `world_birth` 至少检查：cosmology/astronomy/time、geography/environment、history/timeline、polities/institutions、culture/belief/economy、power/technology rules、current conflicts、world map、world scenes。检查对象必须是带稳定来源的文档、Assertion、资源和关系，不用关键词出现次数冒充结构。
-2. `oc_saga` 至少检查：唯一焦点 OC 的 profile、来历、人格/动机、能力与限制、主要关系、world/story bindings、角色立绘、关键场景，以及当前稳定个人故事总长度 `>= 10_000` Unicode code points。字符数不按字节、Token 或 HTML 长度计算。非焦点主要 OC 必须有完整 profile、来历、关系和个人经历，但默认不要求各自达到 10,000 字；显式提升为焦点后使用新的 `oc_saga` 评估。
+2. `oc_saga` 至少检查：唯一焦点 OC 的 profile、来历、人格/动机、能力与限制、主要关系、world/story bindings、角色立绘、关键场景，以及当前稳定个人故事总长度 `>= 7_000` Unicode code points。字符数不按字节、Token 或 HTML 长度计算。非焦点主要 OC 必须有完整 profile、来历、关系和个人经历，但默认不要求各自达到 7,000 字符；显式提升为焦点后使用新的 `oc_saga` 评估。
 3. `story_universe` 至少检查：世界历史背景、主要角色来历、起因、发展、关键转折、阶段性结局、uses_world、uses_oc 和故事场景图。
 4. `mixed_birth` 组合种子中用户明确要求的 profiles；不能为了快速完成偷偷降低单项门槛。
 

@@ -2,7 +2,7 @@
 
 > **For Codex/Claude:** REQUIRED SUB-SKILL: use `executing-plans` to execute this plan task-by-task. Read `CONTEXT.md`, `src/agent-worker/growth/README.md`, `src/main/growth/README.md`, and only the current stage files before editing.
 
-**Goal:** 完成可持续、可指导、可自询检查、可返工、可生成万字 OC 个人故事与来源绑定插图的交互式 Growth（生长）黑客松闭环。
+**Goal:** 完成可持续、可指导、可自询检查、可返工、可生成不少于 7,000 Unicode 字符的 OC 个人故事与来源绑定插图的交互式 Growth（生长）黑客松闭环。
 
 **Architecture:** Main（主进程）持有 Goal/Cycle、Rule Revision（规则修订）、checkpoint（检查点）、Receipt（检索回执）、权限和副作用权威；Agent Worker（智能体工作线程）只处理当前阶段的高层创作输入；Domain（领域层）通过唯一 Change Set（变更集）提交正式修改；Renderer（渲染层）只投影已持久化的安全状态。实现按阶段模块串行推进，禁止继续把产品能力堆回顶层巨型状态机。
 
@@ -43,7 +43,7 @@
 [x] 0. 模块化基线与全量测试
 [x] 1. Repair 权限与领域正确性
 [x] 2. 用户规则影响分析与修订
-[x] 3. OC 万字 Longform 自动循环
+[x] 3. OC 长篇 Longform 自动循环
 [x] 4. 通用插图队列
 [x] 5. 生长过程与图文图鉴 UI
 [ ] 6. 真实 Live、打包与冻结验收
@@ -97,7 +97,7 @@
 flowchart LR
     S0["0 模块化冻结"] --> S1["1 Repair 权限"]
     S1 --> S2["2 用户规则修订"]
-    S2 --> S3["3 万字 Longform"]
+    S2 --> S3["3 OC 长篇 Longform"]
     S3 --> S4["4 通用插图队列"]
     S4 --> S5["5 生长 UI"]
     S5 --> S6["6 真实 Live 与冻结"]
@@ -273,7 +273,7 @@ git diff --check
 
 ---
 
-## 6. 阶段 3：OC 万字 Longform 自动循环 [x]
+## 6. 阶段 3：OC 长篇 Longform 自动循环 [x]
 
 **状态：** `completed`
 **目标：** 为焦点 OC 创建或恢复个人故事 `volume`，逐节检索、写作和提交，累计至少 10,000 个 Unicode 字符后交给 Closure/Checker 复检。
@@ -297,7 +297,7 @@ git diff --check
 - `src/domain/growth/growthRepository.ts`
 - 相邻 Longform/Closure/Coordinator 测试。
 
-**Forbidden:** 主线 prose 冒充 OC 个人故事、一次请求生成全部万字、无检索连续写、模板正文、padding。
+**Forbidden:** 主线 prose 冒充 OC 个人故事、一次请求生成全部长篇、无检索连续写、模板正文、padding。
 
 ### 实现步骤
 
@@ -535,8 +535,8 @@ ready、重开和计费幂等留到阶段 6 唯一 Live。
 
 ## 10. 阶段 6：真实 Live、打包与冻结验收 [ ]
 
-**状态：** `in_progress`
-**目标：** 在冻结代码上证明真实交互式世界生长、万字 OC 故事、多图生成、重开恢复和 Windows 可运行包。
+**状态：** `blocked`
+**目标：** 在冻结代码上证明真实交互式世界生长、不少于 7,000 Unicode 字符的 OC 故事、多图生成、重开恢复和 Windows 可运行包。
 
 ### 文件所有权
 
@@ -559,11 +559,11 @@ npm run build
 npx --no-install playwright test tests/e2e/growth-presentation-ui.spec.ts tests/e2e/creative-showcase.spec.ts --workers=1 --retries=0
 ```
 
-- [ ] 工作树只含冻结范围，Player evidence 未触碰。
-- [ ] 全量测试通过、0 skipped。
-- [ ] typecheck/build/Prompt publication 通过。
-- [ ] 无 Provider 失败关闭 UI E2E 通过。
-- [ ] Electron/Playwright 残留为 0。
+- [x] 工作树只含冻结范围，Player evidence 未触碰。
+- [x] 全量测试通过、0 skipped（Unit 767、Integration 22、e2e-support 6，共 795）。
+- [x] typecheck/build/三组 Prompt publication 通过。
+- [x] 无 Provider 失败关闭 UI E2E 通过（5/5）。
+- [x] Electron/Playwright 残留为 0。
 
 ### 唯一真实交互式 Live
 
@@ -574,21 +574,78 @@ npx --no-install playwright test tests/e2e/real-provider-interactive-growth.spec
 
 必须证明：
 
-1. [ ] UI 一次输入任意种子启动 Growth。
-2. [ ] 世界 Cycle 真实检索、Inquiry、Change Set 和 checkpoint 提交。
-3. [ ] 运行中输入：“日式指轻小说叙事风格，不出现真实日本元素，世界仍为原创西幻。”
-4. [ ] UI 显示 revision 已持久化但尚未应用。
-5. [ ] 下一安全 Cycle 固定新 revision、重新检索并产生 Impact Brief。
-6. [ ] Revision Change Set 修改受影响世界/故事/OC/关系，preserve 对象不变。
+1. [x] UI 一次输入任意种子启动 Growth。
+2. [x] 世界 Cycle 真实检索、Inquiry、Change Set 和 checkpoint 提交。
+3. [x] 运行中输入：“日式指轻小说叙事风格，不出现真实日本元素，世界仍为原创西幻。”
+4. [x] UI 显示 revision 已持久化但尚未应用。
+5. [x] 下一安全 Cycle 固定新 revision、重新检索并产生 Impact Brief。
+6. [ ] Revision Change Set 保留并修改当时已经存在的世界对象；尚未存在的故事、OC 与关系必须在后续 Cycle 中按 revision 2 创建并持续使用该规则。不得把不存在的对象伪称为已被即时修改。
 7. [ ] Checker 给出 accepted 或 repairs_required；返工后重新检索复检。
 8. [ ] 焦点 OC 个人故事累计至少 10,000 Unicode 字符并有完整来源。
 9. [ ] 默认地图、风貌、场景、主要 OC 立绘进入队列并 ready；额外文本/节点插图可创建。
 10. [ ] 中央流、右栏、图谱和图文展台显示真实状态。
 11. [ ] 重开后 revision、Cycle、Change Set、checkpoint、文档、关系、Job、Asset 和图谱一致。
 12. [ ] research-only Run 重新检索且不新增 Change Set/图片/checkpoint。
-13. [ ] leak scan 不含凭证、Prompt、参数、原始思维链、locator 或未授权正文。
+13. [x] leak scan 不含凭证、Prompt、参数、原始思维链、locator 或未授权正文。
 
 首次失败必须保存首个可操作失败和副作用边界并停止，不得盲目重跑。
+
+**2026-07-16 第一次 Live 结果：** `blocked`。真实 Provider 进程已启动，但 E2E 仍定位旧按钮
+“保存到下一轮”；当前 Renderer 的真实按钮为“保存规则修订”。因此运行在任何模型回执、检索、Change Set
+或图片调用前以 `GROWTH_GUIDANCE_CYCLE_ONE_WINDOW_MISSED` 停止。Cycle 1 在关闭时进入
+`reconciliation_required / GROWTH_RUN_INTERRUPTED`；正式资源、文档、断言、关系、Change Set、图片均为 0。
+失败证据：`notes/evidence/novax-desktop-growth/growth-guidance-live-2026-07-16T14-17-18-079Z.json`，
+SHA-256 `6C57EADD3E1DC53B9D71A4DC14F558AF44B0EEC19DC2D312006A05BACC87B2EF`；PowerShell/Node
+双解析与 leak scan 均通过。按停止条件未修 Harness、未重跑 Provider，Windows 打包未开始。
+
+**产品负责人授权的第二次 Live：** 旧按钮已迁移为“保存规则修订”，无 Provider 指导 UI 3/3 通过。
+新运行真实保存 revision 2；Cycle 1 committed 且世界地图 ready，Cycle 2 使用 revision 2 重新检索后
+以 `GROWTH_CHANGE_SET_NOT_COMMITTED` blocked，没有成功 proposal 或第二个 Change Set。Coordinator 为
+blocked，Showcase 未打开；当次 E2E 表面首失败为 `AUTO_SHOWCASE_NOT_OBSERVED`。复核确认旧 Harness 对非 completed
+终态仍等待 Showcase，因而遮蔽了真实 Coordinator blocked；现已改为只有权威 `completed` 才运行原有视觉高潮断言。
+当前最高证据为
+`growth-guidance-live-2026-07-16T15-07-02-921Z.json`，SHA-256
+`D5307157EC41DDA10373060D0CA1568C28A099F0D42644A8B749741D77EAEF0E`；双解析与 leak scan 通过。
+没有 Cycle 3、Closure、Longform、默认/自由插图、重开或 research 验收；未打包、未再次重跑。
+
+**无 Provider 安全诊断：** E2E 支持层现从既有 public terminal conflict Artifact 中仅投影固定 block code，
+并在 SQLite 安全边界记录 Receipt link 数；不记录 message、evidence ID、正文或参数。状态机/Worker 52/52、
+Harness 8/8、typecheck、Prompt gate 与 diff check 通过，生产代码和协议未改。Harness 已证明非 completed 终态
+不再进入 Showcase 等待，且 completed 路径的视觉断言保持原样。下一次 Live 若再次在 proposal
+前 blocked，可区分 `user_confirmation_required` 与 `missing_source`，并用 link 数判断检索是否为空。
+
+**产品负责人授权的第三次、唯一 Live：** 新 Harness 正确以 `GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED`
+报告真实终态。Cycle 1 committed/map ready；Cycle 2 固定 revision 2，Receipt 14 links，retrieve 与 Inquiry
+选择已持久化，随后以 allowlisted `tool_failed` blocked；无成功 proposal、第二个 Change Set 或 output checkpoint。
+因此已经排除空检索和 Creator Choice；当前证据只支持定位到 Inquiry 后、Change Set executor 前的 Revision
+Fragment/工具边界，不能推断具体私有编译码。证据
+`growth-guidance-live-2026-07-16T15-41-18-710Z.json`，SHA-256
+`C7F69602CF5833EC199484E6B3969757041DAE69FE7A6E028F39234AAB1E441E`；PowerShell/Node 双解析与 leak scan 通过。
+按停止条件未修改生产逻辑、Prompt 或断言，未重跑 Provider。
+
+**确定性诊断与局部修复：** 经产品负责人授权后，上游 `pi-agent-core` 源码与红色回归共同证明：工具抛错时
+模型只看到 `Error.message`，而 Revision 编译器原先把八类可纠正错误全部压成同一句泛化消息；状态机的两次
+零副作用修正因此缺少具体方向。Revision 阶段现以固定 allowlist 文案分别说明 authority、impact、reference、
+relation 等修正要求，并在首次工具描述中显式声明 revise/preserve/stale_visual、addition multiset 和引用种类不变量。
+没有放宽 Schema、领域策略、authority、重试次数或验收门槛。定向 6 files / 71 tests 全通过，typecheck、三组
+Prompt gate、build、diff check 与 Electron 残留检查通过。该结果只证明盲重试缺陷已修复；尚未运行新的 Provider
+Live，不能反推历史私有错误码，也不能把阶段 6 标为完成。
+
+**修复后的第四次、唯一 Live：** `openai-compatible / gpt-5.4` 与
+`openai-compatible-image / gpt-image-2` 均真实启动。Cycle 1 文本 Change Set committed，但地图
+`IMAGE_GENERATION_FAILED`（Job 1、Asset 0）；Cycle 2 固定 revision 2，Receipt 8 links，retrieve、Inquiry 和
+`propose_change_set` 均 succeeded，证明 Revision Fragment 修复越过了原编译前边界。提案却只形成一个
+`pending` Change Set，无 Cycle 绑定或 output checkpoint，最终 `GROWTH_CHANGE_SET_NOT_COMMITTED` blocked。
+安全证据 `growth-guidance-live-2026-07-16T16-08-36-144Z.json`，SHA-256
+`11EF515F3F6F03955229F73F36374E746A782F3AF2B84704A9A7A3981B24A3B8`；PowerShell/Node 双解析、leak scan
+和残留进程检查通过。按停止条件未修改 Policy、Coordinator、Prompt 或验收门槛，未重跑 Provider。
+
+只读检查确定新的合同冲突：Revision 编译器和 Main pinned authority 允许 `resource.put(create=false)` 与
+现有 identity 的 `assertion.put`，而 `WorkspaceChangeSetPolicy` 将前者固定评为 elevated，并会因后者的
+same-identity warning/major 将其评为 elevated；`ChangeSetService` 只自动提交全 low-risk 的 Free Change Set。
+安全证据不含具体 item/gate reason，故不能声称本次由哪一种更新触发。产品负责人于 2026-07-17 决定：Free 是
+用户直接放权，合法 Change Set 不再进入人工审查；risk 只保留审计，重大冲突、越权、过期 checkpoint、领域校验和
+事务失败仍失败关闭。本地实现已删除 elevated 风险触发的 review 分支；历史 pending 证据保持原样，新的真实 Live 才能证明提交闭环。
 
 ### Windows 打包与重开
 
@@ -599,10 +656,23 @@ npm run package:win
 npm run verify:installer
 ```
 
-- [ ] 解包目录可启动并退出。
-- [ ] NSIS 安装包通过验证。
+- [x] 解包目录可启动并退出。
+- [x] NSIS 安装包通过验证。
 - [ ] 安装后打开已有 workspace，规则、文本、图片和图谱仍可读取。
-- [ ] 不误读测试 userData；残留进程为 0。
+- [x] 不误读测试 userData；残留进程为 0。
+
+**2026-07-16 打包结果：** `npm run package:dir` 与 `npm run verify:package` 通过。仓库验证器已启动/退出
+`release\win-unpacked\novelx.exe`，验证 packaged Worker、Preload（预加载桥）、Windows 平台、无 workspace
+启动和内部文本不泄漏；包内 17,889 entries，`app.asar` 116,170,082 bytes。`npm run package:win` 成功生成
+`release\novelx-Setup-0.2.7-x64.exe`（121,009,169 bytes，SHA-256
+`62E45425D6BF449E6FFA36124B1E7372C83B45D210F344DCFCA091399CB86C64`）。安装器和解包应用当前均为
+`NotSigned`，不得声称代码签名通过。
+
+`npm run verify:installer` 首次在任何测试安装前 fail closed：检测到用户已有正式安装
+`D:\NovelX\Uninstall novelx.exe /currentuser`。产品负责人随后确认旧安装没有需保留的数据并明确授权覆盖；
+官方卸载器静默退出 0 后，`verify:installer` 通过隔离安装、双启动、卸载、应用移除和用户数据保留。当前
+0.2.7 已重新安装到 `D:\NovelX`，并用隔离 userData 启动/退出通过。旧安装没有可供重开验证的 Growth
+workspace，因此“安装后打开已有 workspace”仍未勾选。打包结束后工作树关联进程为 0。
 
 ### 最终冻结
 
@@ -614,7 +684,9 @@ npm run verify:installer
 - [ ] 提交代码/测试/证据，不混入 Player evidence。
 - [ ] 记录最终 HEAD；未授权不 push、不合并主线。
 
-**完成证据：** Commit / Full test / Build / Live / Package / Evidence SHA 待填。
+**当前证据：** 冻结前 `npm test` 795/795、0 skipped；typecheck、三组 Prompt publication、build、diff check、
+无 Provider UI 5/5 和残留进程 0。第三次真实 Live 到达 revision 2 的 14-link Receipt 与 Inquiry，但在
+proposal executor 前 `tool_failed`；解包目录、NSIS 生成和隔离安装生命周期均通过；Commit 未开始。
 
 ---
 
@@ -626,7 +698,7 @@ npm run verify:installer
 | 用户规则修订 | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
 | 自询与 Creator Choice | 已有基础 | 已有基础 | [ ] | [ ] | [ ] | [ ] |
 | Closure/Checker/Repair | 已有基础 | [ ] | [ ] | [ ] | [ ] | [ ] |
-| OC 万字 Longform | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
+| OC 长篇 Longform | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
 | 通用插图队列 | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
 | 图文图鉴 UI | [ ] | N/A | [ ] | [ ] | [ ] | [ ] |
 | 整体冻结 | N/A | N/A | [ ] | [ ] | [ ] | [ ] |
@@ -660,6 +732,15 @@ npm run verify:installer
 | 2026-07-16 | 4 通用插图队列 | completed | `6ed78e2` | Vitest 106/106；typecheck/Prompt gate/build/diff passed | 未运行 Provider/Renderer E2E/full suite |
 | 2026-07-16 | 5 生长 UI | completed | `3663d96` | Vitest 142/142；Electron E2E 5/5；typecheck/build passed | 未运行 Provider；真实 Live 留到阶段 6 |
 | 2026-07-16 | 5.5 自动默认配图 | completed | `76dba6a` | Vitest 142/142；Electron E2E 5/5；typecheck/Prompt gate/build/diff passed | 未运行 Provider；真实多图 ready 留到阶段 6 |
+| 2026-07-16 | 6 真实 Live 与冻结 | blocked | WIP | 全量 795/795；typecheck/Prompt/build；无 Provider UI 5/5；失败证据 `6C57EADD…B2EF` | E2E 旧按钮选择器在首轮指导前失败；Provider 已启动但无模型回执或领域副作用；按唯一 Live 规则停止 |
+| 2026-07-16 | 6 真实 Live 恢复 | blocked | WIP | 按钮迁移后无 Provider 指导 UI 3/3；安全诊断 Harness 8/8；真实证据 `D5307157…AEF0E` | C1 committed/map ready；C2 revision 2 retrieve 后未提交；Coordinator blocked；旧视觉二次错误已不再遮蔽非完成终态；后续闭环未运行 |
+| 2026-07-16 | 6 Windows 打包 | blocked | WIP | package:dir/verify:package/package:win passed；installer SHA `62E45425…C64` | 解包应用启动/退出通过；现有正式安装触发 `PRODUCTION_INSTALL_DETECTED`，未绕过；安装生命周期/已有 workspace 未验收；未签名 |
+| 2026-07-16 | 6 Windows 打包恢复 | completed | WIP | verify:installer passed；0.2.7 安装到 `D:\NovelX` 并启动/退出 | 隔离安装/双启动/卸载/用户数据保留通过；旧安装无 Growth 数据，未验证已有 workspace；未签名 |
+| 2026-07-16 | 6 安全诊断 Live | blocked | WIP | 真实证据 `C7F69602…441E`；双解析/leak scan passed | C1 committed/map ready；C2 revision 2 Receipt=14、Inquiry selected 后 `tool_failed`；无 proposal/第二 Change Set；未重跑 |
+| 2026-07-16 | 6 Revision 盲重试修复 | completed | WIP | Vitest 71/71；typecheck/3 Prompt gates/build/diff passed | 固定脱敏分类修正指令已接入；未放宽门槛；尚无修复后的 Provider Live |
+| 2026-07-17 | 6 修复后真实 Live | blocked | WIP | 真实证据 `11EF515F…A3B8`；双解析/leak scan passed | Revision propose succeeded，但 Free Change Set 为 pending；C1 地图另有 Provider failure；未重跑 |
+| 2026-07-17 | 6 Free 直接授权 | completed | WIP | 局部 73/73；全量 799/799、0 skipped；typecheck/3 Prompt gates/build/diff passed | elevated 不再触发人工审查；重大冲突和全部领域门禁保持失败关闭；尚未重跑 Provider |
+| 2026-07-17 | 6 Free/地图真实复验 | blocked | WIP | 真实证据 `2D238B25…49BDD`；JSON/leak scan passed | C1 text+map committed，Job succeeded/Asset 1；C2 revision 2 retrieve/Inquiry 后未调用 proposal；未重跑 |
 
 只追加经验证的行，不把计划或中间态写成完成。
 
@@ -672,10 +753,13 @@ npm run verify:installer
 - [x] 0. 模块化基线与全量测试
 - [x] 1. Repair 权限与领域正确性
 - [x] 2. 用户规则影响分析与修订
-- [x] 3. OC 万字 Longform 自动循环
+- [x] 3. OC 长篇 Longform 自动循环
 - [x] 4. 通用插图队列
 - [x] 5. 生长过程与图文图鉴 UI
 - [x] 5.5 自动默认配图接线
 - [ ] 6. 真实 Live、打包与冻结验收
 
-**下一执行入口：** 阶段 6。生产代码冻结；先迁移真实验收脚本到当前 Closure/Longform/Revision/默认插图语义并跑全量测试、typecheck、build 和无 Provider UI，随后只运行一次真实交互式 Live。首次真实失败保存安全证据并停止，不在 Live 后修改生产逻辑或降低门槛。
+**下一执行入口：** 地图 Provider 失败已在第五次 Live 中未复现，C1 world_map Job succeeded 且 Asset 1。Free 直接授权的
+局部 73/73、全量 799/799（0 skipped）、typecheck、三组 Prompt gate、生产构建和差异检查均通过；但 C2 在 Inquiry 后、
+proposal 前停止，仍缺少真实 committed Revision。未经新的单次 Provider 授权不得重跑，也不得把历史 pending Change Set
+改写为 committed。公开协议、Schema、权限边界、重试上限和验收门槛保持冻结。

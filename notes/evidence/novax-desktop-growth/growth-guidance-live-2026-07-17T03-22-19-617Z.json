@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 3,
+  "provider": {
+    "providerId": "openai-compatible",
+    "modelId": "gpt-5.4"
+  },
+  "imageProvider": {
+    "providerId": "openai-compatible-image",
+    "modelId": "gpt-image-2"
+  },
+  "providerStarted": true,
+  "outcome": "failed_after_provider_start",
+  "cycles": [],
+  "research": null,
+  "counts": null,
+  "leakScan": "passed",
+  "initialGreenfield": {
+    "eligible": true,
+    "nonRootResourceRevisions": 0,
+    "assertionVersions": 0,
+    "creativeDocumentRevisions": 0,
+    "creativeRelationVersions": 0,
+    "constraintProfileVersions": 0,
+    "documentVersions": 0,
+    "workingDocuments": 0,
+    "workingCreativeDocuments": 0,
+    "workingConstraintProfiles": 0
+  },
+  "guidance": {
+    "formEnabledOnCycle1": true,
+    "preSaveAcknowledgementAbsent": true,
+    "persistedRevision": 2,
+    "currentCycleRevisionAtSave": 1,
+    "nextCycleSequence": 2,
+    "nextCycleRevisionBoundary": true,
+    "pendingBoundaryVisible": true,
+    "notShownAsAppliedBeforeBoundary": true,
+    "screenshotSha256": "1953d6cb0ff0275169cf7ff63393e25a6eaf51786b427c2c3244605c32db272d"
+  },
+  "preTermination": {
+    "cycles": [
+      {
+        "sequence": 1,
+        "status": "blocked",
+        "hasRun": true
+      }
+    ],
+    "growthEvents": [
+      {
+        "sequence": 1,
+        "phase": "cycle_planned",
+        "durableState": "planned"
+      },
+      {
+        "sequence": 2,
+        "phase": "run_attached",
+        "durableState": "running"
+      },
+      {
+        "sequence": 3,
+        "phase": "receipt_recorded",
+        "durableState": "running"
+      },
+      {
+        "sequence": 4,
+        "phase": "creator_choice_required",
+        "durableState": "blocked"
+      }
+    ],
+    "agentEvents": [
+      {
+        "type": "run.started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      },
+      {
+        "type": "run.activity",
+        "phase": "started"
+      },
+      {
+        "type": "run.activity",
+        "phase": "completed"
+      }
+    ]
+  },
+  "termination": {
+    "attemptedRunPresent": false,
+    "cancelRequested": false,
+    "terminalObserved": false,
+    "snapshotStatus": "blocked"
+  },
+  "postTermination": {
+    "cycles": [
+      {
+        "sequence": 1,
+        "status": "blocked",
+        "ruleRevision": 1,
+        "failureCode": "GROWTH_CREATOR_CHOICE_REQUIRED",
+        "hasRun": true,
+        "hasReceipt": true,
+        "hasChangeSet": false,
+        "hasInputCheckpoint": true,
+        "hasOutputCheckpoint": false,
+        "receiptLinkCount": 1,
+        "audit": {
+          "terminalCount": 4,
+          "terminalErrorCodes": [],
+          "retrieveSucceeded": true,
+          "proposeSucceeded": false,
+          "imageSucceeded": false,
+          "requestedProviderId": "openai-compatible",
+          "requestedModelId": "gpt-5.4",
+          "actualProviderIds": [
+            "openai-compatible"
+          ],
+          "actualModelIds": []
+        }
+      }
+    ],
+    "diagnostics": [
+      {
+        "cycleSequence": 1,
+        "operationKind": "tool_call",
+        "owner": "worker_schema",
+        "boundary": "tool_arguments",
+        "code": "STEWARD_GROWTH_INQUIRY_FRONTIER_INVALID",
+        "toolName": "submit_growth_inquiry",
+        "attempt": 1,
+        "maxAttempts": 3,
+        "sideEffectState": "none",
+        "disposition": "correctable",
+        "retryability": "model_correction"
+      },
+      {
+        "cycleSequence": 1,
+        "operationKind": "growth_cycle",
+        "owner": "growth_phase",
+        "boundary": "phase_compile",
+        "code": "GROWTH_CREATOR_CHOICE_REQUIRED",
+        "toolName": null,
+        "attempt": null,
+        "maxAttempts": null,
+        "sideEffectState": "none",
+        "disposition": "terminal",
+        "retryability": "user_action"
+      }
+    ],
+    "counts": {
+      "resources": 0,
+      "documents": 0,
+      "assertions": 0,
+      "relations": 0
+    },
+    "changeSets": {
+      "total": 0,
+      "byStatus": [],
+      "outputCount": 0,
+      "checkpointCount": 1,
+      "checkpointDeltaFromInitial": 0
+    },
+    "closure": {
+      "profileCount": 0,
+      "decisions": []
+    },
+    "longform": {
+      "status": "unavailable",
+      "complete": false,
+      "totalCodePoints": 0,
+      "sectionCount": 0
+    },
+    "illustrations": {
+      "requests": [],
+      "itemStatuses": [],
+      "jobs": [],
+      "imageJobCount": 0,
+      "imageAssetCount": 0
+    }
+  },
+  "failureCode": "GROWTH_AGENT_TERMINAL_PROJECTION_TIMEOUT"
+}

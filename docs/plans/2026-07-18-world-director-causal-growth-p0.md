@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task.
 
-> **当前状态（2026-07-18）：** 计划已展开，产品决策已确认，实施任务 `1 / 32`。Phase A / Task 1 已完成只读盘点，证据见 `notes/status/2026-07-18-world-director-task-1-dirty-baseline.md`；当前执行入口为 Task 2：恢复绿色 pre-feature 基线。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
+> **当前状态（2026-07-18）：** 计划已展开，产品决策已确认，实施任务 `2 / 32`。Phase A 已完成并冻结；Task 2 代码提交为 `ce8378e9deb9ad86dbbacc6eefe1bd2afbb8e4d5`，证据见 `notes/status/2026-07-18-world-director-task-2-green-baseline.md`。当前执行入口为 Phase B / Task 3：记录 World Director 架构。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
 
 这份计划回答三个问题：为什么 NovelX 不能继续依赖一个模型包办所有工作；为什么“因果关系”必须成为图谱和调度的核心；最终用户、评委和后续编码 Agent 分别会得到什么。代码优化的首要目标不是方便人类阅读，而是降低 AI 修改所需上下文、缩小变更影响半径并让每个失败直接定位到唯一责任模块。
 
@@ -388,13 +388,15 @@ User guidance
 
 **Steps:**
 
-- [ ] Run the existing focused suites routed by `src/agent-worker/growth/README.md` and `src/main/growth/README.md`.
-- [ ] Run `npm run typecheck`.
-- [ ] Fix only already-authorized regressions without changing product semantics.
-- [ ] Run `npm test` once after focused tests pass.
-- [ ] Run `npm run build`.
-- [ ] Check Electron residue and terminate only processes launched from this worktree.
-- [ ] Review and semantically commit the existing batch before starting schema v28.
+- [x] Run the existing focused suites routed by `src/agent-worker/growth/README.md` and `src/main/growth/README.md`.
+- [x] Run `npm run typecheck`.
+- [x] Fix only already-authorized regressions without changing product semantics.
+- [x] Run `npm test` after focused tests pass; after the single discovered stale expectation was fixed, rerun the frozen suite once for final evidence.
+- [x] Run `npm run build`.
+- [x] Check Electron residue and terminate only processes launched from this worktree.
+- [x] Review and semantically commit the existing batch before starting schema v28.
+
+**Task 2 evidence (2026-07-18):** 18 unique focused files / 190 tests passed; final full freeze 141 files / 915 tests passed with zero skips; typecheck, three Agent Prompt gates, Decomposer/GM Prompt gates, production build and diff checks passed; worktree-bound process residue was zero. One stale Safe Diagnostic catalog expectation was corrected without changing production behavior. Code freeze commit: `ce8378e9deb9ad86dbbacc6eefe1bd2afbb8e4d5`. No Provider was run.
 
 **Acceptance:** zero failed/skipped required tests; typecheck/build pass; clean worktree at a reviewed commit.
 
@@ -869,7 +871,7 @@ This matrix is the execution index. The detailed phase sections define files and
 | Done | Task | Why it is necessary | Expected effect | Exit evidence |
 | --- | ---: | --- | --- | --- |
 | [x] | 1 | The current worktree contains many overlapping unfinished batches and evidence files. Starting new architecture without ownership classification risks deleting evidence or mixing unrelated regressions. | Every dirty path has an owner/category and the highest valid Live boundary is indexed. | Exact status inventory, evidence parse/leak check and no overlapping live editor. |
-| [ ] | 2 | New capability work on a failing baseline makes every later failure ambiguous. | Existing behavior becomes a green, reviewed checkpoint before schema or scheduler work. | Focused tests, typecheck, one full test run, build and reviewed semantic commits. |
+| [x] | 2 | New capability work on a failing baseline makes every later failure ambiguous. | Existing behavior becomes a green, reviewed checkpoint before schema or scheduler work. | Focused tests, typecheck, one repaired full freeze, build and reviewed semantic commits. |
 | [ ] | 3 | Director/Steward/Checker/Curator boundaries are product semantics and must not be rediscovered differently in each file. | One ADR records authority, concurrency, commit serialization and post-hackathon debt. | ADR review plus current-state/product documents aligned with code intent. |
 | [ ] | 4 | Ad-hoc objects would leak phase-private state into the shared protocol and recreate a giant contract. | Strict versioned internal contracts define rounds, orders, attempts, reviews and artifacts. | Zod/TypeBox parity, strict unknown-field rejection and lifecycle transition tests. |
 | [ ] | 5 | Assignment and review must survive restart; in-memory coordination cannot prove ownership or avoid duplicate work. | SQLite v28 stores additive editorial metadata without rewriting Canon content. | v27→v28 migration, reopen, unique constraints, replay and preservation tests. |
