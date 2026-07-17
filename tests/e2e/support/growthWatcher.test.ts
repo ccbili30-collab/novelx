@@ -1,7 +1,50 @@
 import { describe, expect, it } from "vitest";
-import { watchGrowthTerminal, type GrowthWatchSnapshot } from "./growthWatcher";
+import {
+  projectSafeGrowthAgentEvent,
+  shouldValidateCompletedGrowthShowcase,
+  watchGrowthTerminal,
+  type GrowthWatchSnapshot,
+} from "./growthWatcher";
 
 describe("Growth live watcher", () => {
+  it("validates the Showcase climax only for an authoritative completed coordinator", () => {
+    expect(shouldValidateCompletedGrowthShowcase({ coordinatorStatus: "completed", cycles: [] })).toBe(true);
+    for (const coordinatorStatus of [
+      "running",
+      "awaiting_guidance",
+      "blocked",
+      "failed",
+      "cancelled",
+      "reconciliation_required",
+    ] as const) {
+      expect(shouldValidateCompletedGrowthShowcase({ coordinatorStatus, cycles: [] })).toBe(false);
+    }
+  });
+
+  it("projects only allowlisted pre-proposal block codes from public terminal artifacts", () => {
+    expect(projectSafeGrowthAgentEvent({
+      type: "run.completed",
+      outcome: "blocked",
+      changeSetState: "none",
+      artifacts: [
+        { kind: "conflict", code: "missing_source", message: "must not persist" },
+        { kind: "conflict", code: "untrusted-model-code", message: "must not persist" },
+        { kind: "document_reference", code: "user_confirmation_required", message: "not a conflict" },
+      ],
+    })).toEqual({
+      type: "run.completed",
+      outcome: "blocked",
+      changeSetState: "none",
+      escalationCodes: ["missing_source"],
+    });
+    expect(projectSafeGrowthAgentEvent({
+      type: "run.completed",
+      outcome: "blocked",
+      changeSetState: "none",
+      artifacts: [{ kind: "conflict", code: "user_confirmation_required" }],
+    })).toMatchObject({ escalationCodes: ["user_confirmation_required"] });
+  });
+
   it("returns awaiting guidance without treating a committed Cycle as an active Worker", async () => {
     let released = 0;
     const result = await watchGrowthTerminal({
@@ -28,6 +71,32 @@ describe("Growth live watcher", () => {
       overallTimeoutMs: 900, cycleTimeoutMs: 300,
     });
     expect(result).toMatchObject({ termination: null, snapshot: { coordinatorStatus: "failed" } });
+    expect(released).toBe(1);
+  });
+
+  it("resumes once from a creator decision boundary without releasing subscriptions", async () => {
+    let state: "blocked" | "running" | "completed" = "blocked";
+    let resumes = 0;
+    let released = 0;
+    const result = await watchGrowthTerminal({
+      getSnapshot: async () => ({
+        coordinatorStatus: state,
+        cycles: [{ id: state === "blocked" ? "cycle-1" : "cycle-2", status: state === "completed" ? "committed" : state, runId: null }],
+      }),
+      readEvents: async () => [],
+      resumeAtBoundary: async (snapshot) => {
+        if (snapshot.coordinatorStatus !== "blocked" || resumes > 0) return false;
+        resumes += 1;
+        state = "running";
+        return true;
+      },
+      release: async () => { released += 1; },
+      overallTimeoutMs: 900,
+      cycleTimeoutMs: 300,
+      sleep: async () => { if (state === "running") state = "completed"; },
+    });
+    expect(result.snapshot.coordinatorStatus).toBe("completed");
+    expect(resumes).toBe(1);
     expect(released).toBe(1);
   });
 

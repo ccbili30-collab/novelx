@@ -63,6 +63,32 @@ describe("WorkspaceChangeSetPolicy", () => {
     expect(conflicting[0].conflicts).toContainEqual({ severity: "major", code: "ASSERTION_VALUE_CONFLICT" });
   });
 
+  it("updates an assertion identity only with explicit internal Revision authority", () => {
+    const setup = createWorkspaceEvidence();
+    new AssertionRepository(setup.workspace).putVersion({
+      assertionId: "assertion.revision-target",
+      checkpointId: setup.headCheckpointId,
+      scopeType: "world",
+      scopeId: setup.worldId,
+      subject: "潮汐法则",
+      predicate: "代价",
+      object: { cost: "memory" },
+      status: "current",
+      source: { kind: "document_version", ref: setup.documentVersionId },
+    });
+    const update = assertionItem("revision-update", setup.worldId, setup.documentVersionId, { cost: "years" });
+    if (update.kind !== "assertion.put") throw new Error("Expected assertion fixture.");
+    update.payload.assertionId = "assertion.revision-target";
+    update.payload.subject = "潮汐法则";
+    update.payload.predicate = "代价";
+    const policy = new WorkspaceChangeSetPolicy(setup.workspace);
+
+    expect(policy.assess(candidate(update))[0].conflicts)
+      .toContainEqual({ severity: "major", code: "ASSERTION_IDENTITY_CONFLICT" });
+    expect(policy.assess({ ...candidate(update), assertionIdentityUpdateAuthorized: true })[0].conflicts)
+      .not.toContainEqual({ severity: "major", code: "ASSERTION_IDENTITY_CONFLICT" });
+  });
+
   it("allows valid Free content writes while keeping destructive resource changes elevated", () => {
     const setup = createWorkspaceEvidence();
     const policy = new WorkspaceChangeSetPolicy(setup.workspace);
@@ -165,6 +191,18 @@ describe("WorkspaceChangeSetPolicy", () => {
 
     expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate(greenfieldCandidateItems(worldRoot.id)))[2].conflicts)
       .toContainEqual({ severity: "major", code: "ASSERTION_EVIDENCE_NOT_ACTIVE" });
+  });
+
+  it("accepts same-Change-Set document evidence only with explicit internal authority", () => {
+    const setup = createBlankWorkspace();
+    const worldRoot = new ResourceRepository(setup.workspace).listCurrent().find((resource) => resource.type === "world")!;
+    const authorized = {
+      ...candidate(greenfieldCandidateItems(worldRoot.id)),
+      sameChangeSetDocumentEvidenceAuthorized: true,
+    };
+
+    expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(authorized)[2].conflicts)
+      .not.toContainEqual({ severity: "major", code: "ASSERTION_EVIDENCE_NOT_ACTIVE" });
   });
 
   it("does not accept the Greenfield document-output exception when a stable root document exists", () => {

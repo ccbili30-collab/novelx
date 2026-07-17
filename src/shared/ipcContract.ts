@@ -29,6 +29,14 @@ import {
   type GrowthPresentationInspectRequest,
   type GrowthPresentationSnapshot,
 } from "./growthPresentationContract";
+import {
+  safeDiagnosticBoundarySchema,
+  safeDiagnosticDispositionSchema,
+  safeDiagnosticOperationKindSchema,
+  safeDiagnosticOwnerSchema,
+  safeDiagnosticRetryabilitySchema,
+  safeDiagnosticSideEffectStateSchema,
+} from "./diagnostics/safeDiagnosticContract";
 
 export {
   growthIllustrationCancelRequestSchema,
@@ -284,6 +292,30 @@ const artifactLocatorSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("section"), label: z.string().trim().min(1).max(500) }).strict(),
 ]);
 
+const agentImageArtifactSchema = z.object({
+  kind: z.literal("image"),
+  assetId: opaqueIdSchema.nullable(),
+  title: z.string().trim().min(1).max(240),
+  status: z.enum(["queued", "generating", "ready", "failed", "stale"]),
+  purpose: z.string().trim().min(1).max(500),
+  sourceLabel: z.string().trim().min(1).max(500),
+  thumbnailUrl: z.string().max(4_000).refine(
+    (value) => value.startsWith("data:image/") || value.startsWith("novax-asset:"),
+    "Image thumbnails must use a managed Novax asset URL.",
+  ).nullable(),
+}).strict().superRefine((artifact, context) => {
+  const hasManagedImage = artifact.assetId !== null && artifact.thumbnailUrl !== null;
+  const mustHaveManagedImage = artifact.status === "ready" || artifact.status === "stale";
+  if (hasManagedImage !== mustHaveManagedImage) {
+    context.addIssue({
+      code: "custom",
+      message: mustHaveManagedImage
+        ? "Renderable image artifacts require a managed Asset and thumbnail."
+        : "Non-renderable image artifacts cannot expose a managed Asset or thumbnail.",
+    });
+  }
+});
+
 export const agentArtifactSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("tool_call"),
@@ -322,18 +354,7 @@ export const agentArtifactSchema = z.discriminatedUnion("kind", [
     locator: artifactLocatorSchema,
     excerpt: z.string().max(4_000).nullable(),
   }).strict(),
-  z.object({
-    kind: z.literal("image"),
-    assetId: opaqueIdSchema,
-    title: z.string().trim().min(1).max(240),
-    status: z.enum(["queued", "generating", "ready", "failed", "stale"]),
-    purpose: z.string().trim().min(1).max(500),
-    sourceLabel: z.string().trim().min(1).max(500),
-    thumbnailUrl: z.string().max(4_000).refine(
-      (value) => value.startsWith("data:image/") || value.startsWith("novax-asset:"),
-      "Image thumbnails must use a managed Novax asset URL.",
-    ).nullable(),
-  }).strict(),
+  agentImageArtifactSchema,
 ]);
 
 export const sessionMessageSchema = z.object({
@@ -1378,6 +1399,29 @@ export const growthProjectedEventSchema = z.union([
   growthClosureEvaluationPublicEventSchema,
 ]);
 
+export const growthPublicDiagnosticSchema = z.object({
+  diagnosticId: opaqueIdSchema,
+  operationKind: safeDiagnosticOperationKindSchema,
+  operationId: opaqueIdSchema,
+  runId: z.string().min(1).max(240).nullable(),
+  cycleId: opaqueIdSchema,
+  sequence: z.number().int().positive().safe(),
+  owner: safeDiagnosticOwnerSchema,
+  boundary: safeDiagnosticBoundarySchema,
+  code: z.string().regex(/^[A-Z][A-Z0-9_]{2,119}$/),
+  toolName: z.string().regex(/^[a-z][a-z0-9_.-]{0,119}$/).nullable(),
+  attempt: z.number().int().positive().safe().nullable().default(null),
+  maxAttempts: z.number().int().positive().safe().nullable().default(null),
+  sideEffectState: safeDiagnosticSideEffectStateSchema,
+  disposition: safeDiagnosticDispositionSchema,
+  retryability: safeDiagnosticRetryabilitySchema,
+}).strict().superRefine((diagnostic, context) => {
+  if ((diagnostic.attempt === null) !== (diagnostic.maxAttempts === null)
+    || (diagnostic.attempt !== null && diagnostic.maxAttempts !== null && diagnostic.attempt > diagnostic.maxAttempts)) {
+    context.addIssue({ code: "custom", path: ["attempt"], message: "GROWTH_PUBLIC_DIAGNOSTIC_ATTEMPT_INVALID" });
+  }
+});
+
 const growthPublicSnapshotSchema = z.object({
   capabilityVersion: z.literal(growthCapabilityVersion),
   strategy: growthStrategySchema,
@@ -1388,6 +1432,7 @@ const growthPublicSnapshotSchema = z.object({
   guidanceStatus: z.enum(["none", "persisted_pending_boundary"]).optional(),
   cycles: z.array(growthPublicCycleSchema).max(100),
   events: z.array(growthProjectedEventSchema).max(100),
+  diagnostics: z.array(growthPublicDiagnosticSchema).max(100).default([]),
 }).strict();
 
 export const growthStartResponseSchema = growthPublicSnapshotSchema;

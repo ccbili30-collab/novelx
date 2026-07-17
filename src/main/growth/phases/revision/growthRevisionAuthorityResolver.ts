@@ -95,6 +95,12 @@ export class GrowthRevisionAuthorityResolver {
         if (!document || !stable || stable.id !== hit.targetVersionId || stable.resourceId !== document.resourceId) {
           throw revisionAuthorityError();
         }
+        const owner = resources.find((candidate) => candidate.id === document.resourceId);
+        // Longform outlines and section prose remain retrievable evidence,
+        // but only the Longform phase may mutate their managed identity,
+        // length bounds and source chain.
+        if (owner?.objectKind === "volume"
+          && (document.kind === "writing_constraints" || document.kind === "prose")) continue;
         targets.push({
           kind: "document", evidenceId: hit.targetVersionId, documentId: document.id,
           resourceId: document.resourceId, documentKind: document.kind,

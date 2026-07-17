@@ -1,6 +1,6 @@
 import type { AgentArtifact } from "../../../../shared/ipcContract";
 import { AgentArtifactList } from "./AgentArtifactList";
-import { growthEventSummary, type GrowthPresentation } from "./growthPresentation";
+import { growthDiagnosticSummary, growthEventSummary, type GrowthPresentation } from "./growthPresentation";
 
 export function RunActivityTimeline(props: {
   presentation: GrowthPresentation;
@@ -25,6 +25,11 @@ export function RunActivityTimeline(props: {
             <div className="growth-timeline__details">
               {row.events.map((event) => <p key={`${event.cycleId}-${event.sequence}`}>{growthEventSummary(event)}</p>)}
               {row.activities.map((activity, index) => <p key={`${activity.runId}-${index}`}>{activity.label}</p>)}
+              {row.diagnostics.map((diagnostic) => (
+                <p className="growth-timeline__diagnostic" data-owner={diagnostic.owner} key={diagnostic.diagnosticId}>
+                  {growthDiagnosticSummary(diagnostic)}
+                </p>
+              ))}
               {row.events.length === 0 && row.activities.length === 0 ? <p>等待 Main 安排此轮。</p> : null}
             </div>
           </details>

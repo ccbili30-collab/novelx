@@ -2,10 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { SQLOutputValue } from "node:sqlite";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 import { CheckpointRepository } from "../version/checkpointRepository";
+import type { SafeDiagnosticEnvelopeV1 } from "../../shared/diagnostics/safeDiagnosticContract";
+import { SafeDiagnosticRepository } from "./safeDiagnosticRepository";
 
 export const AGENT_RUNTIME_CONTRACT_VERSION = "novax.agent-runtime@1.1.0";
 
 export interface AgentAuditStore {
+  appendSafeDiagnostic?(diagnostic: SafeDiagnosticEnvelopeV1): void;
   beginRun(input: BeginRunInput): void;
   beginInvocation(input: BeginInvocationInput): void;
   beginTool(input: BeginToolInput): void;
@@ -21,7 +24,11 @@ export interface AgentAuditStore {
     invocationId: string;
     toolName: string;
   }): void;
-  terminalizeOpenRun(runId: string, eventType: "cancelled" | "interrupted" | "failed", errorCode: string): void;
+  terminalizeOpenRun(
+    runId: string,
+    eventType: "blocked" | "cancelled" | "interrupted" | "failed",
+    errorCode: string,
+  ): void;
 }
 
 export interface BeginRunInput {
@@ -173,6 +180,10 @@ export interface ContextBudgetAuditRecord {
 
 export class AgentAuditRepository implements AgentAuditStore {
   constructor(readonly workspace: WorkspaceDatabase) {}
+
+  appendSafeDiagnostic(diagnostic: SafeDiagnosticEnvelopeV1): void {
+    new SafeDiagnosticRepository(this.workspace).append(diagnostic);
+  }
 
   beginRun(input: BeginRunInput): void {
     const branch = new CheckpointRepository(this.workspace).getActiveBranch();
@@ -394,7 +405,7 @@ export class AgentAuditRepository implements AgentAuditStore {
 
   terminalizeOpenRun(
     runId: string,
-    eventType: "cancelled" | "interrupted" | "failed",
+    eventType: "blocked" | "cancelled" | "interrupted" | "failed",
     errorCode: string,
   ): void {
     this.workspace.db.exec("BEGIN IMMEDIATE");
@@ -412,7 +423,7 @@ export class AgentAuditRepository implements AgentAuditStore {
           runId,
           invocationId: tool.invocation_id,
           toolInvocationId: tool.id,
-          eventType,
+          eventType: eventType === "blocked" ? "cancelled" : eventType,
           errorCode,
           resultSha256: null,
         });

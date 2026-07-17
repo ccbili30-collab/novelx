@@ -128,12 +128,12 @@ export function projectPublicArtifacts(
   retrievedDocuments: Array<{ documentId: string; title: string; versionId: string; content: string }> = [],
   inspectedFiles: Array<{ path: string; sha256: string; kind: "text" | "binary"; complete: boolean }> = [],
   generatedImages: Array<{
-    assetId: string;
+    assetId: string | null;
     title: string;
-    status: "ready";
+    status: "ready" | "failed";
     purpose: "character_portrait" | "scene" | "world_map";
     sourceVersionIds: string[];
-    thumbnailUrl: string;
+    thumbnailUrl: string | null;
   }> = [],
 ): AgentArtifact[] {
   const toolLabels: Record<StewardOutput["toolOutcomes"][number]["tool"], string> = {

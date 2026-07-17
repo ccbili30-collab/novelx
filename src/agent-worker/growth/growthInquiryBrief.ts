@@ -1,5 +1,10 @@
 import { Type } from "typebox";
 import { z } from "zod";
+import {
+  growthInquiryDiagnosticCodes,
+  isGrowthInquiryDiagnosticCode,
+  type GrowthInquiryDiagnosticCode,
+} from "../../shared/diagnostics/growthInquiryDiagnostics";
 
 const localId = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
 const evidenceId = z.string().trim().min(1).max(240);
@@ -51,15 +56,32 @@ export const growthInquiryBriefSchema = z.object({
     ? undefined
     : value.inquiries.find((item) => item.localId === value.selectedLocalId);
   if (value.selectedLocalId === null) {
-    if (choice.length !== 1) context.addIssue({ code: "custom", message: "A creator-choice Brief requires one exact choice Inquiry." });
-  } else if (!selected || choice.length !== 0) {
-    context.addIssue({ code: "custom", message: "A normal Brief requires one selected non-choice Inquiry." });
+    if (choice.length !== 1) context.addIssue({
+      code: "custom", path: ["selectedLocalId", "creatorChoiceCount"],
+      message: "A creator-choice Brief requires one exact choice Inquiry.",
+    });
+  } else {
+    if (!selected) context.addIssue({
+      code: "custom", path: ["selectedLocalId", "selection"],
+      message: "The selected Inquiry must exist in this Brief.",
+    });
+    if (choice.length !== 0) context.addIssue({
+      code: "custom", path: ["selectedLocalId", "choiceConflict"],
+      message: "A normal Brief cannot contain a creator-choice Inquiry.",
+    });
   }
   const frontier = selected ?? choice[0];
   const highestPriority = Math.max(...value.inquiries.map((item) => item.priority));
-  if (value.inquiries.filter((item) => item.priority === highestPriority).length !== 1
-    || (frontier && frontier.priority !== highestPriority)) {
-    context.addIssue({ code: "custom", message: "The Inquiry frontier must be the unique highest priority." });
+  if (value.inquiries.filter((item) => item.priority === highestPriority).length !== 1) {
+    context.addIssue({
+      code: "custom", path: ["inquiries", "priorityTie"],
+      message: "The Inquiry Brief requires one unique highest priority.",
+    });
+  } else if (frontier && frontier.priority !== highestPriority) {
+    context.addIssue({
+      code: "custom", path: ["selectedLocalId", "priority"],
+      message: "The Inquiry frontier must have the highest priority.",
+    });
   }
   const localIds = new Set(value.inquiries.map((item) => item.localId));
   for (const transition of value.priorTransitions) {
@@ -97,3 +119,52 @@ export const growthInquiryBriefParameters = Type.Object({
 }, { additionalProperties: false });
 
 export type GrowthInquiryBrief = z.infer<typeof growthInquiryBriefSchema>;
+
+export const growthInquiryBriefDiagnosticCodes = growthInquiryDiagnosticCodes;
+
+export type GrowthInquiryBriefDiagnosticCode = GrowthInquiryDiagnosticCode;
+
+/** Returns one content-free reason for a rejected model-authored Inquiry Brief. */
+export function classifyGrowthInquiryBriefFailure(value: unknown): GrowthInquiryBriefDiagnosticCode | null {
+  const parsed = growthInquiryBriefSchema.safeParse(value);
+  if (parsed.success) return null;
+  const issues = parsed.error.issues;
+  const paths = issues.map((issue) => issue.path);
+  if (issues.some((issue) => (issue.code === "invalid_type" && issue.path.length <= 1)
+    || (issue.code === "unrecognized_keys" && issue.path.length === 0))) {
+    return "STEWARD_GROWTH_INQUIRY_INPUT_INVALID";
+  }
+  if (issues.some((issue) => issue.path[0] === "inquiries" && issue.path.length === 1
+    && (issue.code === "too_small" || issue.code === "too_big"))) {
+    return "STEWARD_GROWTH_INQUIRY_COUNT_INVALID";
+  }
+  if (paths.some((path) => path[0] === "inquiries" && path[1] === "priorityTie")) {
+    return "STEWARD_GROWTH_INQUIRY_PRIORITY_TIE_INVALID";
+  }
+  if (paths.some((path) => path[0] === "inquiries" && path.length > 1
+    && path[1] !== "priorityTie")) {
+    return "STEWARD_GROWTH_INQUIRY_ITEM_INVALID";
+  }
+  if (paths.some((path) => path[0] === "priorTransitions")) {
+    return "STEWARD_GROWTH_INQUIRY_TRANSITION_INVALID";
+  }
+  if (paths.some((path) => path[0] === "selectedLocalId" && path[1] === "creatorChoiceCount")) {
+    return "STEWARD_GROWTH_INQUIRY_CHOICE_CARDINALITY_INVALID";
+  }
+  if (paths.some((path) => path[0] === "selectedLocalId"
+    && (path[1] === "selection" || path[1] === "choiceConflict"))) {
+    return "STEWARD_GROWTH_INQUIRY_SELECTION_INVALID";
+  }
+  if (paths.some((path) => path[0] === "selectedLocalId" && path[1] === "priority")) {
+    return "STEWARD_GROWTH_INQUIRY_FRONTIER_PRIORITY_INVALID";
+  }
+  if (paths.some((path) => path[0] === "selectedLocalId")
+    || parsed.error.issues.some((issue) => issue.code === "custom" && issue.path.length === 0)) {
+    return "STEWARD_GROWTH_INQUIRY_FRONTIER_INVALID";
+  }
+  return "STEWARD_GROWTH_INQUIRY_INPUT_INVALID";
+}
+
+export function isGrowthInquiryBriefDiagnosticCode(value: unknown): value is GrowthInquiryBriefDiagnosticCode {
+  return isGrowthInquiryDiagnosticCode(value);
+}

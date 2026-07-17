@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { z } from "zod";
 import { proposeChangeSetArgsSchema, type ProposeChangeSetArgs } from "../../shared/agentWorkerProtocol";
 import type { GrowthLongformOutline } from "./growthLongformOutline";
+import { GROWTH_LONGFORM_SECTION_HARD_MAX_CODE_POINTS } from "../../shared/growthLongformPolicy";
 
 const identifier = z.string().trim().min(1).max(240);
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -10,7 +11,7 @@ const localId = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
 
 export const growthLongformSectionSchema = z.object({
   outlineSectionId: localId,
-  candidateText: z.string().min(1).max(20_000),
+  candidateText: z.string().min(1).max(GROWTH_LONGFORM_SECTION_HARD_MAX_CODE_POINTS),
   evidenceIds: z.array(identifier).min(1).max(200),
 }).strict().superRefine((value, context) => {
   if (new Set(value.evidenceIds).size !== value.evidenceIds.length) {
@@ -20,7 +21,7 @@ export const growthLongformSectionSchema = z.object({
 
 export const growthLongformSectionParameters = Type.Object({
   outlineSectionId: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" }),
-  candidateText: Type.String({ minLength: 1, maxLength: 20_000 }),
+  candidateText: Type.String({ minLength: 1, maxLength: GROWTH_LONGFORM_SECTION_HARD_MAX_CODE_POINTS }),
   evidenceIds: Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { minItems: 1, maxItems: 200 }),
 }, { additionalProperties: false });
 
@@ -56,6 +57,8 @@ export type GrowthLongformSectionErrorCode =
   | "GROWTH_LONGFORM_SECTION_OUTLINE_MISMATCH"
   | "GROWTH_LONGFORM_SECTION_EVIDENCE_MISMATCH"
   | "GROWTH_LONGFORM_SECTION_LENGTH_INVALID"
+  | "GROWTH_LONGFORM_SECTION_TOO_SHORT"
+  | "GROWTH_LONGFORM_SECTION_TOO_LONG"
   | "GROWTH_LONGFORM_SECTION_PRIOR_PROSE_REQUIRED"
   | "GROWTH_LONGFORM_SECTION_PADDING_REJECTED"
   | "GROWTH_LONGFORM_SECTION_FILLER_REJECTED"
@@ -98,9 +101,8 @@ export function compileGrowthLongformSection(
   const rawPoints = Array.from(parsed.data.candidateText).length;
   const semanticPoints = Array.from(parsed.data.candidateText.trim()).length;
   if (rawPoints !== semanticPoints) throw sectionError("GROWTH_LONGFORM_SECTION_PADDING_REJECTED");
-  if (semanticPoints < outlineSection.estimatedCodePoints.min
-    || semanticPoints > outlineSection.estimatedCodePoints.max) {
-    throw sectionError("GROWTH_LONGFORM_SECTION_LENGTH_INVALID");
+  if (semanticPoints < outlineSection.estimatedCodePoints.min) {
+    throw sectionError("GROWTH_LONGFORM_SECTION_TOO_SHORT");
   }
   if (hasRepeatedFiller(parsed.data.candidateText)) {
     throw sectionError("GROWTH_LONGFORM_SECTION_FILLER_REJECTED");

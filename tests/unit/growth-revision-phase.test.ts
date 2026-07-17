@@ -17,9 +17,15 @@ describe("Growth revision phase", () => {
     });
     const presentation = revisionToolPresentation(binding, "propose_change_set");
     expect(presentation).not.toBeNull();
+    expect(presentation!.description).toContain("Every targetRef marked revise must appear exactly once");
+    expect(presentation!.description).toContain("preserve and stale_visual targets must not be mutated");
+    expect(presentation!.description).toContain("aliases from revisionReferences");
+    expect(presentation!.description).toContain("Never use evidenceId, resourceId, documentId");
     const visibleSchema = JSON.stringify(presentation!.parameters);
     expect(visibleSchema).toContain("impact");
+    expect(visibleSchema).toContain("targetRef");
     expect(visibleSchema).toContain("stale_visual");
+    expect(visibleSchema).not.toContain("additions");
     for (const forbidden of [
       "checkpointId", "branchId", "scopeResourceIds", "ruleRevision", "receiptId",
       "resourceId", "documentId", "dependsOn", "create", "state",

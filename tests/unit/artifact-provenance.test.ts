@@ -214,12 +214,12 @@ describe("Artifact provenance", () => {
     legacy.exec("DROP TABLE change_set_outputs");
     legacy.exec("ALTER TABLE change_sets DROP COLUMN producer_tool_invocation_id");
     legacy.exec("ALTER TABLE agent_audit_events DROP COLUMN correction_attempts");
-    legacy.exec("UPDATE schema_meta SET version = 3 WHERE singleton = 1");
+    legacy.exec("DROP TABLE safe_diagnostic_events; UPDATE schema_meta SET version = 3 WHERE singleton = 1");
     legacy.close();
 
     const migrated = openTrackedWorkspace(root);
     expect(migrated.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toMatchObject({ version: 26 });
+      .toMatchObject({ version: 27 });
     const columns = migrated.db.prepare("PRAGMA table_info(change_sets)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toContain("producer_tool_invocation_id");
     expect(migrated.db.prepare(`

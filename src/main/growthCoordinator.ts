@@ -32,8 +32,9 @@ import type {
   GrowthPresentationInspectRequest,
   GrowthPresentationSnapshot,
 } from "../shared/growthPresentationContract";
-import { GrowthRunLifecycle } from "./growthRunLifecycle";
+import { GrowthRunLifecycle, readGrowthRunStartDiagnosticCode } from "./growthRunLifecycle";
 import { GrowthLongformCoordinator } from "./growth/phases/longform/growthLongformCoordinator";
+import { planGrowthClosureContinuation } from "./growth/phases/closure/growthClosureContinuationPlanner";
 import { syncClosureProfilesAfterRevision } from "./growth/phases/revision/growthRevisionClosureSync";
 import { estimateRevisionIntent, planGrowthFrontier, type GrowthFocusKind } from "./growthFrontierPlanner";
 import type { AgentProcessSupervisor } from "./agentProcessSupervisor";
@@ -43,6 +44,8 @@ import { ResourceRepository } from "../domain/workspace/resourceRepository";
 import { ChangeSetRepository, type ChangeSetItemRecord } from "../domain/changeSet/changeSetRepository";
 import { GrowthPresentationProjector } from "./growth/growthPresentationProjector";
 import { GrowthIllustrationApplicationService } from "./growth/illustration/growthIllustrationApplicationService";
+import { SafeDiagnosticRepository } from "../domain/audit/safeDiagnosticRepository";
+import { ensureGrowthCycleDiagnostic } from "./diagnostics/growthCycleDiagnostics";
 
 interface GrowthWorkspaceContext {
   workspace: import("../domain/workspace/workspaceRepository").WorkspaceDatabase;
@@ -131,24 +134,40 @@ export class GrowthCoordinator {
     const cycles = repository.listCycles(goal.id);
     const current = cycles.at(-1);
     const replay = exactRuleReplay(repository, input);
-    if (!current || (!["planned", "running", "committed"].includes(current.status) && !replay)) {
+    const creatorChoiceEvent = current?.status === "blocked" && current.failureCode === "GROWTH_CREATOR_CHOICE_REQUIRED"
+      ? [...repository.listEvents(goal.id)].reverse().find((event) => event.cycleId === current.id
+        && event.phase === "creator_choice_required" && event.targetKind === "inquiry")
+      : undefined;
+    if (!current || (!["planned", "running", "committed"].includes(current.status) && !creatorChoiceEvent && !replay)) {
       throw coordinatorError("GROWTH_GUIDANCE_NO_NEXT_CYCLE");
     }
     const boundaryCycle = current;
     const currentIntent = repository.getCycleIntent(boundaryCycle.id);
     const coverageKinds = formalCoverageKinds(context, boundaryCycle.outputCheckpointId ?? boundaryCycle.inputCheckpointId);
-    const estimated = isContentIntent(currentIntent)
+    const estimated = creatorChoiceEvent && isContentIntent(currentIntent)
+      ? creatorChoiceSuccessorIntent(currentIntent, coverageKinds)
+      : isContentIntent(currentIntent)
       ? estimateRevisionIntent({ currentIntent, formalCoverageKinds: coverageKinds })
       : { kind: "revision" as const, focusKinds: coverageKinds.length > 0 ? coverageKinds : ["world", "story", "oc"] as GrowthFocusKind[], resumeFrontier: [] };
-    const persisted = repository.appendRule({
-      goalId: goal.id,
-      expectedRevision: input.expectedRevision,
-      ruleText: input.ruleText,
-      sourceMessageId: input.sourceMessageId ?? `request:${input.requestId}`,
-    });
+    const sourceMessageId = input.sourceMessageId ?? `request:${input.requestId}`;
+    const persisted = creatorChoiceEvent && !replay
+      ? repository.answerCreatorInquiry({
+          inquiryId: creatorChoiceEvent.targetId,
+          idempotencyKey: `growth-inquiry-answer:${sourceMessageId}`,
+          expectedRuleRevision: input.expectedRevision,
+          expectedLifecycleSequence: repository.listInquiryLifecycle(creatorChoiceEvent.targetId).at(-1)?.sequence ?? 0,
+          answerText: input.ruleText,
+          sourceMessageId,
+        })
+      : repository.appendRule({
+          goalId: goal.id,
+          expectedRevision: input.expectedRevision,
+          ruleText: input.ruleText,
+          sourceMessageId,
+        });
     const response = growthGuideResponseSchema.parse({
       goalId: goal.id,
-      persistedRevision: persisted.revision,
+      persistedRevision: "ruleRevision" in persisted ? persisted.ruleRevision : persisted.revision,
       currentCycleRevision: boundaryCycle.ruleRevision,
       appliesAt: "next_cycle_boundary",
       nextCycleSequence: boundaryCycle.sequence + 1,
@@ -205,6 +224,25 @@ export class GrowthCoordinator {
       if (!outcome) throw coordinatorError("GROWTH_CLOSURE_OUTCOME_MISSING");
       this.#advanceEvaluated(input, current, outcome);
       return;
+    }
+    if (current?.status === "blocked" && current.failureCode === "GROWTH_CREATOR_CHOICE_REQUIRED") {
+      const choiceEvent = [...input.repository.listEvents(input.goal.id)].reverse().find((event) => event.cycleId === current.id
+        && event.phase === "creator_choice_required" && event.targetKind === "inquiry");
+      if (choiceEvent && input.repository.getInquiryCreatorAnswer(choiceEvent.targetId)) {
+        const priorIntent = input.repository.getCycleIntent(current.id);
+        const coverageKinds = formalCoverageKinds(input.context, current.inputCheckpointId);
+        const successorIntent = isContentIntent(priorIntent)
+          ? creatorChoiceSuccessorIntent(priorIntent, coverageKinds)
+          : { kind: "revision" as const, focusKinds: coverageKinds.length > 0 ? coverageKinds : ["world", "story", "oc"] as GrowthFocusKind[], resumeFrontier: [] };
+        const successor = this.#createPlannedCycle({
+          goal: input.goal,
+          repository: input.repository,
+          inputCheckpointId: current.inputCheckpointId,
+          intent: successorIntent,
+        });
+        this.#startPlanned(input, successor);
+        return;
+      }
     }
     if (current && ["blocked", "failed", "cancelled", "reconciliation_required"].includes(current.status)) {
       this.#releaseListeners(input.goal.id);
@@ -306,7 +344,7 @@ export class GrowthCoordinator {
           : isClosureRepair
           ? "闭环返工 Cycle 已计划，等待绑定修复 Run。"
           : input.intent.kind === "revision"
-          ? "新规则已进入安全修订轮，等待绑定 Agent Run。"
+          ? "内容修订轮已计划，等待绑定 Agent Run。"
           : "Growth Cycle 已计划，等待绑定 Agent Run。",
         phase: "cycle_planned",
         targetKind: "resource",
@@ -404,6 +442,30 @@ export class GrowthCoordinator {
         });
         this.#startPlanned(input, next);
         return;
+      }
+      const continuation = planGrowthClosureContinuation({
+        repository: input.repository,
+        goalId: input.goal.id,
+        profileId: intent.profileId,
+        currentCycleId: cycle.id,
+      });
+      if (continuation?.state === "plan") {
+        const next = this.#createPlannedCycle({
+          goal: input.goal,
+          repository: input.repository,
+          inputCheckpointId: cycle.inputCheckpointId,
+          intent: { kind: "revision", focusKinds: continuation.focusKinds, resumeFrontier: [] },
+        });
+        this.#startPlanned(input, next);
+        return;
+      }
+      if (continuation?.state === "stalled") {
+        ensureGrowthCycleDiagnostic({
+          workspace: input.context.workspace,
+          cycleId: cycle.id,
+          runId: cycle.runId,
+          code: "GROWTH_CLOSURE_NO_PROGRESS",
+        });
       }
     }
     if (outcome.decision === "accepted") {
@@ -542,28 +604,46 @@ export class GrowthCoordinator {
       }
     }
     const repairBrief = intent.kind === "repair" ? requiredRepairBrief(input.repository, intent) : null;
-    const runId = lifecycle.start({
-      goalId: input.goal.id,
-      cycleId: cycle.id,
-      request: {
-        projectId: input.request.projectId,
-        sessionId: input.request.sessionId,
-        userInput: stagePrompt(cycle.sequence, intent, input.request.seed, pinnedRule.ruleText, repairBrief),
-        mode: "free",
-        scopeResourceIds: [],
-      },
-      emit: (event) => {
+    let runId: string;
+    try {
+      runId = lifecycle.start({
+        goalId: input.goal.id,
+        cycleId: cycle.id,
+        request: {
+          projectId: input.request.projectId,
+          sessionId: input.request.sessionId,
+          userInput: stagePrompt(cycle.sequence, intent, input.request.seed, pinnedRule.ruleText, repairBrief),
+          mode: "free",
+          scopeResourceIds: [],
+        },
+        emit: (event) => {
+          try {
+            this.#publishAgent(input.goal.id, event);
+            this.#onAgentEvent(input, cycle.id, event);
+          } catch {
+            // Supervisor terminal cleanup must survive Coordinator advancement.
+          }
+        },
+        sessionHistory: this.applicationRegistry.listRecentConversation(input.request.sessionId),
+        collaborationContext: this.applicationRegistry.getCollaborationContext(input.request.projectId, input.request.sessionId),
+        onPersistedEvent: (event) => this.#publish(event),
+      });
+    } catch (error) {
+      const diagnosticCode = readGrowthRunStartDiagnosticCode(error);
+      if (diagnosticCode) {
         try {
-          this.#publishAgent(input.goal.id, event);
-          this.#onAgentEvent(input, cycle.id, event);
+          ensureGrowthCycleDiagnostic({
+            workspace: input.context.workspace,
+            cycleId: cycle.id,
+            runId: null,
+            code: diagnosticCode,
+          });
         } catch {
-          // Supervisor terminal cleanup must survive Coordinator advancement.
+          // A diagnostic write must never replace the original start failure.
         }
-      },
-      sessionHistory: this.applicationRegistry.listRecentConversation(input.request.sessionId),
-      collaborationContext: this.applicationRegistry.getCollaborationContext(input.request.projectId, input.request.sessionId),
-      onPersistedEvent: (event) => this.#publish(event),
-    });
+      }
+      throw error;
+    }
     this.#activeCycleRuns.set(cycle.id, runId);
   }
 
@@ -619,9 +699,11 @@ export class GrowthCoordinator {
     const cycles = repository.listCycles(goal.id);
     const latestCycle = cycles.at(-1);
     const activeCycle = latestCycle;
-    const activeCycleRuleRevision = activeCycle && ["planned", "running", "committed"].includes(activeCycle.status)
+    const activeCycleRuleRevision = activeCycle && (["planned", "running", "committed"].includes(activeCycle.status)
+      || (activeCycle.status === "blocked" && activeCycle.failureCode === "GROWTH_CREATOR_CHOICE_REQUIRED"))
       ? activeCycle.ruleRevision
       : null;
+    const diagnosticRepository = new SafeDiagnosticRepository(context.workspace);
     return {
       capabilityVersion: growthCapabilityVersion,
       strategy,
@@ -637,6 +719,10 @@ export class GrowthCoordinator {
         id: cycle.id, sequence: cycle.sequence, runId: cycle.runId, status: cycle.status,
       })),
       events: repository.listEvents(goal.id).slice(-100).map(projectEvent),
+      diagnostics: cycles
+        .flatMap((cycle) => diagnosticRepository.listCycle(cycle.id))
+        .slice(-100)
+        .map(projectDiagnostic),
     };
   }
 
@@ -730,6 +816,25 @@ function projectEvent(event: GrowthEvent) {
     targetKind: event.targetKind, targetId: event.targetId, targetVersionId: event.targetVersionId, contentRef: event.contentRef,
   };
 }
+function projectDiagnostic(diagnostic: import("../shared/diagnostics/safeDiagnosticContract").SafeDiagnosticEnvelopeV1) {
+  return {
+    diagnosticId: diagnostic.diagnosticId,
+    operationKind: diagnostic.operationKind,
+    operationId: diagnostic.operationId,
+    runId: diagnostic.runId,
+    cycleId: diagnostic.cycleId!,
+    sequence: diagnostic.sequence,
+    owner: diagnostic.owner,
+    boundary: diagnostic.boundary,
+    code: diagnostic.code,
+    toolName: diagnostic.toolName,
+    attempt: diagnostic.attempt,
+    maxAttempts: diagnostic.maxAttempts,
+    sideEffectState: diagnostic.sideEffectState,
+    disposition: diagnostic.disposition,
+    retryability: diagnostic.retryability,
+  };
+}
 function stagePrompt(
   sequence: number,
   intent: GrowthCycleIntent,
@@ -781,6 +886,31 @@ function coordinatorStatus(
 }
 function sameStrings(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function creatorChoiceRevisionIntent(
+  priorIntent: Pick<GrowthContentCycleIntent, "focusKinds" | "resumeFrontier">,
+  coverageKinds: GrowthFocusKind[],
+): { kind: "revision"; focusKinds: GrowthFocusKind[]; resumeFrontier: GrowthFocusKind[] } {
+  return {
+    kind: "revision",
+    focusKinds: [...new Set(coverageKinds)],
+    resumeFrontier: [...new Set([...priorIntent.focusKinds, ...priorIntent.resumeFrontier])],
+  };
+}
+
+function creatorChoiceSuccessorIntent(
+  priorIntent: Pick<GrowthContentCycleIntent, "focusKinds" | "resumeFrontier">,
+  coverageKinds: GrowthFocusKind[],
+) {
+  if (coverageKinds.length === 0) {
+    return {
+      kind: "expand" as const,
+      focusKinds: [...priorIntent.focusKinds],
+      resumeFrontier: [...priorIntent.resumeFrontier],
+    };
+  }
+  return creatorChoiceRevisionIntent(priorIntent, coverageKinds);
 }
 function coordinatorError(code: string): Error & { code: string } {
   return Object.assign(new Error("Growth coordinator request rejected."), { code });

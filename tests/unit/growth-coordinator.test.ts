@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChangeSetPolicyEvaluator } from "../../src/domain/changeSet/changeSetService";
 import { ApplicationRegistryRepository } from "../../src/domain/application/applicationRegistryRepository";
 import { AgentAuditRepository } from "../../src/domain/audit/agentAuditRepository";
+import { SafeDiagnosticRepository } from "../../src/domain/audit/safeDiagnosticRepository";
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
@@ -22,7 +23,9 @@ import { growthStartRequestSchema } from "../../src/shared/ipcContract";
 import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growthWorldFragment";
 import { compileGrowthLongformOutlineChangeSet } from "../../src/agent-worker/growth/growthLongformOutline";
 import { compileGrowthLongformSectionChangeSet } from "../../src/agent-worker/growth/growthLongformSection";
-import type { GrowthRunBinding } from "../../src/shared/agentWorkerProtocol";
+import { compileGrowthRevisionFragment } from "../../src/agent-worker/growth/phases/revision/growthRevisionFragment";
+import { createGrowthRevisionReferenceCatalog } from "../../src/agent-worker/growth/phases/revision/growthRevisionReferences";
+import type { GrowthRevisionAuthority, GrowthRunBinding } from "../../src/shared/agentWorkerProtocol";
 
 class FakeWorker extends EventEmitter implements AgentWorkerProcess {
   killed = false;
@@ -115,6 +118,278 @@ describe("GrowthCoordinator", () => {
     expect(command.userInput).toContain("Use the revised rule.");
     supervisor.cancel(runId(workers[1]!));
     await vi.waitFor(() => expect(repository.getCycle(cycles[1]!.id)?.status).toBe("cancelled"));
+  });
+
+  it("restarts an empty Greenfield Cycle after a persisted creator choice without inventing Revision authority", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const started = coordinator.start(growthRequest(setup));
+    const worker = workers[0]!;
+    worker.spawn();
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(1));
+    const id = runId(worker);
+    worker.receive({ type: "run.started", runId: id });
+    beginStewardInvocation(setup.workspace, id);
+    requestCoordinatorRetrieval(worker, id, "find the highest-value creator decision");
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({ ok: true, tool: "retrieve_graph_evidence" }));
+    worker.receive({
+      type: "tool.request", runId: id, requestId: randomUUID(), tool: "submit_growth_inquiry",
+      args: {
+        inquiries: [3, 2, 1].map((priority, index) => ({
+          localId: `empty_creator_question_${index + 1}`,
+          question: index === 0 ? "Should the empty world begin with an inland sea?" : `Which initial consequence has priority ${priority}?`,
+          evidenceIds: [], evidenceState: "unknown",
+          safeSummary: `Evaluating initial world consequence ${index + 1}.`,
+          proposedAction: "Use the creator decision as the initial world rule.",
+          provisionalAssumption: index === 0 ? null : "Preserve the seed.",
+          priority, requiresCreatorChoice: index === 0,
+        })),
+        selectedLocalId: null,
+        priorTransitions: [],
+      },
+    });
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).listCycles(started.goal.id)[0]).toMatchObject({
+      status: "blocked", failureCode: "GROWTH_CREATOR_CHOICE_REQUIRED", changeSetId: null, outputCheckpointId: null,
+    }));
+
+    expect(coordinator.guide({
+      goalId: started.goal.id,
+      expectedRevision: 1,
+      ruleText: "Begin with an inland sea and derive the first settlements from its seasonal retreat.",
+      requestId: "24242424-2424-4424-8424-242424242424",
+    })).toMatchObject({ persistedRevision: 2, currentCycleRevision: 1, nextCycleSequence: 2, nextCycleKind: "revision" });
+    expect(coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id }))
+      .toMatchObject({ coordinatorStatus: "running", currentRuleRevision: 2 });
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    const cycles = new GrowthRepository(setup.workspace).listCycles(started.goal.id);
+    expect(cycles[1]).toMatchObject({ sequence: 2, status: "running", ruleRevision: 2, inputCheckpointId: cycles[0]!.inputCheckpointId });
+    expect(new GrowthRepository(setup.workspace).getCycleIntent(cycles[1]!.id)).toMatchObject({
+      kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"],
+    });
+    workers[1]!.spawn();
+    await vi.waitFor(() => expect(workers[1]!.sent).toHaveLength(1));
+    expect((workers[1]!.sent[0] as { growthBinding: { kind: string; greenfieldCreateAuthorized: boolean } }).growthBinding)
+      .toMatchObject({ kind: "expand", greenfieldCreateAuthorized: true });
+    supervisor.cancel(runId(workers[1]!));
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).getCycle(cycles[1]!.id)?.status).toBe("cancelled"));
+  });
+
+  it("answers a persisted creator choice after committed content and starts one successor revision Cycle", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const started = coordinator.start(growthRequest(setup));
+    await completeCycle(setup.workspace, workers[0]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+    const worker = workers[1]!;
+    worker.spawn();
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(1));
+    const id = runId(worker);
+    worker.receive({ type: "run.started", runId: id });
+    beginStewardInvocation(setup.workspace, id);
+    requestCoordinatorRetrieval(worker, id, "find the highest-value creator decision");
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({ ok: true, tool: "retrieve_graph_evidence" }));
+    worker.receive({
+      type: "tool.request", runId: id, requestId: randomUUID(), tool: "submit_growth_inquiry",
+      args: {
+        inquiries: [3, 2, 1].map((priority, index) => ({
+          localId: `creator_question_${index + 1}`,
+          question: index === 0 ? "Should the harbor remain autonomous?" : `What bounded consequence has priority ${priority}?`,
+          evidenceIds: [], evidenceState: "unknown",
+          safeSummary: index === 0 ? "港口自治需要你的决定。" : `评估后续影响 ${index + 1}。`,
+          proposedAction: "Preserve established canon and choose the smallest coherent change.",
+          provisionalAssumption: index === 0 ? null : "Preserve established canon.",
+          priority, requiresCreatorChoice: index === 0,
+        })),
+        selectedLocalId: null,
+        priorTransitions: [],
+      },
+    });
+    const choiceCycle = new GrowthRepository(setup.workspace).listCycles(started.goal.id).at(-1)!;
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).getCycle(choiceCycle.id)).toMatchObject({
+      status: "blocked", failureCode: "GROWTH_CREATOR_CHOICE_REQUIRED",
+    }));
+    await vi.waitFor(() => expect(worker.killed).toBe(true));
+
+    const answered = coordinator.guide({
+      goalId: started.goal.id,
+      expectedRevision: 1,
+      ruleText: "保留既有正典，港口继续自治；只补充维持自治所需的最小制度因果。",
+      requestId: "23232323-2323-4323-8323-232323232323",
+    });
+    expect(answered).toMatchObject({ persistedRevision: 2, currentCycleRevision: 1, nextCycleSequence: 3 });
+    expect(new GrowthRepository(setup.workspace).getGoal(started.goal.id)).toMatchObject({ status: "active", currentRuleRevision: 2 });
+
+    let resumed;
+    try {
+      resumed = coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id });
+    } catch (error) {
+      const failure = error as { code?: string; startDiagnosticCode?: string; diagnosticCode?: string };
+      throw new Error(`Creator-choice successor failed: ${failure.code ?? "unknown"}/${failure.startDiagnosticCode ?? "unknown"}/${failure.diagnosticCode ?? "unknown"}`);
+    }
+    expect(resumed).toMatchObject({ coordinatorStatus: "running", currentRuleRevision: 2 });
+    await vi.waitFor(() => expect(workers).toHaveLength(3));
+    expect(new GrowthRepository(setup.workspace).listCycles(started.goal.id).at(-1)).toMatchObject({
+      sequence: 3, status: "running", ruleRevision: 2,
+    });
+    workers[2]!.spawn();
+    await vi.waitFor(() => expect(workers[2]!.sent).toHaveLength(1));
+    supervisor.cancel(runId(workers[2]!));
+    await vi.waitFor(() => expect(new GrowthRepository(setup.workspace).listCycles(started.goal.id).at(-1)?.status).toBe("cancelled"));
+  });
+
+  it("starts one successor after an additive Revision omits the prior world output", async () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const started = coordinator.start(growthRequest(setup));
+    coordinator.guide({
+      goalId: started.goal.id,
+      expectedRevision: 1,
+      ruleText: "Add one evidence-backed harbor without rewriting the world resource.",
+      requestId: "17171717-1717-4717-8717-171717171717",
+    });
+    await completeCycle(setup.workspace, workers[0]!);
+    await vi.waitFor(() => expect(workers).toHaveLength(2));
+
+    const worker = workers[1]!;
+    const binding = await longformBinding(worker);
+    expect(binding).toMatchObject({ kind: "revision", ruleRevision: 2 });
+    const id = runId(worker);
+    worker.receive({ type: "run.started", runId: id });
+    beginStewardInvocation(setup.workspace, id);
+    requestCoordinatorRetrieval(worker, id, "add one harbor from the pinned world evidence");
+    await vi.waitFor(() => expect(worker.sent.at(-1)).toMatchObject({
+      ok: true,
+      tool: "retrieve_graph_evidence",
+      result: { receiptId: expect.any(String), revisionAuthority: { targets: expect.any(Array) } },
+    }));
+    const retrieval = (worker.sent.at(-1) as {
+      ok: true;
+      result: { evidence: Array<{ evidenceId: string }>; revisionAuthority: GrowthRevisionAuthority };
+    }).result;
+    const resource = retrieval.revisionAuthority.targets.find((target) => target.kind === "resource");
+    if (!resource) throw new Error("Expected one pinned resource target.");
+    const resourceRef = createGrowthRevisionReferenceCatalog(retrieval.revisionAuthority)
+      [retrieval.revisionAuthority.targets.indexOf(resource)]?.ref;
+    if (!resourceRef) throw new Error("Expected the pinned resource reference alias.");
+    await submitCoordinatorInquiry(worker, id, [resource.evidenceId], "additive_revision");
+    const proposal = compileGrowthRevisionFragment({
+      summary: "Add one sourced harbor without rewriting the world resource.",
+      impact: {
+        summary: "The established world remains unchanged while one harbor is added.",
+        targets: [{ targetRef: resourceRef, decision: "preserve", reasonSummary: "The pinned resource remains authoritative." }],
+      },
+      resourceUpdates: [],
+      documentUpdates: [],
+      assertionUpdates: [],
+      relationRemovals: [],
+      resourceAdditions: [{
+        localId: "harbor",
+        kind: resource.objectKind === "faction" ? "faction" : "location",
+        title: "Moon Harbor",
+        parentRef: resourceRef,
+      }],
+      documentAdditions: [{
+        localId: "harbor_profile",
+        ownerRef: "harbor",
+        kind: resource.objectKind === "faction" ? "faction_profile" : "location_profile",
+        title: "Moon Harbor",
+        content: "Moon Harbor follows the new evidence-backed navigation rule.",
+      }],
+      assertionAdditions: [{
+        localId: "harbor_rule",
+        scopeRef: "harbor",
+        subject: "Moon Harbor",
+        predicate: "uses",
+        object: { target: "lunar navigation" },
+        sourceDocumentRefs: ["harbor_profile"],
+      }],
+      relationAdditions: [],
+    }, {
+      cycleId: binding.cycleId,
+      domainRootResourceIds: binding.domainRootResourceIds,
+      authority: retrieval.revisionAuthority,
+    });
+    await proposeCoordinatorChangeSet(worker, id, proposal);
+
+    const repository = new GrowthRepository(setup.workspace);
+    await vi.waitFor(() => expect(repository.listCycles(started.goal.id)).toHaveLength(3));
+    const successor = repository.listCycles(started.goal.id)[2]!;
+    expect(successor).toMatchObject({
+      sequence: 3,
+      status: "running",
+      runId: expect.any(String),
+      receiptId: null,
+      changeSetId: null,
+    });
+    expect(workers).toHaveLength(3);
+    expect(coordinator.get({
+      projectId: setup.projectId,
+      sessionId: setup.sessionId,
+      goalId: started.goal.id,
+    }).cycles[2]).toMatchObject({ status: "running", runId: successor.runId });
+    expect(workers).toHaveLength(3);
+
+    supervisor.cancel(successor.runId!);
+    await vi.waitFor(() => expect(repository.getCycle(successor.id)?.status).toBe("cancelled"));
+  });
+
+  it("records the exact pre-run checkpoint boundary when a planned Cycle cannot start", () => {
+    const setup = createSetup();
+    const workers: FakeWorker[] = [];
+    const supervisor = createSupervisor(setup, workers);
+    const coordinator = new GrowthCoordinator(setup.session, setup.application, supervisor);
+    const repository = new GrowthRepository(setup.workspace);
+    const request = growthRequest(setup);
+    const context = setup.session.getGrowthCoordinatorContext();
+    if (!context) throw new Error("Expected Growth coordinator context.");
+    const checkpoints = new CheckpointRepository(setup.workspace);
+    const branch = checkpoints.getActiveBranch();
+    const goal = repository.createGoal({
+      id: goalIdForRequest(request),
+      idempotencyKey: `growth-start:${setup.projectId}:${request.requestId}`,
+      branchId: branch.id,
+      seed: request.seed,
+      authorizedScopeResourceIds: context.authorizedScopeResourceIds,
+      initialRuleText: request.initialRuleText,
+      sourceMessageId: null,
+    });
+    const cycle = repository.beginCycle({
+      id: `${goal.id}:cycle:1`,
+      goalId: goal.id,
+      idempotencyKey: `${goal.id}:cycle:1`,
+      inputCheckpointId: branch.headCheckpointId,
+      ruleRevision: 1,
+      intent: { kind: "expand", focusKinds: ["world"], resumeFrontier: ["story", "oc"] },
+    });
+    checkpoints.appendCheckpoint(branch.id, "Move the active head before the planned Run starts.");
+
+    const get = () => coordinator.get({
+      projectId: setup.projectId,
+      sessionId: setup.sessionId,
+      goalId: goal.id,
+    });
+    expect(get).toThrowError(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
+    expect(get).toThrowError(expect.objectContaining({ code: "GROWTH_BINDING_INVALID" }));
+    expect(new SafeDiagnosticRepository(setup.workspace).listCycle(cycle.id)).toEqual([
+      expect.objectContaining({
+        runId: null,
+        cycleId: cycle.id,
+        code: "GROWTH_RUN_START_CHECKPOINT_INVALID",
+        owner: "growth_phase",
+        boundary: "phase_compile",
+        sideEffectState: "none",
+        disposition: "terminal",
+        retryability: "do_not_retry",
+      }),
+    ]);
+    expect(repository.getCycle(cycle.id)).toMatchObject({ status: "planned", runId: null });
+    expect(workers).toHaveLength(0);
   });
 
   it("replays one guidance identity exactly and rejects a competing CAS write", async () => {
@@ -749,6 +1024,14 @@ describe("GrowthCoordinator", () => {
     workers[0]!.spawn();
     workers[0]!.receive({ type: "run.failed", runId: runId(workers[0]!), code: "PROVIDER_RUNTIME_FAILED", message: "safe", artifacts: [] });
     await vi.waitFor(() => expect(coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: first.goal.id }).cycles[0]!.status).toBe("failed"));
+    expect(coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: first.goal.id }).diagnostics)
+      .toContainEqual(expect.objectContaining({
+        cycleId: first.cycles[0]!.id,
+        runId: first.cycles[0]!.runId,
+        code: "GROWTH_PROVIDER_RUNTIME_FAILED",
+        owner: "provider",
+        boundary: "provider_inference",
+      }));
     expect(coordinator.start(growthRequest(setup)).cycles).toHaveLength(1);
     expect(workers).toHaveLength(1);
 
@@ -765,8 +1048,14 @@ describe("GrowthCoordinator", () => {
     expect(runningCoordinator.start(runningRequest).cycles[0]!.status).toBe("running");
     expect(runningWorkers).toHaveLength(1);
     const restartedCoordinator = new GrowthCoordinator(runningSetup.session, runningSetup.application, runningSupervisor);
-    expect(restartedCoordinator.get({ projectId: runningSetup.projectId, sessionId: runningSetup.sessionId, goalId: running.goal.id }).cycles[0]!.status)
-      .toBe("reconciliation_required");
+    const recovered = restartedCoordinator.get({ projectId: runningSetup.projectId, sessionId: runningSetup.sessionId, goalId: running.goal.id });
+    expect(recovered.cycles[0]!.status).toBe("reconciliation_required");
+    expect(recovered.diagnostics).toContainEqual(expect.objectContaining({
+      cycleId: running.cycles[0]!.id,
+      code: "GROWTH_RUN_INTERRUPTED",
+      sideEffectState: "outcome_unknown",
+      disposition: "reconciliation_required",
+    }));
     runningWorkers[0]!.spawn();
     runningSupervisor.cancel(runId(runningWorkers[0]!));
   });
@@ -1123,6 +1412,7 @@ type LongformBinding = {
   cycleId: string;
   inputCheckpointId: string;
   ruleRevision: number;
+  domainRootResourceIds: { world: string; story: string; oc: string };
   longformAuthority:
     | {
         phase: "outline";

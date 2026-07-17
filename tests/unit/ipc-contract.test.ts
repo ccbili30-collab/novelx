@@ -23,6 +23,7 @@ import {
   growthClosureEvaluationPublicEventSchema,
   growthInquiryPublicEventSchema,
   growthLiveEventSchema,
+  growthPublicDiagnosticSchema,
   growthStartResponseSchema,
   growthStartRequestSchema,
   handoffSummarySchema,
@@ -132,6 +133,30 @@ describe("desktop IPC contract", () => {
     };
     expect(workspaceImageAssetSchema.parse(image).purpose).toBe("world_map");
     expect(workspaceImageAssetSchema.safeParse({ ...image, purpose: "placeholder_map" }).success).toBe(false);
+  });
+
+  it("projects strict safe diagnostics and rejects raw failure material", () => {
+    const diagnostic = {
+      diagnosticId: "diagnostic-1",
+      operationKind: "growth_cycle",
+      operationId: "cycle-1",
+      runId: "run-1",
+      cycleId: "cycle-1",
+      sequence: 1,
+      owner: "reconciliation",
+      boundary: "recovery",
+      code: "GROWTH_RUN_INTERRUPTED",
+      toolName: null,
+      attempt: 1,
+      maxAttempts: 3,
+      sideEffectState: "outcome_unknown",
+      disposition: "reconciliation_required",
+      retryability: "restart_reconcile",
+    } as const;
+    expect(growthPublicDiagnosticSchema.parse(diagnostic)).toEqual(diagnostic);
+    for (const field of ["message", "details", "stack", "prompt", "arguments", "path", "url", "credential"]) {
+      expect(growthPublicDiagnosticSchema.safeParse({ ...diagnostic, [field]: "unsafe-secret" }).success, field).toBe(false);
+    }
   });
 
   it("admits only Creator-safe Growth presentation and illustration commands", () => {

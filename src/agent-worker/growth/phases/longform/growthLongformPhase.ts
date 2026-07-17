@@ -7,6 +7,10 @@ import {
   type GrowthLongformOutline,
 } from "../../growthLongformOutline";
 import { compileGrowthLongformSectionChangeSet } from "../../growthLongformSection";
+import {
+  growthLongformWriterCorrectionInstruction,
+  type GrowthLongformWriterCorrectionCode,
+} from "./growthLongformDiagnostics";
 
 export interface GrowthLongformWriterCandidate {
   text: string;
@@ -29,7 +33,7 @@ export function longformToolPresentation(
   const authority = binding?.longformAuthority;
   if (authority?.phase === "outline" && toolName === "propose_change_set") {
     return {
-      description: "Submit one high-level OC personal-story outline. Supply only story title, summary, section objectives, cited evidence, continuity constraints, and bounded character ranges. Main story, world, focus OC, personal-story resource, document identities, checkpoint, and Receipt are trusted by the Harness.",
+      description: "Submit one high-level OC personal-story outline. Each section objective is confirmed Creator-authoring intent and must state the key events, choices, consequences, and ending state that Writer may realize without a GM resolution. Supply only story title, summary, section objectives, cited evidence, continuity constraints, and bounded character ranges. Main story, world, focus OC, personal-story resource, document identities, checkpoint, and Receipt are trusted by the Harness.",
       parameters: growthLongformOutlineParameters,
     };
   }
@@ -52,7 +56,7 @@ export function longformToolPresentation(
 
 export function longformPostInquiryInstruction(binding: GrowthRunBinding | undefined): string | undefined {
   if (binding?.longformAuthority?.phase === "outline") {
-    return "The pinned evidence and Inquiry are durable. Submit one high-level personal-story outline now; do not supply project identifiers or authority fields.";
+    return "The pinned evidence and Inquiry are durable. Submit one high-level personal-story outline now. Each section objective must decide its key events, choices, consequences, and ending state as confirmed Creator-authoring intent; do not defer those decisions to Writer or supply project identifiers or authority fields.";
   }
   if (binding?.longformAuthority?.phase === "section") {
     return "The pinned evidence and Inquiry are durable. Call Writer for the one trusted incomplete personal-story section now.";
@@ -84,27 +88,51 @@ export function compileLongformWriterInput(input: {
   authority: SectionAuthority;
   receiptId: string;
   evidenceById: ReadonlyMap<string, unknown>;
+  correctionCode?: GrowthLongformWriterCorrectionCode | null;
+  preserveMissingGmResolutionCorrection?: boolean;
+  continuationDraft?: GrowthLongformWriterCandidate | null;
 }): Record<string, unknown> {
   requireReceipt(input.receiptId);
   const selected = selectedSection(input.authority, "STEWARD_LONGFORM_AUTHORITY_INVALID");
   const requiredEvidenceIds = [...selected.evidenceIds, ...input.authority.priorProseEvidenceIds];
   requireAvailableEvidence(requiredEvidenceIds, input.evidenceById);
   const sourceMaterial = JSON.stringify({
+    authoringMode: "creator_lens_section",
     storyTitle: input.authority.storyTitle,
     outlineSummary: input.authority.summary,
     section: selected,
     evidence: requiredEvidenceIds.map((id) => input.evidenceById.get(id)),
+    ...(input.continuationDraft ? { inProgressDraft: input.continuationDraft.text } : {}),
   });
   if (sourceMaterial.length > 160_000) throw longformError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
+  const correctionInstruction = input.correctionCode
+    ? growthLongformWriterCorrectionInstruction(input.correctionCode)
+    : null;
+  const persistentAuthoringInstruction = input.preserveMissingGmResolutionCorrection
+    && input.correctionCode !== "STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_GM_RESOLUTION"
+    ? growthLongformWriterCorrectionInstruction("STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_GM_RESOLUTION")
+    : null;
+  const continuationCodePoints = input.continuationDraft ? [...input.continuationDraft.text].length : 0;
+  const continuationInstruction = input.continuationDraft
+    ? `Continue the supplied inProgressDraft. Return only new prose to append, not the existing draft. The combined section still needs at least ${Math.max(0, selected.estimatedCodePoints.min - continuationCodePoints)} additional Unicode code points. The outline maximum is a preferred estimate, not a rejection boundary.`
+    : null;
   return {
-    instruction: "Write exactly this one bounded OC personal-story section. Preserve continuity with the supplied pinned evidence and prior prose. Return only a Writer candidate; do not claim Canon, project authority, or a committed Change Set.",
+    instruction: [
+      "This is Creator Lens authoring, not a live player turn and not GM adjudication. The selected outline section is confirmed creative authority: realize its stated events, choices, consequences, and ending state while preserving all supplied pinned evidence and prior prose. You may create scene-level connective action, dialogue, sensory detail, pacing, and minor non-Canon incidents needed to turn that approved outline into original prose; those details do not need to pre-exist in the evidence and their absence is not missing_source. Do not contradict or replace pinned facts, change an approved consequential outcome, or introduce a new consequential Canon fact, identity, rule, or authority decision. If completing the section would require one of those unapproved consequential changes, return blocked. Write exactly this one bounded OC personal-story section and return only a Writer candidate; do not claim Canon, project authority, or a committed Change Set.",
+      continuationInstruction,
+      persistentAuthoringInstruction,
+      correctionInstruction,
+    ].filter(Boolean).join(" "),
     sourceMaterial,
-    evidenceIds: [...selected.evidenceIds],
+    evidenceIds: requiredEvidenceIds,
     gmResolution: null,
     gmResolutionId: null,
     styleConstraints: [
       ...selected.continuityConstraints,
-      `Unicode code point range: ${selected.estimatedCodePoints.min}-${selected.estimatedCodePoints.max}.`,
+      `Unicode code points: minimum ${selected.estimatedCodePoints.min}; preferred maximum ${selected.estimatedCodePoints.max}. The preferred maximum may be exceeded when needed for coherent prose, within the tool hard limit.`,
+      ...(persistentAuthoringInstruction ? [persistentAuthoringInstruction] : []),
+      ...(correctionInstruction ? [correctionInstruction] : []),
+      ...(continuationInstruction ? [continuationInstruction] : []),
       "Do not pad, repeat filler, or add leading/trailing whitespace.",
     ],
   };
@@ -159,11 +187,15 @@ export function captureLongformWriterCandidate(input: {
   const output = writerOutputSchema.safeParse(input.details);
   if (!output.success) throw longformError("STEWARD_TOOL_RESULT_INVALID");
   if (output.data.status !== "candidate") return null;
+  const candidate = output.data;
   const selected = selectedSection(input.authority, "STEWARD_LONGFORM_EVIDENCE_REQUIRED");
-  if (!sameStringSets(output.data.evidenceIds, selected.evidenceIds)) {
-    throw longformError("STEWARD_LONGFORM_EVIDENCE_REQUIRED");
+  const allowedEvidenceIds = new Set([...selected.evidenceIds, ...input.authority.priorProseEvidenceIds]);
+  if (candidate.evidenceIds.some((evidenceId) => !allowedEvidenceIds.has(evidenceId))) {
+    throw longformError("STEWARD_LONGFORM_WRITER_EVIDENCE_ECHO_INVALID");
   }
-  return { text: output.data.candidateText, evidenceIds: output.data.evidenceIds };
+  // The Harness owns evidence authority. Writer evidence IDs are an untrusted echo:
+  // allow any non-foreign subset, then bind the formal candidate to the selected section.
+  return { text: candidate.candidateText, evidenceIds: [...selected.evidenceIds] };
 }
 
 export function requireLongformWriterEvidence(

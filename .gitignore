@@ -16,3 +16,4 @@ coverage/
 *.db-wal
 .novax/
 runtime/target/
+artifacts/latest-growth-world-package/

@@ -20,6 +20,7 @@ import { createWorkspaceAgentToolGateway } from "../../src/main/workspaceAgentTo
 import { ImageAssetRepository } from "../../src/domain/asset/imageAssetRepository";
 import { ImageAssetStore } from "../../src/domain/asset/imageAssetStore";
 import { ImageGenerationService } from "../../src/domain/asset/imageGenerationService";
+import { ResponsesImageProviderError } from "../../src/domain/asset/responsesImageProviderClient";
 import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growthWorldFragment";
 import { compileGrowthStoryFragment } from "../../src/agent-worker/growth/growthStoryFragment";
 import { compileGrowthOcFragment } from "../../src/agent-worker/growth/growthOcFragment";
@@ -452,6 +453,29 @@ describe("Workspace Agent tool gateway", () => {
     await expect(gateway.generateImage(imageRequest(source), invocationContext("assist")))
       .rejects.toMatchObject({ code: "IMAGE_PROVIDER_REQUIRED" });
     expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
+  });
+
+  it("attaches only the persisted allowlisted image failure class for Main diagnostics", async () => {
+    const { root, workspace } = createWorkspace();
+    const source = imageSource(workspace);
+    seedTool(workspace, "generate_image");
+    const client = vi.fn().mockRejectedValue(
+      new ResponsesImageProviderError("IMAGE_PROVIDER_GENERATION_FAILED", false, 429),
+    );
+    const gateway = createWorkspaceAgentToolGateway(workspace, testOnlyLowRiskPolicy, () => true, {
+      getImageProviderProfile: imageProfile,
+      createImageGenerationService: () => new ImageGenerationService(
+        new ImageAssetRepository(workspace), new ImageAssetStore(root), client,
+      ),
+    });
+
+    await expect(gateway.generateImage(imageRequest(source), invocationContext("assist")))
+      .rejects.toMatchObject({
+        code: "IMAGE_GENERATION_FAILED",
+        diagnosticCode: "IMAGE_PROVIDER_RATE_LIMITED",
+      });
+    expect(new ImageAssetRepository(workspace).getJobByIdempotencyKey("steward:silver-bay-night-tide-v1"))
+      .toMatchObject({ status: "failed", errorCode: "IMAGE_PROVIDER_RATE_LIMITED" });
   });
 
   it("accepts a world_map only for a current formal world and its bound stable version", async () => {

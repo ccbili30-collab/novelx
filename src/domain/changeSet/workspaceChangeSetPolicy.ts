@@ -17,6 +17,34 @@ import {
 } from "./changeSetService";
 import type { ChangeSetConflictRecord } from "./changeSetRepository";
 
+export const workspaceChangeSetMajorConflictCodes = [
+  "ASSERTION_EVIDENCE_NOT_ACTIVE",
+  "ASSERTION_EVIDENCE_REQUIRED",
+  "ASSERTION_IDENTITY_CONFLICT",
+  "ASSERTION_SCOPE_NOT_ACTIVE",
+  "ASSERTION_VALUE_CONFLICT",
+  "CONSTRAINT_PROFILE_ID_CONFLICT",
+  "CONSTRAINT_PROFILE_TARGET_NOT_ACTIVE",
+  "CONSTRAINT_SCOPE_NOT_ACTIVE",
+  "CREATIVE_DOCUMENT_ID_CONFLICT",
+  "CREATIVE_DOCUMENT_TARGET_NOT_ACTIVE",
+  "CREATIVE_RELATION_ID_CONFLICT",
+  "CREATIVE_RELATION_TARGET_NOT_ACTIVE",
+  "DOCUMENT_TARGET_NOT_ACTIVE",
+  "RELATION_SOURCE_NOT_ACTIVE",
+  "RELATION_TARGET_NOT_ACTIVE",
+  "RESOURCE_DUPLICATE_CREATE",
+  "RESOURCE_ID_CONFLICT",
+  "RESOURCE_PARENT_NOT_ACTIVE",
+  "RESOURCE_TARGET_NOT_ACTIVE",
+] as const;
+
+export type WorkspaceChangeSetMajorConflictCode = (typeof workspaceChangeSetMajorConflictCodes)[number];
+
+export function isWorkspaceChangeSetMajorConflictCode(value: string): value is WorkspaceChangeSetMajorConflictCode {
+  return (workspaceChangeSetMajorConflictCodes as readonly string[]).includes(value);
+}
+
 export function isGreenfieldWorkspaceEmpty(workspace: WorkspaceDatabase): boolean {
   const row = workspace.db.prepare(`
     SELECT (
@@ -62,6 +90,8 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
       && candidate.greenfieldCreateAuthorized === true
       && isGreenfieldWorkspaceEmpty(this.workspace)
       && isGreenfieldCreateOnlyCandidate(candidate.items);
+    const sameChangeSetDocumentEvidenceAuthorized = greenfieldCreateCandidate
+      || candidate.sameChangeSetDocumentEvidenceAuthorized === true;
     const greenfieldDocumentOutputItemIds = new Set(candidate.items
       .filter((item) => item.kind === "document.put")
       .map((item) => item.id));
@@ -96,8 +126,9 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
       documentCreateItems,
       relationIds: new Set(creativeRelations.map((relation) => relation.id)),
       profileIds: new Set(constraintProfiles.map((profile) => profile.profileId)),
-      greenfieldCreateCandidate,
+      sameChangeSetDocumentEvidenceAuthorized,
       greenfieldDocumentOutputItemIds,
+      assertionIdentityUpdateAuthorized: candidate.assertionIdentityUpdateAuthorized === true,
     }));
   }
 
@@ -112,8 +143,9 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
       documentCreateItems: ReadonlyMap<string, string[]>;
       relationIds: ReadonlySet<string>;
       profileIds: ReadonlySet<string>;
-      greenfieldCreateCandidate: boolean;
+      sameChangeSetDocumentEvidenceAuthorized: boolean;
       greenfieldDocumentOutputItemIds: ReadonlySet<string>;
+      assertionIdentityUpdateAuthorized: boolean;
     },
   ): ChangeSetPolicyAssessment {
     switch (item.kind) {
@@ -124,8 +156,9 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
           current.evidenceIds,
           current.resourceIds,
           current.resourceCreateItems,
-          current.greenfieldCreateCandidate,
+          current.sameChangeSetDocumentEvidenceAuthorized,
           current.greenfieldDocumentOutputItemIds,
+          current.assertionIdentityUpdateAuthorized,
         );
       case "resource.put":
         return assessResource(item, current.resourceIds, current.resourceCreateItems);
@@ -265,8 +298,9 @@ function assessAssertion(
   activeEvidenceIds: ReadonlySet<string>,
   activeResourceIds: ReadonlySet<string>,
   resourceCreateItems: ReadonlyMap<string, string[]>,
-  greenfieldCreateCandidate: boolean,
+  sameChangeSetDocumentEvidenceAuthorized: boolean,
   greenfieldDocumentOutputItemIds: ReadonlySet<string>,
+  assertionIdentityUpdateAuthorized: boolean,
 ): ChangeSetPolicyAssessment {
   const conflicts: ChangeSetConflictRecord[] = [];
   const scopeCreateItems = resourceCreateItems.get(item.payload.scopeId) ?? [];
@@ -279,7 +313,7 @@ function assessAssertion(
   } else if (item.payload.evidenceIds.some((id) => {
     const documentItemId = parseGreenfieldDocumentOutputEvidence(id);
     if (!documentItemId) return !activeEvidenceIds.has(id);
-    return !greenfieldCreateCandidate
+    return !sameChangeSetDocumentEvidenceAuthorized
       || !greenfieldDocumentOutputItemIds.has(documentItemId)
       || !item.dependsOn.includes(documentItemId);
   })) {
@@ -302,9 +336,10 @@ function assessAssertion(
       && sameIdentity.subject === item.payload.subject
       && sameIdentity.predicate === item.payload.predicate
       && stableStringify(sameIdentity.object) === stableStringify(item.payload.object);
-    conflicts.push(unchanged
-      ? { severity: "warning", code: "ASSERTION_DUPLICATE" }
-      : { severity: "major", code: "ASSERTION_IDENTITY_CONFLICT" });
+    if (unchanged) conflicts.push({ severity: "warning", code: "ASSERTION_DUPLICATE" });
+    else if (!assertionIdentityUpdateAuthorized) {
+      conflicts.push({ severity: "major", code: "ASSERTION_IDENTITY_CONFLICT" });
+    }
   } else if (sameSemanticKey && stableStringify(sameSemanticKey.object) !== stableStringify(item.payload.object)) {
     conflicts.push({ severity: "major", code: "ASSERTION_VALUE_CONFLICT" });
   }

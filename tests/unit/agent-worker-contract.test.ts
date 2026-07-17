@@ -7,6 +7,7 @@ import type { PublishedPrompt } from "../../src/agent-worker/promptRegistry";
 import {
   agentWorkerToolResponseSchema,
   agentWorkerToolRequestSchema,
+  agentWorkerAuditOperationSchema,
   growthIllustrationPlanSchema,
   growthRetrieveGraphEvidenceResultSchema,
   growthRunBindingSchema,
@@ -20,6 +21,29 @@ import { agentRunEventSchema } from "../../src/shared/ipcContract";
 const auditRecorder = { record: async () => undefined };
 
 describe("agent worker fail-closed contract", () => {
+  it("accepts only the strict versioned Safe Diagnostic audit operation", () => {
+    const operation = {
+      type: "safe_diagnostic.append" as const,
+      diagnostic: {
+        schemaVersion: 1 as const,
+        diagnosticId: "diagnostic-1", operationKind: "tool_call" as const, operationId: "tool-1",
+        runId: "run-1", cycleId: "cycle-1", toolInvocationId: "tool-1", parentDiagnosticId: null,
+        sequence: 1, owner: "growth_phase" as const, boundary: "phase_compile" as const,
+        code: "GROWTH_REVISION_FRAGMENT_INVALID", toolName: "propose_change_set",
+        attempt: 1, maxAttempts: 3, sideEffectState: "none" as const,
+        disposition: "correctable" as const, retryability: "model_correction" as const,
+        occurredAt: "2026-07-17T00:00:00.000Z",
+      },
+    };
+    expect(agentWorkerAuditOperationSchema.safeParse(operation).success).toBe(true);
+    expect(agentWorkerAuditOperationSchema.safeParse({
+      ...operation, diagnostic: { ...operation.diagnostic, message: "token=secret" },
+    }).success).toBe(false);
+    expect(agentWorkerAuditOperationSchema.safeParse({
+      ...operation, diagnostic: { ...operation.diagnostic, code: "raw provider error" },
+    }).success).toBe(false);
+  });
+
   it("requires a bounded unique trusted seed set in the internal Growth binding", () => {
     const binding = {
       capabilityVersion: "hackathon-growth-closure-v4", goalId: "goal-1", cycleId: "cycle-1",
@@ -111,6 +135,16 @@ describe("agent worker fail-closed contract", () => {
       .toEqual({ status: "selected", safeSummary: "正在推演。" });
     expect(submitGrowthInquiryResultSchema.safeParse({ status: "selected", safeSummary: "正在推演。", inquiryId: "hidden" }).success)
       .toBe(false);
+    expect(agentWorkerToolResponseSchema.safeParse({
+      type: "tool.response",
+      runId: "run-1",
+      requestId: "11111111-1111-4111-8111-111111111111",
+      ok: false,
+      error: {
+        code: "STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID",
+        message: "Cite only exact evidence IDs returned by the current pinned Growth retrieval.",
+      },
+    }).success).toBe(true);
   });
 
   it("keeps Closure evaluation authority internal and its submissions evidence-bound", () => {
@@ -627,6 +661,50 @@ describe("agent worker fail-closed contract", () => {
     expect(event.type).toBe("run.completed");
     if (event.type !== "run.completed") throw new Error("Expected a completed Agent Run event.");
     expect(event.artifacts).toEqual(artifacts);
+  });
+
+  it("projects a failed image attempt as false without inventing an Asset", () => {
+    const artifacts = projectPublicArtifacts({
+      status: "completed",
+      message: "文字已保存；图片生成失败，可稍后重试。",
+      evidenceIds: ["version-1"],
+      toolOutcomes: [{ tool: "generate_image", status: "failed" }],
+      changeSet: { state: "committed", changeSetId: "change-1" },
+      escalations: [],
+    }, [], [], [{
+      assetId: null,
+      title: "银湾夜潮",
+      status: "failed",
+      purpose: "world_map",
+      sourceVersionIds: ["version-1"],
+      thumbnailUrl: null,
+    }]);
+
+    expect(artifacts.at(-1)).toEqual({
+      kind: "image",
+      assetId: null,
+      title: "银湾夜潮",
+      status: "failed",
+      purpose: "world_map",
+      sourceLabel: "基于 1 个稳定版本",
+      thumbnailUrl: null,
+    });
+    expect(agentRunEventSchema.safeParse({
+      type: "run.completed",
+      runId: "run-failed-image",
+      outcome: "completed",
+      message: "文字已保存；图片生成失败，可稍后重试。",
+      changeSetState: "committed",
+      artifacts,
+    }).success).toBe(true);
+    expect(agentRunEventSchema.safeParse({
+      type: "run.completed",
+      runId: "run-fake-ready-image",
+      outcome: "completed",
+      message: "不应通过。",
+      changeSetState: "committed",
+      artifacts: [{ ...artifacts.at(-1), status: "ready" }],
+    }).success).toBe(false);
   });
 
   it("rejects missing structured submissions and unsafe public messages", async () => {

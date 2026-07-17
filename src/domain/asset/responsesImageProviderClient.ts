@@ -13,7 +13,27 @@ export type ResponsesImageProviderErrorCode =
   | "IMAGE_PROVIDER_GENERATION_FAILED"
   | "IMAGE_PROVIDER_PROTOCOL_FAILED";
 
+export const responsesImageProviderFailureClasses = [
+  "IMAGE_PROVIDER_CONNECTION_FAILED",
+  "IMAGE_PROVIDER_PROTOCOL_FAILED",
+  "IMAGE_PROVIDER_REQUEST_REJECTED",
+  "IMAGE_PROVIDER_AUTH_FAILED",
+  "IMAGE_PROVIDER_MODEL_UNAVAILABLE",
+  "IMAGE_PROVIDER_RATE_LIMITED",
+  "IMAGE_PROVIDER_SERVICE_UNAVAILABLE",
+  "IMAGE_PROVIDER_GENERATION_FAILED",
+] as const;
+
+export type ResponsesImageProviderFailureClass = (typeof responsesImageProviderFailureClasses)[number];
+
+export function isResponsesImageProviderFailureClass(value: unknown): value is ResponsesImageProviderFailureClass {
+  return typeof value === "string"
+    && (responsesImageProviderFailureClasses as readonly string[]).includes(value);
+}
+
 export class ResponsesImageProviderError extends Error {
+  readonly failureClass: ResponsesImageProviderFailureClass;
+
   constructor(
     readonly code: ResponsesImageProviderErrorCode,
     readonly outcomeUnknown: boolean,
@@ -21,7 +41,21 @@ export class ResponsesImageProviderError extends Error {
   ) {
     super(code);
     this.name = "ResponsesImageProviderError";
+    this.failureClass = classifyImageProviderFailure(code, httpStatus);
   }
+}
+
+export function classifyImageProviderFailure(
+  code: ResponsesImageProviderErrorCode,
+  httpStatus?: number,
+): ResponsesImageProviderFailureClass {
+  if (code !== "IMAGE_PROVIDER_GENERATION_FAILED" || httpStatus === undefined) return code;
+  if (httpStatus === 401 || httpStatus === 403) return "IMAGE_PROVIDER_AUTH_FAILED";
+  if (httpStatus === 404) return "IMAGE_PROVIDER_MODEL_UNAVAILABLE";
+  if (httpStatus === 429) return "IMAGE_PROVIDER_RATE_LIMITED";
+  if (httpStatus >= 500 && httpStatus <= 599) return "IMAGE_PROVIDER_SERVICE_UNAVAILABLE";
+  if (httpStatus >= 400 && httpStatus <= 499) return "IMAGE_PROVIDER_REQUEST_REJECTED";
+  return "IMAGE_PROVIDER_GENERATION_FAILED";
 }
 
 export async function generateResponsesImage(

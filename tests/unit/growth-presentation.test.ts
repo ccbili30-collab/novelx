@@ -33,6 +33,7 @@ function snapshot(overrides: Partial<GrowthStartResponse> = {}): GrowthStartResp
       { id: "cycle-3", sequence: 3, runId: null, status: "planned" },
     ],
     events: [event({ cycleId: cycleOne, sequence: 1, phase: "run_attached", durableState: "running", runId: "run-1" })],
+    diagnostics: [],
     ...overrides,
   } as GrowthStartResponse;
 }
@@ -60,7 +61,7 @@ function worldMapArtifact(
 ): Extract<AgentArtifact, { kind: "image" }> {
   return {
     kind: "image",
-    assetId: "map-asset-1",
+    assetId: status === "ready" || status === "stale" ? "map-asset-1" : null,
     title: "潮汐海港地图",
     status,
     purpose: "world_map",
@@ -72,7 +73,7 @@ function worldMapArtifact(
 
 describe("growth presentation", () => {
   it("fails closed when restored guidance revision fields are incomplete", async () => {
-    const { createGrowthPresentation } = await presentation();
+    const { createGrowthPresentation, getGrowthGuidanceAvailability, mergeGrowthSnapshot } = await presentation();
 
     const complete = createGrowthPresentation(snapshot({
       currentRuleRevision: 2,
@@ -275,7 +276,7 @@ describe("growth presentation", () => {
   });
 
   it("renders Inquiry phases from safeSummary without projecting hidden reasoning fields", async () => {
-    const { createGrowthPresentation, growthEventSummary } = await presentation();
+    const { createGrowthPresentation, getGrowthGuidanceAvailability, growthEventSummary, mergeGrowthSnapshot } = await presentation();
     const selected = event({
       phase: "inquiry_selected", durableState: "running", targetKind: "inquiry", targetId: "inquiry-1",
       safeSummary: "港口制度可能改变航线。", contentRef: null,
@@ -287,6 +288,9 @@ describe("growth presentation", () => {
     const state = createGrowthPresentation(snapshot({
       coordinatorStatus: "blocked",
       goal: { id: goalId, status: "blocked", currentCycleSequence: 1 },
+      currentRuleRevision: 1,
+      activeCycleRuleRevision: 1,
+      guidanceStatus: "none",
       cycles: [{ id: cycleOne, sequence: 1, runId: "run-1", status: "blocked" }],
       events: [selected, choice],
     }));
@@ -294,6 +298,20 @@ describe("growth presentation", () => {
     expect(growthEventSummary(selected)).toBe("正在推演：港口制度可能改变航线。");
     expect(growthEventSummary(choice)).toBe("需要你的取舍：是否保留港口自治需要你的决定。");
     expect(state.rows[0]?.summary).toBe("需要你的取舍：是否保留港口自治需要你的决定。");
+    expect(getGrowthGuidanceAvailability(state)).toEqual({ canGuide: true, reason: null });
+    const resumed = mergeGrowthSnapshot(state, snapshot({
+      coordinatorStatus: "running",
+      goal: { id: goalId, status: "active", currentCycleSequence: 2 },
+      currentRuleRevision: 2,
+      activeCycleRuleRevision: 2,
+      cycles: [
+        { id: cycleOne, sequence: 1, runId: "run-1", status: "blocked" },
+        { id: cycleTwo, sequence: 2, runId: "run-2", status: "running" },
+      ],
+      events: [choice],
+    }));
+    expect(resumed.coordinatorStatus).toBe("running");
+    expect(resumed.currentCycleSequence).toBe(2);
     expect(JSON.stringify(state)).not.toContain("proposedAction");
     expect(JSON.stringify(state)).not.toContain("provisionalAssumption");
     expect(JSON.stringify(state)).not.toContain("fingerprint");
@@ -392,7 +410,7 @@ describe("growth presentation", () => {
   it("selects the latest managed ready world map for a truthful preview", async () => {
     const { getGrowthWorldMapDisplay } = await presentation();
     const display = getGrowthWorldMapDisplay([
-      worldMapArtifact("failed", { assetId: "map-asset-old" }),
+      worldMapArtifact("failed"),
       worldMapArtifact("ready"),
     ]);
 
@@ -481,5 +499,33 @@ describe("growth presentation", () => {
     expect(advanceGrowthVisualClimax(observed.state, createGrowthPresentation(snapshot({ coordinatorStatus: "blocked" })), [map]).artifact).toBeNull();
     expect(advanceGrowthVisualClimax(observed.state, createGrowthPresentation(snapshot({ coordinatorStatus: "failed" })), [map]).artifact).toBeNull();
     expect(advanceGrowthVisualClimax(observed.state, unrelatedCompleted, [map]).artifact).toBeNull();
+  });
+
+  it("projects only persisted safe diagnostics into the owning Cycle", async () => {
+    const { createGrowthPresentation, growthDiagnosticSummary } = await presentation();
+    const diagnostic = {
+      diagnosticId: "diagnostic-1",
+      operationKind: "growth_cycle",
+      operationId: cycleOne,
+      runId: "run-1",
+      cycleId: cycleOne,
+      sequence: 1,
+      owner: "reconciliation",
+      boundary: "recovery",
+      code: "GROWTH_RUN_INTERRUPTED",
+      toolName: null,
+      attempt: 1,
+      maxAttempts: 3,
+      sideEffectState: "outcome_unknown",
+      disposition: "reconciliation_required",
+      retryability: "restart_reconcile",
+    } as const;
+    const result = createGrowthPresentation(snapshot({ diagnostics: [diagnostic, diagnostic] }));
+
+    expect(result.diagnostics).toEqual([diagnostic]);
+    expect(result.rows[0]?.diagnostics).toEqual([diagnostic]);
+    expect(result.rows[1]?.diagnostics).toEqual([]);
+    expect(growthDiagnosticSummary(diagnostic)).toBe("结果核对 · GROWTH_RUN_INTERRUPTED · 第 1/3 次 · 结果未知，必须核对");
+    expect(growthDiagnosticSummary(diagnostic)).not.toContain("password");
   });
 });

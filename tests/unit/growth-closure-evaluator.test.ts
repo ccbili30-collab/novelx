@@ -10,6 +10,7 @@ import { CreativeRelationRepository } from "../../src/domain/workspace/creativeR
 import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
+import { GROWTH_LONGFORM_MIN_CODE_POINTS } from "../../src/shared/growthLongformPolicy";
 
 const opened: WorkspaceDatabase[] = [];
 const roots: string[] = [];
@@ -21,7 +22,7 @@ afterEach(() => {
 
 describe("GrowthClosureEvaluator", () => {
   it("evaluates world, story, OC, and explicit mixed profiles from typed pinned evidence", () => {
-    const setup = createCompleteSetup("文".repeat(9_999) + "🌊");
+    const setup = createCompleteSetup("文".repeat(GROWTH_LONGFORM_MIN_CODE_POINTS - 1) + "🌊");
     const evaluator = new GrowthClosureEvaluator(setup.workspace);
 
     expect(evaluator.evaluate({ checkpointId: setup.checkpointId, profileKind: "world_birth" }))
@@ -29,7 +30,11 @@ describe("GrowthClosureEvaluator", () => {
     expect(evaluator.evaluate({ checkpointId: setup.checkpointId, profileKind: "story_universe" }))
       .toMatchObject({ deterministicContentReady: true, components: ["story_universe"] });
     expect(evaluator.evaluate({ checkpointId: setup.checkpointId, profileKind: "oc_saga", subjectResourceId: setup.ocId }))
-      .toMatchObject({ deterministicContentReady: true, components: ["oc_saga"], ocPersonalStoryCodePoints: 10_000 });
+      .toMatchObject({
+        deterministicContentReady: true,
+        components: ["oc_saga"],
+        ocPersonalStoryCodePoints: GROWTH_LONGFORM_MIN_CODE_POINTS,
+      });
     expect(evaluator.evaluate({
       checkpointId: setup.checkpointId,
       profileKind: "mixed_birth",
@@ -39,10 +44,10 @@ describe("GrowthClosureEvaluator", () => {
   });
 
   it("counts Unicode code points across current pinned prose and excludes superseded versions", () => {
-    const setup = createCompleteSetup("文".repeat(9_998) + "🌊");
+    const setup = createCompleteSetup("文".repeat(GROWTH_LONGFORM_MIN_CODE_POINTS - 2) + "🌊");
     const evaluator = new GrowthClosureEvaluator(setup.workspace);
     const before = evaluator.evaluate({ checkpointId: setup.checkpointId, profileKind: "oc_saga", subjectResourceId: setup.ocId });
-    expect(before.ocPersonalStoryCodePoints).toBe(9_999);
+    expect(before.ocPersonalStoryCodePoints).toBe(GROWTH_LONGFORM_MIN_CODE_POINTS - 1);
     expect(before.deterministicContentReady).toBe(false);
     expect(before.facetResults.find((facet) => facet.facetId === GROWTH_CLOSURE_FACETS.oc.personalStory)?.state).toBe("missing");
 
@@ -52,7 +57,7 @@ describe("GrowthClosureEvaluator", () => {
       resourceId: setup.storyId,
       creativeDocumentId: setup.proseDocumentId,
       checkpointId: nextCheckpoint,
-      content: "文".repeat(4_999) + "🌊",
+      content: "文".repeat(Math.floor(GROWTH_LONGFORM_MIN_CODE_POINTS / 2) - 1) + "🌊",
       authorKind: "agent",
     });
     new AssertionRepository(setup.workspace).putVersion({
@@ -61,9 +66,10 @@ describe("GrowthClosureEvaluator", () => {
       object: { storyResourceId: setup.storyId }, status: "current", source: { kind: "document_version", ref: nextVersionId },
     });
 
-    expect(evaluator.evaluate({ checkpointId: setup.checkpointId, profileKind: "oc_saga", subjectResourceId: setup.ocId }).ocPersonalStoryCodePoints).toBe(9_999);
+    expect(evaluator.evaluate({ checkpointId: setup.checkpointId, profileKind: "oc_saga", subjectResourceId: setup.ocId }).ocPersonalStoryCodePoints)
+      .toBe(GROWTH_LONGFORM_MIN_CODE_POINTS - 1);
     expect(evaluator.evaluate({ checkpointId: nextCheckpoint, profileKind: "oc_saga", subjectResourceId: setup.ocId }))
-      .toMatchObject({ ocPersonalStoryCodePoints: 10_000, deterministicContentReady: true });
+      .toMatchObject({ ocPersonalStoryCodePoints: GROWTH_LONGFORM_MIN_CODE_POINTS, deterministicContentReady: true });
   });
 
   it("does not infer a facet from prose keywords when the typed sourced assertion is absent", () => {
@@ -77,6 +83,31 @@ describe("GrowthClosureEvaluator", () => {
     const result = new GrowthClosureEvaluator(setup.workspace).evaluate({ checkpointId: setup.checkpointId, profileKind: "world_birth" });
     expect(result.deterministicContentReady).toBe(false);
     expect(result.facetResults.find((facet) => facet.facetId === GROWTH_CLOSURE_FACETS.world.cosmologyTime))
+      .toMatchObject({ state: "missing", evidence: [] });
+  });
+
+  it("accepts a Change Set evidence_version only when it resolves to a pinned stable document", () => {
+    const setup = createCompleteSetup("文".repeat(9_999) + "🌊", undefined, "evidence_version");
+    const evaluator = new GrowthClosureEvaluator(setup.workspace);
+
+    expect(evaluator.evaluate({ checkpointId: setup.checkpointId, profileKind: "mixed_birth",
+      componentProfiles: ["world_birth", "story_universe", "oc_saga"], focusOcResourceId: setup.ocId }))
+      .toMatchObject({ deterministicContentReady: true });
+
+    const unresolved = createCompleteSetup(
+      "文".repeat(9_999) + "🌊",
+      GROWTH_CLOSURE_FACETS.world.cosmologyTime,
+      "evidence_version",
+    );
+    new AssertionRepository(unresolved.workspace).putVersion({
+      assertionId: "unresolved-evidence-version", checkpointId: unresolved.checkpointId,
+      scopeType: "resource", scopeId: unresolved.worldId, subject: unresolved.worldId,
+      predicate: GROWTH_CLOSURE_FACETS.world.cosmologyTime, object: { established: true }, status: "current",
+      source: { kind: "evidence_version", ref: "not-a-pinned-document-version" },
+    });
+    expect(new GrowthClosureEvaluator(unresolved.workspace)
+      .evaluate({ checkpointId: unresolved.checkpointId, profileKind: "world_birth" })
+      .facetResults.find((facet) => facet.facetId === GROWTH_CLOSURE_FACETS.world.cosmologyTime))
       .toMatchObject({ state: "missing", evidence: [] });
   });
 
@@ -120,7 +151,11 @@ describe("GrowthClosureEvaluator", () => {
   });
 });
 
-function createCompleteSetup(personalStory: string, omittedPredicate?: string) {
+function createCompleteSetup(
+  personalStory: string,
+  omittedPredicate?: string,
+  sourceKind: "document_version" | "evidence_version" = "document_version",
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-growth-closure-"));
   roots.push(root);
   const workspace = openWorkspace(root);
@@ -163,12 +198,12 @@ function createCompleteSetup(personalStory: string, omittedPredicate?: string) {
     if (predicate === omittedPredicate) continue;
     const scopeId = predicate.startsWith("closure.world") ? worldId : predicate.startsWith("closure.story") ? storyId : ocId;
     const sourceVersion = scopeId === worldId ? settingVersionId : scopeId === storyId ? proseVersionId : profileVersionId;
-    assertions.putVersion({ assertionId: `facet-${index}`, checkpointId, scopeType: "resource", scopeId, subject: scopeId, predicate, object: { established: true }, status: "current", source: { kind: "document_version", ref: sourceVersion } });
+    assertions.putVersion({ assertionId: `facet-${index}`, checkpointId, scopeType: "resource", scopeId, subject: scopeId, predicate, object: { established: true }, status: "current", source: { kind: sourceKind, ref: sourceVersion } });
   }
   assertions.putVersion({
     assertionId: "personal-story-binding", checkpointId, scopeType: "resource", scopeId: ocId, subject: ocId,
     predicate: GROWTH_CLOSURE_FACETS.oc.personalStoryBinding,
-    object: { storyResourceId: storyId }, status: "current", source: { kind: "document_version", ref: proseVersionId },
+    object: { storyResourceId: storyId }, status: "current", source: { kind: sourceKind, ref: proseVersionId },
   });
   return { workspace, checkpointId, worldId, storyId, ocId, proseDocumentId, settingVersionId };
 }

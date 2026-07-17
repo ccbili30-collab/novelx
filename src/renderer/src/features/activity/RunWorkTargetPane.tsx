@@ -1,5 +1,6 @@
 import type { AgentArtifact, WorkspaceSnapshot } from "../../../../shared/ipcContract";
 import { getGrowthWorldMapDisplay, type GrowthPresentation } from "../agent/growthPresentation";
+import { FailedImagePlaceholder } from "../assets/FailedImagePlaceholder";
 
 export function RunWorkTargetPane(props: {
   presentation: GrowthPresentation | null;
@@ -54,7 +55,9 @@ export function RunWorkTargetPane(props: {
           {uniqueDomains.length ? <div className="run-work-target-pane__domains" aria-label="当前领域">{uniqueDomains.map((domain) => <span key={domain}>{domainLabel(domain)}</span>)}</div> : null}
           {worldMapArtifact ? <section className="run-work-target-pane__world-map" data-status={worldMapArtifact.status} aria-label="世界地图产物">
             {worldMap.canPreview ? <img src={worldMapArtifact.thumbnailUrl ?? undefined} alt={`${worldMapArtifact.title}缩略图`} />
-              : <div className="run-work-target-pane__world-map-placeholder">{worldMapStatusLabel(worldMapArtifact.status)}</div>}
+              : worldMapArtifact.status === "failed"
+                ? <FailedImagePlaceholder compact label="世界地图生成失败" />
+                : <div className="run-work-target-pane__world-map-placeholder">{worldMapStatusLabel(worldMapArtifact.status)}</div>}
             <div>
               <strong>{worldMapArtifact.title}</strong>
               <small>{worldMapArtifact.sourceLabel}</small>

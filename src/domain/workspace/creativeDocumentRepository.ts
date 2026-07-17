@@ -2,18 +2,14 @@ import { randomUUID } from "node:crypto";
 import type { SQLOutputValue } from "node:sqlite";
 import { canonicalAuditHash } from "../audit/canonicalAuditHash";
 import { CheckpointRepository } from "../version/checkpointRepository";
-import { ResourceRepository, type ResourceRecord } from "./resourceRepository";
+import {
+  assertCreativeDocumentOwnerAllowed,
+  type CreativeDocumentKind,
+} from "./creativeDocumentPolicy";
+import { ResourceRepository } from "./resourceRepository";
 import type { WorkspaceDatabase } from "./workspaceRepository";
 
-export type CreativeDocumentKind =
-  | "prose"
-  | "setting"
-  | "character_profile"
-  | "location_profile"
-  | "faction_profile"
-  | "knowledge_note"
-  | "style_guide"
-  | "writing_constraints";
+export type { CreativeDocumentKind } from "./creativeDocumentPolicy";
 
 export interface CreativeDocumentRecord {
   id: string;
@@ -127,7 +123,7 @@ export class CreativeDocumentRepository {
     if (input.state === "active") {
       const owner = this.#resources.getCurrent(input.resourceId);
       if (!owner) throw documentError("DOCUMENT_OWNER_NOT_ACTIVE", "The document owner is not active.");
-      assertDocumentOwner(input.kind, owner);
+      assertCreativeDocumentOwnerAllowed(input.kind, owner.objectKind);
     }
 
     if (!identity) this.workspace.db.prepare("INSERT INTO creative_documents (id) VALUES (?)").run(documentId);
@@ -153,30 +149,6 @@ export class CreativeDocumentRepository {
       revisionId,
       revisionSha256: canonicalAuditHash({ documentId, ...input, sortOrder }),
     };
-  }
-}
-
-function assertDocumentOwner(kind: CreativeDocumentKind, owner: ResourceRecord): void {
-  if (owner.objectKind === "domain_root") {
-    throw documentError("DOCUMENT_KIND_OWNER_INVALID", "Domain roots cannot own creative documents.");
-  }
-  const allowed = (() => {
-    switch (kind) {
-      case "prose": return ["story", "volume", "chapter"];
-      case "character_profile": return ["oc", "oc_variant"];
-      case "location_profile": return ["location"];
-      case "faction_profile": return ["faction"];
-      case "setting": return ["world", "story"];
-      case "knowledge_note":
-      case "style_guide":
-      case "writing_constraints": return [
-        "world", "oc", "story", "volume", "chapter", "location", "faction", "oc_variant",
-        "graph_view", "timeline_view", "asset_collection",
-      ];
-    }
-  })();
-  if (!allowed.includes(owner.objectKind)) {
-    throw documentError("DOCUMENT_KIND_OWNER_INVALID", "The document kind is incompatible with its owner.");
   }
 }
 

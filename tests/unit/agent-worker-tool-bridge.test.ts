@@ -41,6 +41,8 @@ describe("Agent Worker tool bridge", () => {
     expect(modelVisible).not.toContain("receipt-internal-1");
     expect(modelVisible).not.toContain("document-setting");
     expect(modelVisible).not.toContain("revisionAuthority");
+    expect(modelVisible).toContain('"revisionReferences":[{"ref":"@document1","kind":"document","label":"Setting"}]');
+    expect(modelVisible).not.toContain("version-setting");
   });
 
   it("exposes the three audited project tools", () => {

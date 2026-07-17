@@ -13,6 +13,7 @@ import {
   visibleGrowthIllustrationItems,
   type GrowthIllustrationPresentationItem,
 } from "./growthPresentationViews";
+import { FailedImagePlaceholder } from "../assets/FailedImagePlaceholder";
 
 export { canOpenGrowthIllustration, flattenGrowthIllustrationItems, growthIllustrationPageSize } from "./growthPresentationViews";
 
@@ -102,7 +103,10 @@ export function GrowthIllustrationGallery(props: {
     <div className="growth-illustration-gallery__items">
       {items.length === 0 ? <div className="growth-illustration-gallery__empty"><Image size={20} /><span>还没有图鉴配图。任意节点或文本片段都可以成为画面来源。</span></div> : visibleGrowthIllustrationItems(items, visibleCount).map((item) => (
         <article key={item.id} data-status={item.status}>
-          {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt={`${item.title}缩略图`} /> : <div className="growth-illustration-gallery__placeholder"><Image size={20} /><span>{illustrationStatusLabel(item.status)}</span></div>}
+          {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt={`${item.title}缩略图`} />
+            : item.status === "failed"
+              ? <FailedImagePlaceholder label={`${item.title}生成失败`} />
+              : <div className="growth-illustration-gallery__placeholder"><Image size={20} /><span>{illustrationStatusLabel(item.status)}</span></div>}
           <div className="growth-illustration-gallery__caption">
             <strong>{item.title}</strong><small>{item.source.label}</small><span>{illustrationStatusLabel(item.status)}</span>
           </div>

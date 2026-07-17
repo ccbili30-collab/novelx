@@ -22,14 +22,14 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates schema 26 creative, audit, import, image, Inquiry and Closure evaluation storage", () => {
+  it("creates schema 27 creative, audit, import, image, Inquiry, Closure and safe diagnostic storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 26 });
+      .toEqual({ version: 27 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
@@ -99,6 +99,7 @@ describe("local workspace persistence", () => {
       "growth_illustration_items",
       "growth_illustration_item_sources",
       "growth_illustration_text_snapshots",
+      "safe_diagnostic_events",
     ]));
     expect(listIndexes(workspace)).toEqual(expect.arrayContaining([
       "creative_documents_resource_idx",
@@ -118,6 +119,11 @@ describe("local workspace persistence", () => {
       "growth_cycles_inquiry_source_idx",
       "growth_closure_reviews_revision_idx",
       "growth_illustration_requests_goal_status_idx",
+      "safe_diagnostic_events_run_idx",
+      "safe_diagnostic_events_cycle_idx",
+      "safe_diagnostic_events_tool_idx",
+      "safe_diagnostic_events_operation_idx",
+      "safe_diagnostic_events_code_idx",
       "growth_illustration_items_request_status_idx",
       "growth_events_cycle_idx",
     ]));
@@ -225,7 +231,7 @@ describe("local workspace persistence", () => {
     workspace = openWorkspace(root);
     opened.push(workspace);
 
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
     expect(workspace.db.prepare("SELECT purpose, request_sha256 FROM image_generation_jobs WHERE id = 'job-v23'").get())
       .toEqual({ purpose: "world_map", request_sha256: hash });
     expect(workspace.db.prepare("SELECT sha256 FROM image_assets WHERE id = 'asset-v23'").get()).toEqual({ sha256: hash });
@@ -269,7 +275,7 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
     expect(workspace.db.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all()).toEqual(eventBefore);
     expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_events").get()).toEqual(eventCountBefore);
     expect(workspace.db.prepare("PRAGMA table_info(growth_events)").all()).toEqual(columnsBefore);
@@ -343,7 +349,7 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
     expect(workspace.db.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all()).toEqual(eventBefore);
     expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
@@ -381,7 +387,7 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
     expect(workspace.db.prepare(`
       SELECT id, goal_id, sequence, idempotency_key, payload_hash, input_checkpoint_id, rule_revision,
         run_id, receipt_id, change_set_id, output_checkpoint_id, status, failure_code, created_at, updated_at, terminal_at
@@ -462,8 +468,70 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
     expect(new GrowthRepository(workspace).getCycleIntent("legacy-v24-cycle")).toMatchObject({ provenance: "persisted_v24" });
+    expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("migrates v26 to v27 additively without fabricating diagnostic history and reopens idempotently", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-27-"));
+    roots.push(root);
+    let workspace = openWorkspace(root);
+    opened.push(workspace);
+    workspace.db.prepare("INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, ?, ?, ?)")
+      .run("legacy-v26-source", "document_version", "legacy-ref", "2026-07-17T00:00:00.000Z");
+    workspace.db.exec("DROP TABLE safe_diagnostic_events; UPDATE schema_meta SET version = 26 WHERE singleton = 1;");
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT id, kind, ref FROM source_records WHERE id = ?").get("legacy-v26-source"))
+      .toEqual({ id: "legacy-v26-source", kind: "document_version", ref: "legacy-ref" });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM safe_diagnostic_events").get()).toEqual({ count: 0 });
+    expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    const tableCount = workspace.db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'").get();
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'").get()).toEqual(tableCount);
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM safe_diagnostic_events").get()).toEqual({ count: 0 });
+  });
+
+  it("rolls back the whole v26 to v27 migration after a table collision", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-27-rollback-"));
+    roots.push(root);
+    let workspace = openWorkspace(root);
+    opened.push(workspace);
+    workspace.db.prepare("INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, ?, ?, ?)")
+      .run("rollback-v26-source", "document_version", "rollback-ref", "2026-07-17T00:00:00.000Z");
+    workspace.db.exec(`
+      DROP TABLE safe_diagnostic_events;
+      UPDATE schema_meta SET version = 26 WHERE singleton = 1;
+      CREATE TABLE safe_diagnostic_events (sentinel TEXT NOT NULL);
+    `);
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+
+    expect(() => openWorkspace(root)).toThrow();
+    const direct = new DatabaseSync(path.join(root, ".novax", "workspace.db"));
+    direct.exec("PRAGMA foreign_keys = ON");
+    expect(direct.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(direct.prepare("PRAGMA table_info(safe_diagnostic_events)").all())
+      .toEqual([expect.objectContaining({ name: "sentinel" })]);
+    expect(direct.prepare("SELECT id FROM source_records WHERE id = ?").get("rollback-v26-source"))
+      .toEqual({ id: "rollback-v26-source" });
+    expect(direct.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'safe_diagnostic_events_%'").all())
+      .toEqual([]);
+    direct.exec("DROP TABLE safe_diagnostic_events");
+    direct.close();
+
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
     expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
@@ -920,6 +988,7 @@ function downgradeToSchema25(workspace: WorkspaceDatabase): void {
   workspace.db.exec("BEGIN IMMEDIATE");
   try {
     workspace.db.exec(`
+      DROP TABLE safe_diagnostic_events;
       DROP TABLE growth_closure_repair_backlog;
       DROP TABLE growth_closure_repair_lineage;
       DROP TABLE growth_closure_evaluation_outcomes;

@@ -2,6 +2,7 @@ import type { AgentArtifact, AgentRunEvent, GrowthGuideResponse, GrowthStartResp
 
 type GrowthEvent = GrowthStartResponse["events"][number];
 type GrowthCycle = GrowthStartResponse["cycles"][number];
+type GrowthDiagnostic = GrowthStartResponse["diagnostics"][number];
 type CoordinatorStatus = GrowthStartResponse["coordinatorStatus"];
 export type GrowthImageArtifact = Extract<AgentArtifact, { kind: "image" }>;
 
@@ -20,6 +21,7 @@ export interface GrowthTimelineRow {
   summary: string;
   events: GrowthEvent[];
   activities: GrowthAgentActivity[];
+  diagnostics: GrowthDiagnostic[];
 }
 
 export interface GrowthGuidancePresentation {
@@ -43,6 +45,7 @@ export interface GrowthPresentation {
   currentCycleSequence: number;
   cycles: GrowthCycle[];
   events: GrowthEvent[];
+  diagnostics: GrowthDiagnostic[];
   agentActivities: GrowthAgentActivity[];
   rows: GrowthTimelineRow[];
   current: GrowthTimelineRow | null;
@@ -79,6 +82,7 @@ export function createGrowthPresentation(snapshot: GrowthStartResponse): GrowthP
     currentCycleSequence: snapshot.goal.currentCycleSequence,
     cycles: snapshot.cycles,
     events: uniqueEvents(snapshot.events),
+    diagnostics: uniqueDiagnostics(snapshot.diagnostics),
     agentActivities: [],
     guidance: guidanceFromSnapshot(snapshot),
   });
@@ -86,7 +90,8 @@ export function createGrowthPresentation(snapshot: GrowthStartResponse): GrowthP
 
 export function mergeGrowthSnapshot(current: GrowthPresentation | null, snapshot: GrowthStartResponse): GrowthPresentation {
   if (!current || current.goalId !== snapshot.goal.id) return createGrowthPresentation(snapshot);
-  const coordinatorStatus = terminalCoordinatorStates.has(current.coordinatorStatus) && snapshot.coordinatorStatus === "running"
+  const successorStarted = snapshot.goal.currentCycleSequence > current.currentCycleSequence;
+  const coordinatorStatus = terminalCoordinatorStates.has(current.coordinatorStatus) && snapshot.coordinatorStatus === "running" && !successorStarted
     ? current.coordinatorStatus
     : snapshot.coordinatorStatus;
   const restoredGuidance = guidanceFromSnapshot(snapshot);
@@ -106,6 +111,7 @@ export function mergeGrowthSnapshot(current: GrowthPresentation | null, snapshot
     currentCycleSequence: Math.max(current.currentCycleSequence, snapshot.goal.currentCycleSequence),
     cycles: snapshot.cycles,
     events: uniqueEvents([...current.events, ...snapshot.events]),
+    diagnostics: uniqueDiagnostics([...current.diagnostics, ...snapshot.diagnostics]),
     agentActivities: current.agentActivities,
     guidance,
   });
@@ -130,7 +136,10 @@ export function recordGrowthGuidanceResponse(
 }
 
 export function getGrowthGuidanceAvailability(current: GrowthPresentation): GrowthGuidanceAvailability {
-  if (current.coordinatorStatus !== "running" && current.coordinatorStatus !== "awaiting_guidance") {
+  const awaitingCreatorChoice = current.coordinatorStatus === "blocked"
+    && current.events.some((event) => event.phase === "creator_choice_required"
+      && event.cycleId === current.current?.cycleId && event.durableState === "blocked");
+  if (current.coordinatorStatus !== "running" && current.coordinatorStatus !== "awaiting_guidance" && !awaitingCreatorChoice) {
     return { canGuide: false, reason: "当前生长任务已结束，不能追加规则修订。" };
   }
   if (current.currentCycleSequence < 1 || !current.guidance) {
@@ -148,6 +157,30 @@ export function growthEventSummary(event: GrowthEvent): string {
   if (event.phase === "inquiry_selected") return `正在推演：${event.safeSummary}`;
   if (event.phase === "creator_choice_required") return `需要你的取舍：${event.safeSummary}`;
   return event.safeSummary;
+}
+
+export function growthDiagnosticSummary(diagnostic: GrowthDiagnostic): string {
+  const owner = ({
+    provider: "模型服务",
+    worker_schema: "Worker 结构校验",
+    growth_phase: "生长阶段",
+    tool_bridge: "工具桥",
+    main_gateway: "主进程网关",
+    domain_policy: "领域规则",
+    persistence: "持久化",
+    reconciliation: "结果核对",
+    projection: "界面投影",
+  } as const)[diagnostic.owner];
+  const effect = ({
+    none: "未产生外部副作用",
+    request_sent: "请求已发出",
+    outcome_unknown: "结果未知，必须核对",
+    committed: "变更已提交",
+  } as const)[diagnostic.sideEffectState];
+  const attempt = diagnostic.attempt !== null && diagnostic.maxAttempts !== null
+    ? ` · 第 ${diagnostic.attempt}/${diagnostic.maxAttempts} 次`
+    : "";
+  return `${owner} · ${diagnostic.code}${attempt} · ${effect}`;
 }
 
 export function appendGrowthAgentEvent(current: GrowthPresentation, event: AgentRunEvent): GrowthPresentation {
@@ -229,6 +262,7 @@ function derive(input: Omit<GrowthPresentation, "rows" | "current" | "running" |
     const latest = events.at(-1) ?? null;
     const durableState = latest?.durableState ?? cycle.status;
     const activities = input.agentActivities.filter((activity) => activity.runId === cycle.runId);
+    const diagnostics = input.diagnostics.filter((diagnostic) => diagnostic.cycleId === cycle.id);
     return {
       cycleId: cycle.id,
       sequence: cycle.sequence,
@@ -237,6 +271,7 @@ function derive(input: Omit<GrowthPresentation, "rows" | "current" | "running" |
       summary: latest?.durableState === "committed" ? "已提交" : latest ? growthEventSummary(latest) : cycleSummary(cycle.status),
       events,
       activities,
+      diagnostics,
     } satisfies GrowthTimelineRow;
   });
   const current = rows.find((row) => row.sequence === input.currentCycleSequence)
@@ -275,6 +310,12 @@ function uniqueEvents(events: readonly GrowthEvent[]): GrowthEvent[] {
   const byKey = new Map<string, GrowthEvent>();
   for (const event of events) byKey.set(eventKey(event), event);
   return [...byKey.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function uniqueDiagnostics(diagnostics: readonly GrowthDiagnostic[]): GrowthDiagnostic[] {
+  const byId = new Map<string, GrowthDiagnostic>();
+  for (const diagnostic of diagnostics) byId.set(diagnostic.diagnosticId, diagnostic);
+  return [...byId.values()];
 }
 
 function eventKey(event: GrowthEvent): string {

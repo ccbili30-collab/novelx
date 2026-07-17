@@ -82,6 +82,18 @@ describe("GrowthLongformProgressResolver", () => {
     });
   });
 
+  it("treats an outline maximum as an estimate while preserving its minimum and hard safety limit", () => {
+    const setup = createSetup();
+    addSection(setup, "origin", sectionContent("起源", 5_501));
+
+    expect(resolve(setup)).toMatchObject({
+      status: "ready",
+      totalCodePoints: 5_501,
+      completedSections: [{ outlineSectionId: "origin", codePoints: 5_501 }],
+      nextSection: { outlineSectionId: "reckoning" },
+    });
+  });
+
   it("rejects out-of-order sections instead of treating later prose as valid progress", () => {
     const setup = createSetup();
     addSection(setup, "reckoning", sectionContent("偿还", 5_000));

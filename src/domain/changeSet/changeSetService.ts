@@ -301,6 +301,8 @@ export interface ChangeSetCandidate {
   summary: string;
   items: ChangeSetItem[];
   greenfieldCreateAuthorized?: boolean;
+  sameChangeSetDocumentEvidenceAuthorized?: boolean;
+  assertionIdentityUpdateAuthorized?: boolean;
 }
 
 export interface ChangeSetPolicyAssessment {
@@ -536,7 +538,12 @@ export class ChangeSetService {
 
   propose(
     input: unknown,
-    trusted: { producerToolInvocationId: string; greenfieldCreateAuthorized?: boolean } | null = null,
+    trusted: {
+      producerToolInvocationId: string;
+      greenfieldCreateAuthorized?: boolean;
+      sameChangeSetDocumentEvidenceAuthorized?: boolean;
+      assertionIdentityUpdateAuthorized?: boolean;
+    } | null = null,
   ): ChangeSetRecord {
     let proposal: z.infer<typeof proposalSchema>;
     try {
@@ -566,6 +573,8 @@ export class ChangeSetService {
       summary: proposal.summary,
       items: proposal.items,
       greenfieldCreateAuthorized: trusted?.greenfieldCreateAuthorized === true,
+      sameChangeSetDocumentEvidenceAuthorized: trusted?.sameChangeSetDocumentEvidenceAuthorized === true,
+      assertionIdentityUpdateAuthorized: trusted?.assertionIdentityUpdateAuthorized === true,
     };
     let assessments: ChangeSetPolicyAssessment[];
     try {
@@ -576,12 +585,9 @@ export class ChangeSetService {
     const assessmentByItem = new Map(assessments.map((assessment) => [assessment.itemId, assessment]));
     const hasMajorConflict = assessments.some((assessment) =>
       assessment.conflicts.some((conflict) => conflict.severity === "major"));
-    const freeNeedsReview = proposal.mode === "free" && assessments.some((assessment) => assessment.risk !== "low");
     const blockedReason = hasMajorConflict
       ? "MAJOR_CONFLICT"
-      : freeNeedsReview
-        ? "FREE_REVIEW_REQUIRED"
-        : null;
+      : null;
     const gateStatus = blockedReason
       ? "blocked" as const
       : proposal.mode === "free"

@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChangeSetPolicyEvaluator } from "../../src/domain/changeSet/changeSetService";
 import { AgentAuditRepository } from "../../src/domain/audit/agentAuditRepository";
+import { SafeDiagnosticRepository } from "../../src/domain/audit/safeDiagnosticRepository";
 import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
 import { GROWTH_CLOSURE_FACETS } from "../../src/domain/growth/growthClosureEvaluator";
@@ -20,6 +21,8 @@ import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspac
 import { AgentProcessSupervisor, type AgentRuntimeLease, type AgentWorkerProcess } from "../../src/main/agentProcessSupervisor";
 import { GrowthRunLifecycle, safeFailureCode } from "../../src/main/growthRunLifecycle";
 import { createWorkspaceAgentToolGateway } from "../../src/main/workspaceAgentToolGateway";
+import { compileGrowthRevisionFragment } from "../../src/agent-worker/growth/phases/revision/growthRevisionFragment";
+import type { GrowthRevisionAuthority } from "../../src/shared/agentWorkerProtocol";
 
 class FakeWorker extends EventEmitter implements AgentWorkerProcess {
   killed = false;
@@ -239,7 +242,12 @@ describe("Growth Run bridge", () => {
       emit: () => undefined,
     });
     worker.spawn();
-    const command = worker.sent[0] as { growthBinding: { kind: string; ruleRevision: number; greenfieldCreateAuthorized: boolean } };
+    const command = worker.sent[0] as { growthBinding: {
+      kind: string;
+      ruleRevision: number;
+      greenfieldCreateAuthorized: boolean;
+      domainRootResourceIds: { world: string; story: string; oc: string };
+    } };
     expect(command.growthBinding).toMatchObject({ kind: "revision", ruleRevision: 2, greenfieldCreateAuthorized: false });
     worker.receive({ type: "run.started", runId });
     beginStewardInvocation(setup.workspace, runId);
@@ -247,7 +255,7 @@ describe("Growth Run bridge", () => {
     await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
     const retrieval = (worker.sent[1] as {
       ok: true;
-      result: { evidence: Array<{ evidenceId: string }>; revisionAuthority: { targets: Array<Record<string, unknown>> } };
+      result: { evidence: Array<{ evidenceId: string }>; revisionAuthority: GrowthRevisionAuthority };
     }).result;
     const target = retrieval.revisionAuthority.targets.find((candidate) => candidate.kind === "resource") as {
       evidenceId: string; resourceId: string; type: string; objectKind: string; parentId: string; sortOrder: number;
@@ -277,19 +285,47 @@ describe("Growth Run bridge", () => {
     });
     await vi.waitFor(() => expect(worker.sent).toHaveLength(4));
     expect(worker.sent[3]).toMatchObject({ ok: false, error: { code: "GROWTH_BINDING_INVALID" } });
+    expect(new SafeDiagnosticRepository(setup.workspace).listRun(runId)).toContainEqual(expect.objectContaining({
+      operationKind: "tool_call",
+      owner: "main_gateway",
+      boundary: "tool_authorization",
+      code: "GROWTH_REVISION_POLICY_IMPACT_AUTHORITY_INVALID",
+      toolName: "propose_change_set",
+      sideEffectState: "none",
+    }));
 
+    const revisionProposal = compileGrowthRevisionFragment({
+      summary: "Apply revision two and grow one evidence-backed location.",
+      impact: {
+        summary: "The existing world changes and gains one location documented in the same atomic revision.",
+        targets: [{
+          targetRef: "@resource1", decision: "revise",
+          reasonSummary: "The world title and its new harbor must reflect revision two.",
+        }],
+      },
+      resourceUpdates: [{ targetRef: "@resource1", title: "Revised world" }],
+      documentUpdates: [],
+      assertionUpdates: [],
+      relationRemovals: [],
+      resourceAdditions: [{ localId: "harbor", kind: "location", title: "Moon Harbor", parentRef: "@resource1" }],
+      documentAdditions: [{
+        localId: "harbor_note", ownerRef: "harbor", kind: "location_profile", title: "Moon Harbor",
+        content: "Moon Harbor now follows the revised lunar navigation rule.",
+      }],
+      assertionAdditions: [{
+        localId: "harbor_fact", scopeRef: "harbor", subject: "Moon Harbor", predicate: "uses",
+        object: { target: "lunar navigation" }, sourceDocumentRefs: ["harbor_note"],
+      }],
+      relationAdditions: [],
+    }, {
+      cycleId: revision.id,
+      domainRootResourceIds: command.growthBinding.domainRootResourceIds,
+      authority: retrieval.revisionAuthority,
+    });
     worker.receive({
       type: "tool.request", runId, requestId: "44444444-4444-4444-8444-444444444444",
       tool: "propose_change_set",
-      args: { summary: "Apply revision two", growthRevisionImpact: {
-        revisedEvidenceIds: [target.evidenceId], preservedEvidenceIds: [], staleVisualEvidenceIds: [target.evidenceId],
-      }, items: [{
-        id: "revision-resource", dependsOn: [], kind: "resource.put",
-        payload: {
-          resourceId: target.resourceId, create: false, type: target.type, objectKind: target.objectKind,
-          title: "Revised world", parentId: target.parentId, state: "active", sortOrder: target.sortOrder,
-        },
-      }] },
+      args: revisionProposal,
     });
     await vi.waitFor(() => expect(worker.sent).toHaveLength(5));
     expect(worker.sent[4]).toMatchObject({ ok: true, result: { status: "committed" } });
@@ -302,6 +338,24 @@ describe("Growth Run bridge", () => {
     expect(growth.getCycle(revision.id)!.outputCheckpointId).not.toBe(prior.outputCheckpointId);
     expect(growth.getIllustrationItem("revision-affected-visual")?.status).toBe("stale");
     expect(growth.getIllustrationItem("revision-unrelated-visual")?.status).toBe("planned");
+
+    const successor = growth.beginCycle({
+      id: "revision-successor-story", goalId: setup.goalId, idempotencyKey: "revision-successor-story",
+      inputCheckpointId: growth.getCycle(revision.id)!.outputCheckpointId!, ruleRevision: 2,
+      intent: { kind: "expand", focusKinds: ["story"], resumeFrontier: ["oc"] },
+    });
+    const successorWorker = new FakeWorker();
+    const successorRunId = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, successorWorker)).start({
+      goalId: setup.goalId, cycleId: successor.id,
+      request: { projectId: "project-1", sessionId: "revision-successor", userInput: "continue after revision", mode: "free" },
+      emit: () => undefined,
+    });
+    successorWorker.spawn();
+    beginStewardInvocation(setup.workspace, successorRunId);
+    requestGrowthRetrieval(successorWorker, successorRunId, randomUUID(), "continue story", 10);
+    await vi.waitFor(() => expect(successorWorker.sent).toHaveLength(2));
+    expect((successorWorker.sent[1] as { ok: true; result: { evidence: Array<{ resource?: { objectKind: string } }> } }).result.evidence)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ resource: expect.objectContaining({ objectKind: "world" }) })]));
   });
 
   it("records a missing deterministic Closure facet as a durable continue-growing evaluation", async () => {
@@ -979,6 +1033,7 @@ describe("Growth Run bridge", () => {
     const worker = new FakeWorker();
     const proposeChangeSet = vi.fn();
     const generateImage = vi.fn();
+    const events: Array<{ type: string; outcome?: string; changeSetState?: string }> = [];
     const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker, undefined, {
       proposeChangeSet,
       generateImage,
@@ -987,15 +1042,13 @@ describe("Growth Run bridge", () => {
       goalId: setup.goalId,
       cycleId: setup.cycleId,
       request: { projectId: "project-1", sessionId: "session-1", userInput: "需要取舍的增长", mode: "free" },
-      emit: () => undefined,
+      emit: (event) => events.push(event),
     });
     worker.spawn();
     beginStewardInvocation(setup.workspace, runId);
     requestGrowthRetrieval(worker, runId, randomUUID());
     await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
-    const sourceVersionId = (worker.sent[1] as { result: { evidence: Array<{ evidenceId: string }> } }).result.evidence[0]!.evidenceId;
 
-    await requestSelectedInquiry(worker, runId, true);
     await requestSelectedInquiry(worker, runId, true);
 
     const repository = new GrowthRepository(setup.workspace);
@@ -1007,32 +1060,36 @@ describe("Growth Run bridge", () => {
     expect(repository.listEvents(setup.goalId).filter((event) => event.phase === "creator_choice_required")).toHaveLength(1);
     expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_inquiry_batches").get()).toMatchObject({ count: 1 });
     expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()).toMatchObject({ count: 0 });
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+      type: "run.completed", outcome: "blocked", changeSetState: "none",
+    })));
+    expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
+    expect(worker.killed).toBe(true);
 
+    const sentCountAfterTerminal = worker.sent.length;
+    worker.receive({ type: "run.completed", runId, outcome: "blocked", message: "late", changeSetState: "none", artifacts: [] });
     worker.receive({
       type: "tool.request", runId, requestId: randomUUID(), tool: "propose_change_set",
-      args: {
-        summary: "must not run",
-        items: [{
-          id: "must-not-run", dependsOn: [], kind: "resource.put",
-          payload: { resourceId: "must.not.run", create: true, type: "world", objectKind: "world", title: "must not run", parentId: setup.scopeId, state: "active", sortOrder: 0 },
-        }],
-      },
+      args: { summary: "must not run", items: [] },
     });
-    await vi.waitFor(() => expect(worker.sent).toHaveLength(5));
-    expect(worker.sent[4]).toMatchObject({ ok: false, error: { code: "GROWTH_INQUIRY_REQUIRED" } });
-    worker.receive({
-      type: "tool.request", runId, requestId: randomUUID(), tool: "generate_image",
-      args: {
-        title: "must not run", purpose: "world_map", prompt: "must not run",
-        sourceResourceIds: [setup.scopeId], sourceVersionIds: [sourceVersionId], idempotencyKey: "must-not-run",
-      },
-    });
-    await vi.waitFor(() => expect(worker.sent).toHaveLength(6));
-    expect(worker.sent[5]).toMatchObject({ ok: false, error: { code: "GROWTH_INQUIRY_REQUIRED" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(worker.sent).toHaveLength(sentCountAfterTerminal);
+    expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
     expect(proposeChangeSet).not.toHaveBeenCalled();
     expect(generateImage).not.toHaveBeenCalled();
-    worker.receive({ type: "run.completed", runId, outcome: "blocked", message: "等待创作者取舍。", changeSetState: "none", artifacts: [] });
-    await vi.waitFor(() => expect(repository.listEvents(setup.goalId).at(-1)?.phase).toBe("creator_choice_required"));
+
+    const terminalAudit = setup.workspace.db.prepare(`
+      SELECT entity_type, event_type, error_code
+      FROM agent_audit_events
+      WHERE run_id = ? AND terminal = 1
+      ORDER BY created_at, id
+    `).all(runId);
+    expect(terminalAudit).toContainEqual(expect.objectContaining({
+      entity_type: "run", event_type: "blocked", error_code: "GROWTH_CREATOR_CHOICE_REQUIRED",
+    }));
+    expect(terminalAudit).toContainEqual(expect.objectContaining({
+      entity_type: "invocation", event_type: "blocked", error_code: "GROWTH_CREATOR_CHOICE_REQUIRED",
+    }));
     expect(repository.listEvents(setup.goalId).some((event) => event.phase === "cycle_terminal")).toBe(false);
     expect(lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: setup.cycleId })).toMatchObject({
       status: "blocked", failureCode: "GROWTH_CREATOR_CHOICE_REQUIRED",
@@ -1085,6 +1142,56 @@ describe("Growth Run bridge", () => {
     expect(worker.sent[4]).toMatchObject({ ok: false, error: { code: "GROWTH_INQUIRY_INVALID" } });
     expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_inquiry_batches").get()).toMatchObject({ count: 1 });
     expect(repository.listEvents(setup.goalId).filter((event) => event.phase === "inquiry_selected")).toHaveLength(1);
+  });
+
+  it("returns a content-free correctable code for an out-of-receipt Inquiry evidence ID", async () => {
+    const setup = createSetup();
+    const worker = new FakeWorker();
+    const lifecycle = new GrowthRunLifecycle(setup.workspace, createSupervisor(setup, worker));
+    const runId = lifecycle.start({
+      goalId: setup.goalId,
+      cycleId: setup.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "纠正 Inquiry 证据", mode: "free" },
+      emit: () => undefined,
+    });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, randomUUID());
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+
+    const invalidArgs = {
+      inquiries: [3, 2, 1].map((priority, index) => ({
+        localId: `question_${index + 1}`,
+        question: `Which evidence-backed consequence ${index + 1} should be pursued?`,
+        evidenceIds: ["not-in-current-receipt"],
+        evidenceState: "known" as const,
+        safeSummary: `Evaluating consequence ${index + 1}.`,
+        proposedAction: `Apply consequence ${index + 1}.`,
+        provisionalAssumption: null,
+        priority,
+        requiresCreatorChoice: false,
+      })),
+      selectedLocalId: "question_1",
+      priorTransitions: [],
+    };
+    worker.receive({
+      type: "tool.request", runId, requestId: randomUUID(), tool: "submit_growth_inquiry", args: invalidArgs,
+    });
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(3));
+
+    expect(worker.sent[2]).toMatchObject({
+      ok: false,
+      error: { code: "STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID" },
+    });
+    expect(new GrowthRepository(setup.workspace).getCycle(setup.cycleId)).toMatchObject({
+      status: "running",
+      failureCode: null,
+    });
+    expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_inquiry_batches").get())
+      .toMatchObject({ count: 0 });
+
+    await requestSelectedInquiry(worker, runId);
+    expect(worker.sent.at(-1)).toMatchObject({ ok: true, result: { status: "selected" } });
   });
 
   it("allows only one in-flight Change Set executor call and never retries it after failure", async () => {
@@ -1382,6 +1489,16 @@ describe("Growth Run bridge", () => {
     expect(resumed.recoverCycle({ goalId: setup.goalId, cycleId: setup.cycleId }).status).toBe("reconciliation_required");
     expect(new GrowthRepository(workspace).listEvents(setup.goalId).map((event) => event.phase))
       .toEqual(["run_attached", "cycle_terminal"]);
+    expect(new SafeDiagnosticRepository(workspace).listOperation("growth_cycle", setup.cycleId)).toMatchObject([{
+      runId,
+      cycleId: setup.cycleId,
+      code: "GROWTH_RUN_INTERRUPTED",
+      owner: "reconciliation",
+      boundary: "recovery",
+      sideEffectState: "outcome_unknown",
+      disposition: "reconciliation_required",
+      retryability: "restart_reconcile",
+    }]);
   });
 
   it("repairs a missing reconciliation terminal event exactly once", () => {
@@ -1404,6 +1521,7 @@ describe("Growth Run bridge", () => {
     expect(lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: setup.cycleId }).status).toBe("reconciliation_required");
     expect(lifecycle.recoverCycle({ goalId: setup.goalId, cycleId: setup.cycleId }).status).toBe("reconciliation_required");
     expect(new GrowthRepository(setup.workspace).listEvents(setup.goalId).map((event) => event.phase)).toEqual(["run_attached", "cycle_terminal"]);
+    expect(new SafeDiagnosticRepository(setup.workspace).listOperation("growth_cycle", setup.cycleId)).toHaveLength(1);
   });
 
   it("terminalizes a non-committed Cycle as blocked without binding a pending Change Set", async () => {

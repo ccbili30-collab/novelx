@@ -68,7 +68,7 @@ describe("DecompositionCandidateRepository", () => {
     } });
     workspace.db.prepare("DELETE FROM decomposition_candidate_revisions WHERE candidate_id = ?").run(candidate!.id);
     removePostV22GrowthSchema(workspace.db);
-    workspace.db.prepare("UPDATE schema_meta SET version = 13 WHERE singleton = 1").run();
+    workspace.db.exec("DROP TABLE safe_diagnostic_events; UPDATE schema_meta SET version = 13 WHERE singleton = 1");
     workspace.close();
     workspace = null;
     workspace = openWorkspace(root);

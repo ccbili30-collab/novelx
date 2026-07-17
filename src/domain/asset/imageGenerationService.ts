@@ -86,7 +86,7 @@ export class ImageGenerationService {
         this.repository.markReconciliationRequired(job.id, error.code, "图片请求结果未知，禁止自动重试。");
         notify(observer, "reconciliation_required");
       } else {
-        const code = error instanceof ResponsesImageProviderError ? error.code : "IMAGE_PROVIDER_RUNTIME_FAILED";
+        const code = error instanceof ResponsesImageProviderError ? error.failureClass : "IMAGE_PROVIDER_RUNTIME_FAILED";
         this.repository.markFailed(job.id, code, "图片模型没有返回可提交的图片资产。");
         notify(observer, "failed");
       }

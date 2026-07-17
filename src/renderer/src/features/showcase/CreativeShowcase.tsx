@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { BookOpenText, CircleUserRound, Image, LoaderCircle, Network, Play, Sparkles } from "lucide-react";
 import type { CreativeShowcaseSnapshot, WorkspaceSnapshot } from "../../../../shared/ipcContract";
 import { AgentMessageContent } from "../agent/AgentMessageContent";
+import { FailedImagePlaceholder } from "../assets/FailedImagePlaceholder";
 import { ImageAssetCard } from "../assets/ImageAssetCard";
 import { SemanticGraphView } from "../graph/SemanticGraphView";
 
@@ -208,7 +209,9 @@ export function CreativeShowcase(props: {
               <h2>{section.label}<small>{section.images.length}</small></h2>
               <div>{section.images.map((image) => (
                 <button type="button" key={image.jobId} data-selected={image.jobId === selectedImage?.jobId} onClick={() => setSelectedImageId(image.assetId)}>
-                  {image.thumbnailUrl ? <img src={image.thumbnailUrl} alt="" loading="lazy" /> : <Image size={18} aria-hidden="true" />}
+                  {image.thumbnailUrl ? <img src={image.thumbnailUrl} alt="" loading="lazy" />
+                    : image.status === "failed" ? <FailedImagePlaceholder compact label="生成失败" />
+                      : <Image size={18} aria-hidden="true" />}
                   <span>{image.title} · {image.statusMessage}</span>
                 </button>
               ))}</div>
@@ -222,13 +225,14 @@ export function CreativeShowcase(props: {
             <div>
               {showcase?.characters.length ? showcase.characters.slice(0, 8).map((character) => {
                 const portrait = showcase.images.find((image) => image.purpose === "character_portrait"
-                  && image.sourceResourceIds.includes(character.id)
-                  && image.thumbnailUrl);
+                  && image.sourceResourceIds.includes(character.id));
                 const profile = character.documents.find((document) => document.kind === "character_profile");
                 return (
                   <article className="showcase-character-card" key={character.id}>
                     <button type="button" aria-label={`${character.title} · OC`} onClick={() => void props.onOpenResource(character.id)}>
-                      {portrait?.thumbnailUrl ? <img src={portrait.thumbnailUrl} alt="" loading="lazy" /> : <span className="showcase-character-placeholder">{character.title.slice(0, 1)}</span>}
+                      {portrait?.thumbnailUrl ? <img src={portrait.thumbnailUrl} alt="" loading="lazy" />
+                        : portrait?.status === "failed" ? <FailedImagePlaceholder compact label="角色图生成失败" />
+                          : <span className="showcase-character-placeholder">{character.title.slice(0, 1)}</span>}
                       <strong>{character.title}</strong><small>OC</small>
                     </button>
                     <p>{profile ? firstParagraph(profile.content) : "尚无稳定角色资料。"}</p>

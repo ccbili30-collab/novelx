@@ -138,6 +138,8 @@ export class PlayerProcessSupervisor {
           errorCode: operation.errorCode, receipt: operation.receipt, structuredSubmissionCount: operation.structuredSubmissionCount, outputSha256: operation.outputSha256 });
       } else if (operation.type === "local_tool.started") {
         run.lease.audit.beginTool({ runId, invocationId: operation.invocationId, toolInvocationId: operation.toolInvocationId, toolName: operation.toolName, argumentsSha256: operation.argumentsSha256 });
+      } else if (operation.type === "safe_diagnostic.append") {
+        throw new Error("Safe diagnostic operations are not authorized on the Player audit boundary.");
       } else {
         run.lease.audit.appendToolTerminal({ runId, invocationId: operation.invocationId, toolInvocationId: operation.toolInvocationId,
           eventType: operation.eventType, errorCode: operation.errorCode, resultSha256: operation.resultSha256 });

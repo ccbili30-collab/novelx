@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import { z } from "zod";
 import { proposeChangeSetArgsSchema, type ProposeChangeSetArgs } from "../../shared/agentWorkerProtocol";
+import { GROWTH_LONGFORM_MIN_CODE_POINTS } from "../../shared/growthLongformPolicy";
 
 const identifier = z.string().trim().min(1).max(240);
 const localId = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
@@ -37,7 +38,7 @@ function validateOutline(value: { sections: z.infer<typeof sectionSchema>[] }, c
   if (new Set(value.sections.map((section) => section.localId)).size !== value.sections.length) {
     context.addIssue({ code: "custom", message: "GROWTH_LONGFORM_OUTLINE_DUPLICATE_SECTION" });
   }
-  if (value.sections.reduce((total, section) => total + section.estimatedCodePoints.min, 0) < 10_000) {
+  if (value.sections.reduce((total, section) => total + section.estimatedCodePoints.min, 0) < GROWTH_LONGFORM_MIN_CODE_POINTS) {
     context.addIssue({ code: "custom", message: "GROWTH_LONGFORM_OUTLINE_TARGET_TOO_SHORT" });
   }
 }

@@ -11,6 +11,7 @@ import type {
   GrowthCycleIntent,
   GrowthGoal,
 } from "../../../../shared/growthContract";
+import { GROWTH_LONGFORM_MIN_CODE_POINTS } from "../../../../shared/growthLongformPolicy";
 
 export type GrowthLongformCoordinatorProgress =
   | { status: "blocked"; reason: Extract<GrowthLongformProgress, { status: "blocked" }>["reason"] }
@@ -188,7 +189,7 @@ export function decideGrowthLongformStep(input:
     throw coordinatorError("GROWTH_LONGFORM_SECTION_SEQUENCE_INVALID");
   }
   if (input.after.nextSectionId === null) {
-    if (!input.after.complete || input.after.totalCodePoints < 10_000) {
+    if (!input.after.complete || input.after.totalCodePoints < GROWTH_LONGFORM_MIN_CODE_POINTS) {
       throw coordinatorError("GROWTH_LONGFORM_TARGET_NOT_REACHED");
     }
     return "recheck";
@@ -212,13 +213,17 @@ export function projectGrowthLongformProgress(progress: GrowthLongformProgress):
 function nextFromEvaluation(progress: GrowthLongformCoordinatorProgress): GrowthLongformStep {
   if (progress.status === "blocked") {
     if (progress.reason === "GROWTH_LONGFORM_PERSONAL_STORY_BINDING_MISSING") return "outline";
-    throw coordinatorError("GROWTH_LONGFORM_PROGRESS_INVALID");
-  }
-  if (progress.nextSectionId !== null && !progress.complete) return "section";
-  if (progress.nextSectionId === null && progress.complete && progress.totalCodePoints >= 10_000) {
+    // Only the absent initial binding belongs to the Longform bootstrap path.
+    // A later content revision can invalidate another Longform invariant; the
+    // Closure continuation planner must own that repair instead of making
+    // growth.get fail before it can inspect the persisted missing facets.
     return "not_applicable";
   }
-  if (progress.nextSectionId === null && progress.totalCodePoints < 10_000) {
+  if (progress.nextSectionId !== null && !progress.complete) return "section";
+  if (progress.nextSectionId === null && progress.complete && progress.totalCodePoints >= GROWTH_LONGFORM_MIN_CODE_POINTS) {
+    return "not_applicable";
+  }
+  if (progress.nextSectionId === null && progress.totalCodePoints < GROWTH_LONGFORM_MIN_CODE_POINTS) {
     throw coordinatorError("GROWTH_LONGFORM_TARGET_NOT_REACHED");
   }
   throw coordinatorError("GROWTH_LONGFORM_PROGRESS_INVALID");

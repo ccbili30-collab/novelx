@@ -52,6 +52,21 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
           { id: "cycle-3", sequence: 3, runId: cycleSequence === 3 ? "growth-run-3" : null, status: cycleSequence === 3 ? "running" : "planned" },
         ],
         events: [],
+        diagnostics: [{
+          diagnosticId: "diagnostic-growth-ui-1",
+          operationKind: "growth_cycle",
+          operationId: "cycle-1",
+          runId: "growth-run-1",
+          cycleId: "cycle-1",
+          sequence: 1,
+          owner: "reconciliation",
+          boundary: "recovery",
+          code: "GROWTH_RUN_INTERRUPTED",
+          toolName: null,
+          sideEffectState: "outcome_unknown",
+          disposition: "reconciliation_required",
+          retryability: "restart_reconcile",
+        }],
       };
     };
 
@@ -226,6 +241,9 @@ test("keeps a newer scope guide saving when the previous scope resolves", async 
     await expect(composer).toBeEnabled({ timeout: 8_000 });
     await composer.fill("建立新会话世界");
     await page.getByTitle("发送").click();
+    await expect(page.locator(".growth-timeline__diagnostic")).toContainText("GROWTH_RUN_INTERRUPTED", { timeout: 8_000 });
+    await expect(page.locator(".growth-timeline__diagnostic")).toContainText("结果未知，必须核对");
+    await expect(page.locator("body")).not.toContainText("unsafe-secret");
     const startCalls = await app.evaluate(() => (globalThis as typeof globalThis & { __growthStartCalls?: Array<{ sessionId?: string }> }).__growthStartCalls ?? []);
     const newGoalId = `goal-${startCalls.at(-1)?.sessionId}`;
     const growthSummary = page.locator(".growth-impact-summary");

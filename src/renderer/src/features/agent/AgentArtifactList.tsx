@@ -1,5 +1,6 @@
 import { AlertTriangle, CheckCircle2, FileText, Image, LoaderCircle, Wrench } from "lucide-react";
 import type { AgentArtifact } from "../../../../shared/ipcContract";
+import { FailedImagePlaceholder } from "../assets/FailedImagePlaceholder";
 
 interface AgentArtifactListProps {
   artifacts: AgentArtifact[];
@@ -66,7 +67,8 @@ export function AgentArtifactList({ artifacts, onOpenChangeSet, onOpenDocumentRe
         }
         return (
           <section className={`agent-artifact agent-artifact--image agent-artifact--${artifact.status}`} key={key}>
-            {artifact.status === "generating" ? <LoaderCircle size={15} aria-hidden="true" /> : <Image size={15} aria-hidden="true" />}
+            {artifact.status === "failed" ? <FailedImagePlaceholder compact label={`${artifact.title}生成失败`} />
+              : artifact.status === "generating" ? <LoaderCircle size={15} aria-hidden="true" /> : <Image size={15} aria-hidden="true" />}
             {artifact.thumbnailUrl && artifact.status === "ready"
               ? <img src={artifact.thumbnailUrl} alt="" loading="lazy" />
               : null}

@@ -4,6 +4,7 @@ import { CreativeRelationRepository, type CreativeRelationRecord } from "../work
 import { DocumentRepository, type DocumentVersionRecord } from "../workspace/documentRepository";
 import { ResourceRepository, type ResourceRecord } from "../workspace/resourceRepository";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
+import { GROWTH_LONGFORM_MIN_CODE_POINTS } from "../../shared/growthLongformPolicy";
 
 export const GROWTH_CLOSURE_FACETS = {
   world: {
@@ -41,6 +42,7 @@ export const GROWTH_CLOSURE_FACETS = {
     abilitiesLimits: "closure.oc.fact.abilities_limits",
     worldInfluence: "closure.oc.fact.world_influence",
     personalStoryBinding: "closure.oc.binding.personal_story",
+    // Persisted identity retained for compatibility; the threshold is policy-driven.
     personalStory: "closure.oc.structure.personal_story_10000",
   },
 } as const;
@@ -123,12 +125,13 @@ export class GrowthClosureEvaluator {
       const version = documentsRepository.getStableForCreativeDocumentAtCheckpoint(record.id, checkpointId);
       return version ? [{ record, version }] : [];
     });
+    const stableDocumentVersionIds = new Set(documents.map((document) => document.version.id));
     const relations = new CreativeRelationRepository(this.workspace).listAtCheckpoint(checkpointId);
     const assertions = new AssertionRepository(this.workspace)
       .listCurrentInScopesAtCheckpoint(resources.map((resource) => resource.id), checkpointId)
       .filter((assertion) => assertion.sources.some((source) => (
-        source.kind === "document_version"
-        && documents.some((document) => document.version.id === source.ref)
+        (source.kind === "document_version" || source.kind === "evidence_version")
+        && stableDocumentVersionIds.has(source.ref)
       )));
     return { resources, documents, relations, assertions };
   }
@@ -199,7 +202,11 @@ export class GrowthClosureEvaluator {
       snapshot.assertions,
       oc?.id ?? null,
     ));
-    results.push(structureFacet(GROWTH_CLOSURE_FACETS.oc.personalStory, personalStoryDocuments.map(documentEvidence), codePoints >= 10_000));
+    results.push(structureFacet(
+      GROWTH_CLOSURE_FACETS.oc.personalStory,
+      personalStoryDocuments.map(documentEvidence),
+      codePoints >= GROWTH_LONGFORM_MIN_CODE_POINTS,
+    ));
     return { results, codePoints };
   }
 }

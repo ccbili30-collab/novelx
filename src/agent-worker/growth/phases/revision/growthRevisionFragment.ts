@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import { z } from "zod";
 import { assertCreativeRelationAllowed } from "../../../../domain/workspace/creativeRelationPolicy";
+import { assertCreativeDocumentOwnerAllowed } from "../../../../domain/workspace/creativeDocumentPolicy";
 import type { CreativeObjectKind, ResourceDomain } from "../../../../domain/workspace/creativeObjectPolicy";
 import {
   proposeChangeSetArgsSchema,
@@ -9,9 +10,14 @@ import {
   type ProposeChangeSetArgs,
 } from "../../../../shared/agentWorkerProtocol";
 import { growthImpactBriefParameters, growthImpactBriefSchema } from "./growthImpactBrief";
+import {
+  growthRevisionExistingRefParameter,
+  growthRevisionExistingRefSchema,
+  indexGrowthRevisionTargets,
+} from "./growthRevisionReferences";
 
 const localId = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
-const evidenceId = z.string().trim().min(1).max(240);
+const existingOrLocalRef = z.union([growthRevisionExistingRefSchema, localId]);
 const title = z.string().trim().min(1).max(500);
 const content = z.string().max(80_000).refine((value) => value.trim().length > 0, "GROWTH_REVISION_FRAGMENT_INVALID");
 const object = z.record(z.string().min(1).max(240), z.json());
@@ -24,28 +30,28 @@ const relationKind = z.enum(["uses_world", "uses_oc", "variant_of", "related_to"
 export const growthRevisionFragmentSchema = z.object({
   summary: z.string().trim().min(1).max(2_000),
   impact: growthImpactBriefSchema,
-  resourceUpdates: z.array(z.object({ evidenceId, title }).strict()).max(100),
-  documentUpdates: z.array(z.object({ evidenceId, title, content }).strict()).max(100),
+  resourceUpdates: z.array(z.object({ targetRef: growthRevisionExistingRefSchema, title }).strict()).max(100),
+  documentUpdates: z.array(z.object({ targetRef: growthRevisionExistingRefSchema, title, content }).strict()).max(100),
   assertionUpdates: z.array(z.object({
-    evidenceId, subject: title, predicate: z.string().trim().min(1).max(240), object,
-    sourceDocumentRefs: z.array(evidenceId).min(1).max(100),
+    targetRef: growthRevisionExistingRefSchema, subject: title, predicate: z.string().trim().min(1).max(240), object,
+    sourceDocumentRefs: z.array(existingOrLocalRef).min(1).max(100),
   }).strict()).max(100),
-  relationRemovals: z.array(z.object({ evidenceId }).strict()).max(100),
+  relationRemovals: z.array(z.object({ targetRef: growthRevisionExistingRefSchema }).strict()).max(100),
   resourceAdditions: z.array(z.object({
     localId, kind: z.enum(["world", "location", "faction", "story", "oc"]), title,
-    parentRef: z.string().trim().min(1).max(240).optional(),
+    parentRef: existingOrLocalRef.optional(),
   }).strict()).max(100),
   documentAdditions: z.array(z.object({
-    localId, ownerRef: z.string().trim().min(1).max(240), kind: documentKind, title, content,
+    localId, ownerRef: existingOrLocalRef, kind: documentKind, title, content,
   }).strict()).max(100),
   assertionAdditions: z.array(z.object({
-    localId, scopeRef: z.string().trim().min(1).max(240), subject: title,
+    localId, scopeRef: existingOrLocalRef, subject: title,
     predicate: z.string().trim().min(1).max(240), object,
-    sourceDocumentRefs: z.array(z.string().trim().min(1).max(240)).min(1).max(100),
+    sourceDocumentRefs: z.array(existingOrLocalRef).min(1).max(100),
   }).strict()).max(100),
   relationAdditions: z.array(z.object({
-    localId, kind: relationKind, sourceRef: z.string().trim().min(1).max(240),
-    targetRef: z.string().trim().min(1).max(240),
+    localId, kind: relationKind, sourceRef: existingOrLocalRef,
+    targetRef: existingOrLocalRef,
   }).strict()).max(100),
 }).strict().superRefine((value, context) => {
   const localIds = [
@@ -58,10 +64,10 @@ export const growthRevisionFragmentSchema = z.object({
     context.addIssue({ code: "custom", message: "GROWTH_REVISION_FRAGMENT_DUPLICATE_LOCAL_ID" });
   }
   const targetIds = [
-    ...value.resourceUpdates.map((item) => item.evidenceId),
-    ...value.documentUpdates.map((item) => item.evidenceId),
-    ...value.assertionUpdates.map((item) => item.evidenceId),
-    ...value.relationRemovals.map((item) => item.evidenceId),
+    ...value.resourceUpdates.map((item) => item.targetRef),
+    ...value.documentUpdates.map((item) => item.targetRef),
+    ...value.assertionUpdates.map((item) => item.targetRef),
+    ...value.relationRemovals.map((item) => item.targetRef),
   ];
   if (new Set(targetIds).size !== targetIds.length) {
     context.addIssue({ code: "custom", message: "GROWTH_REVISION_FRAGMENT_DUPLICATE_TARGET" });
@@ -76,11 +82,51 @@ export type GrowthRevisionFragmentErrorCode =
   | "GROWTH_REVISION_FRAGMENT_AUTHORITY_INVALID"
   | "GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH"
   | "GROWTH_REVISION_FRAGMENT_REFERENCE_INVALID"
+  | "GROWTH_REVISION_FRAGMENT_OWNER_REF_INVALID"
+  | "GROWTH_REVISION_FRAGMENT_DOCUMENT_OWNER_KIND_INVALID"
+  | "GROWTH_REVISION_FRAGMENT_SCOPE_REF_INVALID"
+  | "GROWTH_REVISION_FRAGMENT_DOCUMENT_SOURCE_REF_INVALID"
+  | "GROWTH_REVISION_FRAGMENT_RELATION_ENDPOINT_REF_INVALID"
+  | "GROWTH_REVISION_FRAGMENT_PARENT_REF_INVALID"
   | "GROWTH_REVISION_FRAGMENT_REFERENCE_CYCLE"
-  | "GROWTH_REVISION_FRAGMENT_RELATION_INVALID";
+  | "GROWTH_REVISION_FRAGMENT_RELATION_INVALID"
+  | "GROWTH_REVISION_FRAGMENT_CLOSURE_REQUIREMENT_INVALID";
 
-const refParameter = Type.String({ minLength: 1, maxLength: 240 });
+const revisionCorrectionMessages: Record<GrowthRevisionFragmentErrorCode, string> = {
+  GROWTH_REVISION_FRAGMENT_INVALID:
+    "Submit the complete Revision Fragment shape with every required array present and at least one authorized mutation or addition.",
+  GROWTH_REVISION_FRAGMENT_DUPLICATE_LOCAL_ID:
+    "Use a unique localId across every resource, document, assertion, and relation addition.",
+  GROWTH_REVISION_FRAGMENT_DUPLICATE_TARGET:
+    "Mutate each evidenceId at most once across all update and removal arrays.",
+  GROWTH_REVISION_FRAGMENT_AUTHORITY_INVALID:
+    "Use only aliases from revisionReferences, and place each alias in the update array matching its reference kind.",
+  GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH:
+    "Every targetRef marked revise must appear exactly once in the matching update or removal array; preserve and stale_visual targets must not be mutated.",
+  GROWTH_REVISION_FRAGMENT_REFERENCE_INVALID:
+    "Use resource aliases from revisionReferences or resource localIds for owners, scopes, and relation endpoints; use document aliases or document localIds for assertion sources.",
+  GROWTH_REVISION_FRAGMENT_OWNER_REF_INVALID:
+    "Use one @resource alias from revisionReferences or one resource localId as each document ownerRef.",
+  GROWTH_REVISION_FRAGMENT_DOCUMENT_OWNER_KIND_INVALID:
+    "Choose a document kind allowed for its owner: setting for world/story, prose for story, character_profile for OC, location_profile for location, faction_profile for faction, or a general note/guide/constraint kind.",
+  GROWTH_REVISION_FRAGMENT_SCOPE_REF_INVALID:
+    "Use one @resource alias from revisionReferences or one resource localId as each assertion scopeRef.",
+  GROWTH_REVISION_FRAGMENT_DOCUMENT_SOURCE_REF_INVALID:
+    "Use only @document aliases from revisionReferences or document localIds as assertion sourceDocumentRefs.",
+  GROWTH_REVISION_FRAGMENT_RELATION_ENDPOINT_REF_INVALID:
+    "Use only @resource aliases from revisionReferences or resource localIds as relation sourceRef and targetRef.",
+  GROWTH_REVISION_FRAGMENT_PARENT_REF_INVALID:
+    "Use a compatible @resource world alias or resource localId as each location or faction parentRef.",
+  GROWTH_REVISION_FRAGMENT_REFERENCE_CYCLE:
+    "Make resource parent references acyclic and point each parentRef to an @resource alias or an earlier resolvable resource localId.",
+  GROWTH_REVISION_FRAGMENT_RELATION_INVALID:
+    "Choose a relation kind whose source and target resource kinds are allowed by the creative relation policy.",
+  GROWTH_REVISION_FRAGMENT_CLOSURE_REQUIREMENT_INVALID:
+    "Add exactly one sourced assertionAddition for every required Closure predicate and use its matching world, main story, or focus OC resource alias as scopeRef.",
+};
+
 const localIdParameter = Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" });
+const existingOrLocalRefParameter = Type.Union([growthRevisionExistingRefParameter, localIdParameter]);
 const titleParameter = Type.String({ minLength: 1, maxLength: 500 });
 const contentParameter = Type.String({ minLength: 1, maxLength: 80_000 });
 const objectParameter = Type.Object({}, { additionalProperties: true });
@@ -96,29 +142,29 @@ const relationKindParameter = Type.Union([
 export const growthRevisionFragmentParameters = Type.Object({
   summary: Type.String({ minLength: 1, maxLength: 2_000 }),
   impact: growthImpactBriefParameters,
-  resourceUpdates: Type.Array(Type.Object({ evidenceId: refParameter, title: titleParameter }, { additionalProperties: false }), { maxItems: 100 }),
-  documentUpdates: Type.Array(Type.Object({ evidenceId: refParameter, title: titleParameter, content: contentParameter }, { additionalProperties: false }), { maxItems: 100 }),
+  resourceUpdates: Type.Array(Type.Object({ targetRef: growthRevisionExistingRefParameter, title: titleParameter }, { additionalProperties: false }), { maxItems: 100 }),
+  documentUpdates: Type.Array(Type.Object({ targetRef: growthRevisionExistingRefParameter, title: titleParameter, content: contentParameter }, { additionalProperties: false }), { maxItems: 100 }),
   assertionUpdates: Type.Array(Type.Object({
-    evidenceId: refParameter, subject: titleParameter, predicate: Type.String({ minLength: 1, maxLength: 240 }),
-    object: objectParameter, sourceDocumentRefs: Type.Array(refParameter, { minItems: 1, maxItems: 100 }),
+    targetRef: growthRevisionExistingRefParameter, subject: titleParameter, predicate: Type.String({ minLength: 1, maxLength: 240 }),
+    object: objectParameter, sourceDocumentRefs: Type.Array(existingOrLocalRefParameter, { minItems: 1, maxItems: 100 }),
   }, { additionalProperties: false }), { maxItems: 100 }),
-  relationRemovals: Type.Array(Type.Object({ evidenceId: refParameter }, { additionalProperties: false }), { maxItems: 100 }),
+  relationRemovals: Type.Array(Type.Object({ targetRef: growthRevisionExistingRefParameter }, { additionalProperties: false }), { maxItems: 100 }),
   resourceAdditions: Type.Array(Type.Object({
     localId: localIdParameter,
     kind: Type.Union([Type.Literal("world"), Type.Literal("location"), Type.Literal("faction"), Type.Literal("story"), Type.Literal("oc")]),
-    title: titleParameter, parentRef: Type.Optional(refParameter),
+    title: titleParameter, parentRef: Type.Optional(existingOrLocalRefParameter),
   }, { additionalProperties: false }), { maxItems: 100 }),
   documentAdditions: Type.Array(Type.Object({
-    localId: localIdParameter, ownerRef: refParameter, kind: documentKindParameter,
+    localId: localIdParameter, ownerRef: existingOrLocalRefParameter, kind: documentKindParameter,
     title: titleParameter, content: contentParameter,
   }, { additionalProperties: false }), { maxItems: 100 }),
   assertionAdditions: Type.Array(Type.Object({
-    localId: localIdParameter, scopeRef: refParameter, subject: titleParameter,
+    localId: localIdParameter, scopeRef: existingOrLocalRefParameter, subject: titleParameter,
     predicate: Type.String({ minLength: 1, maxLength: 240 }), object: objectParameter,
-    sourceDocumentRefs: Type.Array(refParameter, { minItems: 1, maxItems: 100 }),
+    sourceDocumentRefs: Type.Array(existingOrLocalRefParameter, { minItems: 1, maxItems: 100 }),
   }, { additionalProperties: false }), { maxItems: 100 }),
   relationAdditions: Type.Array(Type.Object({
-    localId: localIdParameter, kind: relationKindParameter, sourceRef: refParameter, targetRef: refParameter,
+    localId: localIdParameter, kind: relationKindParameter, sourceRef: existingOrLocalRefParameter, targetRef: existingOrLocalRefParameter,
   }, { additionalProperties: false }), { maxItems: 100 }),
 }, { additionalProperties: false });
 
@@ -126,6 +172,7 @@ export function compileGrowthRevisionFragment(input: unknown, trusted: {
   cycleId: string;
   domainRootResourceIds: { world: string; story: string; oc: string };
   authority: GrowthRevisionAuthority;
+  requiredClosureAssertions?: Array<{ facetId: string; scopeResourceId: string }>;
 }): ProposeChangeSetArgs {
   const parsed = growthRevisionFragmentSchema.safeParse(input);
   if (!parsed.success) {
@@ -137,49 +184,50 @@ export function compileGrowthRevisionFragment(input: unknown, trusted: {
     throw revisionError("GROWTH_REVISION_FRAGMENT_INVALID");
   }
   const fragment = parsed.data;
-  const authorityByEvidence = new Map(trusted.authority.targets.map((target) => [target.evidenceId, target]));
-  if (fragment.impact.targets.some((target) => !authorityByEvidence.has(target.evidenceId))) {
+  const authorityByRef = indexGrowthRevisionTargets(trusted.authority);
+  if (fragment.impact.targets.some((target) => !authorityByRef.has(target.targetRef))) {
     throw revisionError("GROWTH_REVISION_FRAGMENT_AUTHORITY_INVALID");
   }
-  const decisions = new Map(fragment.impact.targets.map((target) => [target.evidenceId, target.decision]));
-  const updatedEvidenceIds = [
-    ...fragment.resourceUpdates.map((item) => item.evidenceId),
-    ...fragment.documentUpdates.map((item) => item.evidenceId),
-    ...fragment.assertionUpdates.map((item) => item.evidenceId),
-    ...fragment.relationRemovals.map((item) => item.evidenceId),
+  const decisions = new Map(fragment.impact.targets.map((target) => [target.targetRef, target.decision]));
+  const updatedRefs = [
+    ...fragment.resourceUpdates.map((item) => item.targetRef),
+    ...fragment.documentUpdates.map((item) => item.targetRef),
+    ...fragment.assertionUpdates.map((item) => item.targetRef),
+    ...fragment.relationRemovals.map((item) => item.targetRef),
   ];
-  const revised = fragment.impact.targets.filter((target) => target.decision === "revise").map((target) => target.evidenceId);
-  if (!sameSet(updatedEvidenceIds, revised)) throw revisionError("GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH");
-  const actualAdditionKinds = [
-    ...fragment.resourceAdditions.map((item) => item.kind),
-    ...fragment.documentAdditions.map(() => "document" as const),
-    ...fragment.assertionAdditions.map(() => "assertion" as const),
-    ...fragment.relationAdditions.map(() => "relation" as const),
-  ];
-  if (!sameMultiset(actualAdditionKinds, fragment.impact.additions.map((addition) => addition.kind))) {
-    throw revisionError("GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH");
-  }
+  const revised = fragment.impact.targets.filter((target) => target.decision === "revise").map((target) => target.targetRef);
+  if (!sameSet(updatedRefs, revised)) throw revisionError("GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH");
   if ([...decisions.values()].some((decision) => decision === "preserve")
-    && updatedEvidenceIds.some((id) => decisions.get(id) === "preserve")) {
+    && updatedRefs.some((ref) => decisions.get(ref) === "preserve")) {
     throw revisionError("GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH");
   }
 
   const prefix = `growth-${createHash("sha256").update(`${trusted.cycleId}:revision`).digest("hex").slice(0, 20)}`;
   const items: ProposeChangeSetArgs["items"] = [];
   const resources = new Map<string, ResolvedResource>();
-  for (const target of trusted.authority.targets) {
-    if (target.kind === "resource") resources.set(target.evidenceId, {
+  for (const [ref, target] of authorityByRef) {
+    if (target.kind === "resource") resources.set(ref, {
       resourceId: target.resourceId, type: target.type, objectKind: target.objectKind,
       itemId: null,
     });
   }
-  const documents = new Map<string, { documentId: string; resourceId: string; itemId: string | null }>();
-  for (const target of trusted.authority.targets) if (target.kind === "document") {
-    documents.set(target.evidenceId, { documentId: target.documentId, resourceId: target.resourceId, itemId: null });
+  const documents = new Map<string, {
+    documentId: string;
+    resourceId: string;
+    evidenceId: string | null;
+    itemId: string | null;
+  }>();
+  for (const [ref, target] of authorityByRef) if (target.kind === "document") {
+    documents.set(ref, {
+      documentId: target.documentId,
+      resourceId: target.resourceId,
+      evidenceId: target.evidenceId,
+      itemId: null,
+    });
   }
 
   for (const update of fragment.resourceUpdates) {
-    const target = authorityByEvidence.get(update.evidenceId);
+    const target = authorityByRef.get(update.targetRef);
     if (!target || target.kind !== "resource") throw revisionError("GROWTH_REVISION_FRAGMENT_AUTHORITY_INVALID");
     items.push({
       id: `${prefix}-resource-update-${items.length}`, dependsOn: [], kind: "resource.put",
@@ -211,7 +259,7 @@ export function compileGrowthRevisionFragment(input: unknown, trusted: {
   }
 
   for (const update of fragment.documentUpdates) {
-    const target = authorityByEvidence.get(update.evidenceId);
+    const target = authorityByRef.get(update.targetRef);
     if (!target || target.kind !== "document") throw revisionError("GROWTH_REVISION_FRAGMENT_AUTHORITY_INVALID");
     const creativeItemId = `${prefix}-document-meta-update-${items.length}`;
     const documentItemId = `${prefix}-document-content-update-${items.length}`;
@@ -224,11 +272,22 @@ export function compileGrowthRevisionFragment(input: unknown, trusted: {
         resourceId: target.resourceId, creativeDocumentId: target.documentId, content: update.content,
       } },
     );
+    documents.set(update.targetRef, {
+      documentId: target.documentId,
+      resourceId: target.resourceId,
+      evidenceId: target.evidenceId,
+      itemId: documentItemId,
+    });
   }
 
   for (const addition of fragment.documentAdditions) {
     const owner = resources.get(addition.ownerRef);
-    if (!owner) throw revisionError("GROWTH_REVISION_FRAGMENT_REFERENCE_INVALID");
+    if (!owner) throw revisionError("GROWTH_REVISION_FRAGMENT_OWNER_REF_INVALID");
+    try {
+      assertCreativeDocumentOwnerAllowed(addition.kind, owner.objectKind);
+    } catch {
+      throw revisionError("GROWTH_REVISION_FRAGMENT_DOCUMENT_OWNER_KIND_INVALID");
+    }
     const documentId = `${prefix}-document-${addition.localId}`;
     const creativeItemId = `${prefix}-creative-document-item-${addition.localId}`;
     const documentItemId = `${prefix}-document-item-${addition.localId}`;
@@ -241,11 +300,16 @@ export function compileGrowthRevisionFragment(input: unknown, trusted: {
         resourceId: owner.resourceId, creativeDocumentId: documentId, content: addition.content,
       } },
     );
-    documents.set(addition.localId, { documentId, resourceId: owner.resourceId, itemId: documentItemId });
+    documents.set(addition.localId, {
+      documentId,
+      resourceId: owner.resourceId,
+      evidenceId: null,
+      itemId: documentItemId,
+    });
   }
 
   for (const update of fragment.assertionUpdates) {
-    const target = authorityByEvidence.get(update.evidenceId);
+    const target = authorityByRef.get(update.targetRef);
     if (!target || target.kind !== "assertion") throw revisionError("GROWTH_REVISION_FRAGMENT_AUTHORITY_INVALID");
     const sources = resolveDocumentSources(update.sourceDocumentRefs, documents);
     items.push({ id: `${prefix}-assertion-update-${items.length}`, dependsOn: sources.dependsOn, kind: "assertion.put", payload: {
@@ -255,18 +319,31 @@ export function compileGrowthRevisionFragment(input: unknown, trusted: {
   }
   for (const addition of fragment.assertionAdditions) {
     const scope = resources.get(addition.scopeRef);
-    if (!scope) throw revisionError("GROWTH_REVISION_FRAGMENT_REFERENCE_INVALID");
+    if (!scope) throw revisionError("GROWTH_REVISION_FRAGMENT_SCOPE_REF_INVALID");
+    const closureRequirement = trusted.requiredClosureAssertions?.find((item) => item.facetId === addition.predicate);
+    if (closureRequirement && closureRequirement.scopeResourceId !== scope.resourceId) {
+      throw revisionError("GROWTH_REVISION_FRAGMENT_CLOSURE_REQUIREMENT_INVALID");
+    }
     const sources = resolveDocumentSources(addition.sourceDocumentRefs, documents);
     items.push({ id: `${prefix}-assertion-item-${addition.localId}`, dependsOn: [
       ...(scope.itemId ? [scope.itemId] : []), ...sources.dependsOn,
     ], kind: "assertion.put", payload: {
       assertionId: `${prefix}-assertion-${addition.localId}`, scopeType: scope.type, scopeId: scope.resourceId,
-      subject: addition.subject, predicate: addition.predicate, object: addition.object, evidenceIds: sources.evidenceIds,
+      subject: closureRequirement?.scopeResourceId ?? addition.subject,
+      predicate: addition.predicate, object: addition.object, evidenceIds: sources.evidenceIds,
     } });
   }
 
+  for (const requirement of trusted.requiredClosureAssertions ?? []) {
+    const matches = items.filter((item) => item.kind === "assertion.put"
+      && item.payload.predicate === requirement.facetId
+      && item.payload.scopeId === requirement.scopeResourceId
+      && item.payload.subject === requirement.scopeResourceId);
+    if (matches.length !== 1) throw revisionError("GROWTH_REVISION_FRAGMENT_CLOSURE_REQUIREMENT_INVALID");
+  }
+
   for (const removal of fragment.relationRemovals) {
-    const target = authorityByEvidence.get(removal.evidenceId);
+    const target = authorityByRef.get(removal.targetRef);
     if (!target || target.kind !== "relation") throw revisionError("GROWTH_REVISION_FRAGMENT_AUTHORITY_INVALID");
     items.push({ id: `${prefix}-relation-remove-${items.length}`, dependsOn: [], kind: "creative_relation.put", payload: {
       relationId: target.relationId, create: false, relationKind: target.relationKind,
@@ -276,7 +353,7 @@ export function compileGrowthRevisionFragment(input: unknown, trusted: {
   for (const addition of fragment.relationAdditions) {
     const source = resources.get(addition.sourceRef);
     const target = resources.get(addition.targetRef);
-    if (!source || !target) throw revisionError("GROWTH_REVISION_FRAGMENT_REFERENCE_INVALID");
+    if (!source || !target) throw revisionError("GROWTH_REVISION_FRAGMENT_RELATION_ENDPOINT_REF_INVALID");
     try {
       assertCreativeRelationAllowed({
         kind: addition.kind,
@@ -300,13 +377,13 @@ export function compileGrowthRevisionFragment(input: unknown, trusted: {
     growthRevisionImpact: {
       revisedEvidenceIds: fragment.impact.targets
         .filter((target) => target.decision === "revise")
-        .map((target) => target.evidenceId),
+        .map((target) => authorityByRef.get(target.targetRef)!.evidenceId),
       preservedEvidenceIds: fragment.impact.targets
         .filter((target) => target.decision === "preserve")
-        .map((target) => target.evidenceId),
+        .map((target) => authorityByRef.get(target.targetRef)!.evidenceId),
       staleVisualEvidenceIds: fragment.impact.targets
         .filter((target) => target.decision !== "preserve")
-        .map((target) => target.evidenceId),
+        .map((target) => authorityByRef.get(target.targetRef)!.evidenceId),
     },
   });
 }
@@ -339,28 +416,35 @@ function resourcePlacement(
   const parent = parentRef
     ? resources.get(parentRef)
     : [...resources.values()].find((resource) => resource.objectKind === "world");
-  if (!parent || parent.type !== "world") throw revisionError("GROWTH_REVISION_FRAGMENT_REFERENCE_INVALID");
+  if (!parent || parent.type !== "world") throw revisionError("GROWTH_REVISION_FRAGMENT_PARENT_REF_INVALID");
   if ((kind === "location" && !["world", "location"].includes(parent.objectKind))
     || (kind === "faction" && !["world", "faction"].includes(parent.objectKind))) {
-    throw revisionError("GROWTH_REVISION_FRAGMENT_REFERENCE_INVALID");
+    throw revisionError("GROWTH_REVISION_FRAGMENT_PARENT_REF_INVALID");
   }
   return { type: "world", parentId: parent.resourceId, parentItemId: parent.itemId };
 }
 
 function resolveDocumentSources(
   refs: string[],
-  documents: Map<string, { documentId: string; resourceId: string; itemId: string | null }>,
+  documents: Map<string, {
+    documentId: string;
+    resourceId: string;
+    evidenceId: string | null;
+    itemId: string | null;
+  }>,
 ): { evidenceIds: string[]; dependsOn: string[] } {
   const evidenceIds: string[] = [];
   const dependsOn: string[] = [];
   for (const ref of refs) {
     const document = documents.get(ref);
-    if (!document) throw revisionError("GROWTH_REVISION_FRAGMENT_REFERENCE_INVALID");
+    if (!document) throw revisionError("GROWTH_REVISION_FRAGMENT_DOCUMENT_SOURCE_REF_INVALID");
     if (document.itemId) {
       evidenceIds.push(`greenfield_document_output:${document.itemId}`);
       dependsOn.push(document.itemId);
+    } else if (document.evidenceId) {
+      evidenceIds.push(document.evidenceId);
     } else {
-      evidenceIds.push(ref);
+      throw revisionError("GROWTH_REVISION_FRAGMENT_DOCUMENT_SOURCE_REF_INVALID");
     }
   }
   return { evidenceIds, dependsOn };
@@ -370,12 +454,6 @@ function sameSet(left: string[], right: string[]): boolean {
   return left.length === right.length && new Set(left).size === left.length && left.every((item) => right.includes(item));
 }
 
-function sameMultiset(left: string[], right: string[]): boolean {
-  const sortedLeft = [...left].sort();
-  const sortedRight = [...right].sort();
-  return sortedLeft.length === sortedRight.length && sortedLeft.every((item, index) => item === sortedRight[index]);
-}
-
 function revisionError(code: GrowthRevisionFragmentErrorCode): Error & { code: GrowthRevisionFragmentErrorCode } {
-  return Object.assign(new Error("Growth revision Fragment is invalid."), { code });
+  return Object.assign(new Error(`${code}: ${revisionCorrectionMessages[code]}`), { code });
 }

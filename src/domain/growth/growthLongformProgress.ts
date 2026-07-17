@@ -1,5 +1,9 @@
 import type { z } from "zod";
 import {
+  GROWTH_LONGFORM_MIN_CODE_POINTS,
+  GROWTH_LONGFORM_SECTION_HARD_MAX_CODE_POINTS,
+} from "../../shared/growthLongformPolicy";
+import {
   deriveGrowthLongformOutlineDocumentId,
   growthLongformPersistedOutlineSchema,
 } from "../../agent-worker/growth/growthLongformOutline";
@@ -182,7 +186,7 @@ export class GrowthLongformProgressResolver {
       const semanticCodePoints = Array.from(version.content.trim()).length;
       if (rawCodePoints !== semanticCodePoints
         || semanticCodePoints < section.estimatedCodePoints.min
-        || semanticCodePoints > section.estimatedCodePoints.max) {
+        || semanticCodePoints > GROWTH_LONGFORM_SECTION_HARD_MAX_CODE_POINTS) {
         return blocked("GROWTH_LONGFORM_SECTION_LENGTH_INVALID");
       }
       completedSections.push({
@@ -216,7 +220,7 @@ export class GrowthLongformProgressResolver {
       completedSections,
       totalCodePoints,
       nextSection,
-      complete: nextSection === null && totalCodePoints >= 10_000,
+      complete: nextSection === null && totalCodePoints >= GROWTH_LONGFORM_MIN_CODE_POINTS,
     };
   }
 }

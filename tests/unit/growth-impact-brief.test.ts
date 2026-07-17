@@ -9,10 +9,9 @@ describe("Growth revision impact brief", () => {
   const valid = {
     summary: "The revised rule changes the world's cultural framing while preserving unrelated facts.",
     targets: [
-      { evidenceId: "world-version-1", decision: "revise", reasonSummary: "The setting text carries the old framing." },
-      { evidenceId: "oc-version-1", decision: "preserve", reasonSummary: "This character history is unaffected." },
+      { targetRef: "@document1", decision: "revise", reasonSummary: "The setting text carries the old framing." },
+      { targetRef: "@document2", decision: "preserve", reasonSummary: "This character history is unaffected." },
     ],
-    additions: [{ kind: "relation", reasonSummary: "The revised story must explicitly retain its world link." }],
   } as const;
 
   it("accepts only an authority-free, bounded impact summary", () => {
@@ -30,5 +29,16 @@ describe("Growth revision impact brief", () => {
       ...valid,
       targets: [valid.targets[0], { ...valid.targets[0], decision: "preserve" }],
     }).success).toBe(false);
+  });
+
+  it("rejects raw evidence and resource IDs in favor of bounded Revision aliases", () => {
+    expect(growthImpactBriefSchema.safeParse({
+      ...valid,
+      targets: [{ ...valid.targets[0], targetRef: "world-version-1" }],
+    }).success).toBe(false);
+    expect(Value.Check(growthImpactBriefParameters, {
+      ...valid,
+      targets: [{ ...valid.targets[0], targetRef: "world-1" }],
+    })).toBe(false);
   });
 });

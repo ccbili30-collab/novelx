@@ -3,6 +3,7 @@ import {
   resolveResponsesUrl,
   testImageProviderConnection,
 } from "../../src/main/imageProviderConnectionTest";
+import { generateResponsesImage, ResponsesImageProviderError } from "../../src/domain/asset/responsesImageProviderClient";
 
 const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -66,6 +67,27 @@ describe("Image Provider connection test", () => {
       ok: false,
       error: { code: "IMAGE_PROVIDER_PROTOCOL_FAILED" },
     });
+  });
+
+  it.each([
+    [400, "IMAGE_PROVIDER_REQUEST_REJECTED"],
+    [401, "IMAGE_PROVIDER_AUTH_FAILED"],
+    [403, "IMAGE_PROVIDER_AUTH_FAILED"],
+    [404, "IMAGE_PROVIDER_MODEL_UNAVAILABLE"],
+    [429, "IMAGE_PROVIDER_RATE_LIMITED"],
+    [502, "IMAGE_PROVIDER_SERVICE_UNAVAILABLE"],
+  ] as const)("classifies HTTP %s without retaining the response body", async (status, failureClass) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("SECRET-UPSTREAM-BODY", { status })));
+
+    const error = await generateResponsesImage(profile(), "safe prompt").catch((cause) => cause);
+
+    expect(error).toBeInstanceOf(ResponsesImageProviderError);
+    expect(error).toMatchObject({
+      code: "IMAGE_PROVIDER_GENERATION_FAILED",
+      failureClass,
+      httpStatus: status,
+    });
+    expect(JSON.stringify(error)).not.toContain("SECRET-UPSTREAM-BODY");
   });
 });
 

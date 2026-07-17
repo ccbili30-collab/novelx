@@ -1,5 +1,6 @@
 import { AlertTriangle, Image, LoaderCircle } from "lucide-react";
 import type { CreativeShowcaseSnapshot } from "../../../../shared/ipcContract";
+import { FailedImagePlaceholder } from "./FailedImagePlaceholder";
 
 type ShowcaseImage = CreativeShowcaseSnapshot["images"][number];
 
@@ -21,11 +22,13 @@ export function ImageAssetCard(props: {
         <button className="showcase-image-card__visual" type="button" onClick={props.onSelect}>
           <img src={props.image.thumbnailUrl!} alt={props.image.title} loading={props.featured ? "eager" : "lazy"} />
         </button>
+      ) : props.image.status === "failed" ? (
+        <FailedImagePlaceholder label={`${props.image.title}生成失败`} />
       ) : (
         <div className="showcase-image-card__state" role="status">
           {props.image.status === "queued" || props.image.status === "generating"
             ? <LoaderCircle size={22} aria-hidden="true" />
-            : props.image.status === "failed" || props.image.status === "reconciliation_required"
+            : props.image.status === "reconciliation_required"
               ? <AlertTriangle size={22} aria-hidden="true" />
               : <Image size={22} aria-hidden="true" />}
           <strong>{statusLabel(props.image.status)}</strong>

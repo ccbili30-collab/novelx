@@ -10,6 +10,43 @@ export interface GrowthWatchResult<TSnapshot extends GrowthWatchSnapshot, TEvent
   termination: "GROWTH_CYCLE_WATCHDOG_TIMEOUT" | "GROWTH_OVERALL_TIMEOUT" | "GROWTH_AGENT_TERMINAL_PROJECTION_TIMEOUT" | null;
 }
 
+export function shouldValidateCompletedGrowthShowcase(snapshot: GrowthWatchSnapshot): boolean {
+  return snapshot.coordinatorStatus === "completed";
+}
+
+const safeGrowthBlockCodes = new Set([
+  "major_conflict",
+  "missing_source",
+  "tool_failed",
+  "user_confirmation_required",
+]);
+
+export function projectSafeGrowthAgentEvent(event: {
+  type: string;
+  phase?: string;
+  code?: string;
+  outcome?: string;
+  changeSetState?: string;
+  artifacts?: ReadonlyArray<{ kind?: string; code?: string; message?: unknown; evidenceIds?: unknown }>;
+}): { type: string; phase?: string; code?: string; outcome?: string; changeSetState?: string; escalationCodes?: string[] } {
+  if (event.type === "run.activity") return { type: event.type, phase: event.phase };
+  if (event.type === "run.failed") return { type: event.type, code: event.code };
+  if (event.type === "run.completed") {
+    const escalationCodes = [...new Set((event.artifacts ?? []).flatMap((artifact) => (
+      artifact.kind === "conflict" && artifact.code && safeGrowthBlockCodes.has(artifact.code)
+        ? [artifact.code]
+        : []
+    )))].sort();
+    return {
+      type: event.type,
+      outcome: event.outcome,
+      changeSetState: event.changeSetState,
+      ...(escalationCodes.length > 0 ? { escalationCodes } : {}),
+    };
+  }
+  return { type: event.type };
+}
+
 export async function watchGrowthTerminal<TSnapshot extends GrowthWatchSnapshot, TEvents>(input: {
   getSnapshot(): Promise<TSnapshot>;
   readEvents(): Promise<TEvents>;
@@ -18,6 +55,7 @@ export async function watchGrowthTerminal<TSnapshot extends GrowthWatchSnapshot,
   cycleTimeoutMs: number;
   terminalDeliveryTimeoutMs?: number;
   terminalDeliverySatisfied?(snapshot: TSnapshot, events: TEvents): boolean;
+  resumeAtBoundary?(snapshot: TSnapshot, events: TEvents): Promise<boolean>;
   pollMs?: number;
   now?(): number;
   sleep?(milliseconds: number): Promise<void>;
@@ -34,6 +72,13 @@ export async function watchGrowthTerminal<TSnapshot extends GrowthWatchSnapshot,
       const events = await input.readEvents();
       const elapsedMs = now() - startedAt;
       if (snapshot.coordinatorStatus !== "running") {
+        if (input.resumeAtBoundary && await input.resumeAtBoundary(snapshot, events)) {
+          watchedCycleId = null;
+          watchedCycleAt = null;
+          coordinatorTerminalAt = null;
+          await sleep(input.pollMs ?? 500);
+          continue;
+        }
         if (!input.terminalDeliverySatisfied || input.terminalDeliverySatisfied(snapshot, events)) {
           return { snapshot, events, elapsedMs, termination: null };
         }

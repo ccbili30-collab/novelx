@@ -32,14 +32,13 @@ describe("Steward tool handoff state machine", () => {
       impact: {
         summary: "世界设定需要修订。",
         targets: [{
-          evidenceId: "version-growth-setting", decision: "revise",
+          targetRef: "@document1", decision: "revise",
           reasonSummary: "新规则改变港口治理。",
         }],
-        additions: [],
       },
       resourceUpdates: [],
       documentUpdates: [{
-        evidenceId: "version-growth-setting", title: "潮汐世界设定",
+        targetRef: "@document1", title: "潮汐世界设定",
         content: "潮汐决定港口税期、航路和继承仪式。",
       }],
       assertionUpdates: [], relationRemovals: [], resourceAdditions: [],
@@ -52,6 +51,257 @@ describe("Steward tool handoff state machine", () => {
         payload: expect.objectContaining({ documentId: "document-setting", create: false }),
       })]),
     }), undefined, undefined);
+  });
+
+  it("keeps the revision proposal step open with an actionable safe correction", async () => {
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "revision-change", mode: "free", status: "committed", gateStatus: "ready",
+      blockedReason: null, itemCount: 1,
+      committedOutputs: [{ itemId: "document-update", kind: "document_version", outputId: "version-setting-next" }],
+    });
+    const machine = createGrowthMachine("world", [
+      successfulTool("retrieve_graph_evidence", growthRevisionRetrievalResult()),
+      selectedInquiryTool(),
+      propose,
+    ], "revision");
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await tool(machine.tools, "submit_growth_inquiry").execute("inquiry", growthInquiryBrief());
+
+    await expect(tool(machine.tools, "propose_change_set").execute("propose-invalid", {
+      summary: "让潮汐规则影响港口秩序。",
+      impact: {
+        summary: "世界设定需要修订。",
+        targets: [{
+          targetRef: "@document1", decision: "revise",
+          reasonSummary: "新规则改变港口治理。",
+        }],
+      },
+      resourceUpdates: [], documentUpdates: [], assertionUpdates: [], relationRemovals: [],
+      resourceAdditions: [], documentAdditions: [], assertionAdditions: [], relationAdditions: [],
+    })).rejects.toMatchObject({
+      code: "GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH",
+      message: expect.stringContaining("Every targetRef marked revise must appear exactly once"),
+    });
+    expect(machine.requiredNextTool()).toBe("propose_change_set");
+    expect(machine.snapshot().blockReason).toBeNull();
+    expect(propose.execute).not.toHaveBeenCalled();
+
+    await tool(machine.tools, "propose_change_set").execute("propose-corrected", {
+      summary: "让潮汐规则影响港口秩序。",
+      impact: {
+        summary: "世界设定需要修订。",
+        targets: [{
+          targetRef: "@document1", decision: "revise",
+          reasonSummary: "新规则改变港口治理。",
+        }],
+      },
+      resourceUpdates: [],
+      documentUpdates: [{
+        targetRef: "@document1", title: "潮汐世界设定",
+        content: "潮汐决定港口税期、航路和继承仪式。",
+      }],
+      assertionUpdates: [], relationRemovals: [], resourceAdditions: [],
+      documentAdditions: [], assertionAdditions: [], relationAdditions: [],
+    });
+
+    expect(propose.execute).toHaveBeenCalledTimes(1);
+    expect(machine.snapshot().executions.map((execution) => `${execution.tool}:${execution.status}`)).toEqual([
+      "retrieve_graph_evidence:succeeded",
+      "propose_change_set:failed",
+      "propose_change_set:succeeded",
+    ]);
+  });
+
+  it("bounds invalid Growth Inquiry correction and transitions to one blocked final result", async () => {
+    const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
+    const inquiry = selectedInquiryTool();
+    const machine = createGrowthMachine("world", [
+      successfulTool("retrieve_graph_evidence", growthRetrievalResult()),
+      inquiry,
+      successfulTool("propose_change_set", {}),
+      successfulTool("generate_image", {}),
+    ], "expand", undefined, workerDiagnostics);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    const wrappedInquiry = tool(machine.tools, "submit_growth_inquiry");
+
+    await expect(wrappedInquiry.execute("inquiry-1", {})).rejects.toMatchObject({ code: "STEWARD_GROWTH_INQUIRY_INPUT_INVALID" });
+    await expect(wrappedInquiry.execute("inquiry-2", {})).rejects.toMatchObject({ code: "STEWARD_GROWTH_INQUIRY_INPUT_INVALID" });
+    const exhausted = await wrappedInquiry.execute("inquiry-3", {});
+
+    expect(exhausted.content).toEqual([expect.objectContaining({
+      type: "text",
+      text: expect.stringContaining('"requiredNextTool":"submit_steward_result"'),
+    })]);
+    expect(machine.requiredNextTool()).toBe("submit_steward_result");
+    expect(machine.snapshot().blockReason).toBe("tool_failed");
+    expect(machine.finalizationContract()).toMatchObject({
+      requiredResult: {
+        status: "blocked",
+        changeSet: { state: "none", changeSetId: null },
+        escalations: [{ code: "tool_failed", evidenceIds: [] }],
+      },
+    });
+    expect(inquiry.execute).not.toHaveBeenCalled();
+    expect(workerDiagnostics.recordFailure).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      code: "STEWARD_GROWTH_INQUIRY_INPUT_INVALID", attempt: 1, maxAttempts: 3, terminal: false,
+    }));
+    expect(workerDiagnostics.recordFailure).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      code: "STEWARD_GROWTH_INQUIRY_INPUT_INVALID", attempt: 3, maxAttempts: 3, terminal: true,
+    }));
+    await expect(wrappedInquiry.execute("inquiry-4", {})).rejects.toMatchObject({ code: "STEWARD_EXECUTION_BLOCKED" });
+  });
+
+  it("corrects one Main-classified Inquiry evidence error without terminalizing the Cycle", async () => {
+    const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
+    const inquiry = selectedInquiryTool();
+    let attempts = 0;
+    inquiry.execute = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error("safe"), { code: "STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID" });
+      }
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ result: { status: "selected", safeSummary: "正在推演。" } }) }],
+        details: { status: "selected" as const, safeSummary: "正在推演。" },
+      };
+    });
+    const machine = createGrowthMachine("world", [
+      successfulTool("retrieve_graph_evidence", growthRetrievalResult()),
+      inquiry,
+      successfulTool("propose_change_set", {}),
+      successfulTool("generate_image", {}),
+    ], "expand", undefined, workerDiagnostics);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    const wrappedInquiry = tool(machine.tools, "submit_growth_inquiry");
+
+    await expect(wrappedInquiry.execute("inquiry-1", growthInquiryBrief())).rejects.toMatchObject({
+      code: "STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID",
+    });
+    const corrected = await wrappedInquiry.execute("inquiry-2", growthInquiryBrief());
+
+    expect(corrected.details).toMatchObject({ status: "selected" });
+    expect(machine.requiredNextTool()).toBe("propose_change_set");
+    expect(machine.snapshot().blockReason).toBeNull();
+    expect(workerDiagnostics.recordFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID",
+      attempt: 1,
+      maxAttempts: 3,
+      terminal: false,
+    }));
+  });
+
+  it("records each exhausted pre-executor revision failure before the public snapshot collapses to tool_failed", async () => {
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "must-not-execute", mode: "free", status: "committed", gateStatus: "ready",
+      blockedReason: null, itemCount: 1, committedOutputs: [],
+    });
+    const revisionDiagnostics = {
+      recordCompileFailure: vi.fn(async ({ attempt }: { attempt: number }) => `diagnostic-${attempt}`),
+      recordCompileCorrected: vi.fn(async () => "diagnostic-corrected"),
+    };
+    const machine = createGrowthMachine("world", [
+      successfulTool("retrieve_graph_evidence", growthRevisionRetrievalResult()),
+      selectedInquiryTool(),
+      propose,
+    ], "revision", revisionDiagnostics);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await tool(machine.tools, "submit_growth_inquiry").execute("inquiry", growthInquiryBrief());
+    const invalidFragment = {
+      summary: "让潮汐规则影响港口秩序。",
+      impact: {
+        summary: "世界设定需要修订。",
+        targets: [{
+          targetRef: "@document1", decision: "revise",
+          reasonSummary: "新规则改变港口治理。",
+        }],
+      },
+      resourceUpdates: [], documentUpdates: [], assertionUpdates: [], relationRemovals: [],
+      resourceAdditions: [], documentAdditions: [], assertionAdditions: [], relationAdditions: [],
+    };
+
+    for (const attempt of [1, 2, 3, 4, 5]) {
+      const params = attempt % 2 === 1 ? invalidFragment : {};
+      await expect(tool(machine.tools, "propose_change_set").execute(`propose-invalid-${attempt}`, params))
+        .rejects.toMatchObject({
+          code: attempt % 2 === 1
+            ? "GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH"
+            : "GROWTH_REVISION_FRAGMENT_INVALID",
+        });
+    }
+
+    expect(propose.execute).not.toHaveBeenCalled();
+    expect(machine.snapshot().blockReason).toBe("tool_failed");
+    expect(machine.requiredNextTool()).toBe("submit_steward_result");
+    expect(machine.snapshot().executions).toEqual([
+      { tool: "retrieve_graph_evidence", status: "succeeded" },
+      { tool: "propose_change_set", status: "failed" },
+      { tool: "propose_change_set", status: "failed" },
+      { tool: "propose_change_set", status: "failed" },
+      { tool: "propose_change_set", status: "failed" },
+      { tool: "propose_change_set", status: "failed" },
+    ]);
+    expect(JSON.stringify(machine.snapshot())).not.toContain("GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH");
+    expect(revisionDiagnostics.recordCompileFailure).toHaveBeenCalledTimes(5);
+    expect(revisionDiagnostics.recordCompileFailure.mock.calls.map(([entry]) => entry)).toEqual([
+      expect.objectContaining({ toolCallId: "propose-invalid-1", attempt: 1, maxAttempts: 5, terminal: false }),
+      expect.objectContaining({ toolCallId: "propose-invalid-2", attempt: 2, maxAttempts: 5, terminal: false }),
+      expect.objectContaining({ toolCallId: "propose-invalid-3", attempt: 3, maxAttempts: 5, terminal: false }),
+      expect.objectContaining({ toolCallId: "propose-invalid-4", attempt: 4, maxAttempts: 5, terminal: false }),
+      expect.objectContaining({ toolCallId: "propose-invalid-5", attempt: 5, maxAttempts: 5, terminal: true }),
+    ]);
+    expect(revisionDiagnostics.recordCompileCorrected).not.toHaveBeenCalled();
+  });
+
+  it("fails closed without another correction when Revision diagnostic persistence fails", async () => {
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "must-not-execute", mode: "free", status: "committed", gateStatus: "ready",
+      blockedReason: null, itemCount: 1, committedOutputs: [],
+    });
+    const auditFailure = Object.assign(new Error("Agent audit persistence is required."), { code: "AGENT_AUDIT_REQUIRED" });
+    const machine = createGrowthMachine("world", [
+      successfulTool("retrieve_graph_evidence", growthRevisionRetrievalResult()), selectedInquiryTool(), propose,
+    ], "revision", {
+      recordCompileFailure: vi.fn(async () => { throw auditFailure; }),
+      recordCompileCorrected: vi.fn(async () => "must-not-run"),
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await tool(machine.tools, "submit_growth_inquiry").execute("inquiry", growthInquiryBrief());
+
+    await expect(tool(machine.tools, "propose_change_set").execute("propose-invalid", {
+      summary: "invalid", impact: { summary: "invalid", targets: [] },
+      resourceUpdates: [], documentUpdates: [], assertionUpdates: [], relationRemovals: [],
+      resourceAdditions: [], documentAdditions: [], assertionAdditions: [], relationAdditions: [],
+    })).rejects.toMatchObject({ code: "AGENT_AUDIT_REQUIRED" });
+    expect(machine.snapshot().blockReason).toBe("tool_failed");
+    expect(machine.requiredNextTool()).toBe("submit_steward_result");
+    expect(propose.execute).not.toHaveBeenCalled();
+  });
+
+  it("stops a Revision correction that repeats the same structural failure three times", async () => {
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "must-not-execute", mode: "free", status: "committed", gateStatus: "ready",
+      blockedReason: null, itemCount: 1, committedOutputs: [],
+    });
+    const revisionDiagnostics = {
+      recordCompileFailure: vi.fn(async ({ attempt }: { attempt: number }) => `diagnostic-${attempt}`),
+      recordCompileCorrected: vi.fn(async () => "must-not-run"),
+    };
+    const machine = createGrowthMachine("world", [
+      successfulTool("retrieve_graph_evidence", growthRevisionRetrievalResult()), selectedInquiryTool(), propose,
+    ], "revision", revisionDiagnostics);
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await tool(machine.tools, "submit_growth_inquiry").execute("inquiry", growthInquiryBrief());
+    for (const attempt of [1, 2, 3]) {
+      await expect(tool(machine.tools, "propose_change_set").execute(`stalled-${attempt}`, {}))
+        .rejects.toMatchObject({ code: "GROWTH_REVISION_FRAGMENT_INVALID" });
+    }
+    expect(machine.snapshot().blockReason).toBe("tool_failed");
+    expect(propose.execute).not.toHaveBeenCalled();
+    expect(revisionDiagnostics.recordCompileFailure.mock.calls.map(([entry]) => entry)).toEqual([
+      expect.objectContaining({ attempt: 1, maxAttempts: 5, terminal: false }),
+      expect.objectContaining({ attempt: 2, maxAttempts: 5, terminal: false }),
+      expect.objectContaining({ attempt: 3, maxAttempts: 5, terminal: true }),
+    ]);
   });
 
   it("recognizes only conservative explicit Free Greenfield creation requests", () => {
@@ -109,6 +359,7 @@ describe("Steward tool handoff state machine", () => {
       changeSetId: "growth-change-1", mode: "free", status: "committed", gateStatus: "ready", blockedReason: null, itemCount: 1,
       committedOutputs: [{ itemId: "setting", kind: "document_version", outputId: "version-growth-setting" }],
     });
+    const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic-worker") };
     const machine = createStewardExecutionStateMachine({
       mode: "free",
       userInput: "基于当前证据继续发展设定",
@@ -119,6 +370,7 @@ describe("Steward tool handoff state machine", () => {
       },
       operationalTools: [retrieve, selectedInquiryTool(), propose],
       resultCapture: createRoleOutputTool("steward"),
+      workerDiagnostics,
     });
 
     expect(machine.tools.map((candidate) => candidate.name)).not.toContain("submit_steward_plan");
@@ -134,6 +386,9 @@ describe("Steward tool handoff state machine", () => {
       .rejects.toMatchObject({ code: "STEWARD_GROWTH_RETRIEVAL_REQUIRED" });
     await expect(tool(machine.tools, "propose_change_set").execute("growth-early-propose", { summary: "补充", items: [{}] }))
       .rejects.toMatchObject({ code: "STEWARD_STEP_OUT_OF_ORDER" });
+    expect(workerDiagnostics.recordFailure).toHaveBeenCalledWith(expect.objectContaining({
+      toolCallId: "growth-early-propose", code: "STEWARD_STEP_OUT_OF_ORDER", sideEffectState: "none",
+    }));
 
     await tool(machine.tools, "retrieve_graph_evidence").execute("growth-retrieve", {
       variant: "growth_v1", query: "世界设定", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
@@ -551,7 +806,7 @@ describe("Steward tool handoff state machine", () => {
     expect(machine.snapshot().generatedImages[0]).toMatchObject({ purpose: "world_map", status: "ready" });
   });
 
-  it("keeps a committed Greenfield Change Set when the final world_map fails", async () => {
+  it("keeps Growth completed with a false image reference when the final world_map fails", async () => {
     const retrieve = successfulTool("retrieve_graph_evidence", retrievalResult([]));
     const propose = successfulTool("propose_change_set", greenfieldCommittedProposal());
     const generate: AgentTool = {
@@ -571,15 +826,25 @@ describe("Steward tool handoff state machine", () => {
     });
     await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", { scopeResourceIds: ["world-root"] });
     await tool(machine.tools, "propose_change_set").execute("propose", { summary: "创建世界", items: [{}] });
-    await expect(tool(machine.tools, "generate_image").execute("map", worldMapRequest()))
-      .rejects.toMatchObject({ code: "IMAGE_GENERATION_FAILED" });
+    const failedImage = await tool(machine.tools, "generate_image").execute("map", worldMapRequest());
+    expect(failedImage.details).toEqual({ imageAvailable: false, status: "failed" });
+    expect(machine.requiredNextTool()).toBe("submit_steward_result");
+    expect(machine.snapshot()).toMatchObject({
+      blockReason: null,
+      executions: [
+        { tool: "retrieve_graph_evidence", status: "succeeded" },
+        { tool: "propose_change_set", status: "succeeded" },
+        { tool: "generate_image", status: "failed" },
+      ],
+      generatedImages: [{ assetId: null, status: "failed", title: "雾港群岛地图", thumbnailUrl: null }],
+    });
     await tool(machine.tools, "submit_steward_result").execute("result", {
-      status: "blocked",
-      message: "文本世界包已提交，地图生成失败。",
+      status: "completed",
+      message: "文本世界包已提交；地图生成失败，可稍后重试。",
       evidenceIds: ["change-greenfield", "version-world-document"],
       toolOutcomes: [],
       changeSet: { state: "committed", changeSetId: "change-greenfield" },
-      escalations: [{ code: "tool_failed", message: "地图生成失败。", evidenceIds: ["version-world-document"] }],
+      escalations: [],
     });
   });
 
@@ -853,11 +1118,72 @@ describe("Steward tool handoff state machine", () => {
     expect(machine.requiredNextTool()).toBe("submit_steward_result");
     expect(machine.snapshot().executions).toEqual([
       { tool: "retrieve_graph_evidence", status: "succeeded" },
-      { tool: "submit_closure_self_assessment", status: "succeeded" },
       { tool: "checker", status: "succeeded" },
-      { tool: "submit_closure_checker_review", status: "succeeded" },
     ]);
+    const requiredResult = machine.finalizationContract()?.requiredResult;
+    expect(requiredResult).toBeDefined();
+    await tool(machine.tools, "submit_steward_result").execute("final", requiredResult);
+    expect(machine.resultCapture.getSubmission()).toEqual(requiredResult);
     expect(machine.tools.some((candidate) => candidate.name === "propose_change_set" || candidate.name === "generate_image")).toBe(false);
+  });
+
+  it("requires one bounded independent Checker handoff after deterministic Closure is ready", async () => {
+    const facetResults = [{
+      facetId: "closure.world.structure.resource", state: "satisfied" as const, coverage: "complete" as const,
+      safeSummary: "The formal world is pinned.", evidenceIds: ["world-evidence"],
+    }];
+    const assessment = successfulTool("submit_closure_self_assessment", {
+      status: "checker_required", deterministicContentReady: true, facetResults,
+    });
+    const checker = successfulTool("checker", {
+      status: "closure_review", decision: "accepted", adverseFindings: [],
+    });
+    const review = successfulTool("submit_closure_checker_review", { status: "recorded", decision: "accepted" });
+    const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
+    const machine = createClosureMachine([
+      successfulTool("retrieve_graph_evidence", closureRetrievalResult(facetResults, true)),
+      assessment, checker, review,
+    ], workerDiagnostics);
+
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    const correction = await tool(machine.tools, "submit_closure_self_assessment").execute("self-review", {
+      decision: "continue_growing", safeSummary: "I could keep reflecting forever.",
+    });
+    expect(correction.details).toEqual({
+      status: "correction_required", errorCode: "STEWARD_CLOSURE_HANDOFF_REQUIRED",
+    });
+    expect(assessment.execute).not.toHaveBeenCalled();
+    expect(machine.requiredNextTool()).toBe("submit_closure_self_assessment");
+    await tool(machine.tools, "submit_closure_self_assessment").execute("handoff", {
+      decision: "ready_for_checker", safeSummary: "The deterministic facets are ready for independent review.",
+    });
+    expect(machine.requiredNextTool()).toBe("checker");
+    expect(workerDiagnostics.recordFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "STEWARD_CLOSURE_HANDOFF_REQUIRED", attempt: 1, maxAttempts: 2,
+      terminal: false, sideEffectState: "none",
+    }));
+
+    const refusingAssessment = successfulTool("submit_closure_self_assessment", {
+      status: "checker_required", deterministicContentReady: true, facetResults,
+    });
+    const refusingDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
+    const refusing = createClosureMachine([
+      successfulTool("retrieve_graph_evidence", closureRetrievalResult(facetResults, true)),
+      refusingAssessment, checker, review,
+    ], refusingDiagnostics);
+    await tool(refusing.tools, "retrieve_graph_evidence").execute("retrieve-refusing", growthRetrieveArgs());
+    await tool(refusing.tools, "submit_closure_self_assessment").execute("self-review-1", {
+      decision: "continue_growing", safeSummary: "Keep reflecting.",
+    });
+    const terminal = await tool(refusing.tools, "submit_closure_self_assessment").execute("self-review-2", {
+      decision: "continue_growing", safeSummary: "Still refuse handoff.",
+    });
+    expect(terminal.details).toEqual({ status: "blocked", errorCode: "STEWARD_CLOSURE_HANDOFF_REQUIRED" });
+    expect(refusingAssessment.execute).not.toHaveBeenCalled();
+    expect(refusingDiagnostics.recordFailure).toHaveBeenLastCalledWith(expect.objectContaining({
+      code: "STEWARD_CLOSURE_HANDOFF_REQUIRED", attempt: 2, maxAttempts: 2,
+      terminal: true, sideEffectState: "none",
+    }));
   });
 
   it("finishes Closure evaluation without Checker when deterministic facets are missing", async () => {
@@ -893,8 +1219,11 @@ describe("Steward tool handoff state machine", () => {
     expect(retry.requiredNextTool()).toBe("submit_steward_result");
     expect(retry.snapshot().executions).toEqual([
       { tool: "retrieve_graph_evidence", status: "succeeded" },
-      { tool: "submit_closure_self_assessment", status: "succeeded" },
     ]);
+    const requiredResult = retry.finalizationContract()?.requiredResult;
+    expect(requiredResult).toBeDefined();
+    await tool(retry.tools, "submit_steward_result").execute("final", requiredResult);
+    expect(retry.resultCapture.getSubmission()).toEqual(requiredResult);
   });
 
   it("runs one trusted Closure repair from pinned evidence without an Inquiry or image step", async () => {
@@ -927,6 +1256,7 @@ describe("Steward tool handoff state machine", () => {
       changeSetId: "longform-outline-change", mode: "free", status: "committed", gateStatus: "ready",
       blockedReason: null, itemCount: 6, committedOutputs: [],
     });
+    const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
     propose.execute = vi.fn(async (_requestId, args) => {
       compiled = args;
       return { content: [{ type: "text" as const, text: "ok" }], details: {
@@ -948,10 +1278,27 @@ describe("Steward tool handoff state machine", () => {
         },
       },
       operationalTools: [retrieve, selectedInquiryTool(), propose], resultCapture: createRoleOutputTool("steward"),
+      workerDiagnostics,
     });
     expect(machine.snapshot().plan?.steps).toEqual(["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set"]);
     await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
     await submitSelectedInquiry(machine.tools);
+    await expect(tool(machine.tools, "propose_change_set").execute("outline-invalid", {
+      storyTitle: "The Salt Heir", summary: "An OC personal story grounded in the pinned world.",
+      sections: ["opening", "turn"].map((localId) => ({
+        localId, title: localId, objective: `Write ${localId}.`, evidenceIds: ["version-growth-setting"],
+        continuityConstraints: ["Preserve the pinned world rule."], estimatedCodePoints: { min: 3000, max: 6000 },
+      })),
+    })).rejects.toMatchObject({
+      code: "GROWTH_LONGFORM_OUTLINE_TARGET_TOO_SHORT",
+      message: expect.stringContaining("at least 7000"),
+    });
+    expect(propose.execute).not.toHaveBeenCalled();
+    expect(machine.requiredNextTool()).toBe("propose_change_set");
+    expect(workerDiagnostics.recordFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "GROWTH_LONGFORM_OUTLINE_TARGET_TOO_SHORT", attempt: 1, maxAttempts: 3,
+      terminal: false, sideEffectState: "none",
+    }));
     await tool(machine.tools, "propose_change_set").execute("outline", {
       storyTitle: "The Salt Heir", summary: "An OC personal story grounded in the pinned world.",
       sections: ["opening", "turn"].map((localId) => ({
@@ -965,6 +1312,280 @@ describe("Steward tool handoff state machine", () => {
       expect.objectContaining({ kind: "creative_relation.put", payload: expect.objectContaining({ relationKind: "uses_oc", sourceResourceId: "volume-1", targetResourceId: "oc-1" }) }),
     ]) }));
     expect(JSON.stringify(compiled)).not.toContain("receipt-longform-1");
+  });
+
+  it("bounds invalid Longform outline correction before any Change Set side effect", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", {
+      ...growthRetrievalResult(), receiptId: "receipt-longform-bounded",
+    });
+    const propose = successfulTool("propose_change_set", {});
+    const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
+    const machine = createStewardExecutionStateMachine({
+      mode: "free", userInput: "Create the OC personal story outline.",
+      authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
+      growthBinding: {
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-1", kind: "expand",
+        focusKinds: ["oc"], resumeFrontier: [], inputCheckpointId: "checkpoint-1", ruleRevision: 1,
+        authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: ["oc-1"],
+        domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+        greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
+        longformAuthority: {
+          phase: "outline", outlineId: "outline-1", mainStoryResourceId: "story-1", worldResourceId: "world-1",
+          focusOcResourceId: "oc-1", personalStoryResourceId: "volume-1",
+        },
+      },
+      operationalTools: [retrieve, selectedInquiryTool(), propose], resultCapture: createRoleOutputTool("steward"),
+      workerDiagnostics,
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await submitSelectedInquiry(machine.tools);
+    const wrappedPropose = tool(machine.tools, "propose_change_set");
+    await expect(wrappedPropose.execute("outline-invalid-1", {})).rejects.toMatchObject({ code: "GROWTH_LONGFORM_OUTLINE_INVALID" });
+    await expect(wrappedPropose.execute("outline-invalid-2", {})).rejects.toMatchObject({ code: "GROWTH_LONGFORM_OUTLINE_INVALID" });
+    const terminal = await wrappedPropose.execute("outline-invalid-3", {});
+    expect(terminal.details).toEqual({ status: "blocked", errorCode: "GROWTH_LONGFORM_OUTLINE_INVALID" });
+    expect(propose.execute).not.toHaveBeenCalled();
+    expect(machine.snapshot().blockReason).toBe("tool_failed");
+    expect(workerDiagnostics.recordFailure).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      code: "GROWTH_LONGFORM_OUTLINE_INVALID", attempt: 3, maxAttempts: 3, terminal: true,
+      sideEffectState: "none",
+    }));
+    await expect(wrappedPropose.execute("outline-invalid-4", {})).rejects.toMatchObject({ code: "STEWARD_EXECUTION_BLOCKED" });
+  });
+
+  it("rewinds one invalid Longform section to a bounded Writer rewrite before proposal execution", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", {
+      ...growthRetrievalResult(),
+      receiptId: "receipt-longform-section",
+      evidence: [{
+        evidenceId: "evidence-turn", kind: "document" as const, label: "转折依据", excerpt: "可信转折。",
+      }, {
+        evidenceId: "prose-version-1", kind: "document" as const, label: "前文章节", excerpt: "可信前文。",
+      }],
+    });
+    const writer = successfulTool("writer", {});
+    const validText = uniqueLongformText(5000);
+    writer.execute = vi.fn()
+      .mockResolvedValueOnce({ content: [{ type: "text" as const, text: "invalid" }], details: {
+        status: "candidate", candidateText: "invalid shape", evidenceIds: ["evidence-turn"],
+        gmResolutionId: null,
+      } })
+      .mockResolvedValueOnce({ content: [{ type: "text" as const, text: "blocked" }], details: {
+        status: "blocked", reasons: [{
+          code: "missing_gm_resolution", message: "No GM resolution was supplied.", evidenceIds: ["evidence-turn"],
+        }],
+      } })
+      .mockResolvedValueOnce({ content: [{ type: "text" as const, text: "short" }], details: {
+        status: "candidate", candidateText: "短文", evidenceIds: ["evidence-turn"],
+        gmResolutionId: null, authorityChanges: [],
+      } })
+      .mockResolvedValueOnce({ content: [{ type: "text" as const, text: "valid" }], details: {
+        status: "candidate", candidateText: validText, evidenceIds: ["evidence-turn"],
+        gmResolutionId: null, authorityChanges: [],
+      } });
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "longform-section-change", mode: "free", status: "committed", gateStatus: "ready",
+      blockedReason: null, itemCount: 2, committedOutputs: [],
+    });
+    const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
+    const machine = createStewardExecutionStateMachine({
+      mode: "free", userInput: "续写 OC 个人长篇", authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
+      growthBinding: {
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-section", kind: "expand",
+        focusKinds: ["oc"], resumeFrontier: [], inputCheckpointId: "checkpoint-2", ruleRevision: 1,
+        authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: ["oc-1"],
+        domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+        greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
+        longformAuthority: {
+          phase: "section", outlineId: "outline-1", storyResourceId: "volume-1",
+          outlineDocumentVersionId: "outline-version-1", storyTitle: "The Salt Heir", summary: "A bounded OC saga.",
+          sections: [{
+            localId: "opening", title: "opening", objective: "Write opening.", evidenceIds: ["evidence-opening"],
+            continuityConstraints: ["Preserve facts."], estimatedCodePoints: { min: 5000, max: 6000 },
+          }, {
+            localId: "turn", title: "turn", objective: "Write the decided turn.", evidenceIds: ["evidence-turn"],
+            continuityConstraints: ["Preserve facts."], estimatedCodePoints: { min: 5000, max: 6000 },
+          }],
+          selectedSectionId: "turn", sectionSortOrder: 1, completedSectionIds: ["opening"],
+          priorProseEvidenceIds: ["prose-version-1"], priorContentSha256: ["a".repeat(64)],
+        },
+      },
+      operationalTools: [retrieve, selectedInquiryTool(), writer, propose], resultCapture: createRoleOutputTool("steward"),
+      workerDiagnostics,
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await submitSelectedInquiry(machine.tools);
+    const wrappedWriter = tool(machine.tools, "writer");
+    const wrappedPropose = tool(machine.tools, "propose_change_set");
+    const schemaCorrection = await wrappedWriter.execute("writer-invalid", {});
+    expect(schemaCorrection.details).toEqual({
+      status: "correction_required", errorCode: "STEWARD_LONGFORM_WRITER_RESULT_INVALID",
+    });
+    expect(machine.requiredNextTool()).toBe("writer");
+    const authoringCorrection = await wrappedWriter.execute("writer-gm-blocked", {});
+    expect(authoringCorrection.details).toEqual({
+      status: "correction_required", errorCode: "STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_GM_RESOLUTION",
+    });
+    expect(machine.requiredNextTool()).toBe("writer");
+    expect(writer.execute).toHaveBeenLastCalledWith("writer-gm-blocked", expect.objectContaining({
+      gmResolution: null,
+      instruction: expect.stringContaining("strict candidate result schema"),
+    }), undefined, undefined);
+    await wrappedWriter.execute("writer-short", {});
+    expect(writer.execute).toHaveBeenLastCalledWith("writer-short", expect.objectContaining({
+      instruction: expect.stringContaining("incorrectly treated Creator Lens section authoring"),
+    }), undefined, undefined);
+    const correction = await wrappedPropose.execute("propose-short", { outlineSectionId: "turn" });
+    expect(correction.details).toEqual({
+      status: "correction_required", errorCode: "GROWTH_LONGFORM_SECTION_TOO_SHORT",
+    });
+    expect(machine.requiredNextTool()).toBe("writer");
+    expect(propose.execute).not.toHaveBeenCalled();
+    await wrappedWriter.execute("writer-rewrite", {});
+    expect(writer.execute).toHaveBeenLastCalledWith("writer-rewrite", expect.objectContaining({
+      instruction: expect.stringContaining("Return only new prose to append"),
+      sourceMaterial: expect.stringContaining("inProgressDraft"),
+    }), undefined, undefined);
+    expect(writer.execute).toHaveBeenLastCalledWith("writer-rewrite", expect.objectContaining({
+      instruction: expect.stringContaining("incorrectly treated Creator Lens section authoring"),
+    }), undefined, undefined);
+    expect(machine.requiredNextTool()).toBe("propose_change_set");
+    await wrappedPropose.execute("propose-valid", { outlineSectionId: "turn" });
+    expect(propose.execute).toHaveBeenCalledTimes(1);
+    expect(workerDiagnostics.recordFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "GROWTH_LONGFORM_SECTION_TOO_SHORT", attempt: 1, maxAttempts: 3,
+      terminal: false, sideEffectState: "none",
+    }));
+    expect(workerDiagnostics.recordFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_GM_RESOLUTION", attempt: 1, maxAttempts: 2,
+      terminal: false, sideEffectState: "request_sent",
+    }));
+    expect(workerDiagnostics.recordFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "STEWARD_LONGFORM_WRITER_RESULT_INVALID", attempt: 1, maxAttempts: 2,
+      terminal: false, sideEffectState: "request_sent",
+    }));
+  });
+
+  it("records a precise terminal diagnostic for a non-correctable Longform compile failure", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", {
+      ...growthRetrievalResult(),
+      receiptId: "receipt-longform-prior",
+      evidence: [{
+        evidenceId: "evidence-turn", kind: "document" as const, label: "转折依据", excerpt: "可信转折。",
+      }],
+    });
+    const writer = successfulTool("writer", {
+      status: "candidate", candidateText: uniqueLongformText(5000), evidenceIds: ["evidence-turn"],
+      gmResolutionId: null, authorityChanges: [],
+    });
+    const propose = successfulTool("propose_change_set", {
+      changeSetId: "must-not-run", mode: "free", status: "committed", gateStatus: "ready",
+      blockedReason: null, itemCount: 2, committedOutputs: [],
+    });
+    const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
+    const machine = createStewardExecutionStateMachine({
+      mode: "free", userInput: "续写 OC 个人长篇", authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
+      growthBinding: {
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-prior", kind: "expand",
+        focusKinds: ["oc"], resumeFrontier: [], inputCheckpointId: "checkpoint-2", ruleRevision: 1,
+        authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: ["oc-1"],
+        domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+        greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
+        longformAuthority: {
+          phase: "section", outlineId: "outline-1", storyResourceId: "volume-1",
+          outlineDocumentVersionId: "outline-version-1", storyTitle: "The Salt Heir", summary: "A bounded OC saga.",
+          sections: [{
+            localId: "opening", title: "opening", objective: "Write opening.", evidenceIds: ["evidence-opening"],
+            continuityConstraints: ["Preserve facts."], estimatedCodePoints: { min: 5000, max: 6000 },
+          }, {
+            localId: "turn", title: "turn", objective: "Write turn.", evidenceIds: ["evidence-turn"],
+            continuityConstraints: ["Preserve facts."], estimatedCodePoints: { min: 5000, max: 6000 },
+          }],
+          selectedSectionId: "turn", sectionSortOrder: 2, completedSectionIds: ["opening"],
+          priorProseEvidenceIds: [], priorContentSha256: ["a".repeat(64)],
+        },
+      },
+      operationalTools: [retrieve, selectedInquiryTool(), writer, propose], resultCapture: createRoleOutputTool("steward"),
+      workerDiagnostics,
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await submitSelectedInquiry(machine.tools);
+    await tool(machine.tools, "writer").execute("writer", {});
+    await expect(tool(machine.tools, "propose_change_set").execute("propose", { outlineSectionId: "turn" }))
+      .rejects.toMatchObject({ code: "GROWTH_LONGFORM_SECTION_PRIOR_PROSE_REQUIRED" });
+    expect(propose.execute).not.toHaveBeenCalled();
+    expect(workerDiagnostics.recordFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: "GROWTH_LONGFORM_SECTION_PRIOR_PROSE_REQUIRED", sideEffectState: "none", terminal: true,
+    }));
+  });
+
+  it("rechecks supplied Longform evidence once and preserves a repeated missing-source refusal", async () => {
+    const retrieve = successfulTool("retrieve_graph_evidence", {
+      ...growthRetrievalResult(),
+      receiptId: "receipt-longform-source-recheck",
+      evidence: [{
+        evidenceId: "evidence-opening", kind: "document" as const,
+        label: "Pinned opening evidence", excerpt: "A confirmed event and consequence.",
+      }],
+    });
+    const blocked = {
+      content: [{ type: "text" as const, text: "blocked" }],
+      details: {
+        status: "blocked", reasons: [{
+          code: "missing_source", message: "The supplied evidence is insufficient.", evidenceIds: ["evidence-opening"],
+        }],
+      },
+    };
+    const writer = successfulTool("writer", {});
+    writer.execute = vi.fn().mockResolvedValueOnce(blocked).mockResolvedValueOnce(blocked);
+    const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
+    const machine = createStewardExecutionStateMachine({
+      mode: "free", userInput: "Write the bounded OC personal story.",
+      authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"],
+      growthBinding: {
+        capabilityVersion: growthCapabilityVersion, goalId: "goal-1", cycleId: "cycle-source-recheck", kind: "expand",
+        focusKinds: ["oc"], resumeFrontier: [], inputCheckpointId: "checkpoint-2", ruleRevision: 1,
+        authorizedScopeResourceIds: ["world-root", "oc-root", "story-root"], seedResourceIds: ["oc-1"],
+        domainRootResourceIds: { world: "world-root", oc: "oc-root", story: "story-root" },
+        greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
+        longformAuthority: {
+          phase: "section", outlineId: "outline-1", storyResourceId: "volume-1",
+          outlineDocumentVersionId: "outline-version-1", storyTitle: "The Salt Heir", summary: "A bounded OC saga.",
+          sections: [{
+            localId: "opening", title: "opening", objective: "Write the confirmed opening.",
+            evidenceIds: ["evidence-opening"], continuityConstraints: ["Preserve facts."],
+            estimatedCodePoints: { min: 3000, max: 4000 },
+          }, {
+            localId: "turn", title: "turn", objective: "Write the decided turn.",
+            evidenceIds: ["evidence-opening"], continuityConstraints: ["Preserve facts."],
+            estimatedCodePoints: { min: 4000, max: 5000 },
+          }],
+          selectedSectionId: "opening", sectionSortOrder: 0, completedSectionIds: [],
+          priorProseEvidenceIds: [], priorContentSha256: [],
+        },
+      },
+      operationalTools: [retrieve, selectedInquiryTool(), writer, successfulTool("propose_change_set", {})],
+      resultCapture: createRoleOutputTool("steward"), workerDiagnostics,
+    });
+    await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
+    await submitSelectedInquiry(machine.tools);
+    const wrappedWriter = tool(machine.tools, "writer");
+    const correction = await wrappedWriter.execute("writer-missing-source-1", {});
+    expect(correction.details).toEqual({
+      status: "correction_required", errorCode: "STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_SOURCE",
+    });
+    expect(machine.requiredNextTool()).toBe("writer");
+    await wrappedWriter.execute("writer-missing-source-2", {});
+    expect(writer.execute).toHaveBeenLastCalledWith("writer-missing-source-2", expect.objectContaining({
+      instruction: expect.stringContaining("minor non-Canon incidents is not missing_source"),
+    }), undefined, undefined);
+    expect(machine.snapshot().blockReason).toBe("tool_failed");
+    expect(workerDiagnostics.recordFailure).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      code: "STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_SOURCE", attempt: 1, maxAttempts: 2, terminal: false,
+    }));
+    expect(workerDiagnostics.recordFailure).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      code: "STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_SOURCE", attempt: 2, maxAttempts: 2, terminal: true,
+    }));
   });
 
 });
@@ -1005,6 +1626,14 @@ function successfulTool(name: string, details: unknown): AgentTool {
     parameters: { type: "object" } as never,
     execute: vi.fn(async () => ({ content: [{ type: "text" as const, text: "ok" }], details })),
   };
+}
+
+function uniqueLongformText(length: number): string {
+  const chunks: string[] = [];
+  for (let index = 0; Array.from(chunks.join("")).length < length; index += 1) {
+    chunks.push(`第${index}幕潮声推动人物作出不同选择，并改变港口秩序。`);
+  }
+  return Array.from(chunks.join("")).slice(0, length).join("");
 }
 
 function selectedInquiryTool(status: "selected" | "creator_choice_required" = "selected"): AgentTool {
@@ -1195,7 +1824,13 @@ function growthRetrieveArgs() {
   };
 }
 
-function createGrowthMachine(focus: "world" | "story" | "oc", operationalTools: AgentTool[], kind: "expand" | "revision" = "expand") {
+function createGrowthMachine(
+  focus: "world" | "story" | "oc",
+  operationalTools: AgentTool[],
+  kind: "expand" | "revision" = "expand",
+  revisionDiagnostics?: Parameters<typeof createStewardExecutionStateMachine>[0]["revisionDiagnostics"],
+  workerDiagnostics?: Parameters<typeof createStewardExecutionStateMachine>[0]["workerDiagnostics"],
+) {
   const growthTools = operationalTools.some((candidate) => candidate.name === "submit_growth_inquiry")
     ? operationalTools
     : [...operationalTools, selectedInquiryTool()];
@@ -1209,11 +1844,16 @@ function createGrowthMachine(focus: "world" | "story" | "oc", operationalTools: 
       domainRootResourceIds: { world: "world-1", oc: "oc-root", story: "story-root" }, greenfieldCreateAuthorized: false, priorInquiries: [], closureProfile: null, closureRepair: null,
     },
     operationalTools: growthTools,
+    revisionDiagnostics,
+    workerDiagnostics,
     resultCapture: createRoleOutputTool("steward"),
   });
 }
 
-function createClosureMachine(operationalTools: AgentTool[]) {
+function createClosureMachine(
+  operationalTools: AgentTool[],
+  workerDiagnostics?: { recordFailure: (input: any) => Promise<string> },
+) {
   return createStewardExecutionStateMachine({
     mode: "free",
     userInput: "Evaluate the pinned Closure facets.",
@@ -1232,6 +1872,7 @@ function createClosureMachine(operationalTools: AgentTool[]) {
       closureRepair: null,
     },
     operationalTools,
+    workerDiagnostics,
     resultCapture: createRoleOutputTool("steward"),
   });
 }

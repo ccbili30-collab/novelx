@@ -11,7 +11,7 @@
 | 修改故事生成 | `growthStoryBrief.ts`、`growthStoryFragment.ts` | Story Fragment/Brief 定向测试 |
 | 修改 OC 生成 | `growthOcFragment.ts` | `creativeRelationPolicy.ts`、OC Fragment 定向测试 |
 | 修改证据化自询 | `growthInquiryBrief.ts` | pinned Receipt 与 Inquiry 定向测试 |
-| 修改用户规则修订 | `phases/revision/growthRevisionPhase.ts` | `growthImpactBrief.ts`、`growthRevisionFragment.ts`、Revision 定向测试 |
+| 修改用户规则修订 | `phases/revision/growthRevisionPhase.ts` | `growthRevisionReferences.ts`、`growthImpactBrief.ts`、`growthRevisionFragment.ts`、Revision 定向测试 |
 | 修改 OC 个人长篇 | `phases/longform/growthLongformPhase.ts` | `growthLongformOutline.ts`、`growthLongformSection.ts`、Longform 定向测试 |
 | 修改 Closure/Repair Worker 行为 | `phases/closure/growthClosurePhase.ts` | Closure 阶段测试、顶层原子提交门禁 |
 | 修改默认插图规划 | `growthIllustrationPlan.ts` | Image Job/Asset 与来源绑定测试 |
@@ -20,6 +20,8 @@
 
 - 模型只提供创作内容；资源 ID、父子关系、依赖、来源绑定和提交结构由编译器确定。
 - 每个 Growth Cycle 使用固定 checkpoint、规则修订和 Retrieval Receipt（检索回执）。
+- Revision 模型只能使用从 Main-pinned authority 确定性投影的 `@resourceN` / `@documentN` / `@assertionN` / `@relationN` 引用，以及本轮声明的 `localId`；不得把 evidence/resource/document/relation ID 当 Fragment 引用。
+- Revision `impact` 只声明目标决定；新增种类由实际 addition arrays 确定，禁止维护第二份 `impact.additions` 真相。
 - 阶段只能使用 `growthPhaseRegistry.ts` 声明的工具序列；顶层状态机只执行门禁和终态规则。
 - 所有正式写入通过一个原子 Change Set；模型不能直接修改 Canon。
 - `story` 与 `volume` 都是叙事容器，可作为 `uses_world` / `uses_oc` 的源；`chapter` 不可。唯一领域权威是 `src/domain/workspace/creativeRelationPolicy.ts`。
@@ -31,7 +33,7 @@
 - `GrowthPhaseHandler` 已负责阶段匹配与工具计划；Longform、Closure/Repair 的 Worker 编译/展示已迁入阶段目录。顶层状态机仍保留跨阶段的运行时状态、工具分派和原子副作用门禁，尚未把 world/story/OC 迁入同一接口。
 - Longform 与 Closure/Repair 的 Main authority 已迁入 `src/main/growth/phases/`；`growthRunLifecycle.ts` 仍保留 Receipt 投影、Closure 结果持久化、提交与恢复，这是后续维护的主要剩余体积。
 - 用户 Cycle 间指导与 Revision 的确定性链已接通：下一安全 Cycle 重新检索、提交证据化影响简报，并以一个 Change Set 修改授权对象。尚未运行当前实现的真实 Provider Live，不得称交互式 Growth 已闭环。
-- Longform 的确定性编译、身份、pinned progress 与 Main 自动 `outline → section → recheck` 协调已经冻结；用户在章节运行中追加的新规则会在下一 Cycle 边界先执行 Revision，再继续后续章节。尚未运行当前实现的真实 Provider Live，不得称万字内容质量或完整交互演示已验收。
+- Longform 的确定性编译、身份、pinned progress 与 Main 自动 `outline → section → recheck` 协调已经冻结；用户在章节运行中追加的新规则会在下一 Cycle 边界先执行 Revision，再继续后续章节。闭环最低目标统一为 7,000 Unicode code points；尚未运行当前实现的完整真实 Provider Live，不得称长篇内容质量或完整交互演示已验收。
 
 ## 定向验收
 

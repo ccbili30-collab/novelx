@@ -10,6 +10,7 @@ import {
   compileGrowthLongformSectionChangeSet,
   growthLongformSectionParameters,
 } from "../../src/agent-worker/growth/growthLongformSection";
+import { GROWTH_LONGFORM_MIN_CODE_POINTS } from "../../src/shared/growthLongformPolicy";
 
 const evidence = ["world-evidence", "oc-evidence"];
 const validOutlineInput = {
@@ -29,7 +30,8 @@ describe("Growth longform authoring", () => {
       outlineId: "outline-1", checkpointId: "checkpoint-1", receiptId: "receipt-1",
       sections: [{ localId: "origin" }, { localId: "reckoning" }],
     });
-    expect(outline.sections.reduce((total, item) => total + item.estimatedCodePoints.min, 0)).toBe(10_000);
+    expect(outline.sections.reduce((total, item) => total + item.estimatedCodePoints.min, 0))
+      .toBeGreaterThanOrEqual(GROWTH_LONGFORM_MIN_CODE_POINTS);
   });
 
   it("compiles the outline into one independent personal-story volume with world/OC bindings", () => {
@@ -79,7 +81,7 @@ describe("Growth longform authoring", () => {
     expectCode({ ...validOutlineInput, sections: [section("origin", 5_000, 5_500), section("origin", 5_000, 5_500)] }, "GROWTH_LONGFORM_OUTLINE_DUPLICATE_SECTION");
     expectCode({ ...validOutlineInput, sections: [{ ...section("origin", 5_000, 5_500), evidenceIds: ["world-evidence", "world-evidence"] }, section("reckoning", 5_000, 5_500)] }, "GROWTH_LONGFORM_OUTLINE_DUPLICATE_VALUE");
     expectCode({ ...validOutlineInput, sections: [section("origin", 5_500, 5_000), section("reckoning", 5_000, 5_500)] }, "GROWTH_LONGFORM_OUTLINE_RANGE_INVALID");
-    expectCode({ ...validOutlineInput, sections: [section("origin", 4_000, 5_000), section("reckoning", 4_000, 5_000)] }, "GROWTH_LONGFORM_OUTLINE_TARGET_TOO_SHORT");
+    expectCode({ ...validOutlineInput, sections: [section("origin", 3_000, 5_000), section("reckoning", 3_999, 5_000)] }, "GROWTH_LONGFORM_OUTLINE_TARGET_TOO_SHORT");
     expect(() => compileOutline({ ...validOutlineInput, sections: [{ ...section("origin", 5_000, 5_500), evidenceIds: ["foreign"] }, section("reckoning", 5_000, 5_500)] }))
       .toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_OUTLINE_EVIDENCE_MISMATCH" }));
   });
@@ -133,7 +135,11 @@ describe("Growth longform authoring", () => {
     expect(() => compileGrowthLongformSection({ outlineSectionId: "origin", candidateText: ` ${candidateText}`, evidenceIds: evidence }, authority(outline)))
       .toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_SECTION_PADDING_REJECTED" }));
     expect(() => compileGrowthLongformSection({ outlineSectionId: "origin", candidateText: uniqueText(4_999), evidenceIds: evidence }, authority(outline)))
-      .toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_SECTION_LENGTH_INVALID" }));
+      .toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_SECTION_TOO_SHORT" }));
+    expect(compileGrowthLongformSection({ outlineSectionId: "origin", candidateText: uniqueText(5_501), evidenceIds: evidence }, authority(outline)))
+      .toMatchObject({ codePoints: 5_501 });
+    expect(() => compileGrowthLongformSection({ outlineSectionId: "origin", candidateText: uniqueText(20_001), evidenceIds: evidence }, authority(outline)))
+      .toThrow(expect.objectContaining({ code: "GROWTH_LONGFORM_SECTION_INVALID" }));
     const compiled = compileGrowthLongformSection({ outlineSectionId: "origin", candidateText, evidenceIds: evidence }, authority(outline));
     expect(() => compileGrowthLongformSection({ outlineSectionId: "origin", candidateText, evidenceIds: evidence }, {
       ...authority(outline), completedSectionIds: ["origin"], priorContentSha256: [compiled.contentSha256],

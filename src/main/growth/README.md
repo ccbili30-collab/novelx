@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 启动/恢复一个 Cycle | `../growthRunLifecycle.ts` | `GrowthRepository`、`AgentProcessSupervisor` |
 | 自动串行多个 Cycle | `../growthCoordinator.ts` | Goal/Cycle 持久状态与 Coordinator 测试 |
-| 修改规则修订 authority | `phases/revision/growthRevisionAuthorityResolver.ts`、`growthRevisionProposalPolicy.ts` | pinned Receipt、Revision bridge/Coordinator 测试 |
+| 修改规则修订 authority | `phases/revision/growthRevisionAuthorityResolver.ts`、`growthRevisionProposalPolicy.ts` | `growthRevisionProposalDiagnostics.ts`、pinned Receipt、Revision bridge/Coordinator 测试 |
 | 修改 Longform 自动调度 | `phases/longform/growthLongformCoordinator.ts` | `growthLongformProgress.ts`、Coordinator 测试 |
 | 修改 Longform authority/提交边界 | `phases/longform/growthLongformAuthorityResolver.ts`、`growthLongformProposalPolicy.ts` | pinned Receipt、Longform bridge/Gateway 测试 |
 | 修改规则修订后的 Closure 衔接 | `phases/revision/growthRevisionClosureSync.ts` | Rule Revision、Closure revision、Coordinator 测试 |
@@ -22,8 +22,10 @@
 
 - Main 只从持久化 Goal、Cycle、checkpoint、Receipt 和 Domain 投影派生 authority；Renderer 和模型不能提供这些字段。
 - authority resolver 只读、失败关闭，不启动 Worker、不写 Cycle、不提交 Change Set（变更集）。
+- Revision proposal policy 的每个拒绝谓词由 `growthRevisionProposalDiagnostics.ts` 提供模块本地安全码；Worker 仍只收到宽泛失败，持久诊断保留精确 policy 原因且不含 proposal 内容或身份。
 - `growthRunLifecycle.ts` 保留 Run 绑定、Receipt、外部副作用门禁、恢复和终态；阶段 resolver 不拥有这些职责。
 - 每个 Cycle 至多绑定一个 Run 和一个原子 Change Set；未知结果进入 reconciliation，不得重试制造第二份副作用。
+- `creator_choice_required` 持久化后由 Main 权威收口当前 Run 为 blocked；不依赖模型再提交最终结果。用户回答必须进入新的 Cycle/Run。
 - 修改 resolver 不应要求修改共享协议、数据库迁移或 Renderer；若需要，说明阶段边界已扩大，必须停止并重新审查。
 
 ## 定向验收

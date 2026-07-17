@@ -5,8 +5,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { AgentAuditRepository } from "../../src/domain/audit/agentAuditRepository";
+import { SafeDiagnosticRepository } from "../../src/domain/audit/safeDiagnosticRepository";
 import { ChangeSetRepository } from "../../src/domain/changeSet/changeSetRepository";
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
+import {
+  GrowthLongformProgressResolver,
+  type GrowthLongformProgressBlockedReason,
+} from "../../src/domain/growth/growthLongformProgress";
 import { AssertionRepository, type SourcedAssertionRecord } from "../../src/domain/graph/assertionRepository";
 import { CreativeRelationRepository } from "../../src/domain/workspace/creativeRelationRepository";
 import { ImageAssetRepository } from "../../src/domain/asset/imageAssetRepository";
@@ -19,15 +24,25 @@ import { ApplicationRegistryRepository } from "../../src/domain/application/appl
 import { PROVIDER_STORE_FILE_NAME } from "../../src/main/providerSecureStore";
 import { IMAGE_PROVIDER_STORE_FILE_NAME } from "../../src/main/imageProviderSecureStore";
 import type { AgentRunEvent, DesktopApi, GrowthLiveEvent } from "../../src/shared/ipcContract";
+import { GROWTH_LONGFORM_MIN_CODE_POINTS } from "../../src/shared/growthLongformPolicy";
 import { closeTestElectronApp } from "./support/electronCleanup";
-import { watchGrowthTerminal } from "./support/growthWatcher";
+import {
+  projectSafeGrowthAgentEvent,
+  shouldValidateCompletedGrowthShowcase,
+  watchGrowthTerminal,
+} from "./support/growthWatcher";
+import { exportLatestGrowthWorldPackage } from "./support/growthWorldPackageExport";
+import {
+  projectGrowthClosureSafeEvaluation,
+  type GrowthClosureSafeEvaluation,
+} from "./support/growthClosureSafeEvidence";
 
 const require = createRequire(import.meta.url);
 const electronPath = require("electron") as string;
-const guidanceRule = "新增强制规则：所有魔法都必须支付“月痕记忆税”，每次施法会永久失去一段珍贵记忆。后续故事与主要角色必须明确使用“月痕记忆税”这个名称并体现其代价。";
-const guidancePhrase = "月痕记忆税";
-const permanentMarkerPattern = /永久|永远|不可逆|无法恢复|无法找回|不能恢复|再也无法|不再记得/;
-const memoryCostMarkerPattern = /失去|遗忘|抹去|抹除|消失|代价|支付|献出|舍弃|牺牲|夺走|剥离|抽走/;
+const guidanceRule = "日式指轻小说叙事风格，不出现真实日本元素，世界仍为原创西幻。";
+const lightNovelMarkerPattern = /轻小说/;
+const originalFantasyMarkerPattern = /原创西幻|西幻|原创.*奇幻|奇幻.*原创/;
+const forbiddenRealJapaneseMarkerPattern = /东京|京都|大阪|江户|德川|明治|日本国|幕府/;
 const configuredProviderStorePath = process.env.NOVAX_REAL_E2E_PROVIDER_STORE?.trim()
   || (process.env.APPDATA ? path.join(process.env.APPDATA, "novelx-desktop", PROVIDER_STORE_FILE_NAME) : "");
 const configuredImageProviderStorePath = process.env.NOVAX_REAL_E2E_IMAGE_PROVIDER_STORE?.trim()
@@ -35,16 +50,18 @@ const configuredImageProviderStorePath = process.env.NOVAX_REAL_E2E_IMAGE_PROVID
 
 test.skip(!configuredProviderStorePath || !configuredImageProviderStorePath || !fs.existsSync(configuredProviderStorePath) || !fs.existsSync(configuredImageProviderStorePath), "Machine-local encrypted gpt-5.4 and gpt-image-2 Provider stores are required.");
 
-test("runs real gpt-5.4 Growth with cycle-one guidance through persisted boundaries and later retrieval", async () => {
-  test.setTimeout(990_000);
+test("runs real gpt-5.4 interactive Growth through Closure, Longform, illustrations, reopen and later retrieval", async () => {
+  test.setTimeout(4_800_000);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-real-interactive-growth-"));
   const userDataPath = path.join(root, "user-data");
   const workspacePath = path.join(root, "workspace");
   const evidenceDirectory = path.join(process.cwd(), "notes", "evidence", "novax-desktop-growth");
+  const latestPackageDirectory = path.join(process.cwd(), "artifacts", "latest-growth-world-package");
   let app: ElectronApplication | null = null;
+  let exportGoalId: string | null = null;
   let providerStarted = false;
   let evidence: SafeEvidence = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     provider: { providerId: null, modelId: null }, imageProvider: { providerId: null, modelId: null },
     providerStarted: false,
     outcome: "not_started",
@@ -86,9 +103,10 @@ test("runs real gpt-5.4 Growth with cycle-one guidance through persisted boundar
 
     providerStarted = true;
     evidence.providerStarted = true;
-    const first = await startGrowthAndWatch(page, 900_000, 420_000, (visual) => {
+    const first = await startGrowthAndWatch(page, 2_100_000, 420_000, (visual) => {
       evidence.visual = visual;
     });
+    exportGoalId = first.goalId;
     evidence.guidance = first.guidance;
     evidence.preTermination = first.preTermination;
     if (first.termination) {
@@ -106,6 +124,7 @@ test("runs real gpt-5.4 Growth with cycle-one guidance through persisted boundar
     evidence.cycles = first.snapshot.cycles.map((cycle) => ({ sequence: cycle.sequence, status: cycle.status }));
     if (first.snapshot.coordinatorStatus !== "completed") throw new Error("GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED");
     assertPublicGrowth(first.snapshot, first.growthEvents, first.agentEvents);
+    evidence.illustrations = (await waitForIllustrationClosureAndCreateExtra(page, first)).safe;
     evidence.visual = first.visual;
     evidence.guidance = {
       ...evidence.guidance!,
@@ -120,6 +139,9 @@ test("runs real gpt-5.4 Growth with cycle-one guidance through persisted boundar
     evidence.cycles = persisted.cycles;
     evidence.counts = persisted.counts;
     evidence.worldMap = persisted.worldMap.safe;
+    evidence.closure = persisted.closure.safe;
+    evidence.longform = persisted.longform.safe;
+    evidence.illustrations = persisted.illustrations.safe;
     evidence.guidance = { ...evidence.guidance!, ...persisted.guidance };
 
     app = await launch(userDataPath, workspacePath);
@@ -159,21 +181,35 @@ test("runs real gpt-5.4 Growth with cycle-one guidance through persisted boundar
   } finally {
     if (app) await closeTestElectronApp(app);
     if (evidence.outcome === "completed") writeEvidence(evidenceDirectory, evidence);
+    if (providerStarted) {
+      exportLatestGrowthWorldPackage({
+        workspacePath,
+        outputDirectory: latestPackageDirectory,
+        failedImagePlaceholderPath: path.join(process.cwd(), "src", "renderer", "src", "assets", "image-generation-failed.jpg"),
+        outcome: evidence.outcome === "completed" ? "completed" : "incomplete",
+        goalId: exportGoalId,
+        provider: evidence.provider,
+        imageProvider: evidence.imageProvider,
+      });
+    }
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
 interface SafeEvidence {
-  schemaVersion: 2;
+  schemaVersion: 3;
   provider: { providerId: string | null; modelId: string | null };
   imageProvider: { providerId: string | null; modelId: string | null };
   providerStarted: boolean;
   outcome: "not_started" | "blocked_before_provider_start" | "failed_after_provider_start" | "completed";
   failureCode?: string;
-  cycles: Array<{ sequence: number; status: string; ruleRevision?: number; hasRun?: boolean; hasReceipt?: boolean; hasChangeSet?: boolean; hasOutputCheckpoint?: boolean }>;
+  cycles: Array<{ sequence: number; status: string; ruleRevision?: number; intentKind?: string; hasRun?: boolean; hasReceipt?: boolean; hasChangeSet?: boolean; hasOutputCheckpoint?: boolean }>;
   research: { retrieveSucceeded: boolean; noMutationTools: boolean; ruleRevisionUnchanged: boolean; mutationCountsUnchanged: boolean } | null;
   counts: { resources: number; documents: number; assertions: number; relations: number } | null;
   worldMap?: { providerId: string; modelId: string; sourceResourceCount: number; sourceVersionCount: number; mimeType: string; width: number; height: number; byteLength: number; sha256: string };
+  closure?: { profileCount: number; evaluatedCycleCount: number; repairCycleCount: number; finalDecision: "accepted" };
+  longform?: { focusOcPresent: boolean; sectionCount: number; totalCodePoints: number; complete: boolean };
+  illustrations?: { defaultRequestCount: number; defaultReadyCount: number; customRequestCount: number; customReadyCount: number };
   leakScan: "not_run" | "passed";
   preTermination?: SafePreTermination;
   termination?: SafeTermination;
@@ -189,23 +225,27 @@ interface SafeGuidanceEvidence {
   persistedRevision?: number;
   currentCycleRevisionAtSave?: number;
   nextCycleSequence?: number;
-  nextCycleStoryBoundary?: boolean;
+  nextCycleRevisionBoundary?: boolean;
   pendingBoundaryVisible?: boolean;
   notShownAsAppliedBeforeBoundary?: boolean;
   screenshotSha256?: string;
   revisionNumbers?: number[];
   cycleRuleRevisions?: number[];
   revision2PersistedNoLaterThanCycle2?: boolean;
-  storyContainsExactPhrase?: boolean;
-  storyShowsPermanentMemoryCost?: boolean;
-  characterProfileContainsExactPhrase?: boolean;
-  characterProfileShowsPermanentMemoryCost?: boolean;
+  revisionCycleCommitted?: boolean;
+  worldReflectsRule?: boolean;
+  storyReflectsRule?: boolean;
+  characterProfileReflectsRule?: boolean;
+  noRealJapaneseElements?: boolean;
   showcaseStoryNodePresent?: boolean;
   showcaseOcNodePresent?: boolean;
   showcaseRelationsPresent?: boolean;
   reopenedRevision2Present?: boolean;
-  reopenedStoryContentPresent?: boolean;
-  reopenedCharacterContentPresent?: boolean;
+  reopenedStoryRulePresent?: boolean;
+  reopenedCharacterRulePresent?: boolean;
+  creatorChoiceAnswered?: boolean;
+  creatorAnswerRevision?: number;
+  creatorAnswerSuccessorSequence?: number;
 }
 
 interface SafeVisualEvidence {
@@ -248,14 +288,10 @@ interface SafeScreenshotEvidence {
   sha256: string;
 }
 
-function hasGuidanceMemoryCost(content: string): boolean {
-  let index = content.indexOf(guidancePhrase);
-  while (index >= 0) {
-    const context = content.slice(Math.max(0, index - 300), index + guidancePhrase.length + 300);
-    if (context.includes("记忆") && permanentMarkerPattern.test(context) && memoryCostMarkerPattern.test(context)) return true;
-    index = content.indexOf(guidancePhrase, index + guidancePhrase.length);
-  }
-  return false;
+function hasAppliedLightNovelFantasyRule(content: string): boolean {
+  return lightNovelMarkerPattern.test(content)
+    && originalFantasyMarkerPattern.test(content)
+    && !forbiddenRealJapaneseMarkerPattern.test(content);
 }
 
 class AutoShowcaseDiagnosticError extends Error {
@@ -288,7 +324,7 @@ interface SafeInitialGreenfieldEligibility {
 interface SafePreTermination {
   cycles: Array<{ sequence: number; status: string; hasRun: boolean }>;
   growthEvents: Array<{ sequence: number; phase: string; durableState: string }>;
-  agentEvents: Array<{ type: string; phase?: string; code?: string; outcome?: string; changeSetState?: string }>;
+  agentEvents: Array<{ type: string; phase?: string; code?: string; outcome?: string; changeSetState?: string; escalationCodes?: string[] }>;
 }
 
 interface SafeTermination {
@@ -309,9 +345,11 @@ interface SafeSqliteEvidence {
     hasChangeSet: boolean;
     hasInputCheckpoint: boolean;
     hasOutputCheckpoint: boolean;
+    receiptLinkCount: number | null;
     audit: null | {
       terminalCount: number;
       terminalErrorCodes: string[];
+      toolOutcomes: Array<{ toolName: string; status: string }>;
       retrieveSucceeded: boolean;
       proposeSucceeded: boolean;
       imageSucceeded: boolean;
@@ -321,6 +359,19 @@ interface SafeSqliteEvidence {
       actualModelIds: string[];
     };
   }>;
+  diagnostics: Array<{
+    cycleSequence: number;
+    operationKind: string;
+    owner: string;
+    boundary: string;
+    code: string;
+    toolName: string | null;
+    attempt: number | null;
+    maxAttempts: number | null;
+    sideEffectState: string;
+    disposition: string;
+    retryability: string;
+  }>;
   counts: { resources: number; documents: number; assertions: number; relations: number };
   changeSets: {
     total: number;
@@ -329,6 +380,53 @@ interface SafeSqliteEvidence {
     checkpointCount: number;
     checkpointDeltaFromInitial: number;
   };
+  closure: {
+    profileCount: number;
+    decisions: string[];
+    evaluations: GrowthClosureSafeEvaluation[];
+  };
+  longform: {
+    status: "unavailable" | "blocked" | "ready";
+    reason: GrowthLongformProgressBlockedReason | null;
+    complete: boolean;
+    totalCodePoints: number;
+    sectionCount: number;
+  };
+  illustrations: {
+    requests: Array<{ coverageMode: string; status: string; itemCount: number; readyCount: number }>;
+    itemStatuses: Array<{ status: string; count: number }>;
+    jobs: Array<{ purpose: string; status: string; requestSent: boolean; errorCode: string | null }>;
+    imageJobCount: number;
+    imageAssetCount: number;
+  };
+}
+
+const SAFE_IMAGE_JOB_ERROR_CODES = new Set([
+  "IMAGE_PROVIDER_CONNECTION_FAILED",
+  "IMAGE_PROVIDER_GENERATION_FAILED",
+  "IMAGE_PROVIDER_PROTOCOL_FAILED",
+  "IMAGE_PROVIDER_RUNTIME_FAILED",
+  "IMAGE_PROVIDER_OUTCOME_UNKNOWN",
+  "IMAGE_ASSET_COMMIT_FAILED",
+  "IMAGE_JOB_CANCELLED",
+]);
+
+function safeImageJobErrorCode(value: unknown): string | null {
+  return typeof value === "string" && SAFE_IMAGE_JOB_ERROR_CODES.has(value)
+    ? value
+    : value === null || value === undefined
+      ? null
+      : "IMAGE_JOB_ERROR_OTHER";
+}
+
+function safeImageJobPurpose(value: unknown): string {
+  return value === "world_map" || value === "character_portrait" || value === "scene" ? value : "unknown";
+}
+
+function safeImageJobStatus(value: unknown): string {
+  return value === "queued" || value === "running" || value === "succeeded" || value === "failed" || value === "reconciliation_required"
+    ? value
+    : "unknown";
 }
 
 function initializeProject(userDataPath: string, workspacePath: string): void {
@@ -545,6 +643,7 @@ async function startGrowthAndWatch(
   let agentStageScreenshot: SafeScreenshotEvidence | undefined;
   let latestVisual = await readGrowthVisual(page, bufferKey);
   const guidance = await saveGuidanceDuringCycleOne(page, started);
+  let creatorChoiceAnswered = false;
 
   const watched = await watchGrowthTerminal({
     overallTimeoutMs,
@@ -575,6 +674,23 @@ async function startGrowthAndWatch(
         .map((event) => event.runId));
       return snapshot.cycles.every((cycle) => cycle.runId === null || terminalRunIds.has(cycle.runId));
     },
+    resumeAtBoundary: async (snapshot, events) => {
+      if (creatorChoiceAnswered || snapshot.coordinatorStatus !== "blocked") return false;
+      const current = snapshot.cycles.at(-1);
+      if (!current || current.status !== "blocked") return false;
+      const choice = [...events.growthEvents].reverse().find((item) => item.event.cycleId === current.id
+        && item.event.phase === "creator_choice_required");
+      if (!choice) return false;
+      const terminalObserved = current.runId === null || events.agentEvents.some((event) => event.runId === current.runId
+        && (event.type === "run.completed" || event.type === "run.failed"));
+      if (!terminalObserved) return false;
+      const answered = await answerCreatorChoiceViaUi(page, started, snapshot.currentRuleRevision ?? 1);
+      creatorChoiceAnswered = true;
+      guidance.creatorChoiceAnswered = true;
+      guidance.creatorAnswerRevision = answered.persistedRevision;
+      guidance.creatorAnswerSuccessorSequence = answered.successorSequence;
+      return true;
+    },
     release: () => page.evaluate((receivedBufferKey) => {
       const state = globalThis as typeof globalThis & { [key: string]: unknown };
       const buffer = state[receivedBufferKey] as { releaseGrowth(): void; releaseAgent(): void; released: boolean } | undefined;
@@ -586,7 +702,7 @@ async function startGrowthAndWatch(
     }, bufferKey),
   });
   const { growthEvents, agentEvents } = watched.events;
-  if (!watched.termination) {
+  if (!watched.termination && shouldValidateCompletedGrowthShowcase(watched.snapshot)) {
     const autoShowcaseObserved = await waitForShowcase(page, bufferKey, 30_000, (visual) => visual.autoShowcaseObserved && visual.route === "showcase");
     latestVisual = await readGrowthVisual(page, bufferKey);
     onVisualSnapshot?.(latestVisual);
@@ -651,6 +767,29 @@ async function startGrowthAndWatch(
   };
 }
 
+async function answerCreatorChoiceViaUi(
+  page: Page,
+  started: { projectId: string; sessionId: string; goalId: string },
+  expectedRevision: number,
+): Promise<{ persistedRevision: number; successorSequence: number }> {
+  const decision = "保留既有正典与已经提交的因果；采用最小改动原则解决当前取舍，并只修改确实受影响的世界、故事或角色节点。";
+  const editor = page.getByRole("textbox", { name: "追加世界规则或指导" });
+  const save = page.getByRole("button", { name: "保存规则修订" });
+  await expect(editor).toBeEnabled({ timeout: 15_000 });
+  await editor.fill(decision);
+  await expect(save).toBeEnabled({ timeout: 5_000 });
+  await save.click();
+  await expect(page.getByText(new RegExp(`已保存为规则修订 #${expectedRevision + 1}`))).toBeVisible({ timeout: 30_000 });
+  const snapshot = await page.evaluate(async (input) => {
+    const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
+    return desktop.growth.get(input);
+  }, started);
+  if (snapshot.currentRuleRevision !== expectedRevision + 1 || snapshot.coordinatorStatus !== "running") {
+    throw new Error("GROWTH_CREATOR_CHOICE_RESUME_INVALID");
+  }
+  return { persistedRevision: snapshot.currentRuleRevision, successorSequence: snapshot.goal.currentCycleSequence };
+}
+
 async function saveGuidanceDuringCycleOne(
   page: Page,
   started: { projectId: string; sessionId: string; goalId: string },
@@ -682,7 +821,7 @@ async function saveGuidanceDuringCycleOne(
   if (!active) throw new Error("GROWTH_GUIDANCE_CYCLE_ONE_WINDOW_MISSED");
 
   const editor = page.getByRole("textbox", { name: "追加世界规则或指导" });
-  const save = page.getByRole("button", { name: "保存到下一轮" });
+  const save = page.getByRole("button", { name: "保存规则修订" });
   try {
     await expect(editor).toBeEnabled({ timeout: 8_000 });
     await expect(page.getByText(/已保存为规则修订/)).toHaveCount(0);
@@ -693,7 +832,7 @@ async function saveGuidanceDuringCycleOne(
     throw Object.assign(new Error("GROWTH_GUIDANCE_CYCLE_ONE_WINDOW_MISSED"), { cause });
   }
 
-  const acknowledgement = page.getByText("已保存为规则修订 #2，将在第 2 轮（故事）开始前生效", { exact: true });
+  const acknowledgement = page.getByText(/已保存为规则修订 #2，等待安全修订轮；第 2 轮仅为候选边界，不承诺一定执行。预计范围：/);
   const acknowledgementDeadline = Date.now() + 15_000;
   while (Date.now() < acknowledgementDeadline && await acknowledgement.count() === 0) {
     if (await page.getByRole("alert").count() > 0) throw new Error("GROWTH_GUIDANCE_REVISION_CONFLICT");
@@ -702,12 +841,12 @@ async function saveGuidanceDuringCycleOne(
   if (await acknowledgement.count() !== 1) throw new Error("GROWTH_GUIDANCE_ACK_TIMEOUT");
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.locator(".growth-guidance-card")).toContainText("规则修订 #2");
-  await expect(page.locator(".growth-guidance-card")).toContainText("待下一边界");
-  await expect(page.locator(".growth-guidance-card")).toContainText("第 2 轮（故事）");
+  await expect(page.locator(".growth-guidance-card")).toContainText("已保存，等待安全修订轮");
+  await expect(page.locator(".growth-guidance-card")).toContainText("候选边界为第 2 轮");
   const revisions = page.getByLabel("Growth 规则修订");
   await expect(revisions).toContainText("当前轮使用 #1");
   await expect(revisions).toContainText("最新已保存 #2");
-  await expect(revisions).toContainText("待下一轮生效 · 第 2 轮");
+  await expect(revisions).toContainText("已保存，等待安全修订轮 · 候选第 2 轮");
   await expect(revisions).not.toContainText("当前无待生效规则");
 
   const boundary = await page.evaluate(async (input) => {
@@ -733,11 +872,102 @@ async function saveGuidanceDuringCycleOne(
     persistedRevision: 2,
     currentCycleRevisionAtSave: 1,
     nextCycleSequence: 2,
-    nextCycleStoryBoundary: true,
+    nextCycleRevisionBoundary: true,
     pendingBoundaryVisible: true,
     notShownAsAppliedBeforeBoundary: true,
     screenshotSha256: screenshot.sha256,
   };
+}
+
+async function waitForIllustrationClosureAndCreateExtra(
+  page: Page,
+  started: { projectId: string; sessionId: string; goalId: string },
+): Promise<{ safe: NonNullable<SafeEvidence["illustrations"]> }> {
+  const inspect = () => page.evaluate(async (input) => {
+    const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
+    return desktop.growth.inspect(input);
+  }, started);
+  const defaultDeadline = Date.now() + 1_800_000;
+  let presentation = await inspect();
+  while (Date.now() < defaultDeadline) {
+    const defaults = presentation.illustrationRequests.filter((request) => request.coverageMode === "default");
+    if (defaults.some((request) => ["failed", "cancelled", "stale", "reconciliation_required"].includes(request.status))) {
+      throw new Error("DEFAULT_ILLUSTRATIONS_TERMINAL_FAILURE");
+    }
+    if (defaults.length === 1 && defaults[0]!.status === "completed"
+      && defaults[0]!.itemCount > 0 && defaults[0]!.readyCount === defaults[0]!.itemCount
+      && defaults[0]!.items.every((item) => item.status === "ready" && item.imageJobId && item.assetId && item.thumbnailUrl)) {
+      break;
+    }
+    await page.waitForTimeout(1_000);
+    presentation = await inspect();
+  }
+  const defaults = presentation.illustrationRequests.filter((request) => request.coverageMode === "default");
+  if (defaults.length !== 1 || defaults[0]!.status !== "completed"
+    || defaults[0]!.itemCount === 0 || defaults[0]!.readyCount !== defaults[0]!.itemCount) {
+    throw new Error("DEFAULT_ILLUSTRATIONS_TIMEOUT");
+  }
+  const acceptedClosures = presentation.closures.filter((closure) => (
+    closure.contentState === "closed" && closure.visualState === "ready" && closure.checkerDecision === "accepted"
+  ));
+  expect(acceptedClosures.length).toBeGreaterThanOrEqual(1);
+  expect(presentation.longform).toMatchObject({ status: "ready", complete: true });
+  if (presentation.longform.status !== "ready" || !presentation.longform.complete
+    || presentation.longform.totalCodePoints < GROWTH_LONGFORM_MIN_CODE_POINTS) {
+    throw new Error("GROWTH_LONGFORM_INCOMPLETE");
+  }
+
+  const requestId = `growth-live-graph-${randomUUID()}`;
+  await page.evaluate(async ({ input, illustrationRequestId }) => {
+    const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
+    const graph = await desktop.graph.getSnapshot();
+    if (!graph.ok || graph.graph.nodes.length === 0) throw new Error("GROWTH_GRAPH_NODE_MISSING");
+    const node = graph.graph.nodes.find((candidate) => candidate.status === "current") ?? graph.graph.nodes[0]!;
+    await desktop.growth.illustrate({
+      ...input,
+      requestId: illustrationRequestId,
+      target: { kind: "graph_node", nodeId: node.id },
+      purpose: "scene",
+      title: "图谱节点补充插图",
+      compositionDescription: "仅依据该已提交图谱节点及其来源，绘制一张能帮助理解世界关系的漫画感手绘场景图。",
+      variantCount: 1,
+    });
+  }, { input: started, illustrationRequestId: requestId });
+
+  const customDeadline = Date.now() + 600_000;
+  presentation = await inspect();
+  while (Date.now() < customDeadline) {
+    const request = presentation.illustrationRequests.find((candidate) => candidate.id === requestId);
+    if (request && ["failed", "cancelled", "stale", "reconciliation_required"].includes(request.status)) {
+      throw new Error("EXTRA_ILLUSTRATION_TERMINAL_FAILURE");
+    }
+    if (request?.status === "completed" && request.itemCount === 1 && request.readyCount === 1
+      && request.items[0]?.status === "ready" && request.items[0].assetId && request.items[0].imageJobId) {
+      const customRequests = presentation.illustrationRequests.filter((candidate) => candidate.coverageMode === "custom");
+      const readyCount = defaults[0]!.readyCount + customRequests.reduce((total, candidate) => total + candidate.readyCount, 0);
+      await page.getByRole("radio", { name: "Agent 模式" }).click();
+      const gallery = page.getByRole("region", { name: "图文图鉴" });
+      await expect(gallery).toBeVisible({ timeout: 30_000 });
+      await expect(gallery.locator(".growth-illustration-gallery__items article[data-status='ready']"))
+        .toHaveCount(readyCount, { timeout: 30_000 });
+      const impact = page.locator(".growth-impact-summary");
+      await expect(impact).toBeVisible({ timeout: 30_000 });
+      await impact.locator("summary").click();
+      await expect(impact).toContainText("Checker 已接受，复检通过");
+      await expect(impact).toContainText(/1\d{4,} 字符/);
+      return {
+        safe: {
+          defaultRequestCount: defaults.length,
+          defaultReadyCount: defaults[0]!.readyCount,
+          customRequestCount: customRequests.length,
+          customReadyCount: customRequests.reduce((total, candidate) => total + candidate.readyCount, 0),
+        },
+      };
+    }
+    await page.waitForTimeout(1_000);
+    presentation = await inspect();
+  }
+  throw new Error("EXTRA_ILLUSTRATION_TIMEOUT");
 }
 
 async function readGrowthVisual(page: Page, bufferKey: string): Promise<SafeVisualEvidence> {
@@ -890,12 +1120,7 @@ function safePreTermination(
     growthEvents: growthEvents.map(({ event }) => ({
       sequence: event.sequence, phase: event.phase, durableState: event.durableState,
     })),
-    agentEvents: agentEvents.map((event) => {
-      if (event.type === "run.activity") return { type: event.type, phase: event.phase };
-      if (event.type === "run.failed") return { type: event.type, code: event.code };
-      if (event.type === "run.completed") return { type: event.type, outcome: event.outcome, changeSetState: event.changeSetState };
-      return { type: event.type };
-    }),
+    agentEvents: agentEvents.map(projectSafeGrowthAgentEvent),
   };
 }
 
@@ -932,20 +1157,32 @@ function assertPublicGrowth(
   agentEvents: AgentRunEvent[],
 ): void {
   expect(snapshot.coordinatorStatus).toBe("completed");
-  expect(snapshot.cycles).toHaveLength(3);
-  expect(snapshot.cycles.every((cycle) => cycle.status === "committed" && cycle.runId !== null)).toBe(true);
-  expect(new Set(snapshot.cycles.map((cycle) => cycle.runId)).size).toBe(3);
+  expect(snapshot.cycles.length).toBeGreaterThanOrEqual(9);
+  expect(snapshot.cycles.every((cycle) => ["committed", "evaluated"].includes(cycle.status) && cycle.runId !== null)).toBe(true);
+  expect(snapshot.cycles.filter((cycle) => cycle.status === "committed").length).toBeGreaterThanOrEqual(7);
+  expect(snapshot.cycles.filter((cycle) => cycle.status === "evaluated").length).toBeGreaterThanOrEqual(2);
+  expect(new Set(snapshot.cycles.map((cycle) => cycle.runId)).size).toBe(snapshot.cycles.length);
   const persisted = snapshot.events;
-  expect(persisted.length).toBeGreaterThanOrEqual(12);
+  expect(persisted.length).toBeGreaterThanOrEqual(snapshot.cycles.length * 4);
   expect(persisted.every((event, index) => index === 0 || event.sequence > persisted[index - 1]!.sequence)).toBe(true);
   for (const cycle of snapshot.cycles) {
     const events = persisted.filter((event) => event.cycleId === cycle.id);
-    const committedIndex = events.findIndex((event) => event.phase === "change_set_committed");
-    expect(committedIndex).toBeGreaterThanOrEqual(0);
-    expect(events.slice(0, committedIndex).some((event) => event.durableState === "committed")).toBe(false);
+    if (cycle.status === "committed") {
+      const committedIndex = events.findIndex((event) => event.phase === "change_set_committed");
+      expect(committedIndex).toBeGreaterThanOrEqual(0);
+      expect(events.slice(0, committedIndex).some((event) => event.durableState === "committed")).toBe(false);
+      expect(events.filter((event) => event.phase === "change_set_committed")).toHaveLength(1);
+    } else {
+      expect(events.filter((event) => event.phase === "cycle_evaluated")).toHaveLength(1);
+      expect(events.some((event) => event.phase === "change_set_committed")).toBe(false);
+    }
   }
   expect(growthEvents.every((event) => event.strategy === "grow_world_story_oc_closure_v4")).toBe(true);
-  expect(agentEvents.filter((event) => event.type === "run.completed").length).toBeGreaterThanOrEqual(3);
+  const terminalRunIds = new Set(agentEvents
+    .filter((event) => event.type === "run.completed" || event.type === "run.failed")
+    .map((event) => event.runId));
+  expect(snapshot.cycles.every((cycle) => terminalRunIds.has(cycle.runId!))).toBe(true);
+  expect(agentEvents.filter((event) => event.type === "run.failed")).toHaveLength(0);
   const worldRunId = snapshot.cycles[0]!.runId!;
   const mapActivities = agentEvents.filter((event): event is Extract<AgentRunEvent, { type: "run.activity" }> => event.runId === worldRunId && event.type === "run.activity")
     .map((event) => `${event.label}:${event.phase}`);
@@ -965,7 +1202,7 @@ function assertPublicGrowth(
 
 interface PersistedGrowth {
   goalId: string;
-  cycles: Array<{ sequence: number; status: string; ruleRevision: number; hasRun: boolean; hasReceipt: boolean; hasChangeSet: boolean; hasOutputCheckpoint: boolean }>;
+  cycles: Array<{ sequence: number; status: string; ruleRevision: number; intentKind: string; hasRun: boolean; hasReceipt: boolean; hasChangeSet: boolean; hasOutputCheckpoint: boolean }>;
   world: ResourceRecord;
   story: ResourceRecord;
   ocs: ResourceRecord[];
@@ -976,9 +1213,23 @@ interface PersistedGrowth {
   imageJobCount: number;
   imageAssetCount: number;
   guidance: Required<Pick<SafeGuidanceEvidence,
-    "revisionNumbers" | "cycleRuleRevisions" | "revision2PersistedNoLaterThanCycle2"
-    | "storyContainsExactPhrase" | "storyShowsPermanentMemoryCost"
-    | "characterProfileContainsExactPhrase" | "characterProfileShowsPermanentMemoryCost">>;
+    "revisionNumbers" | "cycleRuleRevisions" | "revision2PersistedNoLaterThanCycle2" | "revisionCycleCommitted"
+    | "worldReflectsRule" | "storyReflectsRule" | "characterProfileReflectsRule" | "noRealJapaneseElements">>;
+  closure: {
+    safe: NonNullable<SafeEvidence["closure"]>;
+    profileId: string;
+    revision: number;
+  };
+  longform: {
+    safe: NonNullable<SafeEvidence["longform"]>;
+    personalStoryResourceId: string;
+    sectionDocumentIds: string[];
+  };
+  illustrations: {
+    safe: NonNullable<SafeEvidence["illustrations"]>;
+    requestIds: string[];
+    assetIds: string[];
+  };
   worldMap: {
     jobId: string;
     assetId: string;
@@ -991,20 +1242,40 @@ function inspectCommittedGrowth(workspacePath: string, goalId: string): Persiste
   try {
     const growth = new GrowthRepository(workspace);
     const cycles = growth.listCycles(goalId);
-    expect(cycles).toHaveLength(3);
-    expect(cycles.every((cycle) => cycle.status === "committed" && cycle.runId && cycle.receiptId && cycle.changeSetId && cycle.outputCheckpointId)).toBe(true);
-    expect(new Set(cycles.map((cycle) => cycle.runId)).size).toBe(3);
-    expect(new Set(cycles.map((cycle) => cycle.receiptId)).size).toBe(3);
-    expect(new Set(cycles.map((cycle) => cycle.changeSetId)).size).toBe(3);
-    expect(cycles[1]!.inputCheckpointId).toBe(cycles[0]!.outputCheckpointId);
-    expect(cycles[2]!.inputCheckpointId).toBe(cycles[1]!.outputCheckpointId);
-    expect(cycles.map((cycle) => cycle.ruleRevision)).toEqual([1, 2, 2]);
+    const intents = cycles.map((cycle) => growth.getCycleIntent(cycle.id));
+    expect(cycles.length).toBeGreaterThanOrEqual(9);
+    expect(cycles.every((cycle) => ["committed", "evaluated"].includes(cycle.status) && cycle.runId && cycle.receiptId)).toBe(true);
+    expect(new Set(cycles.map((cycle) => cycle.runId)).size).toBe(cycles.length);
+    expect(new Set(cycles.map((cycle) => cycle.receiptId)).size).toBe(cycles.length);
+    const committedCycles = cycles.filter((cycle) => cycle.status === "committed");
+    const evaluatedCycles = cycles.filter((cycle) => cycle.status === "evaluated");
+    expect(committedCycles.length).toBeGreaterThanOrEqual(7);
+    expect(evaluatedCycles.length).toBeGreaterThanOrEqual(2);
+    expect(committedCycles.every((cycle) => cycle.changeSetId && cycle.outputCheckpointId)).toBe(true);
+    expect(evaluatedCycles.every((cycle) => cycle.changeSetId === null && cycle.outputCheckpointId === null)).toBe(true);
+    expect(new Set(committedCycles.map((cycle) => cycle.changeSetId)).size).toBe(committedCycles.length);
+    let checkpointId = cycles[0]!.inputCheckpointId;
+    for (const cycle of cycles) {
+      expect(cycle.inputCheckpointId).toBe(checkpointId);
+      if (cycle.status === "committed") checkpointId = cycle.outputCheckpointId!;
+    }
     const rules = growth.listRuleRevisions(goalId, { limit: 100 });
     expect(rules.map((rule) => rule.revision)).toEqual([1, 2]);
     expect(rules[1]!.ruleText).toBe(guidanceRule);
-    expect(Date.parse(rules[1]!.createdAt)).toBeLessThanOrEqual(Date.parse(cycles[1]!.createdAt));
+    expect(cycles[0]!.ruleRevision).toBe(1);
+    expect(cycles.slice(1).every((cycle) => cycle.ruleRevision === 2)).toBe(true);
     const receipts = cycles.map((cycle) => growth.getReceipt(cycle.receiptId!));
     expect(receipts.every((receipt, index) => receipt?.runId === cycles[index]!.runId && receipt.links.length >= 0)).toBe(true);
+
+    const revisionIndexes = intents.flatMap((intent, index) => intent.kind === "revision" ? [index] : []);
+    expect(revisionIndexes).toHaveLength(1);
+    const revisionIndex = revisionIndexes[0]!;
+    const revisionCycle = cycles[revisionIndex]!;
+    const revisionIntent = intents[revisionIndex]!;
+    expect(revisionCycle).toMatchObject({ status: "committed", ruleRevision: 2 });
+    expect(Date.parse(rules[1]!.createdAt)).toBeLessThanOrEqual(Date.parse(revisionCycle.createdAt));
+    if (revisionIntent.kind !== "revision") throw new Error("GROWTH_REVISION_INTENT_MISSING");
+    expect(revisionIntent.focusKinds).toContain("world");
 
     const resources = new ResourceRepository(workspace).listCurrent();
     const formal = resources.filter((resource) => resource.objectKind !== "domain_root");
@@ -1027,15 +1298,20 @@ function inspectCommittedGrowth(workspacePath: string, goalId: string): Persiste
     expect(storyDocument.content.trim().length).toBeGreaterThanOrEqual(300);
     expect(ocDocuments.every((document) => document.content.trim().length >= 100)).toBe(true);
     expect([worldDocument!, storyDocument, ...ocDocuments].reduce((total, document) => total + document.content.trim().length, 0)).toBeGreaterThanOrEqual(1_000);
-    expect(storyDocument.content).toContain(guidancePhrase);
-    expect(hasGuidanceMemoryCost(storyDocument.content)).toBe(true);
     const characterProfiles = ocs.flatMap((oc) => new CreativeDocumentRepository(workspace).listCurrent(oc.id)
       .filter((document) => document.kind === "character_profile")
       .map((document) => documents.getCurrentStableForCreativeDocument(document.id))
       .filter((document): document is DocumentVersionRecord => document !== null));
     expect(characterProfiles.length).toBeGreaterThanOrEqual(1);
-    const guidedCharacter = characterProfiles.find((document) => hasGuidanceMemoryCost(document.content));
-    expect(guidedCharacter).toBeDefined();
+    const currentCreativeVersions = formal.flatMap((resource) => new CreativeDocumentRepository(workspace).listCurrent(resource.id)
+      .map((document) => documents.getCurrentStableForCreativeDocument(document.id))
+      .filter((document): document is DocumentVersionRecord => document !== null));
+    const currentDocuments = [...new Map([worldDocument!, storyDocument, ...ocDocuments, ...currentCreativeVersions]
+      .map((document) => [document.id, document] as const)).values()];
+    const combinedCurrentContent = currentDocuments.map((document) => document.content).join("\n");
+    expect(lightNovelMarkerPattern.test(combinedCurrentContent)).toBe(true);
+    expect(originalFantasyMarkerPattern.test(combinedCurrentContent)).toBe(true);
+    expect(forbiddenRealJapaneseMarkerPattern.test(combinedCurrentContent)).toBe(false);
 
     const assertions = new AssertionRepository(workspace).listCurrentInScopes([world!.id, story!.id, ...ocs.map((oc) => oc.id)]);
     const sourced = assertions.filter((assertion) => assertion.sources.length > 0);
@@ -1048,18 +1324,76 @@ function inspectCommittedGrowth(workspacePath: string, goalId: string): Persiste
     expect(relations.some((relation) => relation.kind === "related_to" && [world!.id, story!.id, ...ocs.map((oc) => oc.id)].includes(relation.sourceResourceId) && [world!.id, story!.id, ...ocs.map((oc) => oc.id)].includes(relation.targetResourceId))).toBe(true);
 
     const changeSets = new ChangeSetRepository(workspace);
-    for (const cycle of cycles) {
-      const changeSet = changeSets.get(cycle.changeSetId!);
-      expect(changeSet?.status).toBe("committed");
-      expect(changeSets.listOutputs(cycle.changeSetId!).length).toBeGreaterThan(0);
-      assertGrowthRunAudit(new AgentAuditRepository(workspace), cycle.runId!, cycle.sequence);
+    const closureOutcomes = new Map(evaluatedCycles.map((cycle) => {
+      const outcome = growth.getClosureEvaluationOutcomeForCycle(cycle.id);
+      expect(outcome).not.toBeNull();
+      return [cycle.id, outcome!] as const;
+    }));
+    for (const [index, cycle] of cycles.entries()) {
+      const intent = intents[index]!;
+      if (cycle.status === "committed") {
+        const changeSet = changeSets.get(cycle.changeSetId!);
+        expect(changeSet?.status).toBe("committed");
+        expect(changeSets.listOutputs(cycle.changeSetId!).length).toBeGreaterThan(0);
+      }
+      assertGrowthRunAudit(
+        new AgentAuditRepository(workspace), cycle.runId!, cycle.sequence, cycle.status, intent.kind,
+        closureOutcomes.get(cycle.id)?.decision,
+      );
     }
+    const revisionOutputs = changeSets.listOutputs(revisionCycle.changeSetId!);
+    const revisionDocumentOwners = new Set(revisionOutputs
+      .filter((output) => output.kind === "document_version")
+      .flatMap((output) => documents.getVersion(output.outputId)?.resourceId ?? []));
+    const resourcesBeforeRevision = new Set(new ResourceRepository(workspace).listAtCheckpoint(revisionCycle.inputCheckpointId)
+      .filter((resource) => resource.objectKind !== "domain_root").map((resource) => resource.id));
+    const resourcesAfterRevision = new Set(new ResourceRepository(workspace).listAtCheckpoint(revisionCycle.outputCheckpointId!)
+      .filter((resource) => resource.objectKind !== "domain_root").map((resource) => resource.id));
+    expect([...resourcesBeforeRevision].every((resourceId) => resourcesAfterRevision.has(resourceId))).toBe(true);
+    expect(revisionDocumentOwners.has(world!.id)).toBe(true);
+    const postRevisionStoryCycle = cycles.find((cycle, index) => index > revisionIndex && cycle.status === "committed"
+      && intents[index]?.kind === "expand" && intents[index].focusKinds.includes("story"));
+    const postRevisionOcCycle = cycles.find((cycle, index) => index > revisionIndex && cycle.status === "committed"
+      && intents[index]?.kind === "expand" && intents[index].focusKinds.includes("oc"));
+    expect(postRevisionStoryCycle?.ruleRevision).toBe(2);
+    expect(postRevisionOcCycle?.ruleRevision).toBe(2);
+    expect(changeSets.listOutputs(postRevisionStoryCycle!.changeSetId!).some((output) => output.kind === "creative_relation_revision")).toBe(true);
+    expect(changeSets.listOutputs(postRevisionOcCycle!.changeSetId!).some((output) => output.kind === "creative_relation_revision")).toBe(true);
+
+    const closureStates = growth.listClosureStates(goalId);
+    expect(closureStates).toHaveLength(1);
+    const closureState = closureStates[0]!;
+    expect(closureState).toMatchObject({ contentState: "closed", visualState: "ready", missingFacetIds: [] });
+    const closureProfile = growth.getClosureProfile(closureState.profileId);
+    expect(closureProfile?.contractGeneration).toBe("v26");
+    if (!closureProfile || closureProfile.contractGeneration !== "v26" || !closureProfile.focusOcResourceId) {
+      throw new Error("GROWTH_CLOSURE_FOCUS_OC_MISSING");
+    }
+    const orderedOutcomes = evaluatedCycles.map((cycle) => closureOutcomes.get(cycle.id)!);
+    expect(orderedOutcomes.at(-1)?.decision).toBe("accepted");
+    expect(orderedOutcomes.some((outcome) => outcome.decision === "continue_growing")).toBe(true);
+    const repairCycleCount = intents.filter((intent) => intent.kind === "repair").length;
+    if (orderedOutcomes.some((outcome) => outcome.decision === "repairs_required")) expect(repairCycleCount).toBeGreaterThan(0);
+
+    const longform = new GrowthLongformProgressResolver(workspace).resolve({
+      checkpointId,
+      focusOcResourceId: closureProfile.focusOcResourceId,
+    });
+    expect(longform).toMatchObject({ status: "ready", complete: true });
+    if (longform.status !== "ready") throw new Error("GROWTH_LONGFORM_PROGRESS_BLOCKED");
+    expect(longform.totalCodePoints).toBeGreaterThanOrEqual(GROWTH_LONGFORM_MIN_CODE_POINTS);
+    expect(longform.completedSections).toHaveLength(longform.outline.sections.length);
+    expect(longform.nextSection).toBeNull();
+    for (const section of longform.completedSections) {
+      const version = documents.getVersion(section.documentVersionId);
+      expect(version).toMatchObject({ id: section.documentVersionId, creativeDocumentId: section.documentId, contentHash: section.contentSha256, status: "stable" });
+      expect(Array.from(version!.content).length).toBe(section.codePoints);
+    }
+
     const checkpointCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM checkpoints").get()?.count ?? 0);
     const changeSetCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get()?.count ?? 0);
     const imageJobCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()?.count ?? 0);
     const imageAssetCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_assets").get()?.count ?? 0);
-    expect(imageJobCount).toBe(1);
-    expect(imageAssetCount).toBe(1);
     const worldMap = new ImageAssetRepository(workspace).listShowcaseJobs().filter((job) => job.purpose === "world_map" && job.status === "succeeded");
     expect(worldMap).toHaveLength(1);
     const worldMapJob = worldMap[0]!;
@@ -1073,7 +1407,7 @@ function inspectCommittedGrowth(workspacePath: string, goalId: string): Persiste
     expect(worldMapJob.sourceVersionIds.every((versionId) => worldOutputs.has(versionId))).toBe(true);
     const resourceVersions = new ResourceRepository(workspace);
     expect(worldMapJob.sourceVersionIds.some((versionId) => resourceVersions.getVisibleByRevisionIdAtCheckpoint(versionId, cycles[0]!.outputCheckpointId!)?.id === world!.id)).toBe(true);
-    expect(worldMapJob.sourceVersionIds).toContain(worldDocument!.id);
+    expect(worldMapJob.sourceVersionIds.some((versionId) => documents.getVersion(versionId)?.resourceId === world!.id)).toBe(true);
     const asset = worldMapJob.asset!;
     const bytes = new ImageAssetStore(workspacePath).readVerified(asset.relativePath, asset.sha256);
     expect(bytes.byteLength).toBe(asset.byteLength);
@@ -1081,19 +1415,65 @@ function inspectCommittedGrowth(workspacePath: string, goalId: string): Persiste
     expect(asset.mimeType).toBe("image/png");
     expect(asset.width).toBeGreaterThan(0);
     expect(asset.height).toBeGreaterThan(0);
+    const illustrationRequests = growth.listIllustrationRequests(goalId);
+    const defaultRequests = illustrationRequests.filter((request) => request.coverageMode === "default");
+    const customRequests = illustrationRequests.filter((request) => request.coverageMode === "custom");
+    expect(defaultRequests).toHaveLength(1);
+    expect(customRequests).toHaveLength(1);
+    expect(defaultRequests[0]).toMatchObject({
+      status: "completed", closureProfileId: closureProfile.id, closureRevision: orderedOutcomes.at(-1)!.revision,
+    });
+    const defaultItems = growth.listIllustrationItems(defaultRequests[0]!.id);
+    const customItems = growth.listIllustrationItems(customRequests[0]!.id);
+    const resourceRevisionOutputIds = committedCycles.flatMap((cycle) => changeSets.listOutputs(cycle.changeSetId!)
+      .filter((output) => output.kind === "resource_revision").map((output) => output.outputId));
+    const expectedDefaultTargets = [...new Map(resourceRevisionOutputIds.flatMap((revisionId) => {
+      const resource = new ResourceRepository(workspace).getVisibleByRevisionIdAtCheckpoint(revisionId, checkpointId);
+      return resource && ["oc", "location", "faction", "story"].includes(resource.objectKind)
+        ? [[resource.id, resource] as const] : [];
+    })).values()].filter((resource) => resource.objectKind !== "volume");
+    expect(defaultItems).toHaveLength(expectedDefaultTargets.length);
+    expect(defaultItems.length).toBeGreaterThanOrEqual(4);
+    expect(defaultItems.every((item) => item.status === "ready" && item.imageJobId !== null && item.anchor.kind === "resource")).toBe(true);
+    expect(new Set(defaultItems.flatMap((item) => item.anchor.kind === "resource" ? [item.anchor.resourceId] : [])))
+      .toEqual(new Set(expectedDefaultTargets.map((resource) => resource.id)));
+    expect(defaultItems.filter((item) => item.purpose === "character_portrait")).toHaveLength(ocs.length);
+    expect(defaultItems.filter((item) => item.purpose === "scene").length).toBe(expectedDefaultTargets.length - ocs.length);
+    expect(customItems).toHaveLength(1);
+    expect(customItems[0]).toMatchObject({ status: "ready", purpose: "scene" });
+    expect(customItems[0]!.anchor.kind).toBe("working_text_snapshot");
+    const illustrationItems = [...defaultItems, ...customItems];
+    expect(imageJobCount).toBe(1 + illustrationItems.length);
+    expect(imageAssetCount).toBe(1 + illustrationItems.length);
+    const imageRepository = new ImageAssetRepository(workspace);
+    const illustrationAssetIds: string[] = [];
+    for (const item of illustrationItems) {
+      const job = imageRepository.getRequiredJob(item.imageJobId!);
+      expect(job).toMatchObject({ status: "succeeded", providerId: "openai-compatible-image", modelId: "gpt-image-2", purpose: item.purpose });
+      if (item.requestId === defaultRequests[0]!.id) {
+        expect(job.sourceResourceIds).toContain(world!.id);
+        expect(job.sourceVersionIds).toContain(worldDocument!.id);
+      }
+      const itemAsset = imageRepository.getAssetByJob(job.id);
+      expect(itemAsset).toMatchObject({ status: "ready", mimeType: "image/png" });
+      const itemBytes = new ImageAssetStore(workspacePath).readVerified(itemAsset!.relativePath, itemAsset!.sha256);
+      expect(itemBytes.byteLength).toBe(itemAsset!.byteLength);
+      illustrationAssetIds.push(itemAsset!.id);
+    }
     return {
       goalId,
-      cycles: cycles.map((cycle) => ({
+      cycles: cycles.map((cycle, index) => ({
         sequence: cycle.sequence,
         status: cycle.status,
         ruleRevision: cycle.ruleRevision,
+        intentKind: intents[index]!.kind,
         hasRun: cycle.runId !== null,
         hasReceipt: cycle.receiptId !== null,
         hasChangeSet: cycle.changeSetId !== null,
         hasOutputCheckpoint: cycle.outputCheckpointId !== null,
       })),
       world: world!, story: story!, ocs, distinctive: distinctive!,
-      counts: { resources: formal.length, documents: 2 + ocDocuments.length, assertions: sourced.length, relations: relations.length },
+      counts: { resources: formal.length, documents: currentDocuments.length, assertions: sourced.length, relations: relations.length },
       changeSetCount,
       checkpointCount,
       imageJobCount,
@@ -1102,10 +1482,26 @@ function inspectCommittedGrowth(workspacePath: string, goalId: string): Persiste
         revisionNumbers: rules.map((rule) => rule.revision),
         cycleRuleRevisions: cycles.map((cycle) => cycle.ruleRevision),
         revision2PersistedNoLaterThanCycle2: true,
-        storyContainsExactPhrase: true,
-        storyShowsPermanentMemoryCost: true,
-        characterProfileContainsExactPhrase: true,
-        characterProfileShowsPermanentMemoryCost: true,
+        revisionCycleCommitted: true,
+        worldReflectsRule: revisionDocumentOwners.has(world!.id) && !forbiddenRealJapaneseMarkerPattern.test(worldDocument!.content),
+        storyReflectsRule: postRevisionStoryCycle !== undefined && lightNovelMarkerPattern.test(combinedCurrentContent),
+        characterProfileReflectsRule: postRevisionOcCycle !== undefined && characterProfiles.length > 0,
+        noRealJapaneseElements: !forbiddenRealJapaneseMarkerPattern.test(combinedCurrentContent),
+      },
+      closure: {
+        safe: { profileCount: closureStates.length, evaluatedCycleCount: evaluatedCycles.length, repairCycleCount, finalDecision: "accepted" },
+        profileId: closureProfile.id,
+        revision: orderedOutcomes.at(-1)!.revision,
+      },
+      longform: {
+        safe: { focusOcPresent: true, sectionCount: longform.completedSections.length, totalCodePoints: longform.totalCodePoints, complete: true },
+        personalStoryResourceId: longform.personalStoryResourceId,
+        sectionDocumentIds: longform.completedSections.map((section) => section.documentId),
+      },
+      illustrations: {
+        safe: { defaultRequestCount: 1, defaultReadyCount: defaultItems.length, customRequestCount: 1, customReadyCount: 1 },
+        requestIds: illustrationRequests.map((request) => request.id),
+        assetIds: illustrationAssetIds,
       },
       worldMap: {
         jobId: worldMapJob.jobId,
@@ -1124,77 +1520,108 @@ function requiredStable(documents: DocumentRepository, resource: ResourceRecord)
   return stable!;
 }
 
-function assertGrowthRunAudit(audit: AgentAuditRepository, runId: string, sequence: number): void {
+function assertGrowthRunAudit(
+  audit: AgentAuditRepository,
+  runId: string,
+  sequence: number,
+  status: string,
+  intentKind: string,
+  closureDecision?: string,
+): void {
   const tools = audit.listTools(runId);
   const toolNames = tools.map((row) => String(row.tool_name));
   expect(toolNames.filter((name) => name === "retrieve_graph_evidence")).toHaveLength(1);
-  expect(toolNames.filter((name) => name === "propose_change_set")).toHaveLength(1);
+  expect(toolNames.filter((name) => name === "propose_change_set")).toHaveLength(status === "committed" ? 1 : 0);
   expect(toolNames.filter((name) => name === "generate_image")).toHaveLength(sequence === 1 ? 1 : 0);
+  expect(toolNames.filter((name) => name === "submit_closure_self_assessment"))
+    .toHaveLength(intentKind === "closure_evaluation" ? 1 : 0);
+  expect(toolNames.filter((name) => name === "submit_closure_checker_review"))
+    .toHaveLength(intentKind === "closure_evaluation" && closureDecision !== "continue_growing" ? 1 : 0);
   const events = audit.listEvents(runId);
-  for (const name of sequence === 1 ? ["retrieve_graph_evidence", "propose_change_set", "generate_image"] : ["retrieve_graph_evidence", "propose_change_set"]) {
+  const required = ["retrieve_graph_evidence"];
+  if (status === "committed") required.push("propose_change_set");
+  if (sequence === 1) required.push("generate_image");
+  if (intentKind === "closure_evaluation") required.push("submit_closure_self_assessment");
+  if (intentKind === "closure_evaluation" && closureDecision !== "continue_growing") required.push("submit_closure_checker_review");
+  for (const name of required) {
     const invocationIds = new Set(tools.filter((row) => row.tool_name === name).map((row) => String(row.id)));
     expect(events.some((event) => invocationIds.has(String(event.tool_invocation_id)) && event.event_type === "succeeded")).toBe(true);
   }
 }
 
 async function assertShowcaseWorldMap(page: Page, persisted: PersistedGrowth): Promise<void> {
-  const image = await page.evaluate(async ({ storyResourceId, jobId, assetId }) => {
+  const result = await page.evaluate(async ({ storyResourceId, jobId, assetId, illustrationAssetIds }) => {
     const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
     const result = await desktop.showcase.get({ storyResourceId });
     if (!result.ok) throw new Error("SHOWCASE_WORLD_MAP_UNAVAILABLE");
     const match = result.showcase.images.find((candidate) => candidate.jobId === jobId && candidate.assetId === assetId);
     if (!match) throw new Error("SHOWCASE_WORLD_MAP_MISSING");
     return {
-      jobId: match.jobId,
-      assetId: match.assetId,
-      purpose: match.purpose,
-      status: match.status,
-      sourceResourceIds: match.sourceResourceIds,
-      sourceVersionIds: match.sourceVersionIds,
-      mimeType: match.mimeType,
-      width: match.width,
-      height: match.height,
-      thumbnailUrl: match.thumbnailUrl,
+      worldMap: {
+        jobId: match.jobId,
+        assetId: match.assetId,
+        purpose: match.purpose,
+        status: match.status,
+        sourceResourceIds: match.sourceResourceIds,
+        sourceVersionIds: match.sourceVersionIds,
+        mimeType: match.mimeType,
+        width: match.width,
+        height: match.height,
+        thumbnailUrl: match.thumbnailUrl,
+      },
+      illustrationAssets: illustrationAssetIds.map((expectedAssetId) => {
+        const image = result.showcase.images.find((candidate) => candidate.assetId === expectedAssetId);
+        return image ? { assetId: image.assetId, purpose: image.purpose, status: image.status, thumbnailUrl: image.thumbnailUrl } : null;
+      }),
     };
-  }, { storyResourceId: persisted.story.id, jobId: persisted.worldMap.jobId, assetId: persisted.worldMap.assetId });
+  }, {
+    storyResourceId: persisted.story.id,
+    jobId: persisted.worldMap.jobId,
+    assetId: persisted.worldMap.assetId,
+    illustrationAssetIds: persisted.illustrations.assetIds,
+  });
+  const image = result.worldMap;
   expect(image).toMatchObject({ jobId: persisted.worldMap.jobId, assetId: persisted.worldMap.assetId, purpose: "world_map", status: "ready", mimeType: persisted.worldMap.safe.mimeType });
   expect(image.sourceResourceIds).toContain(persisted.world.id);
   expect(image.sourceVersionIds).toHaveLength(2);
   expect(image.width).toBeGreaterThan(0);
   expect(image.height).toBeGreaterThan(0);
   expect(image.thumbnailUrl).toMatch(/^novax-asset:\/\/image\//);
+  expect(result.illustrationAssets).toHaveLength(persisted.illustrations.assetIds.length);
+  expect(result.illustrationAssets.every((candidate) => candidate?.status === "ready" && /^novax-asset:\/\/image\//.test(candidate.thumbnailUrl ?? ""))).toBe(true);
+  expect(result.illustrationAssets.some((candidate) => candidate?.purpose === "character_portrait")).toBe(true);
+  expect(result.illustrationAssets.some((candidate) => candidate?.purpose === "scene")).toBe(true);
 }
 
 async function assertReopenedGuidanceContent(
   page: Page,
   persisted: PersistedGrowth,
-): Promise<Pick<SafeGuidanceEvidence, "reopenedStoryContentPresent" | "reopenedCharacterContentPresent">> {
-  const anchors = await page.evaluate(async ({ storyResourceId, phrase, permanentPattern, costPattern }) => {
+): Promise<Pick<SafeGuidanceEvidence, "reopenedStoryRulePresent" | "reopenedCharacterRulePresent">> {
+  const anchors = await page.evaluate(async ({ storyResourceId, lightNovelPattern, fantasyPattern, forbiddenPattern }) => {
     const desktop = (globalThis as typeof globalThis & { novaxDesktop: DesktopApi }).novaxDesktop;
     const result = await desktop.showcase.get({ storyResourceId });
     if (!result.ok) throw new Error("SHOWCASE_GUIDANCE_CONTENT_UNAVAILABLE");
-    const permanent = new RegExp(permanentPattern);
-    const cost = new RegExp(costPattern);
-    const guided = (content: string) => {
-      let index = content.indexOf(phrase);
-      while (index >= 0) {
-        const context = content.slice(Math.max(0, index - 300), index + phrase.length + 300);
-        if (context.includes("记忆") && permanent.test(context) && cost.test(context)) return true;
-        index = content.indexOf(phrase, index + phrase.length);
-      }
-      return false;
-    };
+    const lightNovel = new RegExp(lightNovelPattern);
+    const fantasy = new RegExp(fantasyPattern);
+    const forbidden = new RegExp(forbiddenPattern);
     const storyContent = result.showcase.proseDocuments.map((document) => document.content).join("\n");
     const characterContents = result.showcase.characters.flatMap((character) => character.documents)
       .filter((document) => document.kind === "character_profile")
       .map((document) => document.content);
     return {
-      story: guided(storyContent),
-      character: characterContents.some(guided),
+      story: lightNovel.test(storyContent) && !forbidden.test(storyContent),
+      character: characterContents.length > 0
+        && characterContents.every((content) => !forbidden.test(content))
+        && characterContents.some((content) => lightNovel.test(content) || fantasy.test(content)),
     };
-  }, { storyResourceId: persisted.story.id, phrase: guidancePhrase, permanentPattern: permanentMarkerPattern.source, costPattern: memoryCostMarkerPattern.source });
+  }, {
+    storyResourceId: persisted.story.id,
+    lightNovelPattern: lightNovelMarkerPattern.source,
+    fantasyPattern: originalFantasyMarkerPattern.source,
+    forbiddenPattern: forbiddenRealJapaneseMarkerPattern.source,
+  });
   expect(anchors).toEqual({ story: true, character: true });
-  return { reopenedStoryContentPresent: true, reopenedCharacterContentPresent: true };
+  return { reopenedStoryRulePresent: true, reopenedCharacterRulePresent: true };
 }
 
 function inspectReopenedGuidanceRepository(
@@ -1207,7 +1634,19 @@ function inspectReopenedGuidanceRepository(
     const rules = growth.listRuleRevisions(persisted.goalId, { limit: 100 });
     expect(rules.map((rule) => rule.revision)).toEqual([1, 2]);
     expect(rules[1]!.ruleText).toBe(guidanceRule);
-    expect(growth.listCycles(persisted.goalId).map((cycle) => cycle.ruleRevision)).toEqual([1, 2, 2]);
+    const cycles = growth.listCycles(persisted.goalId);
+    expect(cycles.map((cycle) => cycle.ruleRevision)).toEqual(persisted.cycles.map((cycle) => cycle.ruleRevision));
+    expect(cycles.map((cycle) => cycle.status)).toEqual(persisted.cycles.map((cycle) => cycle.status));
+    expect(growth.listIllustrationRequests(persisted.goalId).map((request) => request.id)).toEqual(persisted.illustrations.requestIds);
+    const finalCheckpointId = cycles.at(-1)!.inputCheckpointId;
+    const closureProfile = growth.getClosureProfile(persisted.closure.profileId);
+    if (!closureProfile || closureProfile.contractGeneration !== "v26" || !closureProfile.focusOcResourceId) {
+      throw new Error("GROWTH_REOPEN_CLOSURE_INVALID");
+    }
+    expect(new GrowthLongformProgressResolver(workspace).resolve({
+      checkpointId: finalCheckpointId,
+      focusOcResourceId: closureProfile.focusOcResourceId,
+    })).toMatchObject({ status: "ready", complete: true, totalCodePoints: persisted.longform.safe.totalCodePoints });
     return { reopenedRevision2Present: true };
   } finally {
     workspace.close();
@@ -1271,7 +1710,8 @@ function inspectResearchAudit(workspacePath: string, persisted: PersistedGrowth,
     expect(Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_assets").get()?.count ?? 0)).toBe(persisted.imageAssetCount);
     const growth = new GrowthRepository(workspace);
     expect(growth.listRuleRevisions(persisted.goalId, { limit: 100 }).map((rule) => rule.revision)).toEqual([1, 2]);
-    expect(growth.listCycles(persisted.goalId).map((cycle) => cycle.ruleRevision)).toEqual([1, 2, 2]);
+    expect(growth.listCycles(persisted.goalId).map((cycle) => cycle.ruleRevision)).toEqual(persisted.cycles.map((cycle) => cycle.ruleRevision));
+    expect(growth.listIllustrationRequests(persisted.goalId).map((request) => request.id)).toEqual(persisted.illustrations.requestIds);
   } finally {
     workspace.close();
   }
@@ -1311,7 +1751,7 @@ function writeEvidence(directory: string, evidence: SafeEvidence): void {
   fs.mkdirSync(directory, { recursive: true });
   const serialized = `${JSON.stringify(evidence, null, 2)}\n`;
   JSON.parse(serialized);
-  if (serialized.includes(guidanceRule) || serialized.includes(guidancePhrase)
+  if (serialized.includes(guidanceRule)
     || /"(?:ruleText|content|prompt|toolArgs|locator|path|relativePath)"\s*:/i.test(serialized)
     || containsCredentialMarkerInText(serialized)) {
     throw new Error("GROWTH_GUIDANCE_EVIDENCE_LEAK_DETECTED");
@@ -1325,7 +1765,8 @@ function captureSqliteEvidence(workspacePath: string, goalId?: string): SafeSqli
   try {
     const resolvedGoalId = goalId ?? (workspace.db.prepare("SELECT id FROM growth_goals ORDER BY created_at DESC LIMIT 1").get() as { id?: unknown } | undefined)?.id;
     if (typeof resolvedGoalId !== "string") return undefined;
-    const cycles = new GrowthRepository(workspace).listCycles(resolvedGoalId);
+    const growth = new GrowthRepository(workspace);
+    const cycles = growth.listCycles(resolvedGoalId);
     const formalResources = new ResourceRepository(workspace).listCurrent().filter((resource) => resource.objectKind !== "domain_root");
     const assertions = new AssertionRepository(workspace).listCurrentInScopes(formalResources.map((resource) => resource.id));
     const relations = new CreativeRelationRepository(workspace).listCurrent();
@@ -1338,6 +1779,56 @@ function captureSqliteEvidence(workspacePath: string, goalId?: string): SafeSqli
     `).all() as Array<{ status: string; count: number }>;
     const outputCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM change_set_outputs").get()?.count ?? 0);
     const checkpointCount = Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM checkpoints").get()?.count ?? 0);
+    const closureStates = growth.listClosureStates(resolvedGoalId);
+    const decisions = cycles.flatMap((cycle) => {
+      const outcome = growth.getClosureEvaluationOutcomeForCycle(cycle.id);
+      return outcome ? [outcome.decision] : [];
+    });
+    const closureEvaluations = cycles.flatMap((cycle) => {
+      const outcome = growth.getClosureEvaluationOutcomeForCycle(cycle.id);
+      if (!outcome) return [];
+      const steward = growth.getClosureStewardSubmission(outcome.stewardAssessmentId);
+      if (!steward) return [];
+      const checker = outcome.checkerAssessmentId
+        ? growth.getClosureCheckerSubmission(outcome.checkerAssessmentId)
+        : null;
+      return [projectGrowthClosureSafeEvaluation({
+        cycleSequence: cycle.sequence,
+        decision: outcome.decision,
+        facetResults: steward.facetResults,
+        adverseFindings: checker?.adverseFindings ?? [],
+      })];
+    });
+    const closureProfile = closureStates[0] ? growth.getClosureProfile(closureStates[0].profileId) : null;
+    let longform: SafeSqliteEvidence["longform"] = {
+      status: "unavailable", reason: null, complete: false, totalCodePoints: 0, sectionCount: 0,
+    };
+    if (closureProfile?.contractGeneration === "v26" && closureProfile.focusOcResourceId && cycles.length > 0) {
+      try {
+        const progress = new GrowthLongformProgressResolver(workspace).resolve({
+          checkpointId: cycles.at(-1)!.outputCheckpointId ?? cycles.at(-1)!.inputCheckpointId,
+          focusOcResourceId: closureProfile.focusOcResourceId,
+        });
+        longform = progress.status === "ready"
+          ? { status: "ready", reason: null, complete: progress.complete,
+              totalCodePoints: progress.totalCodePoints, sectionCount: progress.completedSections.length }
+          : { status: "blocked", reason: progress.reason, complete: false, totalCodePoints: 0, sectionCount: 0 };
+      } catch {
+        longform = { status: "blocked", reason: null, complete: false, totalCodePoints: 0, sectionCount: 0 };
+      }
+    }
+    const illustrationRequests = growth.listIllustrationRequests(resolvedGoalId);
+    const illustrationItems = illustrationRequests.flatMap((request) => growth.listIllustrationItems(request.id));
+    const imageJobs = workspace.db.prepare(`
+      SELECT purpose, status, request_sent_at, error_code
+      FROM image_generation_jobs
+      ORDER BY created_at ASC, id ASC
+    `).all() as Array<{ purpose?: unknown; status?: unknown; request_sent_at?: unknown; error_code?: unknown }>;
+    const itemStatusCounts = [...new Set(illustrationItems.map((item) => item.status))].sort().map((status) => ({
+      status,
+      count: illustrationItems.filter((item) => item.status === status).length,
+    }));
+    const diagnosticRepository = new SafeDiagnosticRepository(workspace);
     return {
       cycles: cycles.map((cycle) => ({
         sequence: cycle.sequence,
@@ -1349,8 +1840,22 @@ function captureSqliteEvidence(workspacePath: string, goalId?: string): SafeSqli
         hasChangeSet: cycle.changeSetId !== null,
         hasInputCheckpoint: cycle.inputCheckpointId.length > 0,
         hasOutputCheckpoint: cycle.outputCheckpointId !== null,
+        receiptLinkCount: cycle.receiptId ? growth.getReceipt(cycle.receiptId)?.links.length ?? null : null,
         audit: cycle.runId ? safeRunAudit(workspace, cycle.runId) : null,
       })),
+      diagnostics: cycles.flatMap((cycle) => diagnosticRepository.listCycle(cycle.id).map((diagnostic) => ({
+        cycleSequence: cycle.sequence,
+        operationKind: diagnostic.operationKind,
+        owner: diagnostic.owner,
+        boundary: diagnostic.boundary,
+        code: diagnostic.code,
+        toolName: diagnostic.toolName,
+        attempt: diagnostic.attempt,
+        maxAttempts: diagnostic.maxAttempts,
+        sideEffectState: diagnostic.sideEffectState,
+        disposition: diagnostic.disposition,
+        retryability: diagnostic.retryability,
+      }))),
       counts: {
         resources: formalResources.length,
         documents: Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM document_versions").get()?.count ?? 0),
@@ -1363,6 +1868,22 @@ function captureSqliteEvidence(workspacePath: string, goalId?: string): SafeSqli
         outputCount,
         checkpointCount,
         checkpointDeltaFromInitial: Math.max(0, checkpointCount - 1),
+      },
+      closure: { profileCount: closureStates.length, decisions, evaluations: closureEvaluations },
+      longform,
+      illustrations: {
+        requests: illustrationRequests.map((request) => ({
+          coverageMode: request.coverageMode, status: request.status, itemCount: request.itemCount, readyCount: request.readyCount,
+        })),
+        itemStatuses: itemStatusCounts,
+        jobs: imageJobs.map((job) => ({
+          purpose: safeImageJobPurpose(job.purpose),
+          status: safeImageJobStatus(job.status),
+          requestSent: typeof job.request_sent_at === "string",
+          errorCode: safeImageJobErrorCode(job.error_code),
+        })),
+        imageJobCount: Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()?.count ?? 0),
+        imageAssetCount: Number(workspace.db.prepare("SELECT COUNT(*) AS count FROM image_assets").get()?.count ?? 0),
       },
     };
   } finally {
@@ -1382,9 +1903,28 @@ function safeRunAudit(workspace: ReturnType<typeof openWorkspace>, runId: string
     return auditEvents.some((event) => invocationIds.has(String(event.tool_invocation_id)) && event.event_type === "succeeded");
   };
   const terminal = auditEvents.filter((event) => Number(event.terminal) === 1);
+  const safeToolNames = new Set([
+    "retrieve_graph_evidence", "submit_growth_inquiry", "submit_closure_self_assessment",
+    "checker", "submit_closure_checker_review", "writer", "propose_change_set",
+    "generate_image", "submit_steward_result",
+  ]);
+  const safeTerminalStatuses = new Set([
+    "succeeded", "failed", "blocked", "cancelled", "interrupted", "awaiting_confirmation",
+  ]);
+  const toolOutcomes = tools.map((tool) => {
+    const toolName = String(tool.tool_name);
+    const terminalEvent = auditEvents.find((event) => String(event.tool_invocation_id) === String(tool.id)
+      && Number(event.terminal) === 1);
+    const eventType = terminalEvent ? String(terminalEvent.event_type) : "unknown";
+    return {
+      toolName: safeToolNames.has(toolName) ? toolName : "unknown",
+      status: safeTerminalStatuses.has(eventType) ? eventType : "unknown",
+    };
+  });
   return {
     terminalCount: terminal.length,
     terminalErrorCodes: terminal.map((event) => event.error_code).filter((value): value is string => typeof value === "string"),
+    toolOutcomes,
     retrieveSucceeded: toolSucceeded("retrieve_graph_evidence"),
     proposeSucceeded: toolSucceeded("propose_change_set"),
     imageSucceeded: toolSucceeded("generate_image"),
@@ -1403,6 +1943,8 @@ function safeFailureCode(error: unknown): string {
     "RESEARCH_RUN_TIMEOUT", "RESEARCH_TERMINAL_INVALID", "GROWTH_COORDINATOR_TERMINAL_NOT_COMPLETED", "AUTO_SHOWCASE_NOT_OBSERVED",
     "GROWTH_GUIDANCE_CYCLE_ONE_WINDOW_MISSED", "GROWTH_GUIDANCE_REVISION_CONFLICT", "GROWTH_GUIDANCE_ACK_TIMEOUT",
     "GROWTH_GUIDANCE_BOUNDARY_STATE_INVALID", "GROWTH_GUIDANCE_EVIDENCE_LEAK_DETECTED",
+    "DEFAULT_ILLUSTRATIONS_TERMINAL_FAILURE", "DEFAULT_ILLUSTRATIONS_TIMEOUT",
+    "EXTRA_ILLUSTRATION_TERMINAL_FAILURE", "EXTRA_ILLUSTRATION_TIMEOUT", "GROWTH_LONGFORM_INCOMPLETE",
   ]);
   if (allowlisted.has(error.message)) return error.message;
   if (/^RESEARCH_TERMINAL_[A-Z0-9_]+$/.test(error.message)) return "AGENT_RUN_FAILED";

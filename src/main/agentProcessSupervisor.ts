@@ -68,6 +68,11 @@ import {
 import { getAgentRuntimeProfile } from "../shared/agentRuntimeProfiles";
 import { toPublicError } from "../shared/publicErrors";
 import {
+  createMainToolFailureDiagnostic,
+  mainToolDiagnosticCatalog,
+  type MainToolDiagnosticCode,
+} from "./diagnostics/mainToolDiagnostics";
+import {
   providerRuntimeProfileSchema,
   type ProviderRuntimeProfile,
 } from "../shared/providerContract";
@@ -82,8 +87,10 @@ export interface AgentToolInvocationContext {
   requestId: string;
   mode: "free" | "assist";
   greenfieldCreateRequested?: boolean;
-  /** Main-only authority set after a Longform proposal is deterministically recompiled. */
-  longformCreateAuthorized?: boolean;
+  /** Main-only authority set after a proposal is deterministically compiled and may source assertions from its own new documents. */
+  sameChangeSetDocumentEvidenceAuthorized?: boolean;
+  /** Main-only authority set after a Revision proposal's assertion targets are pinned and validated. */
+  assertionIdentityUpdateAuthorized?: boolean;
   /** Main-only authority for one persisted Illustration Queue item; never model- or Renderer-controlled. */
   illustrationQueueItemId?: string;
   onImageProgress?: (progress: ImageGenerationProgress) => void;
@@ -475,6 +482,7 @@ export class AgentProcessSupervisor {
       if (!pending) return;
       run.pendingTools.delete(request.requestId);
       pending.controller.abort();
+      if (!this.#appendToolDiagnostic(runId, run, request, "AGENT_TOOL_TIMEOUT")) return;
       try {
         run.audit.appendToolTerminal({
           runId,
@@ -540,7 +548,7 @@ export class AgentProcessSupervisor {
       if (request.tool === "retrieve_graph_evidence") {
         const parsed = z.union([retrieveGraphEvidenceResultSchema, growthRetrieveGraphEvidenceResultSchema]).safeParse(result);
         if (!parsed.success) {
-          if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+          if (!this.#recordToolFailure(runId, run, request, "AGENT_TOOL_PROTOCOL_FAILED")) return;
           this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
           return;
         }
@@ -597,7 +605,7 @@ export class AgentProcessSupervisor {
       if (request.tool === "submit_growth_inquiry") {
         const parsed = submitGrowthInquiryResultSchema.safeParse(result);
         if (!parsed.success) {
-          if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+          if (!this.#recordToolFailure(runId, run, request, "AGENT_TOOL_PROTOCOL_FAILED")) return;
           this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
           return;
         }
@@ -629,6 +637,9 @@ export class AgentProcessSupervisor {
           phase: "completed",
           domains: ["graph"],
         });
+        if (parsed.data.status === "creator_choice_required") {
+          this.#completeAuthoritativeBlockedRun(runId, run);
+        }
         return;
       }
       if (request.tool === "submit_closure_self_assessment" || request.tool === "submit_closure_checker_review") {
@@ -636,7 +647,7 @@ export class AgentProcessSupervisor {
           ? submitClosureSelfAssessmentResultSchema.safeParse(result)
           : submitClosureCheckerReviewResultSchema.safeParse(result);
         if (!parsed.success) {
-          if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+          if (!this.#recordToolFailure(runId, run, request, "AGENT_TOOL_PROTOCOL_FAILED")) return;
           this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
           return;
         }
@@ -663,7 +674,7 @@ export class AgentProcessSupervisor {
       if (request.tool === "inspect_project_files" || isProjectFileTool(request.tool)) {
         const parsed = projectFileResultSchema(request.tool).safeParse(result);
         if (!parsed.success) {
-          if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+          if (!this.#recordToolFailure(runId, run, request, "AGENT_TOOL_PROTOCOL_FAILED")) return;
           this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
           return;
         }
@@ -699,7 +710,7 @@ export class AgentProcessSupervisor {
       if (request.tool === "generate_image") {
         const parsed = generateImageResultSchema.safeParse(result);
         if (!parsed.success) {
-          if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+          if (!this.#recordToolFailure(runId, run, request, "AGENT_TOOL_PROTOCOL_FAILED")) return;
           this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
           return;
         }
@@ -736,7 +747,7 @@ export class AgentProcessSupervisor {
       if (request.tool !== "propose_change_set") return;
       const parsed = proposeChangeSetResultSchema.safeParse(result);
       if (!parsed.success) {
-        if (!this.#recordToolFailure(runId, run, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED")) return;
+        if (!this.#recordToolFailure(runId, run, request, "AGENT_TOOL_PROTOCOL_FAILED")) return;
         this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_PROTOCOL_FAILED");
         return;
       }
@@ -773,6 +784,8 @@ export class AgentProcessSupervisor {
     }).catch((error: unknown) => {
       if (!this.#takePending(run, request.requestId)) return;
       const code = readToolFailureCode(error);
+      const diagnosticCode = readToolDiagnosticCode(error, code);
+      if (!this.#appendToolDiagnostic(runId, run, request, diagnosticCode)) return;
       try {
         run.audit.appendToolTerminal({
           runId,
@@ -808,18 +821,43 @@ export class AgentProcessSupervisor {
   #recordToolFailure(
     runId: string,
     run: ActiveRun,
-    requestId: string,
+    request: AgentWorkerToolRequest,
     code: "AGENT_TOOL_PROTOCOL_FAILED" | "AGENT_TOOL_FAILED",
   ): boolean {
+    if (!this.#appendToolDiagnostic(runId, run, request, code)) return false;
     try {
       run.audit.appendToolTerminal({
         runId,
         invocationId: stewardInvocationId(runId),
-        toolInvocationId: requestId,
+        toolInvocationId: request.requestId,
         eventType: "failed",
         errorCode: code,
         resultSha256: null,
       });
+      return true;
+    } catch {
+      this.#failAudit(runId);
+      return false;
+    }
+  }
+
+  #appendToolDiagnostic(
+    runId: string,
+    run: ActiveRun,
+    request: AgentWorkerToolRequest,
+    code: MainToolDiagnosticCode,
+  ): boolean {
+    try {
+      if (!run.audit.appendSafeDiagnostic) throw new Error("Safe diagnostic persistence is unavailable.");
+      run.audit.appendSafeDiagnostic(createMainToolFailureDiagnostic({
+        diagnosticId: randomUUID(),
+        runId,
+        cycleId: run.internalBinding?.workerBinding.cycleId ?? null,
+        requestId: request.requestId,
+        tool: request.tool,
+        code,
+        occurredAt: new Date().toISOString(),
+      }));
       return true;
     } catch {
       this.#failAudit(runId);
@@ -867,6 +905,28 @@ export class AgentProcessSupervisor {
     this.#abortPendingTools(run);
     if (!run.child.killed) run.child.kill();
     run.releaseLease();
+  }
+
+  #completeAuthoritativeBlockedRun(runId: string, run: ActiveRun): void {
+    if (!this.#terminalizeInternalBinding(run, "completed", null)) {
+      this.#failAudit(runId);
+      return;
+    }
+    try {
+      run.audit.terminalizeOpenRun(runId, "blocked", "GROWTH_CREATOR_CHOICE_REQUIRED");
+    } catch {
+      this.#failAudit(runId);
+      return;
+    }
+    run.emit({
+      type: "run.completed",
+      runId,
+      outcome: "blocked",
+      message: "需要创作者取舍后才能继续生长。",
+      changeSetState: "none",
+      artifacts: [],
+    });
+    this.#finish(runId);
   }
 
   #interrupt(runId: string, diagnostic?: AgentWorkerDiagnostic): void {
@@ -1028,6 +1088,13 @@ export class AgentProcessSupervisor {
           toolName: operation.toolName,
           argumentsSha256: operation.argumentsSha256,
         });
+      } else if (operation.type === "safe_diagnostic.append") {
+        const expectedCycleId = run.internalBinding?.workerBinding.cycleId ?? null;
+        if (operation.diagnostic.runId !== runId || operation.diagnostic.cycleId !== expectedCycleId) {
+          throw new Error("Safe diagnostic authority does not match the active Run.");
+        }
+        if (!run.audit.appendSafeDiagnostic) throw new Error("Safe diagnostic persistence is unavailable.");
+        run.audit.appendSafeDiagnostic(operation.diagnostic);
       } else {
         run.audit.appendToolTerminal({
           runId,
@@ -1186,6 +1253,19 @@ function readToolFailureCode(error: unknown): ReturnType<typeof agentToolInterna
   return "AGENT_TOOL_FAILED";
 }
 
+function readToolDiagnosticCode(
+  error: unknown,
+  fallback: ReturnType<typeof agentToolInternalErrorCodeSchema.parse>,
+): MainToolDiagnosticCode {
+  if (error && typeof error === "object" && "diagnosticCode" in error) {
+    const value = error.diagnosticCode;
+    if (typeof value === "string" && mainToolDiagnosticCatalog.has(value)) {
+      return value as MainToolDiagnosticCode;
+    }
+  }
+  return fallback;
+}
+
 function isProjectFileTool(tool: AgentToolName): tool is "list_project_directory" | "stat_project_file" | "glob_project_files" | "search_project_files" | "read_project_file" | "save_task_note" | "list_task_notes" {
   return ["list_project_directory", "stat_project_file", "glob_project_files", "search_project_files", "read_project_file", "save_task_note", "list_task_notes"].includes(tool);
 }
@@ -1279,6 +1359,18 @@ const TOOL_ERROR_MESSAGES = {
   GROWTH_INQUIRY_REQUIRED: "A durable Growth Inquiry is required before downstream work.",
   GROWTH_INQUIRY_INVALID: "The Growth Inquiry is invalid.",
   GROWTH_INQUIRY_STALLED: "The Growth Inquiry made no evidence-backed progress.",
+  STEWARD_GROWTH_INQUIRY_REQUIRED: "Submit the required Growth Inquiry after pinned retrieval.",
+  STEWARD_GROWTH_INQUIRY_INPUT_INVALID: "Submit one strict Growth Inquiry Brief without extra fields.",
+  STEWARD_GROWTH_INQUIRY_COUNT_INVALID: "Submit between three and seven Growth Inquiry questions.",
+  STEWARD_GROWTH_INQUIRY_ITEM_INVALID: "Each Growth Inquiry question must satisfy the strict item contract.",
+  STEWARD_GROWTH_INQUIRY_FRONTIER_INVALID: "Select exactly one valid Growth Inquiry frontier.",
+  STEWARD_GROWTH_INQUIRY_TRANSITION_INVALID: "Use only current trusted prior-Inquiry local IDs and valid successor transitions.",
+  STEWARD_GROWTH_INQUIRY_CHOICE_CARDINALITY_INVALID: "A creator-choice Inquiry Brief must contain exactly one choice question.",
+  STEWARD_GROWTH_INQUIRY_SELECTION_INVALID: "The selected Inquiry must exist and cannot conflict with creator-choice mode.",
+  STEWARD_GROWTH_INQUIRY_PRIORITY_TIE_INVALID: "The Growth Inquiry Brief must have one unique highest priority.",
+  STEWARD_GROWTH_INQUIRY_FRONTIER_PRIORITY_INVALID: "The selected Inquiry frontier must have the unique highest priority.",
+  STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID: "Cite only exact evidence IDs returned by the current pinned Growth retrieval.",
+  STEWARD_GROWTH_INQUIRY_DUPLICATE_INVALID: "Submit semantically distinct questions that do not repeat an unresolved prior Inquiry.",
   GROWTH_CLOSURE_NOT_READY: "The pinned Growth Closure evidence is not ready for independent review.",
   GROWTH_CLOSURE_SUBMISSION_INVALID: "The Growth Closure submission is invalid.",
   GROWTH_RECONCILIATION_REQUIRED: "The Growth Change Set outcome requires reconciliation.",

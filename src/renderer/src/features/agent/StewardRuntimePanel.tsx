@@ -420,6 +420,15 @@ export function StewardRuntimePanel({
       const latest = growthRef.current;
       if (!latest || latest.goalId !== current.goalId) return;
       publishGrowth(recordGrowthGuidanceResponse(latest, response));
+      const snapshot = await window.novaxDesktop.growth.get({
+        projectId: guideProjectId,
+        sessionId: guideSessionId,
+        goalId: current.goalId,
+      });
+      if (!isCurrentGrowthRequest(growthGuidanceRequestToken.current, request)) return;
+      const refreshed = growthRef.current;
+      if (!refreshed || refreshed.goalId !== current.goalId) return;
+      publishGrowth(mergeGrowthSnapshot(refreshed, snapshot));
       setGuidanceDraft("");
       setGuidanceNotice(`已保存为规则修订 #${response.persistedRevision}，等待安全修订轮；第 ${response.nextCycleSequence} 轮仅为候选边界，不承诺一定执行。预计范围：${growthFocusLabels(response.focusKinds)}`);
     } catch {

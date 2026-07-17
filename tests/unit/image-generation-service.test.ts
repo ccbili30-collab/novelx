@@ -47,9 +47,24 @@ describe("ImageGenerationService", () => {
     const progress: string[] = [];
     await expect(service.generate(request(), profile(), undefined, (state) => progress.push(state))).rejects.toMatchObject({ code: "IMAGE_PROVIDER_GENERATION_FAILED" });
     expect(new ImageAssetRepository(workspace!).getJobByIdempotencyKey("visual-1")).toMatchObject({
-      status: "failed", errorCode: "IMAGE_PROVIDER_GENERATION_FAILED",
+      status: "failed", errorCode: "IMAGE_PROVIDER_REQUEST_REJECTED",
     });
     expect(progress).toEqual(["queued", "generating", "failed"]);
+  });
+
+  it.each([
+    [400, "IMAGE_PROVIDER_REQUEST_REJECTED"],
+    [401, "IMAGE_PROVIDER_AUTH_FAILED"],
+    [404, "IMAGE_PROVIDER_MODEL_UNAVAILABLE"],
+    [429, "IMAGE_PROVIDER_RATE_LIMITED"],
+    [503, "IMAGE_PROVIDER_SERVICE_UNAVAILABLE"],
+  ] as const)("persists the safe HTTP failure class for status %s", async (status, expectedCode) => {
+    const client = vi.fn().mockRejectedValue(new ResponsesImageProviderError("IMAGE_PROVIDER_GENERATION_FAILED", false, status));
+    const service = createService(client);
+
+    await expect(service.generate(request(), profile())).rejects.toMatchObject({ code: "IMAGE_PROVIDER_GENERATION_FAILED" });
+    expect(new ImageAssetRepository(workspace!).getJobByIdempotencyKey("visual-1"))
+      .toMatchObject({ status: "failed", errorCode: expectedCode });
   });
 
   it("isolates observer failures from durable image completion", async () => {

@@ -79,9 +79,9 @@ describe("ImageAssetRepository", () => {
     const repository = openRepository();
     expect(repository.createOrGetJob(jobInput()).status).toBe("queued");
     removePostV22GrowthSchema(workspace!.db);
-    workspace!.db.exec("DROP TABLE image_assets; DROP TABLE image_generation_jobs; UPDATE schema_meta SET version = 20 WHERE singleton = 1;");
+    workspace!.db.exec("DROP TABLE safe_diagnostic_events; DROP TABLE image_assets; DROP TABLE image_generation_jobs; UPDATE schema_meta SET version = 20 WHERE singleton = 1;");
     workspace!.close(); workspace = null; workspace = openWorkspace(root);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
     expect(new ImageAssetRepository(workspace).createOrGetJob(jobInput("after-upgrade")).status).toBe("queued");
   });
 
@@ -94,11 +94,11 @@ describe("ImageAssetRepository", () => {
     const scene = repository.createOrGetJob(jobInput("scene-v21"));
 
     removePostV22GrowthSchema(workspace!.db);
-    workspace!.db.prepare("UPDATE schema_meta SET version = 21 WHERE singleton = 1").run();
+    workspace!.db.exec("DROP TABLE safe_diagnostic_events; UPDATE schema_meta SET version = 21 WHERE singleton = 1");
     workspace!.close(); workspace = null; workspace = openWorkspace(root);
     const migrated = new ImageAssetRepository(workspace);
 
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 26 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
     expect(migrated.getRequiredJob(portrait.id)).toMatchObject({
       idempotencyKey: portrait.idempotencyKey,
       purpose: "character_portrait",

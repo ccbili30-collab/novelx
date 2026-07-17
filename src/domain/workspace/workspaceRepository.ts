@@ -250,7 +250,11 @@ function migrate(db: DatabaseSync): void {
     migrateGrowthClosureV26Schema(db);
     schema = { version: 26 };
   }
-  if (schema.version !== 26) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 26) {
+    migrateSafeDiagnosticV27Schema(db);
+    schema = { version: 27 };
+  }
+  if (schema.version !== 27) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -1255,6 +1259,66 @@ function migrateGrowthClosureV26Schema(db: DatabaseSync): void {
     throw error;
   } finally {
     db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+function migrateSafeDiagnosticV27Schema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE safe_diagnostic_events (
+        id TEXT PRIMARY KEY,
+        operation_kind TEXT NOT NULL CHECK (operation_kind IN (
+          'agent_run', 'growth_cycle', 'tool_call', 'image_job', 'provider_test', 'projection'
+        )),
+        operation_id TEXT NOT NULL CHECK (length(trim(operation_id)) > 0),
+        run_id TEXT,
+        cycle_id TEXT,
+        tool_invocation_id TEXT,
+        parent_diagnostic_id TEXT REFERENCES safe_diagnostic_events(id),
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
+        owner TEXT NOT NULL CHECK (owner IN (
+          'provider', 'worker_schema', 'growth_phase', 'tool_bridge', 'main_gateway',
+          'domain_policy', 'persistence', 'reconciliation', 'projection'
+        )),
+        boundary TEXT NOT NULL CHECK (boundary IN (
+          'provider_connect', 'provider_inference', 'provider_protocol', 'tool_arguments',
+          'phase_compile', 'phase_correction', 'worker_to_main', 'tool_authorization',
+          'tool_execution', 'change_set_policy', 'change_set_apply', 'database_commit',
+          'asset_commit', 'recovery', 'renderer_projection'
+        )),
+        code TEXT NOT NULL CHECK (length(code) BETWEEN 3 AND 120 AND code NOT GLOB '*[^A-Z0-9_]*'),
+        tool_name TEXT,
+        attempt INTEGER CHECK (attempt >= 1),
+        max_attempts INTEGER CHECK (max_attempts >= 1),
+        side_effect_state TEXT NOT NULL CHECK (side_effect_state IN (
+          'none', 'request_sent', 'outcome_unknown', 'committed'
+        )),
+        disposition TEXT NOT NULL CHECK (disposition IN (
+          'observed', 'correctable', 'corrected', 'terminal', 'reconciliation_required'
+        )),
+        retryability TEXT NOT NULL CHECK (retryability IN (
+          'model_correction', 'safe_retry', 'user_action', 'restart_reconcile', 'do_not_retry'
+        )),
+        occurred_at TEXT NOT NULL,
+        UNIQUE(operation_kind, operation_id, sequence),
+        CHECK ((attempt IS NULL AND max_attempts IS NULL) OR (attempt IS NOT NULL AND max_attempts IS NOT NULL AND attempt <= max_attempts)),
+        CHECK (parent_diagnostic_id IS NULL OR parent_diagnostic_id <> id)
+      );
+      CREATE INDEX safe_diagnostic_events_run_idx ON safe_diagnostic_events(run_id, sequence);
+      CREATE INDEX safe_diagnostic_events_cycle_idx ON safe_diagnostic_events(cycle_id, sequence);
+      CREATE INDEX safe_diagnostic_events_tool_idx ON safe_diagnostic_events(tool_invocation_id, sequence);
+      CREATE INDEX safe_diagnostic_events_operation_idx
+        ON safe_diagnostic_events(operation_kind, operation_id, sequence);
+      CREATE INDEX safe_diagnostic_events_code_idx ON safe_diagnostic_events(owner, boundary, code);
+      UPDATE schema_meta SET version = 27 WHERE singleton = 1;
+    `);
+    const violations = db.prepare("PRAGMA foreign_key_check").all();
+    if (violations.length > 0) throw new Error("Safe Diagnostic v27 migration produced foreign key violations.");
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
   }
 }
 

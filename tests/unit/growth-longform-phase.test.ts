@@ -10,6 +10,15 @@ import {
 } from "../../src/agent-worker/growth/phases/longform/growthLongformPhase";
 import { growthCapabilityVersion } from "../../src/shared/growthContract";
 import type { GrowthRunBinding } from "../../src/shared/agentWorkerProtocol";
+import {
+  growthLongformSectionWriterCorrectionInstruction,
+  isGrowthLongformSectionDiagnosticCode,
+  isGrowthLongformSectionWriterCorrectionCode,
+  growthLongformSectionDiagnosticCodes,
+  classifyGrowthLongformWriterBlockedDiagnostics,
+  growthLongformWriterBlockedDiagnosticCode,
+  growthLongformWriterBlockedDiagnosticCodes,
+} from "../../src/agent-worker/growth/phases/longform/growthLongformDiagnostics";
 
 describe("Growth Longform phase", () => {
   it("owns Longform-only tool presentation and post-Inquiry guidance", () => {
@@ -53,8 +62,19 @@ describe("Growth Longform phase", () => {
     const writerInput = compileLongformWriterInput({
       authority: binding.longformAuthority!, receiptId: "receipt-2", evidenceById,
     });
+    expect(writerInput.instruction).toContain("Creator Lens authoring");
+    expect(writerInput.instruction).toContain("not GM adjudication");
+    expect(writerInput.instruction).toContain("scene-level connective action, dialogue, sensory detail");
+    expect(writerInput.instruction).toContain("do not need to pre-exist in the evidence");
+    expect(writerInput.instruction).toContain("Do not contradict or replace pinned facts");
+    expect(writerInput.instruction).toContain("new consequential Canon fact, identity, rule");
+    expect(writerInput.gmResolution).toBeNull();
+    expect(writerInput.gmResolutionId).toBeNull();
+    expect(JSON.parse(String(writerInput.sourceMaterial))).toMatchObject({
+      authoringMode: "creator_lens_section",
+    });
     expect(writerInput).toMatchObject({
-      evidenceIds: ["evidence-turn"], gmResolution: null, gmResolutionId: null,
+      evidenceIds: ["evidence-turn", "prose-version-1"], gmResolution: null, gmResolutionId: null,
       styleConstraints: expect.arrayContaining(["Preserve the pinned facts."]),
     });
     expect(writerInput.sourceMaterial).toContain("prose-version-1");
@@ -69,6 +89,14 @@ describe("Growth Longform phase", () => {
       gmResolutionId: null, authorityChanges: [],
     } })).toEqual({ text: candidateText, evidenceIds: ["evidence-turn"] });
     expect(captureLongformWriterCandidate({ authority, details: {
+      status: "candidate", candidateText, evidenceIds: ["evidence-turn", "prose-version-1"],
+      gmResolutionId: null, authorityChanges: [],
+    } })).toEqual({ text: candidateText, evidenceIds: ["evidence-turn"] });
+    expect(captureLongformWriterCandidate({ authority, details: {
+      status: "candidate", candidateText, evidenceIds: ["prose-version-1"],
+      gmResolutionId: null, authorityChanges: [],
+    } })).toEqual({ text: candidateText, evidenceIds: ["evidence-turn"] });
+    expect(captureLongformWriterCandidate({ authority, details: {
       status: "blocked", reasons: [{
         code: "missing_source", message: "Pinned evidence is unavailable.", evidenceIds: ["evidence-turn"],
       }],
@@ -76,7 +104,99 @@ describe("Growth Longform phase", () => {
     expect(() => captureLongformWriterCandidate({ authority, details: {
       status: "candidate", candidateText, evidenceIds: ["foreign-evidence"],
       gmResolutionId: null, authorityChanges: [],
-    } })).toThrow(expect.objectContaining({ code: "STEWARD_LONGFORM_EVIDENCE_REQUIRED" }));
+    } })).toThrow(expect.objectContaining({ code: "STEWARD_LONGFORM_WRITER_EVIDENCE_ECHO_INVALID" }));
+  });
+
+  it("classifies Writer refusal through fixed content-free diagnostic codes", () => {
+    expect(growthLongformWriterBlockedDiagnosticCode("missing_source"))
+      .toBe("STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_SOURCE");
+    expect(growthLongformWriterBlockedDiagnosticCode("insufficient_input"))
+      .toBe("STEWARD_LONGFORM_WRITER_BLOCKED_INSUFFICIENT_INPUT");
+    expect(growthLongformWriterBlockedDiagnosticCode("provider said secret details")).toBeNull();
+    expect(classifyGrowthLongformWriterBlockedDiagnostics([
+      "missing_gm_resolution", "insufficient_input", "missing_gm_resolution", "unknown",
+    ])).toEqual([
+      "STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_GM_RESOLUTION",
+      "STEWARD_LONGFORM_WRITER_BLOCKED_INSUFFICIENT_INPUT",
+    ]);
+    expect(growthLongformWriterBlockedDiagnosticCodes).toHaveLength(9);
+    expect(growthLongformSectionDiagnosticCodes).toEqual([
+      "GROWTH_LONGFORM_SECTION_INVALID",
+      "GROWTH_LONGFORM_SECTION_AUTHORITY_MISMATCH",
+      "GROWTH_LONGFORM_SECTION_OUTLINE_MISMATCH",
+      "GROWTH_LONGFORM_SECTION_EVIDENCE_MISMATCH",
+      "GROWTH_LONGFORM_SECTION_LENGTH_INVALID",
+      "GROWTH_LONGFORM_SECTION_TOO_SHORT",
+      "GROWTH_LONGFORM_SECTION_TOO_LONG",
+      "GROWTH_LONGFORM_SECTION_PRIOR_PROSE_REQUIRED",
+      "GROWTH_LONGFORM_SECTION_PADDING_REJECTED",
+      "GROWTH_LONGFORM_SECTION_FILLER_REJECTED",
+      "GROWTH_LONGFORM_SECTION_REPLAY",
+    ]);
+    expect(isGrowthLongformSectionWriterCorrectionCode("GROWTH_LONGFORM_SECTION_LENGTH_INVALID")).toBe(true);
+    expect(isGrowthLongformSectionWriterCorrectionCode("GROWTH_LONGFORM_SECTION_TOO_SHORT")).toBe(true);
+    expect(isGrowthLongformSectionWriterCorrectionCode("GROWTH_LONGFORM_SECTION_TOO_LONG")).toBe(true);
+    expect(isGrowthLongformSectionWriterCorrectionCode("GROWTH_LONGFORM_SECTION_EVIDENCE_MISMATCH")).toBe(false);
+    expect(isGrowthLongformSectionDiagnosticCode("GROWTH_LONGFORM_SECTION_PRIOR_PROSE_REQUIRED")).toBe(true);
+    expect(isGrowthLongformSectionDiagnosticCode("untrusted raw error")).toBe(false);
+    expect(growthLongformSectionWriterCorrectionInstruction("GROWTH_LONGFORM_SECTION_LENGTH_INVALID"))
+      .toContain("exact Unicode code-point range");
+  });
+
+  it("adds only a fixed Writer correction to a retried section handoff", () => {
+    const binding = sectionBinding();
+    const writerInput = compileLongformWriterInput({
+      authority: binding.longformAuthority!,
+      receiptId: "receipt-2",
+      evidenceById: new Map([
+        ["evidence-turn", { evidenceId: "evidence-turn" }],
+        ["prose-version-1", { evidenceId: "prose-version-1" }],
+      ]),
+      correctionCode: "GROWTH_LONGFORM_SECTION_TOO_SHORT",
+    });
+    expect(writerInput.instruction).toContain("combined Writer candidate is shorter");
+    expect(writerInput.styleConstraints).toEqual(expect.arrayContaining([
+      expect.stringContaining("minimum 5000; preferred maximum 6000"),
+    ]));
+  });
+
+  it("asks Writer to recheck supplied evidence once with bounded creative prose authority", () => {
+    const binding = sectionBinding();
+    const writerInput = compileLongformWriterInput({
+      authority: binding.longformAuthority!,
+      receiptId: "receipt-2",
+      evidenceById: new Map([
+        ["evidence-turn", { evidenceId: "evidence-turn" }],
+        ["prose-version-1", { evidenceId: "prose-version-1" }],
+      ]),
+      correctionCode: "STEWARD_LONGFORM_WRITER_BLOCKED_MISSING_SOURCE",
+    });
+    expect(writerInput.instruction).toContain("pinned evidence values");
+    expect(writerInput.instruction).toContain("minor non-Canon incidents is not missing_source");
+    expect(writerInput.instruction).toContain("new consequential Canon fact, identity, rule, outcome");
+    expect(writerInput.instruction).toContain("Never invent or substitute evidence");
+  });
+
+  it("continues a short in-memory section draft without changing trusted authority", () => {
+    const binding = sectionBinding();
+    const writerInput = compileLongformWriterInput({
+      authority: binding.longformAuthority!,
+      receiptId: "receipt-2",
+      evidenceById: new Map([
+        ["evidence-turn", { evidenceId: "evidence-turn" }],
+        ["prose-version-1", { evidenceId: "prose-version-1" }],
+      ]),
+      correctionCode: "GROWTH_LONGFORM_SECTION_TOO_SHORT",
+      continuationDraft: { text: "既有短稿", evidenceIds: ["evidence-turn"] },
+    });
+    expect(writerInput.instruction).toContain("Return only new prose to append");
+    expect(writerInput.styleConstraints).toEqual(expect.arrayContaining([
+      expect.stringContaining("additional Unicode code points"),
+    ]));
+    expect(JSON.parse(String(writerInput.sourceMaterial))).toMatchObject({ inProgressDraft: "既有短稿" });
+    expect(writerInput).toMatchObject({
+      evidenceIds: ["evidence-turn", "prose-version-1"], gmResolution: null, gmResolutionId: null,
+    });
   });
 
   it("compiles the selected section and rejects missing evidence before any executor", () => {

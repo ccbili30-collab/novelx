@@ -33,6 +33,7 @@ import type { ImageProviderRuntimeProfile } from "../shared/imageProviderContrac
 import { ImageAssetRepository } from "../domain/asset/imageAssetRepository";
 import { ImageAssetStore } from "../domain/asset/imageAssetStore";
 import { ImageGenerationService } from "../domain/asset/imageGenerationService";
+import { isResponsesImageProviderFailureClass } from "../domain/asset/responsesImageProviderClient";
 import { isGreenfieldWorkspaceEmpty } from "../domain/changeSet/workspaceChangeSetPolicy";
 import { ResourceRepository } from "../domain/workspace/resourceRepository";
 import { CreativeDocumentRepository } from "../domain/workspace/creativeDocumentRepository";
@@ -180,7 +181,11 @@ export function createWorkspaceAgentToolGateway(
             "The image request outcome is unknown and cannot be retried automatically.",
           );
         }
-        throw gatewayError("IMAGE_GENERATION_FAILED", "The image Provider did not return a committed image asset.");
+        throw gatewayError(
+          "IMAGE_GENERATION_FAILED",
+          "The image Provider did not return a committed image asset.",
+          isResponsesImageProviderFailureClass(job?.errorCode) ? job.errorCode : undefined,
+        );
       } finally {
         profile.apiKey = "";
       }
@@ -197,7 +202,8 @@ export function createWorkspaceAgentToolGateway(
       const items = mapProposedItems(args);
       const referencesGreenfieldOutput = items.some((item) => item.kind === "assertion.put"
         && item.payload.evidenceIds.some((evidenceId) => parseGreenfieldDocumentOutputEvidence(evidenceId) !== null));
-      if (context.greenfieldCreateRequested || (referencesGreenfieldOutput && !context.longformCreateAuthorized)) {
+      if (context.greenfieldCreateRequested || (referencesGreenfieldOutput
+        && !context.sameChangeSetDocumentEvidenceAuthorized)) {
         assertGreenfieldCreateOnly(workspace, items, context);
       }
       const service = new ChangeSetService(workspace, policy);
@@ -210,6 +216,8 @@ export function createWorkspaceAgentToolGateway(
       }, {
         producerToolInvocationId: context.requestId,
         greenfieldCreateAuthorized: context.greenfieldCreateRequested === true,
+        sameChangeSetDocumentEvidenceAuthorized: context.sameChangeSetDocumentEvidenceAuthorized === true,
+        assertionIdentityUpdateAuthorized: context.assertionIdentityUpdateAuthorized === true,
       });
       assertAvailable(context.signal);
       const committedOutputs = changeSet.status === "committed"
@@ -365,8 +373,12 @@ function mapProposedItems(
   });
 }
 
-function gatewayError(code: string, message: string): Error & { code: string } {
-  return Object.assign(new Error(message), { code });
+function gatewayError(
+  code: string,
+  message: string,
+  diagnosticCode?: string,
+): Error & { code: string; diagnosticCode?: string } {
+  return Object.assign(new Error(message), diagnosticCode ? { code, diagnosticCode } : { code });
 }
 
 function readCode(error: unknown): string {

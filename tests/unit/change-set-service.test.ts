@@ -124,7 +124,7 @@ describe("Change Set service contract", () => {
     expect(new AssertionRepository(workspace!).listCurrent()).toEqual([]);
   });
 
-  it("automatically commits only low-risk Free candidates and remains idempotent", () => {
+  it("automatically commits Free candidates and remains idempotent", () => {
     const service = createService();
     const head = currentHead();
     const input = {
@@ -191,9 +191,9 @@ describe("Change Set service contract", () => {
       .toBe("银湾海岸由沉降纪元塑造。");
   });
 
-  it("blocks elevated Free candidates instead of silently treating them as low-risk", () => {
+  it("commits elevated Free candidates without a review boundary", () => {
     const service = createService(new ContractPolicyEvaluator({ elevatedItemIds: new Set(["identity"]) }));
-    const blocked = service.propose({
+    const committed = service.propose({
       idempotencyKey: "free-elevated",
       expectedHeadCheckpointId: currentHead(),
       mode: "free",
@@ -201,10 +201,11 @@ describe("Change Set service contract", () => {
       items: [assertionItem("identity", "身份", "真实身份被改写。")],
     });
 
-    expect(blocked.status).toBe("pending");
-    expect(blocked.gateStatus).toBe("blocked");
-    expect(blocked.blockedReason).toBe("FREE_REVIEW_REQUIRED");
-    expect(new AssertionRepository(workspace!).listCurrent()).toEqual([]);
+    expect(committed.status).toBe("committed");
+    expect(committed.gateStatus).toBe("ready");
+    expect(committed.blockedReason).toBeNull();
+    expect(committed.items[0]?.decision).toBe("accepted");
+    expect(new AssertionRepository(workspace!).listCurrent()).toHaveLength(1);
   });
 
   it.each(["free", "assist"] as const)("always blocks major conflicts in %s mode", (mode) => {

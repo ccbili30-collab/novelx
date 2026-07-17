@@ -10,6 +10,8 @@ import { auditProviderProtocolStage, providerProtocolError } from "./pi/provider
 import type { RuntimeAdapter } from "./pi/runtimeAdapterContract";
 import type { PublishedPrompt } from "./promptRegistry";
 import { createStewardExecutionStateMachine, type GeneratedImageReference, type InspectedProjectFileReference, type RetrievedDocumentReference, type StewardExecutionSnapshot } from "./stewardExecutionStateMachine";
+import { createGrowthRevisionDiagnosticSink, createStewardToolDiagnosticSink } from "./diagnostics/safeDiagnosticEmitter";
+import { createProviderTerminalDiagnostic } from "./pi/providerDiagnostics";
 
 export interface StewardRuntimeAudit {
   record(runId: string, operation: AgentWorkerAuditOperation, signal?: AbortSignal): Promise<void>;
@@ -76,6 +78,18 @@ export async function runStewardRuntime(input: {
       growthBinding: input.growthBinding,
       operationalTools: input.tools,
       resultCapture: input.resultCapture,
+      revisionDiagnostics: input.growthBinding?.kind === "revision"
+        ? createGrowthRevisionDiagnosticSink({
+            runId: input.runId,
+            cycleId: input.growthBinding.cycleId,
+            record: (operation) => input.audit.record(input.runId, operation, input.signal),
+          })
+        : undefined,
+      workerDiagnostics: createStewardToolDiagnosticSink({
+        runId: input.runId,
+        cycleId: input.growthBinding?.cycleId ?? null,
+        record: (operation) => input.audit.record(input.runId, operation, input.signal),
+      }),
       longReadMaxChars: resolveLongReadMaxChars(input.providerProfile.contextWindow),
     });
     stateMachine = machine;
@@ -129,10 +143,22 @@ export async function runStewardRuntime(input: {
       generatedImages: machine.snapshot().generatedImages,
     };
   } catch (cause) {
-    const effectiveCause = stateMachine?.lastFinalRejectionCode()
+    let effectiveCause = stateMachine?.lastFinalRejectionCode()
       ? stewardRuntimeError(stateMachine.lastFinalRejectionCode()!)
       : cause;
     if (!invocationStarted) throw cause;
+    const providerDiagnostic = createProviderTerminalDiagnostic({
+      runId: input.runId,
+      cycleId: input.growthBinding?.cycleId ?? null,
+      cause: effectiveCause,
+    });
+    if (providerDiagnostic) {
+      try {
+        await input.audit.record(input.runId, { type: "safe_diagnostic.append", diagnostic: providerDiagnostic }, input.signal);
+      } catch {
+        effectiveCause = stewardRuntimeError("AGENT_AUDIT_REQUIRED");
+      }
+    }
     try {
       await input.audit.record(input.runId, {
         type: "invocation.terminal",

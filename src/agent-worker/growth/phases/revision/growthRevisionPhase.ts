@@ -21,9 +21,19 @@ const revisionCorrectionCodes = new Set([
   "GROWTH_REVISION_FRAGMENT_AUTHORITY_INVALID",
   "GROWTH_REVISION_FRAGMENT_IMPACT_MISMATCH",
   "GROWTH_REVISION_FRAGMENT_REFERENCE_INVALID",
+  "GROWTH_REVISION_FRAGMENT_OWNER_REF_INVALID",
+  "GROWTH_REVISION_FRAGMENT_DOCUMENT_OWNER_KIND_INVALID",
+  "GROWTH_REVISION_FRAGMENT_SCOPE_REF_INVALID",
+  "GROWTH_REVISION_FRAGMENT_DOCUMENT_SOURCE_REF_INVALID",
+  "GROWTH_REVISION_FRAGMENT_RELATION_ENDPOINT_REF_INVALID",
+  "GROWTH_REVISION_FRAGMENT_PARENT_REF_INVALID",
   "GROWTH_REVISION_FRAGMENT_REFERENCE_CYCLE",
   "GROWTH_REVISION_FRAGMENT_RELATION_INVALID",
+  "GROWTH_REVISION_FRAGMENT_CLOSURE_REQUIREMENT_INVALID",
 ]);
+
+export const growthRevisionMaxCorrectionAttempts = 5;
+export const growthRevisionMaxRepeatedCorrectionCode = 3;
 
 export const growthRevisionPhaseHandler: GrowthPhaseHandler<"revision"> = fixedGrowthPhaseHandler(
   "revision",
@@ -38,7 +48,7 @@ export function revisionToolPresentation(
 ): { description: string; parameters: TSchema } | null {
   if (binding?.kind !== "revision" || toolName !== "propose_change_set") return null;
   return {
-    description: "Submit one evidence-grounded Revision Fragment after the selected Inquiry. First summarize affected evidence and preserve/stale decisions, then supply only creative edits or additions. Cite returned evidence IDs or Fragment local IDs; never supply checkpoint, branch, scope, resource/database IDs, versions, ownership, dependencies, state, permissions, or project-file operations.",
+    description: "Submit one evidence-grounded Revision Fragment after the selected Inquiry. Use only the @resource/@document/@assertion/@relation aliases from revisionReferences for existing targets, plus localIds declared in this Fragment for new targets. Never use evidenceId, resourceId, documentId, relation endpoints, or database identities as Fragment references. Every targetRef marked revise must appear exactly once in the matching update or removal array; preserve and stale_visual targets must not be mutated. Keep every declared mutation array present. Supply only creative edits or additions; never supply checkpoint, branch, scope, versions, ownership, dependencies, state, permissions, or project-file operations.",
     parameters: growthRevisionFragmentParameters,
   };
 }
@@ -53,6 +63,7 @@ export function compileRevisionProposal(input: {
     cycleId: input.binding.cycleId,
     domainRootResourceIds: input.binding.domainRootResourceIds,
     authority: input.authority,
+    requiredClosureAssertions: input.binding.closureContinuation?.requiredAssertions ?? [],
   });
 }
 
@@ -81,7 +92,7 @@ export function createGrowthRevisionRuntime(binding: GrowthRunBinding | undefine
     },
     postInquiryInstruction(nextTool) {
       return nextTool === "propose_change_set"
-        ? "The selected Inquiry is recorded. Submit one high-level Revision Fragment now: classify affected evidence, preserve unrelated facts, and compile all selected edits into one atomic Change Set."
+        ? `The selected Inquiry is recorded. Submit one high-level Revision Fragment now: classify affected evidence, preserve unrelated facts, and compile all selected edits into one atomic Change Set.${binding.closureContinuation ? ` This is a Closure continuation. Add one sourced assertionAddition for every exact required predicate: ${binding.closureContinuation.requiredAssertions.map((item) => item.facetId).join(", ")}. Use the matching world, main story, or focus OC @resource alias as scopeRef; do not substitute descriptive predicates.` : ""}`
         : undefined;
     },
     isCorrectable(toolName, error) {

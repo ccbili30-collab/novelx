@@ -1,7 +1,9 @@
 import { z } from "zod";
+import { growthInquiryDiagnosticCodes } from "./diagnostics/growthInquiryDiagnostics";
 import { workspaceCreativeRelationSchema, workspaceResourceSchema } from "./ipcContract";
 import { providerRuntimeProfileSchema } from "./providerContract";
 import { growthCapabilityVersion } from "./growthContract";
+import { safeDiagnosticEnvelopeV1Schema } from "./diagnostics/safeDiagnosticContract";
 
 const identifierSchema = z.string().trim().min(1).max(240);
 const requestIdSchema = z.string().uuid();
@@ -74,6 +76,12 @@ export const growthRunBindingSchema = z.object({
   domainRootResourceIds: z.object({ world: identifierSchema, oc: identifierSchema, story: identifierSchema }).strict(),
   greenfieldCreateAuthorized: z.boolean(),
   priorInquiries: z.array(growthPriorInquiryContextSchema).max(100),
+  closureContinuation: z.object({
+    requiredAssertions: z.array(z.object({
+      facetId: identifierSchema,
+      scopeResourceId: identifierSchema,
+    }).strict()).min(1).max(100),
+  }).strict().nullable().optional(),
   closureProfile: z.object({
     profileId: identifierSchema,
     revision: z.number().int().min(1).max(1_000_000),
@@ -123,6 +131,14 @@ export const growthRunBindingSchema = z.object({
   if (value.longformAuthority && (value.kind !== "expand" || value.focusKinds.length !== 1
     || value.focusKinds[0] !== "oc" || value.greenfieldCreateAuthorized)) {
     context.addIssue({ code: "custom", path: ["longformAuthority"], message: "Longform authority requires one non-greenfield OC expansion." });
+  }
+  if (value.closureContinuation) {
+    const requirements = value.closureContinuation.requiredAssertions;
+    if (value.kind !== "revision"
+      || new Set(requirements.map((item) => item.facetId)).size !== requirements.length
+      || new Set(requirements.map((item) => `${item.facetId}:${item.scopeResourceId}`)).size !== requirements.length) {
+      context.addIssue({ code: "custom", path: ["closureContinuation"], message: "Closure continuation authority requires one revision and unique assertions." });
+    }
   }
   if (value.longformAuthority?.phase === "section") {
     const sectionIds = value.longformAuthority.sections.map((section) => section.localId);
@@ -1086,6 +1102,7 @@ export const agentToolInternalErrorCodeSchema = z.enum([
   "GROWTH_INQUIRY_REQUIRED",
   "GROWTH_INQUIRY_INVALID",
   "GROWTH_INQUIRY_STALLED",
+  ...growthInquiryDiagnosticCodes,
   "GROWTH_CLOSURE_NOT_READY",
   "GROWTH_CLOSURE_SUBMISSION_INVALID",
   "GROWTH_RECONCILIATION_REQUIRED",
@@ -1300,11 +1317,17 @@ const auditLocalToolTerminalOperationSchema = z.object({
   resultSha256: sha256Schema.nullable(),
 }).strict();
 
+const auditSafeDiagnosticAppendOperationSchema = z.object({
+  type: z.literal("safe_diagnostic.append"),
+  diagnostic: safeDiagnosticEnvelopeV1Schema,
+}).strict();
+
 export const agentWorkerAuditOperationSchema = z.discriminatedUnion("type", [
   auditInvocationStartedOperationSchema,
   auditInvocationTerminalOperationSchema,
   auditLocalToolStartedOperationSchema,
   auditLocalToolTerminalOperationSchema,
+  auditSafeDiagnosticAppendOperationSchema,
 ]);
 
 export const agentWorkerAuditRequestSchema = z.object({

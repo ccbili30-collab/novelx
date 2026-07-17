@@ -2,6 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "../growth/growthWorldFragment";
 import { growthInquiryBriefParameters, growthInquiryBriefSchema } from "../growth/growthInquiryBrief";
+import { createGrowthRevisionReferenceCatalog } from "../growth/phases/revision/growthRevisionReferences";
 import {
   proposeChangeSetArgsSchema,
   proposeChangeSetResultSchema,
@@ -332,7 +333,12 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
         ? growthRetrieveGraphEvidenceResultSchema.parse(await executor.retrieveGraphEvidence(args, signal))
         : retrieveGraphEvidenceResultSchema.parse(await executor.retrieveGraphEvidence(args, signal));
       const modelVisibleResult = options.growthBinding && "receiptId" in result
-        ? (({ receiptId: _receiptId, revisionAuthority: _revisionAuthority, ...safe }) => safe)(result)
+        ? (({ receiptId: _receiptId, revisionAuthority, ...safe }) => ({
+            ...safe,
+            ...(revisionAuthority
+              ? { revisionReferences: createGrowthRevisionReferenceCatalog(revisionAuthority) }
+              : {}),
+          }))(result)
         : result;
       return {
         content: [{
@@ -345,7 +351,9 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
               : options.growthBinding?.kind === "repair"
               ? `This pinned Receipt contains the evidence for one authorized Closure repair. Apply only this safe objective: ${options.growthBinding.closureRepair?.repairObjective ?? "repair the selected finding"}. Submit exactly one Change Set; do not broaden the repair or repeat retrieval.`
               : options.growthBinding
-              ? "This pinned Growth Receipt is recorded. Do not repeat retrieval. Submit exactly one 3-7 item Growth Inquiry Brief next. Cite only returned evidence IDs; use the trusted priorInquiries local IDs only for explicit allowlisted transitions."
+              ? options.growthBinding.kind === "revision"
+                ? "This pinned Growth Receipt is recorded. Do not repeat retrieval. Submit exactly one 3-7 item Growth Inquiry Brief next. Cite returned evidence IDs in the Inquiry. For the later Revision Fragment, use only revisionReferences ref aliases or new localIds; never use evidenceId, resourceId, documentId, relation endpoints, or database identities as Fragment references."
+                : "This pinned Growth Receipt is recorded. Do not repeat retrieval. Submit exactly one 3-7 item Growth Inquiry Brief next. Cite only returned evidence IDs; use the trusted priorInquiries local IDs only for explicit allowlisted transitions."
               : "Do not repeat the same retrieval. If the user requested a Change Set and evidence is sufficient, call propose_change_set. If the evidence conflicts or the user requested validation, call checker. Otherwise submit the final structured result.",
           }),
         }],
@@ -357,7 +365,7 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
   const submitInquiry: AgentTool<typeof growthInquiryBriefParameters> = {
     name: "submit_growth_inquiry",
     label: "提交证据化自询",
-    description: "Submit one authority-free 3-7 item Inquiry Brief after pinned retrieval. Ask about causal consequences and cross-node impact, not what extra setting can be added. Use only local IDs and returned evidence IDs. Do not submit Batch, Inquiry, Receipt, rank, checkpoint, scope, rule, fingerprint, or lifecycle authority fields.",
+    description: "Submit one authority-free 3-7 item Inquiry Brief after pinned retrieval. Ask about causal consequences and cross-node impact, not what extra setting can be added. For a normal Brief, selectedLocalId must name one non-choice Inquiry and every requiresCreatorChoice must be false. For a creator-choice Brief, selectedLocalId must be null and exactly one Inquiry must set requiresCreatorChoice=true. The selected or creator-choice Inquiry must have the unique highest numeric priority; priority ties are invalid. Use only local IDs and returned evidence IDs. Do not submit Batch, Inquiry, Receipt, rank, checkpoint, scope, rule, fingerprint, or lifecycle authority fields.",
     parameters: growthInquiryBriefParameters,
     execute: async (_toolCallId, params, signal) => {
       const args = growthInquiryBriefSchema.parse(params);

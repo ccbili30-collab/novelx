@@ -158,6 +158,7 @@ function createGateway(overrides: Partial<AgentToolGateway> = {}): AgentToolGate
 
 function createAuditStore(): AgentAuditStore {
   return {
+    appendSafeDiagnostic: vi.fn(),
     beginRun: vi.fn(),
     beginInvocation: vi.fn(),
     beginTool: vi.fn(),
@@ -181,6 +182,41 @@ function runRequest() {
 }
 
 describe("Agent Process Supervisor internal tool gateway", () => {
+  it("persists a strict Worker diagnostic only when its authority matches the active Run", () => {
+    const child = new FakeWorkerProcess();
+    const audit = createAuditStore();
+    const supervisor = new AgentProcessSupervisor("worker.js", {
+      acquireRuntimeLease: () => createLease(createGateway(), audit),
+      spawnWorker: () => child,
+    });
+    const runId = supervisor.start(runRequest(), () => undefined);
+    child.spawn();
+    const diagnostic = {
+      schemaVersion: 1 as const,
+      diagnosticId: "diagnostic-1", operationKind: "tool_call" as const, operationId: "tool-1",
+      runId, cycleId: null, toolInvocationId: "tool-1", parentDiagnosticId: null,
+      sequence: 1, owner: "worker_schema" as const, boundary: "worker_to_main" as const,
+      code: "WORKER_SCHEMA_RESULT_INVALID", toolName: "propose_change_set",
+      attempt: null, maxAttempts: null, sideEffectState: "none" as const,
+      disposition: "terminal" as const, retryability: "do_not_retry" as const,
+      occurredAt: "2026-07-17T00:00:00.000Z",
+    };
+    child.receive({
+      type: "audit.request", runId, auditRequestId: "11111111-1111-4111-8111-111111111111",
+      operation: { type: "safe_diagnostic.append", diagnostic },
+    });
+    expect(audit.appendSafeDiagnostic).toHaveBeenCalledWith(diagnostic);
+    expect(child.sent.at(-1)).toMatchObject({ type: "audit.response", ok: true });
+
+    child.receive({
+      type: "audit.request", runId, auditRequestId: "22222222-2222-4222-8222-222222222222",
+      operation: { type: "safe_diagnostic.append", diagnostic: { ...diagnostic, diagnosticId: "diagnostic-forged", runId: "other-run" } },
+    });
+    expect(audit.appendSafeDiagnostic).toHaveBeenCalledTimes(1);
+    expect(child.sent.at(-1)).toMatchObject({ type: "audit.response", ok: false, error: { code: "AGENT_AUDIT_REQUIRED" } });
+    supervisor.dispose();
+  });
+
   it("preserves an allowlisted post-apply Change Set failure code without forwarding raw exception text", async () => {
     const child = new FakeWorkerProcess();
     const audit = createAuditStore();
@@ -214,6 +250,11 @@ describe("Agent Process Supervisor internal tool gateway", () => {
     expect(audit.appendToolTerminal).toHaveBeenCalledWith(expect.objectContaining({
       eventType: "failed", errorCode: "RESOURCE_PARENT_NOT_FOUND",
     }));
+    expect(audit.appendSafeDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+      operationKind: "tool_call", operationId: "66666666-6666-4666-8666-666666666666",
+      owner: "domain_policy", boundary: "change_set_policy", code: "RESOURCE_PARENT_NOT_FOUND",
+      sideEffectState: "none", disposition: "terminal",
+    }));
   });
 
   it("collapses unknown or sensitive Change Set failures to AGENT_TOOL_FAILED", async () => {
@@ -245,6 +286,82 @@ describe("Agent Process Supervisor internal tool gateway", () => {
     expect(child.sent[1]).toMatchObject({ type: "tool.response", ok: false, error: { code: "AGENT_TOOL_FAILED" } });
     for (const sensitive of ["custom_key=secret", "token=secret", "password=hidden", "provider.example"]) expect(response).not.toContain(sensitive);
     expect(audit.appendToolTerminal).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "AGENT_TOOL_FAILED" }));
+    expect(audit.appendSafeDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+      owner: "main_gateway", boundary: "tool_execution", code: "AGENT_TOOL_FAILED",
+      sideEffectState: "request_sent",
+    }));
+    expect(JSON.stringify((audit.appendSafeDiagnostic as ReturnType<typeof vi.fn>).mock.calls)).not.toContain("secret");
+  });
+
+  it("records an allowlisted image diagnostic subcode while keeping the Worker failure broad", async () => {
+    const child = new FakeWorkerProcess();
+    const audit = createAuditStore();
+    const supervisor = new AgentProcessSupervisor("worker.js", {
+      acquireRuntimeLease: () => createLease(createGateway({
+        generateImage: async () => {
+          throw Object.assign(new Error("token=secret upstream body"), {
+            code: "IMAGE_GENERATION_FAILED",
+            diagnosticCode: "IMAGE_PROVIDER_RATE_LIMITED",
+          });
+        },
+      }), audit),
+      spawnWorker: () => child,
+    });
+    const runId = supervisor.start(runRequest(), () => undefined);
+    child.spawn();
+    child.receive({
+      type: "tool.request", runId, requestId: "88888888-8888-4888-8888-888888888888",
+      tool: "generate_image",
+      args: {
+        title: "safe", purpose: "scene", prompt: "safe",
+        sourceResourceIds: ["resource-1"], sourceVersionIds: ["version-1"],
+        idempotencyKey: "safe-image",
+      },
+    });
+    await vi.waitFor(() => expect(child.sent).toHaveLength(2));
+    expect(child.sent[1]).toMatchObject({
+      type: "tool.response", ok: false, error: { code: "IMAGE_GENERATION_FAILED" },
+    });
+    expect(audit.appendToolTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "IMAGE_GENERATION_FAILED",
+    }));
+    expect(audit.appendSafeDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+      code: "IMAGE_PROVIDER_RATE_LIMITED", owner: "provider", boundary: "provider_inference",
+      sideEffectState: "request_sent", retryability: "user_action",
+    }));
+    expect(JSON.stringify((audit.appendSafeDiagnostic as ReturnType<typeof vi.fn>).mock.calls)).not.toContain("secret");
+  });
+
+  it("ignores an unknown image diagnostic subcode", async () => {
+    const child = new FakeWorkerProcess();
+    const audit = createAuditStore();
+    const supervisor = new AgentProcessSupervisor("worker.js", {
+      acquireRuntimeLease: () => createLease(createGateway({
+        generateImage: async () => {
+          throw Object.assign(new Error("token=secret upstream body"), {
+            code: "IMAGE_GENERATION_FAILED",
+            diagnosticCode: "UPSTREAM_SECRET_CLASS",
+          });
+        },
+      }), audit),
+      spawnWorker: () => child,
+    });
+    const runId = supervisor.start(runRequest(), () => undefined);
+    child.spawn();
+    child.receive({
+      type: "tool.request", runId, requestId: "99999999-9999-4999-8999-999999999999",
+      tool: "generate_image",
+      args: {
+        title: "safe", purpose: "scene", prompt: "safe",
+        sourceResourceIds: ["resource-1"], sourceVersionIds: ["version-1"],
+        idempotencyKey: "safe-image-unknown",
+      },
+    });
+    await vi.waitFor(() => expect(child.sent).toHaveLength(2));
+    expect(audit.appendSafeDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+      code: "IMAGE_GENERATION_FAILED",
+    }));
+    expect(JSON.stringify((audit.appendSafeDiagnostic as ReturnType<typeof vi.fn>).mock.calls)).not.toContain("UPSTREAM_SECRET_CLASS");
   });
 
   it("injects capability only, never workspace details, and does not project tool payloads", async () => {

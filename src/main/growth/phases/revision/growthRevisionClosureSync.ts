@@ -1,7 +1,7 @@
 import type { GrowthRepository } from "../../../../domain/growth/growthRepository";
 import type { GrowthCycle, GrowthCycleIntent, GrowthGoal } from "../../../../shared/growthContract";
 
-/** Advances existing v26 Closure profiles across one committed Rule Revision checkpoint. */
+/** Advances existing v26 Closure profiles across one committed content-revision checkpoint. */
 export function syncClosureProfilesAfterRevision(input: {
   repository: GrowthRepository;
   goal: GrowthGoal;
@@ -20,7 +20,7 @@ export function syncClosureProfilesAfterRevision(input: {
     if (current.checkpointId === input.cycle.outputCheckpointId
       && current.ruleRevision === input.cycle.ruleRevision) continue;
     if (current.checkpointId !== input.cycle.inputCheckpointId
-      || current.ruleRevision >= input.cycle.ruleRevision) throw syncError();
+      || current.ruleRevision > input.cycle.ruleRevision) throw syncError();
     input.repository.appendClosureRevision({
       profileId: profile.id,
       expectedRevision: current.revision,
@@ -36,7 +36,7 @@ export function syncClosureProfilesAfterRevision(input: {
 }
 
 function syncError(): Error & { code: "GROWTH_CLOSURE_REVISION_SYNC_INVALID" } {
-  return Object.assign(new Error("Closure profile cannot advance across the committed rule revision."), {
+  return Object.assign(new Error("Closure profile cannot advance across the committed content revision."), {
     code: "GROWTH_CLOSURE_REVISION_SYNC_INVALID" as const,
   });
 }
