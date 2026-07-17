@@ -505,6 +505,8 @@ unknown side effect -> reconciliation_required
 
 **Tests:** exact replay, conflicting replay, dependency unlock, same-owner attempt, restart recovery, cancellation and reconciliation barrier.
 
+**Task 6 evidence (2026-07-18):** `GrowthEditorialRepository` now implements the approved state machine with transactional expected-state updates; exact/conflicting Round, Attempt and Review replay; fixed-capability revisions; dependency unlock only after serialized commit; complete restart snapshots; pre-side-effect cancellation/failure; and a persisted reconciliation barrier. `commit_queued` remains zero-side-effect until `markCommitRequested` is durably recorded, preventing a queued-only crash from being misclassified while failing closed before an external Change Set call. The Task 6 suite passed 7/7 and the combined repository+persistence gate passed 21/21 with zero skips; `npm run typecheck` and `git diff --check` passed. No Provider or Canon mutation path was run. Task 7 causal policy remains unimplemented.
+
 ## 8. Phase D — Causal Domain Graph
 
 ### Task 7: Define causal relation policy
