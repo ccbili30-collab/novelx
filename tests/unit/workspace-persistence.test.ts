@@ -15,6 +15,14 @@ import { canonicalAuditHash } from "../../src/domain/audit/canonicalAuditHash";
 
 const opened: WorkspaceDatabase[] = [];
 const roots: string[] = [];
+const editorialTables = [
+  "growth_editorial_rounds",
+  "growth_work_orders",
+  "growth_work_order_dependencies",
+  "growth_work_order_attempts",
+  "growth_editorial_reviews",
+  "growth_work_order_artifacts",
+] as const;
 
 afterEach(() => {
   for (const workspace of opened.splice(0)) workspace.close();
@@ -22,14 +30,14 @@ afterEach(() => {
 });
 
 describe("local workspace persistence", () => {
-  it("creates schema 27 creative, audit, import, image, Inquiry, Closure and safe diagnostic storage", () => {
+  it("creates schema 28 creative, audit, import, Growth editorial and safe diagnostic storage", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-6-"));
     roots.push(root);
     const workspace = openWorkspace(root);
     opened.push(workspace);
 
     expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toEqual({ version: 27 });
+      .toEqual({ version: 28 });
     expect(listTables(workspace)).toEqual(expect.arrayContaining([
       "creative_documents",
       "creative_relation_versions",
@@ -100,6 +108,12 @@ describe("local workspace persistence", () => {
       "growth_illustration_item_sources",
       "growth_illustration_text_snapshots",
       "safe_diagnostic_events",
+      "growth_editorial_rounds",
+      "growth_work_orders",
+      "growth_work_order_dependencies",
+      "growth_work_order_attempts",
+      "growth_editorial_reviews",
+      "growth_work_order_artifacts",
     ]));
     expect(listIndexes(workspace)).toEqual(expect.arrayContaining([
       "creative_documents_resource_idx",
@@ -126,6 +140,14 @@ describe("local workspace persistence", () => {
       "safe_diagnostic_events_code_idx",
       "growth_illustration_items_request_status_idx",
       "growth_events_cycle_idx",
+      "growth_editorial_rounds_one_open_goal_idx",
+      "growth_editorial_rounds_goal_status_idx",
+      "growth_work_orders_round_status_idx",
+      "growth_work_order_dependencies_predecessor_idx",
+      "growth_work_order_attempts_one_active_idx",
+      "growth_work_order_attempts_round_status_idx",
+      "growth_editorial_reviews_work_order_idx",
+      "growth_work_order_artifacts_work_order_idx",
     ]));
     expect(workspace.db.prepare("SELECT id, kind, sealed_at FROM creative_commits").all()).toMatchObject([
       { kind: "initialization", sealed_at: null },
@@ -231,7 +253,7 @@ describe("local workspace persistence", () => {
     workspace = openWorkspace(root);
     opened.push(workspace);
 
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 28 });
     expect(workspace.db.prepare("SELECT purpose, request_sha256 FROM image_generation_jobs WHERE id = 'job-v23'").get())
       .toEqual({ purpose: "world_map", request_sha256: hash });
     expect(workspace.db.prepare("SELECT sha256 FROM image_assets WHERE id = 'asset-v23'").get()).toEqual({ sha256: hash });
@@ -275,7 +297,7 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 28 });
     expect(workspace.db.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all()).toEqual(eventBefore);
     expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_events").get()).toEqual(eventCountBefore);
     expect(workspace.db.prepare("PRAGMA table_info(growth_events)").all()).toEqual(columnsBefore);
@@ -349,7 +371,7 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 28 });
     expect(workspace.db.prepare("SELECT * FROM growth_events ORDER BY goal_id, sequence").all()).toEqual(eventBefore);
     expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
@@ -387,7 +409,7 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 28 });
     expect(workspace.db.prepare(`
       SELECT id, goal_id, sequence, idempotency_key, payload_hash, input_checkpoint_id, rule_revision,
         run_id, receipt_id, change_set_id, output_checkpoint_id, status, failure_code, created_at, updated_at, terminal_at
@@ -468,28 +490,30 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 28 });
     expect(new GrowthRepository(workspace).getCycleIntent("legacy-v24-cycle")).toMatchObject({ provenance: "persisted_v24" });
     expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
-  it("migrates v26 to v27 additively without fabricating diagnostic history and reopens idempotently", () => {
+  it("migrates v26 through v28 additively without fabricating diagnostic or editorial history and reopens idempotently", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-27-"));
     roots.push(root);
     let workspace = openWorkspace(root);
     opened.push(workspace);
     workspace.db.prepare("INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, ?, ?, ?)")
       .run("legacy-v26-source", "document_version", "legacy-ref", "2026-07-17T00:00:00.000Z");
+    downgradeToSchema27(workspace);
     workspace.db.exec("DROP TABLE safe_diagnostic_events; UPDATE schema_meta SET version = 26 WHERE singleton = 1;");
     workspace.close();
     opened.splice(opened.indexOf(workspace), 1);
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 28 });
     expect(workspace.db.prepare("SELECT id, kind, ref FROM source_records WHERE id = ?").get("legacy-v26-source"))
       .toEqual({ id: "legacy-v26-source", kind: "document_version", ref: "legacy-ref" });
     expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM safe_diagnostic_events").get()).toEqual({ count: 0 });
+    expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM growth_editorial_rounds").get()).toEqual({ count: 0 });
     expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     const tableCount = workspace.db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'").get();
     workspace.close();
@@ -501,13 +525,14 @@ describe("local workspace persistence", () => {
     expect(workspace.db.prepare("SELECT COUNT(*) AS count FROM safe_diagnostic_events").get()).toEqual({ count: 0 });
   });
 
-  it("rolls back the whole v26 to v27 migration after a table collision", () => {
+  it("rolls back the v26 to v27 stage before v28 after a table collision", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-27-rollback-"));
     roots.push(root);
     let workspace = openWorkspace(root);
     opened.push(workspace);
     workspace.db.prepare("INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, ?, ?, ?)")
       .run("rollback-v26-source", "document_version", "rollback-ref", "2026-07-17T00:00:00.000Z");
+    downgradeToSchema27(workspace);
     workspace.db.exec(`
       DROP TABLE safe_diagnostic_events;
       UPDATE schema_meta SET version = 26 WHERE singleton = 1;
@@ -531,7 +556,213 @@ describe("local workspace persistence", () => {
 
     workspace = openWorkspace(root);
     opened.push(workspace);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 28 });
+    expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("migrates v27 to v28 additively with byte-equivalent legacy rows and idempotent reopen", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-28-"));
+    roots.push(root);
+    let workspace = openWorkspace(root);
+    opened.push(workspace);
+    seedEditorialGoal(workspace, "legacy-v27-editorial-goal");
+    workspace.db.prepare("INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, ?, ?, ?)")
+      .run("legacy-v27-source", "document_version", "legacy-v27-ref", "2026-07-18T00:00:00.000Z");
+    downgradeToSchema27(workspace);
+    const before = snapshotLegacyRows(workspace);
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 28 });
+    expect(snapshotLegacyRows(workspace)).toEqual(before);
+    for (const table of editorialTables) {
+      expect(workspace.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+    }
+    expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(workspace.db.prepare("PRAGMA integrity_check").all()).toEqual([{ integrity_check: "ok" }]);
+    const objectsBeforeReopen = workspace.db.prepare(`
+      SELECT type, name, sql FROM sqlite_master
+      WHERE name LIKE 'growth_editorial_%' OR name LIKE 'growth_work_order_%'
+      ORDER BY type, name
+    `).all();
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+    expect(workspace.db.prepare(`
+      SELECT type, name, sql FROM sqlite_master
+      WHERE name LIKE 'growth_editorial_%' OR name LIKE 'growth_work_order_%'
+      ORDER BY type, name
+    `).all()).toEqual(objectsBeforeReopen);
+    expect(snapshotLegacyRows(workspace)).toEqual(before);
+  });
+
+  it("rolls back the entire v27 to v28 migration after an object collision", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-schema-28-rollback-"));
+    roots.push(root);
+    let workspace = openWorkspace(root);
+    opened.push(workspace);
+    workspace.db.prepare("INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, ?, ?, ?)")
+      .run("rollback-v27-source", "document_version", "rollback-v27-ref", "2026-07-18T00:00:00.000Z");
+    downgradeToSchema27(workspace);
+    workspace.db.exec("CREATE TABLE growth_editorial_rounds (sentinel TEXT NOT NULL)");
+    workspace.close();
+    opened.splice(opened.indexOf(workspace), 1);
+
+    expect(() => openWorkspace(root)).toThrow(/growth_editorial_rounds already exists/);
+    const direct = new DatabaseSync(path.join(root, ".novax", "workspace.db"));
+    direct.exec("PRAGMA foreign_keys = ON");
+    expect(direct.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(direct.prepare("PRAGMA table_info(growth_editorial_rounds)").all())
+      .toEqual([expect.objectContaining({ name: "sentinel" })]);
+    expect(direct.prepare("SELECT id FROM source_records WHERE id = ?").get("rollback-v27-source"))
+      .toEqual({ id: "rollback-v27-source" });
+    expect(direct.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE name LIKE 'growth_work_order_%' OR name LIKE 'growth_editorial_reviews%'
+      ORDER BY name
+    `).all()).toEqual([]);
+    direct.exec("DROP TABLE growth_editorial_rounds");
+    direct.close();
+
+    workspace = openWorkspace(root);
+    opened.push(workspace);
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 28 });
+    expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("enforces Growth editorial ownership, topology, pinning, immutability and content-addressed artifacts", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-editorial-v28-invariants-"));
+    roots.push(root);
+    const workspace = openWorkspace(root);
+    opened.push(workspace);
+    const goal = seedEditorialGoal(workspace, "editorial-v28-goal");
+    const checkpointId = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
+    const now = "2026-07-18T01:00:00.000Z";
+    const hash = "a".repeat(64);
+    const insertRound = workspace.db.prepare(`
+      INSERT INTO growth_editorial_rounds (
+        id, goal_id, contract_version, source_checkpoint_id, rule_revision, idempotency_key,
+        payload_hash, status, failure_code, created_at, updated_at, terminal_at
+      ) VALUES (?, ?, '1.0.0', ?, 1, ?, ?, 'active', NULL, ?, ?, NULL)
+    `);
+    insertRound.run("round-1", goal.id, checkpointId, "round-1-key", hash, now, now);
+    expect(() => insertRound.run("round-2", goal.id, checkpointId, "round-2-key", hash, now, now))
+      .toThrow();
+
+    const insertWorkOrder = workspace.db.prepare(`
+      INSERT INTO growth_work_orders (
+        id, round_id, goal_id, ordinal, objective, source_checkpoint_id, scope_refs_json,
+        capability_id, acceptance_facets_json, status, failure_code, idempotency_key,
+        payload_hash, created_at, updated_at
+      ) VALUES (?, 'round-1', ?, ?, ?, ?, '["world"]', ?, '["causal_closure"]',
+        'planned', NULL, ?, ?, ?, ?)
+    `);
+    insertWorkOrder.run(
+      "order-0", goal.id, 0, "建立世界因果基础", checkpointId, "world_system_author",
+      "order-0-key", hash, now, now,
+    );
+    insertWorkOrder.run(
+      "order-1", goal.id, 1, "在基础上编织文明", checkpointId, "civilization_author",
+      "order-1-key", hash, now, now,
+    );
+    workspace.db.prepare(`
+      INSERT INTO growth_work_order_dependencies (
+        round_id, goal_id, work_order_id, depends_on_work_order_id, ordinal
+      ) VALUES ('round-1', ?, 'order-1', 'order-0', 0)
+    `).run(goal.id);
+    expect(() => workspace.db.prepare(`
+      INSERT INTO growth_work_order_dependencies (
+        round_id, goal_id, work_order_id, depends_on_work_order_id, ordinal
+      ) VALUES ('round-1', ?, 'order-0', 'order-1', 0)
+    `).run(goal.id)).toThrow(/GROWTH_EDITORIAL_DEPENDENCY_TOPOLOGY_INVALID/);
+    expect(() => workspace.db.prepare(`
+      INSERT INTO growth_work_order_dependencies (
+        round_id, goal_id, work_order_id, depends_on_work_order_id, ordinal
+      ) VALUES ('round-1', 'wrong-goal', 'order-1', 'order-0', 1)
+    `).run()).toThrow();
+
+    const insertAttempt = workspace.db.prepare(`
+      INSERT INTO growth_work_order_attempts (
+        id, round_id, goal_id, work_order_id, attempt_number, status, failure_code,
+        source_checkpoint_id, rule_revision, capability_id,
+        capability_profile_id, capability_profile_version, capability_profile_sha256,
+        prompt_id, prompt_version, prompt_sha256, provider_id, model_id, provider_config_sha256,
+        side_effect_state, idempotency_key, payload_hash, output_sha256,
+        created_at, updated_at, terminal_at
+      ) VALUES (?, 'round-1', ?, ?, ?, ?, ?, ?, 1, ?,
+        'growth-specialist', '1.0.0', ?, 'growth-specialist', '1.0.0', ?,
+        'configured-provider', 'configured-model', ?, ?, ?, ?, NULL, ?, ?, ?)
+    `);
+    insertAttempt.run(
+      "attempt-1", goal.id, "order-0", 1, "running", null, checkpointId,
+      "world_system_author", hash, hash, hash, "none", "attempt-1-key", hash, now, now, null,
+    );
+    expect(() => insertAttempt.run(
+      "attempt-2-active", goal.id, "order-0", 2, "running", null, checkpointId,
+      "world_system_author", hash, hash, hash, "none", "attempt-2-active-key", hash, now, now, null,
+    )).toThrow();
+    expect(() => insertAttempt.run(
+      "attempt-wrong-owner", goal.id, "order-1", 1, "running", null, checkpointId,
+      "world_system_author", hash, hash, hash, "none", "attempt-wrong-owner-key", hash, now, now, null,
+    )).toThrow();
+    workspace.db.prepare(`
+      UPDATE growth_work_order_attempts
+      SET status = 'revision_requested', terminal_at = ?, updated_at = ? WHERE id = 'attempt-1'
+    `).run(now, now);
+    insertAttempt.run(
+      "attempt-2", goal.id, "order-0", 2, "running", null, checkpointId,
+      "world_system_author", hash, hash, hash, "none", "attempt-2-key", hash, now, now, null,
+    );
+
+    workspace.db.prepare(`
+      INSERT INTO growth_work_order_artifacts (
+        round_id, goal_id, work_order_id, attempt_id, artifact_kind, ordinal,
+        artifact_store_ref, content_sha256, created_at
+      ) VALUES ('round-1', ?, 'order-0', 'attempt-1', 'specialist_candidate', 0, ?, ?, ?)
+    `).run(goal.id, "artifact://sha256/" + hash, hash, now);
+    expect(() => workspace.db.prepare(`
+      INSERT INTO growth_work_order_artifacts (
+        round_id, goal_id, work_order_id, attempt_id, artifact_kind, ordinal,
+        artifact_store_ref, content_sha256, created_at
+      ) VALUES ('round-1', ?, 'order-0', 'attempt-1', 'content_artifact', 0, ?, ?, ?)
+    `).run(goal.id, "artifact://sha256/" + hash, "b".repeat(64), now)).toThrow();
+    const artifactColumns = (workspace.db.prepare("PRAGMA table_info(growth_work_order_artifacts)").all() as Array<{ name: string }>)
+      .map((column) => column.name);
+    expect(artifactColumns).toEqual(expect.arrayContaining(["artifact_store_ref", "content_sha256"]));
+    expect(artifactColumns).not.toEqual(expect.arrayContaining([
+      "content", "content_json", "prompt", "prompt_text", "api_key", "provider_url",
+    ]));
+
+    expect(() => workspace.db.prepare("UPDATE growth_work_orders SET objective = ? WHERE id = 'order-0'")
+      .run("偷偷改写已定义工作单")).toThrow(/GROWTH_EDITORIAL_WORK_ORDER_DEFINITION_IMMUTABLE/);
+    workspace.db.prepare("UPDATE growth_work_orders SET status = 'running', updated_at = ? WHERE id = 'order-0'")
+      .run(now);
+    workspace.db.prepare(`
+      UPDATE growth_work_order_attempts
+      SET status = 'failed', failure_code = 'GROWTH_EDITORIAL_ATTEMPT_STOPPED', terminal_at = ?, updated_at = ?
+      WHERE id = 'attempt-2'
+    `).run(now, now);
+    insertAttempt.run(
+      "attempt-reconcile", goal.id, "order-0", 3, "reconciliation_required",
+      "GROWTH_EDITORIAL_COMMIT_OUTCOME_UNKNOWN", checkpointId, "world_system_author",
+      hash, hash, hash, "outcome_unknown", "attempt-reconcile-key", hash, now, now, now,
+    );
+    workspace.db.prepare(`
+      UPDATE growth_work_orders
+      SET status = 'reconciliation_required', failure_code = 'GROWTH_EDITORIAL_COMMIT_OUTCOME_UNKNOWN', updated_at = ?
+      WHERE id = 'order-0'
+    `).run(now);
+    expect(() => workspace.db.prepare("UPDATE growth_work_orders SET status = 'ready', updated_at = ? WHERE id = 'order-1'")
+      .run(now)).toThrow(/GROWTH_EDITORIAL_PREDECESSOR_RECONCILIATION_REQUIRED/);
+    expect(() => insertAttempt.run(
+      "attempt-invalid-reconcile", goal.id, "order-1", 1, "reconciliation_required",
+      "GROWTH_EDITORIAL_COMMIT_OUTCOME_UNKNOWN", checkpointId, "civilization_author",
+      hash, hash, hash, "none", "attempt-invalid-reconcile-key", hash, now, now, now,
+    )).toThrow();
     expect(workspace.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
@@ -747,6 +978,38 @@ function listTables(workspace: WorkspaceDatabase): string[] {
 function listIndexes(workspace: WorkspaceDatabase): string[] {
   return (workspace.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name").all() as Array<{ name: string }>)
     .map((row) => row.name);
+}
+
+function seedEditorialGoal(workspace: WorkspaceDatabase, id: string) {
+  const branch = new CheckpointRepository(workspace).getActiveBranch();
+  const world = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+  return new GrowthRepository(workspace).createGoal({
+    id,
+    idempotencyKey: `${id}-key`,
+    branchId: branch.id,
+    seed: { kind: "text", text: "Growth Editorial schema v28 migration seed" },
+    authorizedScopeResourceIds: [world.id],
+    initialRuleText: "所有候选必须保留来源并通过串行 Canon 提交。",
+    sourceMessageId: null,
+  });
+}
+
+function snapshotLegacyRows(workspace: WorkspaceDatabase): Record<string, unknown[]> {
+  const tables = listTables(workspace).filter((table) =>
+    table !== "schema_meta"
+      && table !== "retrieval_index_capability"
+      && !table.startsWith("sqlite_")
+      && !editorialTables.includes(table as typeof editorialTables[number]));
+  return Object.fromEntries(tables.map((table) => {
+    const escapedTable = `"${table.replaceAll('"', '""')}"`;
+    const columns = (workspace.db.prepare(`PRAGMA table_info(${escapedTable})`).all() as Array<{ name: string }>).map(({ name }) => name);
+    const byteColumns = columns.map((column) => {
+      const escapedColumn = `"${column.replaceAll('"', '""')}"`;
+      return `typeof(${escapedColumn}) || ':' || CASE WHEN ${escapedColumn} IS NULL THEN '' ELSE hex(CAST(${escapedColumn} AS BLOB)) END AS ${escapedColumn}`;
+    });
+    const columnOrder = columns.map((_, index) => String(index + 1)).join(", ");
+    return [table, workspace.db.prepare(`SELECT ${byteColumns.join(", ")} FROM ${escapedTable} ORDER BY ${columnOrder}`).all()];
+  }));
 }
 
 function normalizeSql(value: string): string {
@@ -984,6 +1247,7 @@ function downgradeToSchema24(workspace: WorkspaceDatabase): void {
 }
 
 function downgradeToSchema25(workspace: WorkspaceDatabase): void {
+  downgradeToSchema27(workspace);
   workspace.db.exec("PRAGMA foreign_keys = OFF");
   workspace.db.exec("BEGIN IMMEDIATE");
   try {
@@ -1071,6 +1335,28 @@ function downgradeToSchema25(workspace: WorkspaceDatabase): void {
       ALTER TABLE growth_events_v25_test RENAME TO growth_events;
       CREATE INDEX growth_events_cycle_idx ON growth_events(cycle_id, sequence);
       UPDATE schema_meta SET version = 25 WHERE singleton = 1;
+    `);
+    workspace.db.exec("COMMIT");
+  } catch (error) {
+    workspace.db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    workspace.db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+function downgradeToSchema27(workspace: WorkspaceDatabase): void {
+  workspace.db.exec("PRAGMA foreign_keys = OFF");
+  workspace.db.exec("BEGIN IMMEDIATE");
+  try {
+    workspace.db.exec(`
+      DROP TABLE growth_work_order_artifacts;
+      DROP TABLE growth_editorial_reviews;
+      DROP TABLE growth_work_order_attempts;
+      DROP TABLE growth_work_order_dependencies;
+      DROP TABLE growth_work_orders;
+      DROP TABLE growth_editorial_rounds;
+      UPDATE schema_meta SET version = 27 WHERE singleton = 1;
     `);
     workspace.db.exec("COMMIT");
   } catch (error) {

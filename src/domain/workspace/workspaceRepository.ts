@@ -254,7 +254,11 @@ function migrate(db: DatabaseSync): void {
     migrateSafeDiagnosticV27Schema(db);
     schema = { version: 27 };
   }
-  if (schema.version !== 27) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 27) {
+    migrateGrowthEditorialV28Schema(db);
+    schema = { version: 28 };
+  }
+  if (schema.version !== 28) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -1315,6 +1319,269 @@ function migrateSafeDiagnosticV27Schema(db: DatabaseSync): void {
     `);
     const violations = db.prepare("PRAGMA foreign_key_check").all();
     if (violations.length > 0) throw new Error("Safe Diagnostic v27 migration produced foreign key violations.");
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrateGrowthEditorialV28Schema(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE growth_editorial_rounds (
+        id TEXT PRIMARY KEY,
+        goal_id TEXT NOT NULL REFERENCES growth_goals(id) ON DELETE CASCADE,
+        contract_version TEXT NOT NULL CHECK (length(trim(contract_version)) > 0),
+        source_checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        status TEXT NOT NULL CHECK (status IN (
+          'planned', 'active', 'completed', 'blocked', 'cancelled', 'failed', 'reconciliation_required'
+        )),
+        failure_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        terminal_at TEXT,
+        UNIQUE (id, goal_id),
+        UNIQUE (id, goal_id, source_checkpoint_id),
+        FOREIGN KEY (goal_id, rule_revision) REFERENCES growth_goal_rule_revisions(goal_id, revision),
+        CHECK (
+          (status IN ('planned', 'active') AND failure_code IS NULL AND terminal_at IS NULL)
+          OR (status = 'completed' AND failure_code IS NULL AND terminal_at IS NOT NULL)
+          OR (status IN ('blocked', 'cancelled', 'failed', 'reconciliation_required')
+            AND failure_code IS NOT NULL AND terminal_at IS NOT NULL)
+        )
+      );
+      CREATE UNIQUE INDEX growth_editorial_rounds_one_open_goal_idx
+        ON growth_editorial_rounds(goal_id) WHERE status IN ('planned', 'active');
+      CREATE INDEX growth_editorial_rounds_goal_status_idx
+        ON growth_editorial_rounds(goal_id, status, created_at);
+
+      CREATE TABLE growth_work_orders (
+        id TEXT PRIMARY KEY,
+        round_id TEXT NOT NULL,
+        goal_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        objective TEXT NOT NULL CHECK (length(trim(objective)) > 0),
+        source_checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        scope_refs_json TEXT NOT NULL CHECK (
+          json_valid(scope_refs_json) AND json_type(scope_refs_json) = 'array'
+        ),
+        capability_id TEXT NOT NULL CHECK (capability_id IN (
+          'world_director', 'world_system_author', 'geography_ecology_author',
+          'civilization_author', 'organization_author', 'species_culture_author',
+          'character_author', 'story_architect', 'writer', 'general_setting_author',
+          'graph_curator', 'visual_director', 'checker', 'gm', 'decomposer'
+        )),
+        acceptance_facets_json TEXT NOT NULL CHECK (
+          json_valid(acceptance_facets_json) AND json_type(acceptance_facets_json) = 'array'
+        ),
+        status TEXT NOT NULL CHECK (status IN (
+          'planned', 'ready', 'running', 'candidate_ready', 'reviewing',
+          'revision_requested', 'accepted', 'commit_queued', 'committed',
+          'cancelled', 'failed', 'reconciliation_required'
+        )),
+        failure_code TEXT,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (round_id, ordinal),
+        UNIQUE (id, round_id, goal_id),
+        UNIQUE (id, round_id, goal_id, source_checkpoint_id),
+        UNIQUE (id, round_id, goal_id, source_checkpoint_id, capability_id),
+        FOREIGN KEY (round_id, goal_id, source_checkpoint_id)
+          REFERENCES growth_editorial_rounds(id, goal_id, source_checkpoint_id) ON DELETE CASCADE,
+        CHECK (
+          (status IN ('cancelled', 'failed', 'reconciliation_required') AND failure_code IS NOT NULL)
+          OR (status NOT IN ('cancelled', 'failed', 'reconciliation_required') AND failure_code IS NULL)
+        )
+      );
+      CREATE INDEX growth_work_orders_round_status_idx
+        ON growth_work_orders(round_id, status, ordinal);
+
+      CREATE TABLE growth_work_order_dependencies (
+        round_id TEXT NOT NULL,
+        goal_id TEXT NOT NULL,
+        work_order_id TEXT NOT NULL,
+        depends_on_work_order_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        PRIMARY KEY (work_order_id, depends_on_work_order_id),
+        UNIQUE (work_order_id, ordinal),
+        FOREIGN KEY (work_order_id, round_id, goal_id)
+          REFERENCES growth_work_orders(id, round_id, goal_id) ON DELETE CASCADE,
+        FOREIGN KEY (depends_on_work_order_id, round_id, goal_id)
+          REFERENCES growth_work_orders(id, round_id, goal_id) ON DELETE CASCADE,
+        CHECK (work_order_id <> depends_on_work_order_id)
+      );
+      CREATE INDEX growth_work_order_dependencies_predecessor_idx
+        ON growth_work_order_dependencies(depends_on_work_order_id, work_order_id);
+      CREATE TRIGGER growth_work_order_dependencies_topology_insert
+      BEFORE INSERT ON growth_work_order_dependencies
+      BEGIN
+        SELECT CASE WHEN
+          (SELECT ordinal FROM growth_work_orders WHERE id = NEW.depends_on_work_order_id) >=
+          (SELECT ordinal FROM growth_work_orders WHERE id = NEW.work_order_id)
+        THEN RAISE(ABORT, 'GROWTH_EDITORIAL_DEPENDENCY_TOPOLOGY_INVALID') END;
+      END;
+      CREATE TRIGGER growth_work_order_dependencies_immutable
+      BEFORE UPDATE ON growth_work_order_dependencies
+      BEGIN
+        SELECT RAISE(ABORT, 'GROWTH_EDITORIAL_DEPENDENCY_IMMUTABLE');
+      END;
+      CREATE TRIGGER growth_work_orders_reconciliation_barrier
+      BEFORE UPDATE OF status ON growth_work_orders
+      WHEN NEW.status IN ('ready', 'running') AND EXISTS (
+        SELECT 1
+        FROM growth_work_order_dependencies dependency
+        JOIN growth_work_orders predecessor ON predecessor.id = dependency.depends_on_work_order_id
+        WHERE dependency.work_order_id = NEW.id
+          AND predecessor.status = 'reconciliation_required'
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'GROWTH_EDITORIAL_PREDECESSOR_RECONCILIATION_REQUIRED');
+      END;
+
+      CREATE TABLE growth_work_order_attempts (
+        id TEXT PRIMARY KEY,
+        round_id TEXT NOT NULL,
+        goal_id TEXT NOT NULL,
+        work_order_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+        status TEXT NOT NULL CHECK (status IN (
+          'running', 'candidate_ready', 'reviewing', 'revision_requested', 'accepted',
+          'cancelled', 'failed', 'reconciliation_required'
+        )),
+        failure_code TEXT,
+        source_checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id),
+        rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+        capability_id TEXT NOT NULL,
+        capability_profile_id TEXT NOT NULL CHECK (length(trim(capability_profile_id)) > 0),
+        capability_profile_version TEXT NOT NULL CHECK (length(trim(capability_profile_version)) > 0),
+        capability_profile_sha256 TEXT NOT NULL CHECK (length(capability_profile_sha256) = 64),
+        prompt_id TEXT NOT NULL CHECK (length(trim(prompt_id)) > 0),
+        prompt_version TEXT NOT NULL CHECK (length(trim(prompt_version)) > 0),
+        prompt_sha256 TEXT NOT NULL CHECK (length(prompt_sha256) = 64),
+        provider_id TEXT NOT NULL CHECK (length(trim(provider_id)) > 0),
+        model_id TEXT NOT NULL CHECK (length(trim(model_id)) > 0),
+        provider_config_sha256 TEXT NOT NULL CHECK (length(provider_config_sha256) = 64),
+        side_effect_state TEXT NOT NULL CHECK (side_effect_state IN (
+          'none', 'commit_requested', 'outcome_unknown', 'committed'
+        )),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        output_sha256 TEXT CHECK (output_sha256 IS NULL OR length(output_sha256) = 64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        terminal_at TEXT,
+        UNIQUE (work_order_id, attempt_number),
+        UNIQUE (id, work_order_id, round_id, goal_id),
+        FOREIGN KEY (work_order_id, round_id, goal_id, source_checkpoint_id, capability_id)
+          REFERENCES growth_work_orders(id, round_id, goal_id, source_checkpoint_id, capability_id) ON DELETE CASCADE,
+        FOREIGN KEY (goal_id, rule_revision) REFERENCES growth_goal_rule_revisions(goal_id, revision),
+        CHECK (
+          (status IN ('running', 'candidate_ready', 'reviewing') AND failure_code IS NULL AND terminal_at IS NULL)
+          OR (status IN ('revision_requested', 'accepted') AND failure_code IS NULL AND terminal_at IS NOT NULL)
+          OR (status IN ('cancelled', 'failed', 'reconciliation_required')
+            AND failure_code IS NOT NULL AND terminal_at IS NOT NULL)
+        ),
+        CHECK (
+          (status = 'reconciliation_required' AND side_effect_state = 'outcome_unknown')
+          OR (status <> 'reconciliation_required' AND side_effect_state <> 'outcome_unknown')
+        )
+      );
+      CREATE UNIQUE INDEX growth_work_order_attempts_one_active_idx
+        ON growth_work_order_attempts(work_order_id)
+        WHERE status IN ('running', 'candidate_ready', 'reviewing');
+      CREATE INDEX growth_work_order_attempts_round_status_idx
+        ON growth_work_order_attempts(round_id, status, work_order_id, attempt_number);
+
+      CREATE TABLE growth_editorial_reviews (
+        id TEXT PRIMARY KEY,
+        round_id TEXT NOT NULL,
+        goal_id TEXT NOT NULL,
+        work_order_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        reviewer_kind TEXT NOT NULL CHECK (reviewer_kind IN ('checker', 'director')),
+        decision TEXT NOT NULL CHECK (decision IN ('passed', 'findings', 'blocked', 'accept', 'revise', 'ask_user')),
+        safe_summary TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL CHECK (
+          json_valid(evidence_refs_json) AND json_type(evidence_refs_json) = 'array'
+        ),
+        review_artifact_ref TEXT NOT NULL CHECK (length(trim(review_artifact_ref)) > 0),
+        review_sha256 TEXT NOT NULL CHECK (length(review_sha256) = 64),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        created_at TEXT NOT NULL,
+        UNIQUE (attempt_id, reviewer_kind),
+        FOREIGN KEY (attempt_id, work_order_id, round_id, goal_id)
+          REFERENCES growth_work_order_attempts(id, work_order_id, round_id, goal_id) ON DELETE CASCADE,
+        CHECK (
+          (reviewer_kind = 'checker' AND decision IN ('passed', 'findings', 'blocked'))
+          OR (reviewer_kind = 'director' AND decision IN ('accept', 'revise', 'ask_user'))
+        )
+      );
+      CREATE INDEX growth_editorial_reviews_work_order_idx
+        ON growth_editorial_reviews(work_order_id, attempt_id, reviewer_kind);
+
+      CREATE TABLE growth_work_order_artifacts (
+        round_id TEXT NOT NULL,
+        goal_id TEXT NOT NULL,
+        work_order_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        artifact_kind TEXT NOT NULL CHECK (artifact_kind IN (
+          'content_artifact', 'specialist_candidate', 'graph_curator_candidate',
+          'checker_review', 'director_review', 'change_set'
+        )),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        artifact_store_ref TEXT NOT NULL CHECK (length(trim(artifact_store_ref)) > 0),
+        content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (attempt_id, artifact_kind, ordinal),
+        FOREIGN KEY (attempt_id, work_order_id, round_id, goal_id)
+          REFERENCES growth_work_order_attempts(id, work_order_id, round_id, goal_id) ON DELETE CASCADE
+      );
+      CREATE INDEX growth_work_order_artifacts_work_order_idx
+        ON growth_work_order_artifacts(work_order_id, attempt_id, artifact_kind, ordinal);
+      CREATE TRIGGER growth_work_order_artifacts_content_address_insert
+      BEFORE INSERT ON growth_work_order_artifacts
+      WHEN EXISTS (
+        SELECT 1 FROM growth_work_order_artifacts artifact
+        WHERE artifact.artifact_store_ref = NEW.artifact_store_ref
+          AND artifact.content_sha256 <> NEW.content_sha256
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'GROWTH_EDITORIAL_ARTIFACT_CONTENT_ADDRESS_CONFLICT');
+      END;
+
+      CREATE TRIGGER growth_work_orders_definition_immutable
+      BEFORE UPDATE ON growth_work_orders
+      WHEN OLD.round_id IS NOT NEW.round_id
+        OR OLD.goal_id IS NOT NEW.goal_id
+        OR OLD.ordinal IS NOT NEW.ordinal
+        OR OLD.objective IS NOT NEW.objective
+        OR OLD.source_checkpoint_id IS NOT NEW.source_checkpoint_id
+        OR OLD.scope_refs_json IS NOT NEW.scope_refs_json
+        OR OLD.capability_id IS NOT NEW.capability_id
+        OR OLD.acceptance_facets_json IS NOT NEW.acceptance_facets_json
+        OR OLD.idempotency_key IS NOT NEW.idempotency_key
+        OR OLD.payload_hash IS NOT NEW.payload_hash
+        OR OLD.created_at IS NOT NEW.created_at
+      BEGIN
+        SELECT RAISE(ABORT, 'GROWTH_EDITORIAL_WORK_ORDER_DEFINITION_IMMUTABLE');
+      END;
+
+      UPDATE schema_meta SET version = 28 WHERE singleton = 1;
+    `);
+    const violations = db.prepare("PRAGMA foreign_key_check").all();
+    if (violations.length > 0) throw new Error("Growth Editorial v28 migration produced foreign key violations.");
+    const integrity = db.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
+    if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok") {
+      throw new Error("Growth Editorial v28 migration failed integrity check.");
+    }
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

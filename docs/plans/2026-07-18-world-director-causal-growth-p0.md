@@ -460,23 +460,25 @@ npx --no-install vitest run --config vitest.config.ts tests/unit/growth-editoria
 
 **Additive tables:**
 
-- [ ] `growth_editorial_rounds`
-- [ ] `growth_work_orders`
-- [ ] `growth_work_order_dependencies`
-- [ ] `growth_work_order_attempts`
-- [ ] `growth_editorial_reviews`
-- [ ] `growth_work_order_artifacts`
+- [x] `growth_editorial_rounds`
+- [x] `growth_work_orders`
+- [x] `growth_work_order_dependencies`
+- [x] `growth_work_order_attempts`
+- [x] `growth_editorial_reviews`
+- [x] `growth_work_order_artifacts`
 
 **Invariants:**
 
-- [ ] One active Editorial Round per Goal.
-- [ ] One active attempt per Work Order.
-- [ ] Dependency edges are same Goal/Round and acyclic.
-- [ ] Attempt pins checkpoint, rule revision, capability profile, Prompt version/hash and model identity.
-- [ ] Candidate Artifact uses content-addressed storage; DB stores reference/hash, not raw Prompt or credentials.
-- [ ] Accepted Work Order cannot be edited; revision creates a new attempt.
-- [ ] Unknown commit outcome enters `reconciliation_required` and blocks successors.
-- [ ] v27 data remains byte/row equivalent after v28 migration.
+- [x] One active Editorial Round per Goal.
+- [x] One active attempt per Work Order.
+- [x] Dependency edges are same Goal/Round and acyclic.
+- [x] Attempt pins checkpoint, rule revision, capability profile, Prompt version/hash and model identity.
+- [x] Candidate Artifact uses content-addressed storage; DB stores reference/hash, not raw Prompt or credentials.
+- [x] Accepted Work Order cannot be edited; revision creates a new attempt.
+- [x] Unknown commit outcome enters `reconciliation_required` and blocks successors.
+- [x] v27 data remains byte/row equivalent after v28 migration.
+
+**Task 5 evidence (2026-07-18):** SQLite v28 is a six-table additive migration with one-open-Round and one-active-attempt partial indexes, composite ownership/checkpoint/rule constraints, strict decreasing dependency ordinals, immutable Work Order definitions, a reconciliation readiness barrier and content-addressed Artifact references. The migration runs in one `BEGIN IMMEDIATE` transaction and rolls back completely on collision. The persistence suite passed 14/14 with zero skips, including type+byte snapshots of all stable v27 tables before/after migration and reopen; the pre-existing `retrieval_index_capability.checked_at` open-time probe is explicitly excluded and documented because it changes after the migration transaction. `npm run typecheck` and `git diff --check` passed. No Provider was run; Task 6 lifecycle repository remains unimplemented.
 
 **Test command:**
 
