@@ -521,23 +521,25 @@ unknown side effect -> reconciliation_required
 
 **Kinds:**
 
-- [ ] `causes`
-- [ ] `enables`
-- [ ] `constrains`
-- [ ] `prevents`
-- [ ] `amplifies`
-- [ ] `mitigates`
-- [ ] `depends_on`
+- [x] `causes`
+- [x] `enables`
+- [x] `constrains`
+- [x] `prevents`
+- [x] `amplifies`
+- [x] `mitigates`
+- [x] `depends_on`
 
 **Required fields:** cause assertion, effect assertion, mechanism, conditions, temporal scope, polarity/strength summary, epistemic status (`confirmed`, `inferred`, `disputed`), source references.
 
 **Examples to encode as tests:**
 
-- [ ] geographic isolation -> transport cost -> slow diffusion -> slower national development;
-- [ ] childhood poverty -> deprivation/social stigma -> defensive behavior -> insecurity;
-- [ ] feedback loops are multiple directed edges, not a self-edge;
-- [ ] correlation without mechanism/source is rejected;
-- [ ] descriptive prose without development impact does not require an edge.
+- [x] geographic isolation -> transport cost -> slow diffusion -> slower national development;
+- [x] childhood poverty -> deprivation/social stigma -> defensive behavior -> insecurity;
+- [x] feedback loops are multiple directed edges, not a self-edge;
+- [x] correlation without mechanism/source is rejected;
+- [x] descriptive prose without development impact does not require an edge.
+
+**Task 7 evidence (2026-07-18):** the internal causal policy fixes seven relation kinds, assertion-identity endpoints, mechanism/conditions/time/polarity-strength fields, `confirmed|inferred|disputed` epistemic status and exact source references. It rejects self-edges, raw-prose endpoints, correlation without mechanism/source, duplicate edges, unknown epistemic state and model-confidence fields; feedback is represented by independent directed edges. The policy suite passed 7/7 with zero skips and `npm run typecheck` passed. This is policy evidence only: Task 8 persistence, Change Set support and graph projection remain unimplemented, and no Provider was run.
 
 ### Task 8: Persist versioned causal relations
 
