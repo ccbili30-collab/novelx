@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task.
 
-> **当前状态（2026-07-18）：** 计划已展开，产品决策已确认，实施任务 `2 / 32`。Phase A 已完成并冻结；Task 2 代码提交为 `ce8378e9deb9ad86dbbacc6eefe1bd2afbb8e4d5`，证据见 `notes/status/2026-07-18-world-director-task-2-green-baseline.md`。当前执行入口为 Phase B / Task 3：记录 World Director 架构。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
+> **当前状态（2026-07-18）：** 计划已展开，产品决策已确认，实施任务 `3 / 32`。Phase A 已冻结；Task 3 的 World Director / Work Order 架构记录已与 PRD 和当前状态对齐。当前执行入口为 Phase B / Task 4：定义严格内部编辑合同。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
 
 这份计划回答三个问题：为什么 NovelX 不能继续依赖一个模型包办所有工作；为什么“因果关系”必须成为图谱和调度的核心；最终用户、评委和后续编码 Agent 分别会得到什么。代码优化的首要目标不是方便人类阅读，而是降低 AI 修改所需上下文、缩小变更影响半径并让每个失败直接定位到唯一责任模块。
 
@@ -413,12 +413,14 @@ User guidance
 
 **Steps:**
 
-- [ ] Write the role boundary: Director editorial, Steward operational, Checker factual, Graph Curator structural.
-- [ ] Record fixed roster and post-hackathon migration debt.
-- [ ] Record candidate concurrency versus serialized Canon commits.
-- [ ] Record same-owner revision semantics.
-- [ ] Record failure, cancellation, outcome-unknown and recovery behavior.
-- [ ] State that the ADR is design evidence, not implementation completion.
+- [x] Write the role boundary: Director editorial, Steward operational, Checker factual, Graph Curator structural.
+- [x] Record fixed roster and post-hackathon migration debt.
+- [x] Record candidate concurrency versus serialized Canon commits.
+- [x] Record same-owner revision semantics.
+- [x] Record failure, cancellation, outcome-unknown and recovery behavior.
+- [x] State that the ADR is design evidence, not implementation completion.
+
+**Task 3 evidence (2026-07-18):** `docs/adr/2026-07-18-hackathon-world-director-work-orders.md` records requirements, authority, fixed capabilities, Work Order ownership, dependency/concurrency semantics, serialized Change Sets, failure/recovery behavior, trade-offs and rejected alternatives. The PRD resolves World Director as a Growth-only editorial facade under Steward rather than a product-wide authority replacement. No runtime code, schema, Provider or Live state changed.
 
 **Acceptance:** documentation diff matches this plan and does not claim Live.
 
@@ -872,7 +874,7 @@ This matrix is the execution index. The detailed phase sections define files and
 | --- | ---: | --- | --- | --- |
 | [x] | 1 | The current worktree contains many overlapping unfinished batches and evidence files. Starting new architecture without ownership classification risks deleting evidence or mixing unrelated regressions. | Every dirty path has an owner/category and the highest valid Live boundary is indexed. | Exact status inventory, evidence parse/leak check and no overlapping live editor. |
 | [x] | 2 | New capability work on a failing baseline makes every later failure ambiguous. | Existing behavior becomes a green, reviewed checkpoint before schema or scheduler work. | Focused tests, typecheck, one repaired full freeze, build and reviewed semantic commits. |
-| [ ] | 3 | Director/Steward/Checker/Curator boundaries are product semantics and must not be rediscovered differently in each file. | One ADR records authority, concurrency, commit serialization and post-hackathon debt. | ADR review plus current-state/product documents aligned with code intent. |
+| [x] | 3 | Director/Steward/Checker/Curator boundaries are product semantics and must not be rediscovered differently in each file. | One ADR records authority, concurrency, commit serialization and post-hackathon debt. | ADR review plus current-state/product documents aligned with code intent. |
 | [ ] | 4 | Ad-hoc objects would leak phase-private state into the shared protocol and recreate a giant contract. | Strict versioned internal contracts define rounds, orders, attempts, reviews and artifacts. | Zod/TypeBox parity, strict unknown-field rejection and lifecycle transition tests. |
 | [ ] | 5 | Assignment and review must survive restart; in-memory coordination cannot prove ownership or avoid duplicate work. | SQLite v28 stores additive editorial metadata without rewriting Canon content. | v27→v28 migration, reopen, unique constraints, replay and preservation tests. |
 | [ ] | 6 | Multiple callers must not implement Work Order transitions differently. | One repository owns legal transitions, idempotency, sequencing and replay. | Success, invalid transition, duplicate request, outcome-unknown and restart tests. |

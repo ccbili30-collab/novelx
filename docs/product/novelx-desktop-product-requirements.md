@@ -145,6 +145,16 @@ Agent Mode 可以完成世界观讨论、OC 创作、小说写作、项目整理
 
 多 Agent 不是数量展示。只有任务独立、文件/资源不重叠且并行收益明显时才并发。子 Agent 接受有界 Assignment（分配任务），默认只读或只提交 Change Set；不能扩大权限、完成父 Goal 或直接写正史。
 
+### 7.3 Growth 模式的 World Director
+
+Growth 模式可以在 Steward 控制下提供 World Director（世界总编）作为用户可见的专业编辑职能。它不会替代产品级 Steward：Director 选择因果生长前沿、编排有界 Work Order（创作工单）、审核候选并询问真正需要创作者决定的问题；Steward 继续拥有 Provider（模型服务）、工具、持久化、权限、取消、恢复、审计、Change Set（变更集）执行和图片队列。
+
+专业作者只返回来源绑定的候选 Artifact（产物）。Graph Curator（图谱书记官）从候选中提取事实和因果候选，Checker 独立检查来源、冲突和自洽性，确定性 Domain（领域层）代码验证并提交。互相独立的候选可以从同一 pinned checkpoint（固定检查点）受控并发；存在依赖的工作必须等待前置提交；Canon（正史）写入始终通过单一串行、原子的 Change Set 通道。
+
+候选被拒绝时应返回同一能力所有者和同一工单的新 attempt（尝试），保留反馈与责任谱系；只有能力确实错配或需要创作者选择时才创建新工单或阻塞。Provider 已发送但结果未知、Change Set 结果未知、取消或崩溃必须沿用持久化 reconciliation（对账）规则，不能通过重派制造第二份副作用。
+
+黑客松采用代码拥有、版本化的固定员工注册表，禁止 Director 提供任意 Prompt、Provider 凭据、工具列表或动态角色 ID。动态职业、插件角色和市场能力属于赛后产品与安全决策。详细边界见 `docs/adr/2026-07-18-hackathon-world-director-work-orders.md`；该 ADR 是设计证据，不代表 World Director 已实现或通过 Live（真实运行）。
+
 ## 8. Free / Assist 与正式接受
 
 ### Free（自由）
