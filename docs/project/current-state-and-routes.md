@@ -5,6 +5,7 @@
 
 ## 0. 最新状态覆盖（优先于下方迁移历史）
 
+- World Director 因果 Growth P0 已完成 Phase B / Task 4 的未接线内部编辑合同：固定 15 个 capability、1–20 个规范无环 Work Order、专业候选、Graph Curator 来源绑定断言/因果候选、Checker/Director 审核，以及模型伪造 Prompt/凭据/Provider URL/工具/数据库身份的严格拒绝。定向 7/7、typecheck 与 diff check 通过，未运行 Provider 或全量测试。详细边界见 `notes/status/2026-07-18-world-director-task-4-editorial-contract.md`。下一入口是 Task 5 的 SQLite v28；合同存在不等于 World Director 已实现。
 - World Director 因果 Growth P0 已完成 Phase B / Task 3 的架构记录：`docs/adr/2026-07-18-hackathon-world-director-work-orders.md` 固化了 Director 编辑权威、Steward 操作权威、Checker 事实检查、Graph Curator 结构提取、固定员工注册表、同所有者返工、只读候选并发、Canon 串行提交和结果未知恢复边界。该记录是设计证据；World Director、Work Order、SQLite v28、因果图谱和最终 Live 均尚未实现。下一入口是 Task 4 的严格内部编辑合同。
 - World Director 因果 Growth P0 已完成 Phase A / Task 2 的绿色 pre-feature 基线：代码冻结提交 `ce8378e9deb9ad86dbbacc6eefe1bd2afbb8e4d5`；18 个定向文件 190/190、最终全量 141 文件 915/915、零跳过，typecheck、生产 build、Prompt publication 与 diff checks 通过。唯一发现的回归是安全诊断目录测试漏列一个已有生产用途的 Closure policy code，已通过最小测试修复。详细证据见 `notes/status/2026-07-18-world-director-task-2-green-baseline.md`。这不是 Provider Live、Electron、安装包或最终世界包验收；下一入口是 Phase B / Task 3。
 - World Director 因果 Growth P0 已完成 Phase A / Task 1 的只读脏基线盘点；精确路径分类、状态哈希、JSON 解析/凭据标记检查和最高 Live 边界见 `notes/status/2026-07-18-world-director-task-1-dirty-baseline.md`。盘点快照为 `codex/hackathon-10day` @ `60b097e`、81 个已跟踪修改、106 个未跟踪、暂存区 0；盘点后新增的 Task 1 状态文档不属于该冻结计数。下一入口是 Task 2 的定向测试与绿色基线恢复，尚未开始 World Director、因果图谱或 SQLite v28 实现。
