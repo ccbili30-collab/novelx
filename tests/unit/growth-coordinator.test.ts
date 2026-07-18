@@ -26,6 +26,7 @@ import { compileGrowthLongformSectionChangeSet } from "../../src/agent-worker/gr
 import { compileGrowthRevisionFragment } from "../../src/agent-worker/growth/phases/revision/growthRevisionFragment";
 import { createGrowthRevisionReferenceCatalog } from "../../src/agent-worker/growth/phases/revision/growthRevisionReferences";
 import type { GrowthRevisionAuthority, GrowthRunBinding } from "../../src/shared/agentWorkerProtocol";
+import { largeWorldFragmentFixture } from "../support/largeWorldFragmentFixture";
 
 class FakeWorker extends EventEmitter implements AgentWorkerProcess {
   killed = false;
@@ -730,9 +731,9 @@ describe("GrowthCoordinator", () => {
     const defaultIllustrations = repository.listIllustrationRequests(started.goal.id);
     expect(defaultIllustrations).toHaveLength(1);
     expect(defaultIllustrations[0]).toMatchObject({ coverageMode: "default", closureProfileId: expect.any(String) });
-    expect(repository.listIllustrationItems(defaultIllustrations[0]!.id).map((item) => item.purpose)).toEqual([
-      "character_portrait", "character_portrait", "scene", "scene", "scene",
-    ]);
+    const illustrationPurposes = repository.listIllustrationItems(defaultIllustrations[0]!.id).map((item) => item.purpose);
+    expect(illustrationPurposes.filter((purpose) => purpose === "character_portrait")).toHaveLength(2);
+    expect(illustrationPurposes.filter((purpose) => purpose === "scene")).toHaveLength(13);
     await vi.waitFor(() => expect(repository.listIllustrationItems(defaultIllustrations[0]!.id)
       .every((item) => item.status === "failed")).toBe(true));
     expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
@@ -740,11 +741,11 @@ describe("GrowthCoordinator", () => {
       goalId: started.goal.id,
       checkpointId: cycles[9]!.inputCheckpointId,
     }).illustrationRequests).toEqual([
-      expect.objectContaining({ id: defaultIllustrations[0]!.id, coverageMode: "default", itemCount: 5, readyCount: 0 }),
+      expect.objectContaining({ id: defaultIllustrations[0]!.id, coverageMode: "default", itemCount: 15, readyCount: 0 }),
     ]);
     coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id });
     expect(repository.listIllustrationRequests(started.goal.id)).toHaveLength(1);
-    expect(repository.listIllustrationItems(defaultIllustrations[0]!.id)).toHaveLength(5);
+    expect(repository.listIllustrationItems(defaultIllustrations[0]!.id)).toHaveLength(15);
     expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
   });
 
@@ -1332,23 +1333,7 @@ async function commitCycleWithoutRunTerminal(workspace: WorkspaceDatabase, worke
   const roots = new ResourceRepository(workspace).listCurrent().filter((resource) => resource.objectKind === "domain_root");
   const scopeId = roots.find((resource) => resource.type === focus)!.id;
   const items = focus === "world"
-    ? compileGrowthWorldFragment({
-        summary: "Growth world",
-        world: { localId: "world", title: "World" },
-        entities: [
-          { localId: "harbor", kind: "location", title: "Harbor" },
-          { localId: "guild", kind: "faction", title: "Guild" },
-        ],
-        documents: [{
-          localId: "setting", ownerRef: "world", kind: "setting", title: "Setting",
-          content: "A sourced setting document for the coordinator fixture. ".repeat(5),
-        }],
-        assertions: [1, 2, 3].map((index) => ({
-          localId: `fact_${index}`, scopeRef: "world", subject: "World", predicate: `rule_${index}`,
-          object: { value: index }, sourceDocumentRefs: ["setting"],
-        })),
-        relations: [],
-      }, { cycleId: command.growthBinding.cycleId, worldRootResourceId: scopeId }).items
+    ? compileGrowthWorldFragment(largeWorldFragmentFixture(), { cycleId: command.growthBinding.cycleId, worldRootResourceId: scopeId }).items
     : focus === "oc" ? [{
         id: `resource-${id}`, dependsOn: [], kind: "resource.put" as const,
         payload: {

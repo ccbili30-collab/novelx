@@ -8,6 +8,7 @@ import {
   proposeChangeSetResultSchema,
 } from "../../src/shared/agentWorkerProtocol";
 import { growthCapabilityVersion } from "../../src/shared/growthContract";
+import { largeWorldFragmentFixture } from "../support/largeWorldFragmentFixture";
 
 describe("Steward tool handoff state machine", () => {
   it("compiles one authority-bound revision fragment after retrieval and inquiry", async () => {
@@ -1700,18 +1701,7 @@ function greenfieldCommittedProposal() {
 }
 
 function worldFragment() {
-  return {
-    summary: "Create a world with a stable setting.",
-    world: { localId: "world", title: "Harbour World" },
-    entities: [{ localId: "harbor", kind: "location" as const, title: "Harbor" }, { localId: "guild", kind: "faction" as const, title: "Guild" }],
-    documents: [{ localId: "setting", ownerRef: "world", kind: "setting" as const, title: "Setting", content: "A stable setting document explains the coast, the historical rule, the culture shaped by its tides, the geography of each harbour, and the conflict that binds the world into one coherent creative source for future stories and characters." }],
-    assertions: [
-      { localId: "fact", scopeRef: "world", subject: "Harbour World", predicate: "has_rule", object: { rule: "tides" }, sourceDocumentRefs: ["setting"] },
-      { localId: "culture", scopeRef: "world", subject: "Harbour culture", predicate: "is_shaped_by", object: { force: "tides" }, sourceDocumentRefs: ["setting"] },
-      { localId: "conflict", scopeRef: "world", subject: "Harbour conflict", predicate: "binds", object: { scope: "world" }, sourceDocumentRefs: ["setting"] },
-    ],
-    relations: [],
-  };
+  return largeWorldFragmentFixture();
 }
 
 function committedWorldProposalFor(args: unknown) {

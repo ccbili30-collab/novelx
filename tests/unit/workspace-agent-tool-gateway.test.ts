@@ -26,8 +26,14 @@ import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growth
 import { compileGrowthStoryFragment } from "../../src/agent-worker/growth/growthStoryFragment";
 import { compileGrowthOcFragment } from "../../src/agent-worker/growth/growthOcFragment";
 import type { ProposeChangeSetArgs } from "../../src/shared/agentWorkerProtocol";
+import { largeWorldFragmentFixture } from "../support/largeWorldFragmentFixture";
 
 const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+type MutableWorldEntity = {
+  localId: string; kind: "location" | "faction"; title: string;
+  scaleRole: "macro_region" | "mountain_system" | "sea" | "river" | "transport_network" | "resource_distribution" | "polity" | "civilization_group";
+  parentRef?: string; macroRegionRef?: string; sourceDocumentRefs: string[];
+};
 
 const opened: Array<{ root: string; workspace: WorkspaceDatabase }> = [];
 
@@ -189,21 +195,13 @@ describe("Workspace Agent tool gateway", () => {
     const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
     seedProposeTool(workspace);
     const initialCheckpoint = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
-    const args = compileGrowthWorldFragment({
-      summary: "Create a source-bound world.",
-      world: { localId: "world", title: "Tide World" },
-      entities: [
-        { localId: "pier", kind: "location", title: "Pier", parentRef: "harbor" },
-        { localId: "harbor", kind: "location", title: "Harbor", parentRef: "world" },
-      ],
-      documents: [{ localId: "setting", ownerRef: "world", kind: "setting", title: "Setting", content: "The tide governs the harbor, drawing saltwater through the old piers at dawn and leaving silver channels across the market stones by noon. Harbor families read the moon tables before they trade, while watchkeepers keep the lantern towers lit whenever the current turns rough. Every new voyage is planned around the floodgates, and every home keeps a brass tide bell beside its door." }],
-      assertions: [
-        { localId: "tide", scopeRef: "world", subject: "tide", predicate: "governs", object: { target: "harbor" }, sourceDocumentRefs: ["setting"] },
-        { localId: "moon", scopeRef: "world", subject: "families", predicate: "read", object: { target: "moon tables" }, sourceDocumentRefs: ["setting"] },
-        { localId: "lantern", scopeRef: "world", subject: "watchkeepers", predicate: "maintain", object: { target: "lantern towers" }, sourceDocumentRefs: ["setting"] },
-      ],
-      relations: [{ localId: "world-harbor", sourceRef: "world", targetRef: "harbor" }],
-    }, { cycleId: "cycle-compiled", worldRootResourceId: worldRoot.id });
+    const fragment = largeWorldFragmentFixture();
+    const entities = fragment.entities as MutableWorldEntity[];
+    entities.push(
+      { localId: "harbor", kind: "location", title: "Harbor", parentRef: "world", scaleRole: "transport_network", sourceDocumentRefs: ["setting"] },
+      { localId: "pier", kind: "location", title: "Pier", parentRef: "harbor", scaleRole: "resource_distribution", sourceDocumentRefs: ["setting"] },
+    );
+    const args = compileGrowthWorldFragment(fragment, { cycleId: "cycle-compiled", worldRootResourceId: worldRoot.id });
     const gateway = createWorkspaceAgentToolGateway(workspace, new WorkspaceChangeSetPolicy(workspace), () => true);
     const result = await gateway.proposeChangeSet(args, invocationContext("free", true));
     expect(result).toMatchObject({ mode: "free", status: "committed", gateStatus: "ready" });
@@ -231,16 +229,9 @@ describe("Workspace Agent tool gateway", () => {
     const { workspace } = createWorkspace();
     const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
     let code: string | null = null;
-    try { compileGrowthWorldFragment({
-      summary: "Invalid parent shape.", world: { localId: "world", title: "World" },
-      entities: [{ localId: "faction", kind: "faction", title: "Faction" }, { localId: "location", kind: "location", title: "Location", parentRef: "faction" }],
-      documents: [{ localId: "setting", ownerRef: "world", kind: "setting", title: "Setting", content: "Source." }],
-      assertions: [
-        { localId: "fact", scopeRef: "world", subject: "subject", predicate: "predicate", object: { value: "fact" }, sourceDocumentRefs: ["setting"] },
-        { localId: "fact-two", scopeRef: "world", subject: "subject two", predicate: "predicate", object: { value: "fact two" }, sourceDocumentRefs: ["setting"] },
-        { localId: "fact-three", scopeRef: "world", subject: "subject three", predicate: "predicate", object: { value: "fact three" }, sourceDocumentRefs: ["setting"] },
-      ], relations: [],
-    }, { cycleId: "cycle-invalid-parent", worldRootResourceId: worldRoot.id }); } catch (error) { code = (error as { code?: string }).code ?? null; }
+    const fragment = largeWorldFragmentFixture();
+    (fragment.entities as MutableWorldEntity[]).find((entity) => entity.localId === "mountains")!.parentRef = "north_crown";
+    try { compileGrowthWorldFragment(fragment, { cycleId: "cycle-invalid-parent", worldRootResourceId: worldRoot.id }); } catch (error) { code = (error as { code?: string }).code ?? null; }
     expect(code).toBe("GROWTH_FRAGMENT_PARENT_KIND_INVALID");
     expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_sets").get() as { count: number }).count)).toBe(0);
     expect(Number((workspace.db.prepare("SELECT COUNT(*) AS count FROM change_set_outputs").get() as { count: number }).count)).toBe(0);
