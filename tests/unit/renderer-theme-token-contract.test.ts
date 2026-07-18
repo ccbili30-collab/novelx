@@ -8,6 +8,10 @@ const graphView = fs.readFileSync(
   path.join(appRoot, "src/renderer/src/features/graph/SemanticGraphView.tsx"),
   "utf8",
 );
+const graphEdgeStyle = fs.readFileSync(
+  path.join(appRoot, "src/shared/semanticGraphEdgeStyle.ts"),
+  "utf8",
+);
 
 const graphTokenNames = [
   "--novax-color-text-strong",
@@ -48,9 +52,10 @@ describe("renderer theme token contract", () => {
   });
 
   it("keeps graph component colors theme-resolved", () => {
-    expect(graphView).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
-    expect(graphView).toContain("var(--novax-color-graph-edge)");
-    expect(graphView).toContain("var(--novax-color-danger)");
+    const graphRenderingAuthority = `${graphView}\n${graphEdgeStyle}`;
+    expect(graphRenderingAuthority).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
+    expect(graphRenderingAuthority).toContain("var(--novax-color-graph-edge)");
+    expect(graphRenderingAuthority).toContain("var(--novax-color-danger)");
   });
 
   it("keeps every renderer component rule free of literal colors", () => {

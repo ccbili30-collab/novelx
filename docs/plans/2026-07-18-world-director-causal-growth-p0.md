@@ -887,12 +887,14 @@ npm run build
 npm run package
 ```
 
-- [ ] Run focused tests during implementation.
-- [ ] Run the full suite only after code freeze.
-- [ ] Run one build/package process at a time.
-- [ ] Check and clean only this worktree's Electron processes.
-- [ ] Update current-state, ADRs and evidence index.
-- [ ] Review exact staged files before semantic commits.
+- [x] Run focused tests during implementation.
+- [x] Run the full suite only after code freeze.
+- [x] Run one build/package process at a time.
+- [x] Check and clean only this worktree's Electron processes.
+- [x] Update current-state, ADRs and evidence index.
+- [x] Review exact staged files before semantic commits.
+
+**Task 30 evidence (2026-07-18):** frozen branch state passed `git diff --check`, `npm run typecheck`, all three active Prompt publication gates and the staged test manifest covering 163 files. The first full run correctly stopped on one stale renderer theme-token test left by Task 27's move of edge styling into `semanticGraphEdgeStyle`; production rendering already used the centralized token authority. The static contract was updated to inspect both the component and that authority, its focused regression passed 8/8, and the repaired full run passed unit 159 files/1047 tests, integration 3 files/22 tests and E2E-support 1 file/9 tests: 1078/1078 total with zero skips. `npm run build` passed. Because the repository has no `package` script, the existing release entry `npm run package:win` produced `release/novelx-Setup-0.2.7-x64.exe` (121,189,145 bytes, SHA-256 `4E0843B732D912B15C0EED9695EDCBF85D0E69EDB7608BB0543AE15332F2A124`) and blockmap; `verify:package` passed with 17,890 entries and a 116,663,012-byte ASAR. The package and executable are unsigned (`NotSigned`). `verify:installer` did not execute installation because its production-install guard detected the user's existing `D:\NovelX` installation; no installed software was removed or overwritten. Worktree Electron/NovelX residue was zero. The Vite mixed static/dynamic graph import and electron-builder duplicate dependency-reference messages remain nonblocking performance/package warnings. No real Provider, Live Growth run or world-package export occurred in this task.
 
 ### Task 31: Verify Provider profiles
 
@@ -957,7 +959,7 @@ This matrix is the execution index. The detailed phase sections define files and
 | [x] | 27 | Judges and users must see real nodes and edits growing, not only terminal files. | Timeline, right editor, graph and image queue project authoritative safe events and committed objects. | Reducer/component/Electron tests for ordering, failure, scope switch and no premature completion. |
 | [x] | 28 | Generic failures force whole-repository searches and make AI repair unsafe. | Error families identify Provider, specialist protocol, Work Order state, causal Domain, review, persistence or reconciliation ownership. | Allowlisted diagnostic mapping, redaction and unknown-error containment tests. |
 | [x] | 29 | Long runs will be interrupted; replay bugs can duplicate Provider calls or Canon writes. | Restart reconciles every editorial boundary and resumes or blocks truthfully. | Crash matrix covering allocated/running/candidate/review/commit/image boundaries. |
-| [ ] | 30 | Focused tests cannot prove the integrated frozen candidate or release artifacts. | One frozen code state passes all deterministic, build and package gates with updated evidence index. | `git diff --check`, typecheck, Prompt gate, full tests, build and package. |
+| [x] | 30 | Focused tests cannot prove the integrated frozen candidate or release artifacts. | One frozen code state passes all deterministic, build and package gates with updated evidence index. | `git diff --check`, typecheck, Prompt gate, full tests, build and package. |
 | [ ] | 31 | The requested literary quality test is invalid if the saved model is not exactly `5.6luna`. | Live fails before side effects unless both public Provider identities match approved profiles. | Public identity evidence and encrypted-profile/Local-State consistency checks. |
 | [ ] | 32 | Mock and historical evidence do not prove the final Director/causal/image/user-guidance loop. | One real seed produces and revises a persistent causal large-world package, survives reopen and supports research retrieval. | One sanitized dual-Provider Live report, exported package and no-mutation research audit. |
 
