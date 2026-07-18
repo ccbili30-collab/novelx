@@ -194,7 +194,9 @@ function readySubmission(content: string) {
       ],
       causalLinks: [{
         localId: "cold_causes_frozen", causeRef: "local:cold", effectRef: "local:frozen",
+        relationKind: "causes",
         mechanism: "持续低温使河水结冰并形成封冻。", conditions: ["冬季持续严寒"], temporalScope: "冬季",
+        polarityStrengthSummary: "正向、中等强度；不表达伪精确概率。",
         epistemicStatus: "confirmed", sourceLocators: [locator],
       }],
     },

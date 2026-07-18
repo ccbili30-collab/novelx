@@ -173,9 +173,11 @@ export const graphCuratorCausalLinkSchema = z.object({
   localId: boundedIdSchema,
   causeRef: graphEntityRefSchema,
   effectRef: graphEntityRefSchema,
+  relationKind: z.enum(["causes", "enables", "constrains", "prevents", "amplifies", "mitigates", "depends_on"]),
   mechanism: z.string().trim().min(1).max(2_000),
   conditions: z.array(z.string().trim().min(1).max(1_000)).min(1).max(20),
   temporalScope: z.string().trim().min(1).max(1_000),
+  polarityStrengthSummary: z.string().trim().min(1).max(1_000),
   epistemicStatus: z.enum(["confirmed", "disputed", "inferred", "unknown"]),
   sourceLocators: z.array(exactSourceLocatorSchema).min(1).max(20),
 }).strict().superRefine((value, context) => {
@@ -323,9 +325,14 @@ const graphCuratorCausalLinkParameters = Type.Object({
   localId: boundedIdParameter,
   causeRef: graphEntityRefParameter,
   effectRef: graphEntityRefParameter,
+  relationKind: Type.Union([
+    Type.Literal("causes"), Type.Literal("enables"), Type.Literal("constrains"), Type.Literal("prevents"),
+    Type.Literal("amplifies"), Type.Literal("mitigates"), Type.Literal("depends_on"),
+  ]),
   mechanism: Type.String({ minLength: 1, maxLength: 2_000 }),
   conditions: Type.Array(Type.String({ minLength: 1, maxLength: 1_000 }), { minItems: 1, maxItems: 20, uniqueItems: true }),
   temporalScope: Type.String({ minLength: 1, maxLength: 1_000 }),
+  polarityStrengthSummary: Type.String({ minLength: 1, maxLength: 1_000 }),
   epistemicStatus: Type.Union([
     Type.Literal("confirmed"), Type.Literal("disputed"), Type.Literal("inferred"), Type.Literal("unknown"),
   ]),
