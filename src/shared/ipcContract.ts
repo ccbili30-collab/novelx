@@ -1325,6 +1325,18 @@ export const agentRunCancelRequestSchema = z.object({
 
 export const growthStrategySchema = z.literal("grow_world_story_oc_closure_v4");
 
+export const growthConversationRoute = Object.freeze({
+  interlocutor: "world_director",
+  operationalActor: "steward",
+  operationalPresentation: "expandable_activity",
+} as const);
+
+export const growthConversationRouteSchema = z.object({
+  interlocutor: z.literal(growthConversationRoute.interlocutor),
+  operationalActor: z.literal(growthConversationRoute.operationalActor),
+  operationalPresentation: z.literal(growthConversationRoute.operationalPresentation),
+}).strict();
+
 export const growthStartRequestSchema = z.object({
   requestId: z.uuid(),
   projectId: opaqueIdSchema,
@@ -1450,6 +1462,7 @@ export const growthPublicDiagnosticSchema = z.object({
 const growthPublicSnapshotSchema = z.object({
   capabilityVersion: z.literal(growthCapabilityVersion),
   strategy: growthStrategySchema,
+  conversationRoute: growthConversationRouteSchema,
   coordinatorStatus: z.enum(["running", "awaiting_guidance", "completed", "blocked", "failed", "cancelled", "reconciliation_required"]),
   goal: growthPublicGoalSchema,
   currentRuleRevision: z.number().int().min(1).max(1_000_000).optional(),
@@ -1462,6 +1475,9 @@ const growthPublicSnapshotSchema = z.object({
 
 export const growthStartResponseSchema = growthPublicSnapshotSchema;
 export const growthGetResponseSchema = growthPublicSnapshotSchema;
+export function parseGrowthConversationSnapshot(input: unknown) {
+  return growthPublicSnapshotSchema.parse(input);
+}
 export const growthGuideResponseSchema = z.object({
   goalId: opaqueIdSchema,
   persistedRevision: z.number().int().min(2).max(1_000_000),

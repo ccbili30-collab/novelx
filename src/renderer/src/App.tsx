@@ -75,6 +75,7 @@ export function App() {
   const [initializing, setInitializing] = useState(false);
   const [activity, setActivity] = useState<{ label: string; domains: string[] } | null>(null);
   const [growthPresentation, setGrowthPresentation] = useState<GrowthPresentation | null>(null);
+  const [conversationIdentityLabel, setConversationIdentityLabel] = useState<"世界总编" | "大管家">("大管家");
   const [growthArtifacts, setGrowthArtifacts] = useState<AgentArtifact[]>([]);
   const [growthDetails, setGrowthDetails] = useState<GrowthPresentationSnapshot | null>(null);
   const [growthIllustrationBusy, setGrowthIllustrationBusy] = useState(false);
@@ -707,10 +708,10 @@ export function App() {
 
   const agentScopeResourceIds = resolveAgentScopeResourceIds(workspace, selectedResourceId);
   const agentPanel = (
-    <section className="agent-conversation-panel" aria-label="大管家">
+    <section className="agent-conversation-panel" aria-label={conversationIdentityLabel}>
       <div className="panel-heading">
         <MessageSquareText size={16} aria-hidden="true" />
-        <span>{activeSession?.title ?? "大管家"}</span>
+        <span>{conversationIdentityLabel === "世界总编" ? conversationIdentityLabel : activeSession?.title ?? conversationIdentityLabel}</span>
       </div>
       <StewardRuntimePanel
         workspace={workspace}
@@ -725,6 +726,7 @@ export function App() {
         onOpenDocumentReference={openDocumentReference}
         onReadyImage={openReadyImageShowcase}
         onActivityChange={setActivity}
+        onConversationIdentityChange={setConversationIdentityLabel}
         onGrowthPresentationChange={setGrowthPresentation}
         onGrowthArtifactsChange={setGrowthArtifacts}
         growthDetails={growthDetails}

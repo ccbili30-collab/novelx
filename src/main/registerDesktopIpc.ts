@@ -11,7 +11,6 @@ import {
   publicDecomposerEventSchema,
   desktopIpcChannels,
   growthGetRequestSchema,
-  growthGetResponseSchema,
   growthGuideRequestSchema,
   growthGuideResponseSchema,
   growthIllustrationCancelRequestSchema,
@@ -20,7 +19,7 @@ import {
   growthPresentationSnapshotSchema,
   growthLiveEventSchema,
   growthStartRequestSchema,
-  growthStartResponseSchema,
+  parseGrowthConversationSnapshot,
   systemStatusSchema,
 } from "../shared/ipcContract";
 import { AgentProcessSupervisor, type AgentRuntimeLease } from "./agentProcessSupervisor";
@@ -108,7 +107,7 @@ export function registerDesktopIpc(
   ipcMain.handle(desktopIpcChannels.growthStart, (event, payload: unknown) => {
     const request = growthStartRequestSchema.parse(payload);
     if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
-    return growthStartResponseSchema.parse(growthCoordinator.start(request, {
+    return parseGrowthConversationSnapshot(growthCoordinator.start(request, {
       growth: (growthEvent) => {
         if (!event.sender.isDestroyed()) event.sender.send(desktopIpcChannels.growthEvent, growthLiveEventSchema.parse(growthEvent));
       },
@@ -120,7 +119,7 @@ export function registerDesktopIpc(
   ipcMain.handle(desktopIpcChannels.growthGet, (event, payload: unknown) => {
     const request = growthGetRequestSchema.parse(payload);
     if (!growthCoordinator) throw new Error("GROWTH_WORKSPACE_REQUIRED");
-    return growthGetResponseSchema.parse(growthCoordinator.get(request, {
+    return parseGrowthConversationSnapshot(growthCoordinator.get(request, {
       growth: (growthEvent) => {
         if (!event.sender.isDestroyed()) event.sender.send(desktopIpcChannels.growthEvent, growthLiveEventSchema.parse(growthEvent));
       },

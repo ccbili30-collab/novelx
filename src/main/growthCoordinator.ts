@@ -13,6 +13,7 @@ import {
 } from "../shared/growthContract";
 import {
   agentRunEventSchema,
+  growthConversationRoute,
   growthGetResponseSchema,
   growthGuideResponseSchema,
   growthLiveEventSchema,
@@ -741,6 +742,7 @@ export class GrowthCoordinator {
     return {
       capabilityVersion: growthCapabilityVersion,
       strategy,
+      conversationRoute: growthConversationRoute,
       coordinatorStatus: coordinatorStatus(repository, goal, context, cycles, Boolean(latestCycle && this.#activeCycleRuns.has(latestCycle.id))),
       goal: { id: goal.id, status: goal.status, currentCycleSequence: goal.currentCycleSequence },
       currentRuleRevision: goal.currentRuleRevision,

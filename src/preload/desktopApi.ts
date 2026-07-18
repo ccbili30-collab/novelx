@@ -5,7 +5,6 @@ import {
   agentRunStartRequestSchema,
   agentRunStartResponseSchema,
   growthGetRequestSchema,
-  growthGetResponseSchema,
   growthGuideRequestSchema,
   growthGuideResponseSchema,
   growthIllustrationCancelRequestSchema,
@@ -14,7 +13,7 @@ import {
   growthPresentationSnapshotSchema,
   growthLiveEventSchema,
   growthStartRequestSchema,
-  growthStartResponseSchema,
+  parseGrowthConversationSnapshot,
   changeSetDecisionRequestSchema,
   changeSetDetailResultSchema,
   changeSetFinalizeAssistRequestSchema,
@@ -559,11 +558,11 @@ export function exposeDesktopApi(): void {
     growth: {
       async start(request) {
         const safeRequest = growthStartRequestSchema.parse(request);
-        return growthStartResponseSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthStart, safeRequest));
+        return parseGrowthConversationSnapshot(await ipcRenderer.invoke(desktopIpcChannels.growthStart, safeRequest));
       },
       async get(request) {
         const safeRequest = growthGetRequestSchema.parse(request);
-        return growthGetResponseSchema.parse(await ipcRenderer.invoke(desktopIpcChannels.growthGet, safeRequest));
+        return parseGrowthConversationSnapshot(await ipcRenderer.invoke(desktopIpcChannels.growthGet, safeRequest));
       },
       async guide(request) {
         const safeRequest = growthGuideRequestSchema.parse(request);

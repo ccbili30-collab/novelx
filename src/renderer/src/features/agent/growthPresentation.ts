@@ -40,6 +40,7 @@ export interface GrowthGuidanceAvailability {
 
 export interface GrowthPresentation {
   goalId: string;
+  conversationRoute: GrowthStartResponse["conversationRoute"];
   coordinatorStatus: CoordinatorStatus;
   goalStatus: GrowthStartResponse["goal"]["status"];
   currentCycleSequence: number;
@@ -77,6 +78,7 @@ const terminalCoordinatorStates = new Set<CoordinatorStatus>(["completed", "bloc
 export function createGrowthPresentation(snapshot: GrowthStartResponse): GrowthPresentation {
   return derive({
     goalId: snapshot.goal.id,
+    conversationRoute: snapshot.conversationRoute,
     coordinatorStatus: snapshot.coordinatorStatus,
     goalStatus: snapshot.goal.status,
     currentCycleSequence: snapshot.goal.currentCycleSequence,
@@ -106,6 +108,7 @@ export function mergeGrowthSnapshot(current: GrowthPresentation | null, snapshot
     : restoredGuidance;
   return derive({
     goalId: current.goalId,
+    conversationRoute: snapshot.conversationRoute,
     coordinatorStatus,
     goalStatus: snapshot.goal.status,
     currentCycleSequence: Math.max(current.currentCycleSequence, snapshot.goal.currentCycleSequence),

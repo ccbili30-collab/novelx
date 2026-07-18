@@ -14,6 +14,7 @@ import {
   graphInspectorResultSchema,
   graphSnapshotResultSchema,
   growthGetRequestSchema,
+  growthConversationRoute,
   growthGuideRequestSchema,
   growthGuideResponseSchema,
   growthIllustrationCancelRequestSchema,
@@ -113,7 +114,8 @@ describe("desktop IPC contract", () => {
       ...evaluated, contentRef: { kind: "resource", targetId: "world", targetVersionId: "v1" },
     }).success).toBe(false);
     expect(growthStartResponseSchema.safeParse({
-      capabilityVersion: "hackathon-growth-closure-v4", strategy: "grow_world_story_oc_closure_v4", coordinatorStatus: "awaiting_guidance",
+      capabilityVersion: "hackathon-growth-closure-v4", strategy: "grow_world_story_oc_closure_v4",
+      conversationRoute: growthConversationRoute, coordinatorStatus: "awaiting_guidance",
       goal: { id: "goal-1", status: "active", currentCycleSequence: 3 },
       cycles: [
         ...Array.from({ length: 3 }, (_, index) => ({ id: `cycle-${index}`, sequence: index + 1, runId: null, status: "committed" as const })),

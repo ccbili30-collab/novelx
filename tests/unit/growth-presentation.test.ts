@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AgentArtifact, AgentRunEvent, GrowthStartResponse } from "../../src/shared/ipcContract";
+import { growthConversationRoute, type AgentArtifact, type AgentRunEvent, type GrowthStartResponse } from "../../src/shared/ipcContract";
 
 const presentationModulePath = "../../src/renderer/src/features/agent/growthPresentation";
 const stewardModulePath = "../../src/renderer/src/features/agent/StewardRuntimePanel";
@@ -25,6 +25,7 @@ function snapshot(overrides: Partial<GrowthStartResponse> = {}): GrowthStartResp
   return {
     capabilityVersion: "hackathon-growth-closure-v4",
     strategy: "grow_world_story_oc_closure_v4",
+    conversationRoute: growthConversationRoute,
     coordinatorStatus: "running",
     goal: { id: goalId, status: "active", currentCycleSequence: 1 },
     cycles: [

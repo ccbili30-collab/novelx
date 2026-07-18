@@ -19,6 +19,7 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
       __growthUseSessionGoals?: boolean;
       __growthGuideResolvers?: Record<string, () => void>;
       __growthGuideResolved?: string[];
+      __growthRuleRevisions?: Record<string, number>;
       __growthInspectCalls?: Array<{ goalId?: string }>;
       __growthInspectDelayFirst?: boolean;
       __growthInspectFirstResolver?: () => void;
@@ -30,21 +31,30 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
     state.__growthUseSessionGoals = false;
     state.__growthGuideResolvers = {};
     state.__growthGuideResolved = [];
+    state.__growthRuleRevisions = {};
     state.__growthInspectCalls = [];
     state.__growthInspectDelayFirst = false;
     state.__growthSnapshotMode = "same_revision";
     const snapshot = (goalId = "goal-guidance-ui") => {
       const mode = state.__growthSnapshotMode;
       const cycleSequence = mode === "cycle3" ? 3 : 1;
+      const persistedRevision = state.__growthRuleRevisions?.[goalId] ?? 1;
       return {
         capabilityVersion: "hackathon-growth-closure-v4",
         strategy: "grow_world_story_oc_closure_v4",
+        conversationRoute: {
+          interlocutor: "world_director",
+          operationalActor: "steward",
+          operationalPresentation: "expandable_activity",
+        },
         coordinatorStatus: "running",
         goal: { id: goalId, status: "active", currentCycleSequence: cycleSequence },
         ...(mode === "missing" ? {} : {
-          currentRuleRevision: mode === "same_revision" ? 1 : 3,
+          currentRuleRevision: mode === "same_revision" ? persistedRevision : 3,
           activeCycleRuleRevision: mode === "cycle3" ? 3 : 1,
-          guidanceStatus: mode === "cycle3" || mode === "same_revision" ? "none" : "persisted_pending_boundary",
+          guidanceStatus: mode === "cycle3" || (mode === "same_revision" && persistedRevision === 1)
+            ? "none"
+            : "persisted_pending_boundary",
         }),
         cycles: [
           { id: "cycle-1", sequence: 1, runId: "growth-run-1", status: cycleSequence === 1 ? "running" : "committed" },
@@ -95,6 +105,7 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
       }
       if (request.expectedRevision === 1) await new Promise((resolve) => setTimeout(resolve, 180));
       const persistedRevision = (request.expectedRevision ?? 0) + 1;
+      if (request.goalId) state.__growthRuleRevisions![request.goalId] = persistedRevision;
       return {
         goalId: request.goalId,
         persistedRevision,
@@ -150,14 +161,22 @@ test("starts explicit Growth mode once and visibly fails closed without a Provid
     });
     const page = await app.firstWindow();
     await page.setViewportSize({ width: 1440, height: 900 });
-    const composer = page.getByLabel("给大管家发送消息");
+    const stewardComposer = page.getByLabel("给大管家发送消息");
     const growthMode = page.getByRole("radio", { name: "生长", exact: true });
 
-    await expect(composer).toBeEnabled({ timeout: 8_000 });
+    await expect(stewardComposer).toBeEnabled({ timeout: 8_000 });
     await expect(page.getByRole("radio", { name: "协助", exact: true })).toBeVisible({ timeout: 8_000 });
     await expect(page.getByRole("radio", { name: "自由", exact: true })).toBeVisible({ timeout: 8_000 });
     await growthMode.click({ timeout: 8_000 });
     await expect(growthMode).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByLabel("当前对话对象")).toContainText("世界总编");
+    await page.getByRole("radio", { name: "协助", exact: true }).click();
+    await expect(page.getByLabel("当前对话对象")).toHaveCount(0);
+    await expect(page.getByLabel("给大管家发送消息")).toBeVisible();
+    await growthMode.click();
+    const composer = page.getByLabel("给世界总编发送消息");
+    await expect(page.getByRole("region", { name: "世界总编" }).locator(".steward-state")).toContainText("世界总编");
+    await expect(page.getByLabel("给大管家发送消息")).toHaveCount(0);
     await expect(page.getByText("当前创作", { exact: true })).toBeVisible();
     await expect(page.getByText("图文图鉴", { exact: true })).toBeVisible();
     await expect(page.getByText("文件夹内容", { exact: true })).toBeVisible();
@@ -167,7 +186,11 @@ test("starts explicit Growth mode once and visibly fails closed without a Provid
     await expect(send).toBeEnabled({ timeout: 8_000 });
     await send.click({ timeout: 8_000 });
     await expect(page.locator(".steward-message--user").filter({ hasText: "建立一个有潮汐禁令的海港世界" })).toBeVisible();
+    const operationalActivity = page.getByText("大管家运行活动", { exact: true });
+    await expect(operationalActivity).toBeVisible();
     const timeline = page.getByRole("region", { name: "生长活动时间线" });
+    await expect(timeline).toBeHidden();
+    await operationalActivity.click();
     await expect(timeline).toBeVisible({ timeout: 8_000 });
     await expect(timeline.locator(".growth-timeline__row").first()).toContainText("第 1 轮");
     await expect(page.locator(".project-files-panel")).toBeVisible();
@@ -220,13 +243,14 @@ test("keeps a newer scope guide saving when the previous scope resolves", async 
     });
     const page = await app.firstWindow();
     const rail = page.getByRole("complementary", { name: "项目与 Agent 会话" });
-    const composer = page.getByLabel("给大管家发送消息");
+    let composer = page.getByLabel("给大管家发送消息");
 
     const oldSession = rail.getByRole("button", { name: "旧规则会话", exact: true });
     await expect(oldSession).toBeVisible({ timeout: 8_000 });
     await oldSession.click();
     await expect(oldSession).toHaveAttribute("data-selected", "true");
     await page.getByRole("radio", { name: "生长", exact: true }).click();
+    composer = page.getByLabel("给世界总编发送消息");
     await composer.fill("建立旧会话世界");
     await page.getByTitle("发送").click();
     let guidance = page.getByRole("textbox", { name: "追加世界规则或指导" });
@@ -297,11 +321,12 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
     await installGrowthGuidanceMock(app);
     const page = await app.firstWindow();
     await page.setViewportSize({ width: 1440, height: 900 });
-    const composer = page.getByLabel("给大管家发送消息");
+    let composer = page.getByLabel("给大管家发送消息");
     await expect(composer).toBeEnabled({ timeout: 8_000 });
     await expect(page.getByRole("radio", { name: "协助", exact: true })).toBeVisible();
     await expect(page.getByRole("radio", { name: "自由", exact: true })).toBeVisible();
     await page.getByRole("radio", { name: "生长", exact: true }).click();
+    composer = page.getByLabel("给世界总编发送消息");
     await composer.fill("建立潮汐海港世界");
     await page.getByTitle("发送").click();
 

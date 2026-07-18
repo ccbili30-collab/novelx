@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Check,
   CircleStop,
@@ -45,6 +45,7 @@ interface StewardRuntimePanelProps {
   onOpenDocumentReference?(reference: Extract<AgentArtifact, { kind: "document_reference" }>): Promise<void> | void;
   onReadyImage?(image: Extract<AgentArtifact, { kind: "image" }>): Promise<boolean> | boolean;
   onActivityChange(activity: { label: string; domains: string[] } | null): void;
+  onConversationIdentityChange(label: "世界总编" | "大管家"): void;
   onGrowthPresentationChange(presentation: GrowthPresentation | null): void;
   onGrowthArtifactsChange(artifacts: AgentArtifact[]): void;
   growthDetails: GrowthPresentationSnapshot | null;
@@ -77,6 +78,39 @@ export function isCurrentGrowthRequest(
   return current.generation === candidate.generation && current.scopeKey === candidate.scopeKey;
 }
 
+export interface ConversationIdentityCopy {
+  interlocutorLabel: "世界总编" | "大管家";
+  composerAriaLabel: string;
+  composerPlaceholder: string;
+  runningLabel: string;
+}
+
+export function resolveConversationIdentity(mode: "assist" | "free" | "growth"): ConversationIdentityCopy {
+  if (mode === "growth") {
+    return {
+      interlocutorLabel: "世界总编",
+      composerAriaLabel: "给世界总编发送消息",
+      composerPlaceholder: "和世界总编讨论世界、OC 或故事",
+      runningLabel: "世界总编正在组织创作",
+    };
+  }
+  return {
+    interlocutorLabel: "大管家",
+    composerAriaLabel: "给大管家发送消息",
+    composerPlaceholder: "和大管家讨论、检索或修改当前项目",
+    runningLabel: "大管家正在处理",
+  };
+}
+
+export function GrowthOperationalActivity({ children }: { children: ReactNode }) {
+  return (
+    <details className="growth-operational-activity">
+      <summary>大管家运行活动</summary>
+      <div className="growth-operational-activity__body">{children}</div>
+    </details>
+  );
+}
+
 export function StewardRuntimePanel({
   workspace,
   projectId,
@@ -90,6 +124,7 @@ export function StewardRuntimePanel({
   onOpenDocumentReference,
   onReadyImage,
   onActivityChange,
+  onConversationIdentityChange,
   onGrowthPresentationChange,
   onGrowthArtifactsChange,
   growthDetails,
@@ -334,6 +369,7 @@ export function StewardRuntimePanel({
       const snapshot = await window.novaxDesktop.growth.get({ projectId: restoreProjectId, sessionId: restoreSessionId, goalId });
       if (!isCurrentGrowthRequest(growthLoadRequestToken.current, request)) return;
       const next = mergeGrowthSnapshot(growthRef.current, snapshot);
+      setMode("growth");
       publishGrowth(next);
       const runId = snapshot.cycles.find((cycle) => cycle.status === "running")?.runId ?? null;
       setActiveRunId(runId);
@@ -491,19 +527,30 @@ export function StewardRuntimePanel({
   }
 
   const running = starting || activeRunId !== null || growthPresentation?.running === true;
+  const conversationIdentity = resolveConversationIdentity(mode);
   const lastUserEntryIndex = findLastUserEntryIndex(entries);
   const guidanceAvailability = growthPresentation ? getGrowthGuidanceAvailability(growthPresentation) : null;
   const showGuidanceComposer = Boolean(guidanceAvailability?.canGuide && growthPresentation
     && growthPresentation.currentCycleSequence > 0 && growthPresentation.guidance);
+
+  useEffect(() => {
+    onConversationIdentityChange(conversationIdentity.interlocutorLabel);
+  }, [conversationIdentity.interlocutorLabel, onConversationIdentityChange]);
 
   return (
     <>
       <div className="steward-feed">
         <div className="steward-state">
           <GitFork size={18} aria-hidden="true" />
-          <span>{session ? session.title : workspace ? "选择一个 Agent 会话" : "等待工作区"}</span>
+          <span>{session ? (mode === "growth" ? conversationIdentity.interlocutorLabel : session.title) : workspace ? "选择一个 Agent 会话" : "等待工作区"}</span>
         </div>
         <div className="steward-conversation" aria-live="polite">
+          {mode === "growth" ? (
+            <div className="growth-conversation-identity" aria-label="当前对话对象">
+              <strong>{conversationIdentity.interlocutorLabel}</strong>
+              <small>创作对话</small>
+            </div>
+          ) : null}
           {entries.map((entry, index) => (
             <article className={`steward-message steward-message--${entry.kind}`} key={entry.id}>
               <span>{entry.kind === "user" ? "你" : entry.kind === "error" ? "运行阻塞" : "大管家"}</span>
@@ -526,18 +573,22 @@ export function StewardRuntimePanel({
               {entry.outcome === "awaiting_confirmation" ? <small>等待审查</small> : null}
             </article>
           ))}
-          {growthPresentation ? <RunActivityTimeline
-            presentation={growthPresentation}
-            artifacts={growthArtifacts}
-            onOpenChangeSet={onOpenChangeSet}
-            onOpenDocumentReference={onOpenDocumentReference}
-          /> : null}
+          {growthPresentation ? (
+            <GrowthOperationalActivity>
+              <RunActivityTimeline
+                presentation={growthPresentation}
+                artifacts={growthArtifacts}
+                onOpenChangeSet={onOpenChangeSet}
+                onOpenDocumentReference={onOpenDocumentReference}
+              />
+            </GrowthOperationalActivity>
+          ) : null}
           {growthPresentation ? <GrowthGuidanceStatus snapshot={growthDetails} /> : null}
           {growthPresentation ? <GrowthImpactSummary snapshot={growthDetails} /> : null}
           {running ? (
             <div className="steward-running" role="status">
               <LoaderCircle size={14} aria-hidden="true" />
-              <span>{activity || "大管家正在处理"}</span>
+              <span>{mode === "growth" ? conversationIdentity.runningLabel : activity || conversationIdentity.runningLabel}</span>
             </div>
           ) : null}
           {actionNotice ? <div className="steward-action-notice" role="status">{actionNotice}</div> : null}
@@ -578,7 +629,7 @@ export function StewardRuntimePanel({
         </section>
       ) : null}
       <div className="steward-composer">
-        <div className="agent-permission-switch" role="radiogroup" aria-label="大管家提交模式">
+        <div className="agent-permission-switch" role="radiogroup" aria-label={`${conversationIdentity.interlocutorLabel}提交模式`}>
           <button type="button" role="radio" aria-checked={mode === "assist"} onClick={() => setMode("assist")} disabled={running}>
             协助
           </button>
@@ -590,9 +641,9 @@ export function StewardRuntimePanel({
           </button>
         </div>
         <textarea
-          aria-label="给大管家发送消息"
+          aria-label={conversationIdentity.composerAriaLabel}
           disabled={!workspace || !session || running}
-          placeholder={!workspace ? "先初始化项目" : !session ? "先创建 Agent 会话" : running ? "大管家正在处理" : "和大管家讨论、检索或修改当前项目"}
+          placeholder={!workspace ? "先初始化项目" : !session ? "先创建 Agent 会话" : running ? conversationIdentity.runningLabel : conversationIdentity.composerPlaceholder}
           rows={3}
           value={draft}
           onChange={(event) => setDraft(event.target.value)}

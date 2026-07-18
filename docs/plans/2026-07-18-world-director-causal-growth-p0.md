@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task.
 
-> **当前状态（2026-07-18）：** 已验证 Task 1–25；当前执行入口为 Phase J / Task 26：将 Growth 用户对话路由为 World Director（世界总编），Steward（大管家）仅保留可展开的运行活动。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
+> **当前状态（2026-07-18）：** 已验证 Task 1–26；当前执行入口为 Phase J / Task 27：安全投影编辑工作与因果生长。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
 
 这份计划回答三个问题：为什么 NovelX 不能继续依赖一个模型包办所有工作；为什么“因果关系”必须成为图谱和调度的核心；最终用户、评委和后续编码 Agent 分别会得到什么。代码优化的首要目标不是方便人类阅读，而是降低 AI 修改所需上下文、缩小变更影响半径并让每个失败直接定位到唯一责任模块。
 
@@ -830,6 +830,8 @@ unknown side effect -> reconciliation_required
 - Create: contract and UI tests
 
 **UX:** Growth mode identifies World Director as interlocutor; Steward remains visible only in expandable operational activity. Outside Growth, normal Steward conversation is unchanged.
+
+**Task 26 evidence (2026-07-18):** the public Growth snapshot now carries one strict code-owned conversation route: `world_director` is the interlocutor, `steward` is the operational actor, and Steward output is presented as `expandable_activity`. Main emits this route, Main and Preload both parse the same strict snapshot boundary, and missing, forged or legacy route identities fail closed instead of being inferred in Renderer. Renderer preserves the route in its Growth projection, restores Growth mode for a persisted Goal, changes the panel heading, state label, composer accessibility text and running copy to World Director, and keeps the Growth timeline under a closed-by-default “大管家运行活动” disclosure. Assist and Free retain the original Steward labels and composer copy. Six targeted unit files passed 106/106 with zero skips; the three Growth presentation Electron E2E scenarios passed 3/3, including explicit Growth/Assist identity switching, collapsed operational activity, fail-closed missing Provider behavior, cross-session guidance isolation and durable guidance refresh. `npm run typecheck`, the production build with all three active Prompt publication gates, a final `electron-vite` production build and visual inspection of the 1440×900 failure state passed. No real Provider, full repository suite, package or world-package export ran. This task changes only the explicitly approved Growth public identity field; it does not change schema persistence, permissions, Canon or Runtime V2.
 
 ### Task 27: Present editorial work and causal growth
 

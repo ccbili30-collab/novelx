@@ -40,3 +40,8 @@
 .steward-message-actions button:hover { background: var(--hover); color: var(--novax-color-text-strong); }
 .steward-action-notice { align-self: center; padding: 5px 8px; color: var(--muted); font-size: 11px; }
 @media (hover: none) { .steward-message-actions { position: static; justify-self: end; opacity: 1; pointer-events: auto; box-shadow: none; } }
+.growth-conversation-identity { display: flex; align-items: baseline; gap: 6px; width: fit-content; color: var(--novax-color-text-strong); font-size: 12px; }
+.growth-conversation-identity small { color: var(--novax-color-text-subtle); font-size: 10px; font-weight: 500; }
+.growth-operational-activity { color: var(--novax-color-text-subtle); font-size: 11px; }
+.growth-operational-activity > summary { width: fit-content; cursor: pointer; user-select: none; }
+.growth-operational-activity__body { margin-top: 8px; }
