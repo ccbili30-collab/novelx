@@ -708,11 +708,13 @@ unknown side effect -> reconciliation_required
 
 **Rules:**
 
-- [ ] Hard Domain/Checker finding blocks Director acceptance.
-- [ ] Director may reject valid-but-shallow work with explicit acceptance facet gaps.
-- [ ] Revision uses same capability/profile/Prompt version and original Work Order.
-- [ ] Maximum two editorial revisions by default.
-- [ ] Duplicate finding/no-progress escalates to user or recorded debt.
+- [x] Hard Domain/Checker finding blocks Director acceptance.
+- [x] Director may reject valid-but-shallow work with explicit acceptance facet gaps.
+- [x] Revision uses same capability/profile/Prompt version and original Work Order.
+- [x] Maximum two editorial revisions by default.
+- [x] Duplicate finding/no-progress escalates to user or recorded debt.
+
+**Task 17 evidence (2026-07-18):** `GrowthEditorialReviewCoordinator` enforces the ordered seam `deterministic validation -> Graph Curator -> Checker -> Director`, passes cancellation through every stage and stops between stages when aborted. All deterministic/graph/checker findings and Director reasons must bind original Work Order acceptance facets. A blocking Domain/graph finding or blocked Checker result prevents Director `accept`; the policy emits `revise` with source-bound reasons and requires an injected policy-Artifact writer to persist the actual overridden decision and hash. Valid-but-shallow Director `revise` remains allowed only with explicit facet reasons. `prepareSameOwnerRevisionAttempt` copies the latest attempt's capability, profile, Prompt identity/hash and model binding onto the same Work Order; the repository remains the transition authority. The default allows initial work plus two revisions. A repeated Checker Artifact hash or another `revise` at the limit becomes persisted `ask_user`, and the scheduler now refuses to auto-dispatch that existing `revision_requested` storage state. Five targeted review/scheduler/repository/contract/Director suites passed 38/38 tests with zero skips; `npm run typecheck`, `npm run build` and `git diff --check` passed. Tests used real SQLite but injected deterministic, graph, Checker, Director and Artifact functions; no real Provider, Graph Curator or Change Set ran. This batch chooses user escalation rather than recorded debt. Because the v28 status contract has no `awaiting_user` enum, persisted `ask_user` remains stored as `revision_requested` and is distinguished by the latest Director review; Task 27 must project that state truthfully rather than label it as active revision.
 
 ## 11. Phase G — Graph Curator and Atomic Candidate Compilation
 
@@ -918,7 +920,7 @@ This matrix is the execution index. The detailed phase sections define files and
 | [x] | 14 | Director cannot safely plan from raw database rows or entire documents. | A compact packet provides rules, causal frontier, closure gaps, recent diffs and available capabilities. | Budget, provenance, checkpoint, hidden-data and deterministic ordering tests. |
 | [x] | 15 | The user needs one editorial intelligence that chooses what grows next and evaluates the whole. | Director emits a bounded dependency DAG and structured editorial decisions, not prose or tools. | Strict plan/review schemas, no raw tool authority and unsupported capability rejection. |
 | [x] | 16 | Concurrent candidates and serialized Canon commits require durable scheduling, not a Prompt convention. | Ready independent orders run concurrently; dependent orders wait; accepted commits use one lane and rebase. | Concurrency, dependency, lease, stale checkpoint, cancellation and idempotency tests. |
-| [ ] | 17 | Creating a fresh task on rejection loses accountability and feedback lineage. | A rejected result returns to the same capability/Work Order as a new attempt with bounded feedback. | Same-owner identity, attempt lineage, retry cap and no-progress termination tests. |
+| [x] | 17 | Creating a fresh task on rejection loses accountability and feedback lineage. | A rejected result returns to the same capability/Work Order as a new attempt with bounded feedback. | Same-owner identity, attempt lineage, retry cap and no-progress termination tests. |
 | [ ] | 18 | Specialist prose does not automatically become trustworthy graph structure. | Graph Curator returns sourced assertions and causal candidates with no Domain side effect. | Source-span, mechanism, condition, uncertainty and unsupported-inference tests. |
 | [ ] | 19 | Curator output, Checker findings and specialist content must converge before writing. | A deterministic compiler produces one authorized Change Set or one precise blocker. | Atomic compiled-output integration tests and zero-write rejection tests. |
 | [ ] | 20 | Previous output was too small because “world” had no enforced scale. | Default Growth creates world/cosmos, multiple macro regions/polities, physical systems, eras and interacting rules. | World-scale closure tests and a package skeleton fixture satisfying only real Domain rules. |

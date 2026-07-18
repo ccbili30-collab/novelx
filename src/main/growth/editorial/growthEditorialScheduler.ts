@@ -122,8 +122,7 @@ export class GrowthEditorialScheduler {
       this.#terminalizeDependencyBlocked(snapshot);
       snapshot = this.#requiredSnapshot(roundId);
       const capacity = this.#creativeCapacity() - candidates.size;
-      const dispatchable = snapshot.workOrders.filter((order) =>
-        ["ready", "revision_requested", "running", "candidate_ready", "reviewing"].includes(order.status)
+      const dispatchable = snapshot.workOrders.filter((order) => this.#isCandidateDispatchable(snapshot, order.id)
         && !candidates.has(order.id));
       for (const order of dispatchable.slice(0, Math.max(0, capacity))) {
         const task = this.runner.runCandidate(order.id, signal).finally(() => candidates.delete(order.id));
@@ -150,6 +149,17 @@ export class GrowthEditorialScheduler {
     const result = this.#commitTail.then(operation, operation);
     this.#commitTail = result.catch(() => undefined);
     return result;
+  }
+
+  #isCandidateDispatchable(snapshot: GrowthEditorialRoundSnapshot, workOrderId: string): boolean {
+    const order = snapshot.workOrders.find((candidate) => candidate.id === workOrderId);
+    if (!order) return false;
+    if (["ready", "running", "candidate_ready", "reviewing"].includes(order.status)) return true;
+    if (order.status !== "revision_requested") return false;
+    const latestDirectorReview = snapshot.reviews
+      .filter((review) => review.workOrderId === workOrderId && review.reviewerKind === "director")
+      .at(-1);
+    return latestDirectorReview?.decision === "revise";
   }
 
   #creativeCapacity(): number {
