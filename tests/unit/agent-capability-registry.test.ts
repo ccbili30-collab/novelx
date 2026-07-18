@@ -79,10 +79,14 @@ describe("fixed Agent capability registry", () => {
       evidenceRefs: ["@evidence1"],
       coverage: [{ facetId: "hydrology", state: "covered", evidenceRefs: ["@evidence1"] }],
     };
-    expect(parseCapabilitySubmission("geography_ecology_author", "specialist_candidate_v1", ready)).toEqual(ready);
-    expectCode(() => parseCapabilitySubmission("graph_curator", "specialist_candidate_v1", ready), "AGENT_CAPABILITY_CONTRACT_MISMATCH");
+    const submission = {
+      candidate: ready,
+      artifacts: [{ ref: "@artifact1", title: "北境水系", mediaType: "text/markdown", content: "北境水系候选正文。" }],
+    };
+    expect(parseCapabilitySubmission("geography_ecology_author", "specialist_candidate_v1", submission)).toEqual(submission);
+    expectCode(() => parseCapabilitySubmission("graph_curator", "specialist_candidate_v1", submission), "AGENT_CAPABILITY_CONTRACT_MISMATCH");
     expectCode(() => parseCapabilitySubmission("geography_ecology_author", "specialist_candidate_v1", {
-      ...ready,
+      ...submission,
       tools: ["write_database"],
     }), "AGENT_CAPABILITY_OUTPUT_CONTRACT_MISMATCH");
   });

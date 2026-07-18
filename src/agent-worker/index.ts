@@ -17,6 +17,8 @@ import { handlePlayerWorkerCommand } from "./play/playerWorkerController";
 import { loadGmPrompt } from "./play/playPromptRegistry";
 import { decomposerWorkerStartSchema } from "../shared/decomposerWorkerProtocol";
 import { handleDecomposerWorkerCommand } from "./import/decomposerWorkerController";
+import { growthEditorialSpecialistStartSchema } from "../shared/growthEditorialWorkerProtocol";
+import { handleGrowthEditorialSpecialistCommand } from "./editorial/specialistWorkerController";
 
 verifyPromptRegistry();
 loadGmPrompt();
@@ -43,6 +45,20 @@ process.on("message", (payload: unknown) => {
 
   const start = agentWorkerRunStartCommandSchema.safeParse(payload);
   if (!start.success) {
+    const editorialStart = growthEditorialSpecialistStartSchema.safeParse(payload);
+    if (editorialStart.success) {
+      const command = editorialStart.data;
+      if (activeRuns.has(command.runId)) return;
+      const controller = new AbortController(); activeRuns.set(command.runId, controller);
+      void handleGrowthEditorialSpecialistCommand({
+        command,
+        signal: controller.signal,
+        emit: (event) => process.send?.(event),
+      }).finally(() => {
+        activeRuns.delete(command.runId); clearProviderProfile(command.providerProfile);
+      });
+      return;
+    }
     const decomposerStart = decomposerWorkerStartSchema.safeParse(payload);
     if (decomposerStart.success) {
       const command = decomposerStart.data;
