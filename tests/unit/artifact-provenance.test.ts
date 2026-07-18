@@ -219,7 +219,7 @@ describe("Artifact provenance", () => {
 
     const migrated = openTrackedWorkspace(root);
     expect(migrated.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get())
-      .toMatchObject({ version: 27 });
+      .toMatchObject({ version: 30 });
     const columns = migrated.db.prepare("PRAGMA table_info(change_sets)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toContain("producer_tool_invocation_id");
     expect(migrated.db.prepare(`

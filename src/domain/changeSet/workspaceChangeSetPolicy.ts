@@ -23,6 +23,10 @@ export const workspaceChangeSetMajorConflictCodes = [
   "ASSERTION_IDENTITY_CONFLICT",
   "ASSERTION_SCOPE_NOT_ACTIVE",
   "ASSERTION_VALUE_CONFLICT",
+  "DOMAIN_CAUSAL_ENDPOINT_DEPENDENCY_REQUIRED",
+  "DOMAIN_CAUSAL_ENDPOINT_NOT_ACTIVE",
+  "DOMAIN_CAUSAL_IDENTITY_CONFLICT",
+  "DOMAIN_CAUSAL_SOURCE_NOT_ACTIVE",
   "CONSTRAINT_PROFILE_ID_CONFLICT",
   "CONSTRAINT_PROFILE_TARGET_NOT_ACTIVE",
   "CONSTRAINT_SCOPE_NOT_ACTIVE",
@@ -50,6 +54,7 @@ export function isGreenfieldWorkspaceEmpty(workspace: WorkspaceDatabase): boolea
     SELECT (
       EXISTS(SELECT 1 FROM resource_revisions WHERE object_kind <> 'domain_root')
       OR EXISTS(SELECT 1 FROM assertion_versions)
+      OR EXISTS(SELECT 1 FROM causal_relation_versions)
       OR EXISTS(SELECT 1 FROM creative_document_revisions)
       OR EXISTS(SELECT 1 FROM creative_relation_versions)
       OR EXISTS(SELECT 1 FROM constraint_profile_versions)
@@ -95,7 +100,11 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
     const greenfieldDocumentOutputItemIds = new Set(candidate.items
       .filter((item) => item.kind === "document.put")
       .map((item) => item.id));
+    const assertionOutputItems = new Map(candidate.items
+      .filter((item): item is Extract<ChangeSetItem, { kind: "assertion.put" }> => item.kind === "assertion.put")
+      .map((item) => [item.id, item.payload.assertionId]));
     const evidenceIds = new Set(assertions.map((assertion) => assertion.versionId));
+    const documentEvidenceIds = new Set<string>();
     const resourceCreateItems = new Map<string, string[]>();
     const documentCreateItems = new Map<string, string[]>();
     for (const item of candidate.items) {
@@ -112,13 +121,25 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
     }
     for (const resource of resources) {
       const document = this.#documents.getCurrentStable(resource.id);
-      if (document) evidenceIds.add(document.id);
+      if (document) {
+        evidenceIds.add(document.id);
+        documentEvidenceIds.add(document.id);
+      }
+    }
+    for (const document of creativeDocuments) {
+      const stable = this.#documents.getCurrentStableForCreativeDocument(document.id);
+      if (stable) documentEvidenceIds.add(stable.id);
     }
     const acceptedImportCandidates = this.workspace.db.prepare("SELECT id FROM decomposition_candidates WHERE status = 'accepted'").all() as Array<{ id: string }>;
     for (const candidate of acceptedImportCandidates) evidenceIds.add(candidate.id);
 
     return candidate.items.map((item) => this.#assessItem(item, {
       assertions,
+      assertionOutputItems,
+      causalIdentities: new Map((this.workspace.db.prepare(`
+        SELECT id, kind, cause_assertion_id, effect_assertion_id FROM causal_relations
+      `).all() as Array<{ id: string; kind: string; cause_assertion_id: string; effect_assertion_id: string }>).map((row) => [row.id, row])),
+      documentEvidenceIds,
       evidenceIds,
       resourceCreateItems,
       resourceIds,
@@ -136,6 +157,9 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
     item: ChangeSetItem,
     current: {
       assertions: ReturnType<AssertionRepository["listCurrent"]>;
+      assertionOutputItems: ReadonlyMap<string, string>;
+      causalIdentities: ReadonlyMap<string, { id: string; kind: string; cause_assertion_id: string; effect_assertion_id: string }>;
+      documentEvidenceIds: ReadonlySet<string>;
       evidenceIds: ReadonlySet<string>;
       resourceCreateItems: ReadonlyMap<string, string[]>;
       resourceIds: ReadonlySet<string>;
@@ -160,6 +184,16 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
           current.greenfieldDocumentOutputItemIds,
           current.assertionIdentityUpdateAuthorized,
         );
+      case "causal_relation.put":
+        return assessCausalRelation(
+          item,
+          new Set(current.assertions.map((assertion) => assertion.assertionId)),
+          current.assertionOutputItems,
+          current.documentEvidenceIds,
+          current.greenfieldDocumentOutputItemIds,
+          current.sameChangeSetDocumentEvidenceAuthorized,
+          current.causalIdentities,
+        );
       case "resource.put":
         return assessResource(item, current.resourceIds, current.resourceCreateItems);
       case "document.put":
@@ -182,6 +216,47 @@ export class WorkspaceChangeSetPolicy implements ChangeSetPolicyEvaluator {
         return { itemId: item.id, risk: "elevated", conflicts: [] };
     }
   }
+}
+
+function assessCausalRelation(
+  item: Extract<ChangeSetItem, { kind: "causal_relation.put" }>,
+  activeAssertionIds: ReadonlySet<string>,
+  assertionOutputItems: ReadonlyMap<string, string>,
+  activeDocumentEvidenceIds: ReadonlySet<string>,
+  documentOutputItemIds: ReadonlySet<string>,
+  sameChangeSetDocumentEvidenceAuthorized: boolean,
+  causalIdentities: ReadonlyMap<string, { kind: string; cause_assertion_id: string; effect_assertion_id: string }>,
+): ChangeSetPolicyAssessment {
+  const conflicts: ChangeSetConflictRecord[] = [];
+  const assessEndpoint = (assertionId: string, assertionItemId: string | null): void => {
+    if (assertionItemId === null) {
+      if (!activeAssertionIds.has(assertionId)) {
+        conflicts.push({ severity: "major", code: "DOMAIN_CAUSAL_ENDPOINT_NOT_ACTIVE" });
+      }
+      return;
+    }
+    if (!item.dependsOn.includes(assertionItemId) || assertionOutputItems.get(assertionItemId) !== assertionId) {
+      conflicts.push({ severity: "major", code: "DOMAIN_CAUSAL_ENDPOINT_DEPENDENCY_REQUIRED" });
+    }
+  };
+  assessEndpoint(item.payload.causeAssertionId, item.payload.causeAssertionItemId);
+  assessEndpoint(item.payload.effectAssertionId, item.payload.effectAssertionItemId);
+  for (const source of item.payload.sourceBindings) {
+    const documentItemId = parseGreenfieldDocumentOutputEvidence(source.evidenceId);
+    const available = documentItemId === null
+      ? activeDocumentEvidenceIds.has(source.evidenceId)
+      : sameChangeSetDocumentEvidenceAuthorized
+        && documentOutputItemIds.has(documentItemId)
+        && item.dependsOn.includes(documentItemId);
+    if (!available) conflicts.push({ severity: "major", code: "DOMAIN_CAUSAL_SOURCE_NOT_ACTIVE" });
+  }
+  const identity = causalIdentities.get(item.payload.relationId);
+  if (identity && (identity.kind !== item.payload.relationKind
+    || identity.cause_assertion_id !== item.payload.causeAssertionId
+    || identity.effect_assertion_id !== item.payload.effectAssertionId)) {
+    conflicts.push({ severity: "major", code: "DOMAIN_CAUSAL_IDENTITY_CONFLICT" });
+  }
+  return { itemId: item.id, risk: conflicts.length === 0 ? "low" : "elevated", conflicts };
 }
 
 function assessProjectFilePut(item: Extract<ChangeSetItem, { kind: "project_file.put" }>): ChangeSetPolicyAssessment {

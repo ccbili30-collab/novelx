@@ -754,6 +754,28 @@ const proposedAssertionItemSchema = z.object({
   }).strict(),
 }).strict();
 
+const proposedCausalRelationItemSchema = z.object({
+  ...commonProposalItemShape,
+  kind: z.literal("causal_relation.put"),
+  payload: z.object({
+    relationId: identifierSchema,
+    relationKind: z.enum(["causes", "enables", "constrains", "prevents", "amplifies", "mitigates", "depends_on"]),
+    causeAssertionId: identifierSchema,
+    causeAssertionItemId: identifierSchema.nullable(),
+    effectAssertionId: identifierSchema,
+    effectAssertionItemId: identifierSchema.nullable(),
+    mechanism: z.string().trim().min(1).max(2_000),
+    conditions: z.array(z.string().trim().min(1).max(1_000)).min(1).max(20),
+    temporalScope: z.string().trim().min(1).max(1_000),
+    polarityStrengthSummary: z.string().trim().min(1).max(1_000),
+    epistemicStatus: z.enum(["confirmed", "inferred", "disputed"]),
+    sourceBindings: z.array(z.object({
+      evidenceId: identifierSchema,
+      stableLocator: z.string().trim().min(1).max(2_000),
+    }).strict()).min(1).max(50),
+  }).strict(),
+}).strict();
+
 const proposedResourceItemSchema = z.object({
   ...commonProposalItemShape,
   kind: z.literal("resource.put"),
@@ -855,6 +877,7 @@ const proposedProjectFileDeleteItemSchema = z.object({
 
 export const proposedChangeSetItemSchema = z.discriminatedUnion("kind", [
   proposedAssertionItemSchema,
+  proposedCausalRelationItemSchema,
   proposedResourceItemSchema,
   proposedDocumentItemSchema,
   proposedCreativeDocumentItemSchema,
@@ -881,7 +904,23 @@ export const proposeChangeSetArgsSchema = z.object({
       context.addIssue({ code: "custom", message: "Revision impact evidence IDs must be unique and disjoint." });
     }
   }).optional(),
-}).strict();
+}).strict().superRefine((value, context) => {
+  value.items.forEach((item, index) => {
+    if (item.kind !== "causal_relation.put") return;
+    if (item.payload.causeAssertionId === item.payload.effectAssertionId) {
+      context.addIssue({ code: "custom", path: ["items", index, "payload", "effectAssertionId"], message: "A causal relation cannot be a self-edge." });
+    }
+    const localEndpoints = [item.payload.causeAssertionItemId, item.payload.effectAssertionItemId]
+      .filter((id): id is string => id !== null);
+    if (localEndpoints.some((id) => !item.dependsOn.includes(id))) {
+      context.addIssue({ code: "custom", path: ["items", index, "dependsOn"], message: "Same-Change-Set assertion endpoints require explicit dependencies." });
+    }
+    const sourceKeys = item.payload.sourceBindings.map((source) => `${source.evidenceId}\u0000${source.stableLocator}`);
+    if (new Set(sourceKeys).size !== sourceKeys.length) {
+      context.addIssue({ code: "custom", path: ["items", index, "payload", "sourceBindings"], message: "Causal source bindings must be unique." });
+    }
+  });
+});
 
 export const proposeChangeSetResultSchema = z.object({
   changeSetId: identifierSchema,
@@ -894,7 +933,7 @@ export const proposeChangeSetResultSchema = z.object({
     itemId: identifierSchema,
     kind: z.enum([
       "resource_revision", "document_version", "assertion_version",
-      "creative_document_revision", "creative_relation_revision", "constraint_profile_version",
+      "causal_relation_version", "creative_document_revision", "creative_relation_revision", "constraint_profile_version",
       "project_file_version",
     ]),
     outputId: identifierSchema,

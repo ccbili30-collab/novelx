@@ -154,6 +154,16 @@ describe("WorkspaceChangeSetPolicy", () => {
       item("resource.put", { resourceId: id, create, state, objectKind });
     const document = (dependsOn: string[], resourceId = "resource") => item("document.put", { resourceId }, dependsOn);
     const assertion = (dependsOn: string[], evidenceIds: string[] = []) => item("assertion.put", { scopeId: "resource", evidenceIds }, dependsOn);
+    const causal = (
+      dependsOn: string[],
+      causeAssertionItemId: string | null,
+      effectAssertionItemId: string | null,
+      evidenceId: string,
+    ) => item("causal_relation.put", {
+      causeAssertionId: "assertion.cause", causeAssertionItemId,
+      effectAssertionId: "assertion.effect", effectAssertionItemId,
+      sourceBindings: [{ evidenceId }],
+    }, dependsOn);
     const creativeDocument = (dependsOn: string[], resourceId = "resource", create = true, state = "active") =>
       item("creative_document.put", { documentId: "creative", resourceId, create, state }, dependsOn);
     const relation = (dependsOn: string[], sourceResourceId = "source", targetResourceId = "target") =>
@@ -169,6 +179,14 @@ describe("WorkspaceChangeSetPolicy", () => {
       ["GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED", [resource(), document([])]],
       ["GREENFIELD_ASSERTION_SCOPE_REQUIRED", [assertion([])]],
       ["GREENFIELD_ASSERTION_EVIDENCE_REQUIRED", [resource(), document(["resource.put-0"]), assertion(["resource.put-0", "document.put-1"], ["bad-evidence"])]],
+      ["GREENFIELD_CAUSAL_ENDPOINT_REQUIRED", [causal([], null, null, greenfieldDocumentOutputEvidence("document"))]],
+      ["GREENFIELD_CAUSAL_DEPENDENCY_REQUIRED", [causal([], "cause", "effect", greenfieldDocumentOutputEvidence("document"))]],
+      ["GREENFIELD_CAUSAL_SOURCE_REQUIRED", [
+        { id: "resource", kind: "resource.put", payload: { resourceId: "resource", create: true, state: "active", objectKind: "world" }, dependsOn: [] },
+        { id: "cause", kind: "assertion.put", payload: { assertionId: "assertion.cause", scopeId: "resource", evidenceIds: [] }, dependsOn: ["resource"] },
+        { id: "effect", kind: "assertion.put", payload: { assertionId: "assertion.effect", scopeId: "resource", evidenceIds: [] }, dependsOn: ["resource"] },
+        causal(["cause", "effect"], "cause", "effect", "bad-evidence"),
+      ]],
       ["GREENFIELD_CREATIVE_DOCUMENT_OWNER_REQUIRED", [creativeDocument([])]],
       ["GREENFIELD_CREATIVE_DOCUMENT_DEPENDENCY_REQUIRED", [resource(), creativeDocument([])]],
       ["GREENFIELD_RELATION_ENDPOINT_REQUIRED", [relation([])]],
@@ -273,6 +291,45 @@ describe("WorkspaceChangeSetPolicy", () => {
     expect(policy.assess(candidate(missingDependency))[1].conflicts)
       .toContainEqual({ severity: "major", code: "RESOURCE_PARENT_NOT_ACTIVE" });
   });
+
+  it("allows source-bound causal relations over visible pinned assertions", () => {
+    const setup = createWorkspaceEvidence();
+    seedCausalAssertions(setup);
+    const assessment = new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate(
+      causalItem(setup.documentVersionId),
+    ));
+    expect(assessment).toEqual([{ itemId: "causal", risk: "low", conflicts: [] }]);
+  });
+
+  it("requires matching same-Change-Set assertion dependencies and an active document source", () => {
+    const setup = createWorkspaceEvidence();
+    const cause = assertionItem("cause", setup.worldId, setup.documentVersionId, { state: "strong tide" });
+    const effect = assertionItem("effect", setup.worldId, setup.documentVersionId, { state: "route shifted" });
+    const valid = causalItem(setup.documentVersionId, "cause", "effect");
+    expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate([cause, effect, valid]))[2])
+      .toEqual({ itemId: "causal", risk: "low", conflicts: [] });
+
+    const missingDependency = { ...valid, dependsOn: ["effect"] };
+    expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate([cause, effect, missingDependency]))[2].conflicts)
+      .toContainEqual({ severity: "major", code: "DOMAIN_CAUSAL_ENDPOINT_DEPENDENCY_REQUIRED" });
+    const missingSource = causalItem("not-visible", "cause", "effect");
+    expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate([cause, effect, missingSource]))[2].conflicts)
+      .toContainEqual({ severity: "major", code: "DOMAIN_CAUSAL_SOURCE_NOT_ACTIVE" });
+  });
+
+  it("blocks a causal relation ID whose immutable endpoint identity changes", () => {
+    const setup = createWorkspaceEvidence();
+    seedCausalAssertions(setup);
+    setup.workspace.db.prepare(`
+      INSERT INTO causal_relations (id, kind, cause_assertion_id, effect_assertion_id, created_at)
+      VALUES ('relation.moon-route', 'causes', 'assertion.cause', 'assertion.effect', ?)
+    `).run("2026-07-18T00:00:00.000Z");
+    const changed = causalItem(setup.documentVersionId);
+    if (changed.kind !== "causal_relation.put") throw new Error("Expected causal fixture.");
+    changed.payload.relationKind = "prevents";
+    expect(new WorkspaceChangeSetPolicy(setup.workspace).assess(candidate(changed))[0].conflicts)
+      .toContainEqual({ severity: "major", code: "DOMAIN_CAUSAL_IDENTITY_CONFLICT" });
+  });
 });
 
 function createWorkspaceEvidence() {
@@ -374,6 +431,50 @@ function assertionItem(
       evidenceIds: [evidenceId],
       status: "current",
       source: { kind: "agent_candidate", ref: `test:${id}` },
+    },
+  };
+}
+
+function seedCausalAssertions(setup: ReturnType<typeof createWorkspaceEvidence>): void {
+  const repository = new AssertionRepository(setup.workspace);
+  for (const [assertionId, subject] of [["assertion.cause", "月潮"], ["assertion.effect", "商路"]] as const) {
+    repository.putVersion({
+      assertionId,
+      checkpointId: setup.headCheckpointId,
+      scopeType: "world",
+      scopeId: setup.worldId,
+      subject,
+      predicate: "状态",
+      object: { state: subject },
+      status: "current",
+      source: { kind: "document_version", ref: setup.documentVersionId },
+    });
+  }
+}
+
+function causalItem(
+  evidenceId: string,
+  causeAssertionItemId: string | null = null,
+  effectAssertionItemId: string | null = null,
+): ChangeSetCandidate["items"][number] {
+  return {
+    id: "causal",
+    kind: "causal_relation.put",
+    dependsOn: [causeAssertionItemId, effectAssertionItemId].filter((id): id is string => id !== null),
+    payload: {
+      relationId: "relation.moon-route",
+      relationKind: "causes",
+      causeAssertionId: "assertion.cause",
+      causeAssertionItemId,
+      effectAssertionId: "assertion.effect",
+      effectAssertionItemId,
+      mechanism: "潮差改变浅滩可航窗口。",
+      conditions: ["强月潮"],
+      temporalScope: "涨潮后三小时",
+      polarityStrengthSummary: "强正向",
+      epistemicStatus: "confirmed",
+      sourceBindings: [{ evidenceId, stableLocator: "paragraph:1" }],
+      status: "current",
     },
   };
 }

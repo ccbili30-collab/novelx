@@ -262,7 +262,11 @@ function migrate(db: DatabaseSync): void {
     migrateCausalRelationsV29Schema(db);
     schema = { version: 29 };
   }
-  if (schema.version !== 29) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
+  if (schema.version === 29) {
+    migrateCausalChangeSetOutputV30Schema(db);
+    schema = { version: 30 };
+  }
+  if (schema.version !== 30) throw new Error(`Unsupported Novax workspace schema: ${schema.version}`);
 
   const existing = db.prepare("SELECT workspace_id FROM workspace_state WHERE singleton = 1").get();
   if (existing) return;
@@ -1659,6 +1663,84 @@ function migrateCausalRelationsV29Schema(db: DatabaseSync): void {
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
+  }
+}
+
+function migrateCausalChangeSetOutputV30Schema(db: DatabaseSync): void {
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      ALTER TABLE change_set_outputs RENAME TO change_set_outputs_v29;
+      CREATE TABLE change_set_outputs (
+        change_set_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        output_kind TEXT NOT NULL CHECK (output_kind IN (
+          'resource_revision', 'document_version', 'assertion_version',
+          'creative_document_revision', 'creative_relation_revision', 'constraint_profile_version',
+          'project_file_version', 'causal_relation_version'
+        )),
+        output_id TEXT NOT NULL,
+        output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (output_kind, output_id),
+        UNIQUE (change_set_id, item_id),
+        FOREIGN KEY (change_set_id, item_id)
+          REFERENCES change_set_items(change_set_id, id) ON DELETE CASCADE
+      );
+      INSERT INTO change_set_outputs (
+        change_set_id, item_id, output_kind, output_id, output_sha256, created_at
+      ) SELECT
+        change_set_id, item_id, output_kind, output_id, output_sha256, created_at
+      FROM change_set_outputs_v29;
+      DROP TABLE change_set_outputs_v29;
+      CREATE INDEX change_set_outputs_change_idx ON change_set_outputs(change_set_id, item_id);
+
+      ALTER TABLE agent_audit_links RENAME TO agent_audit_links_v29;
+      CREATE TABLE agent_audit_links (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        invocation_id TEXT REFERENCES agent_invocations(id),
+        tool_invocation_id TEXT REFERENCES agent_tool_invocations(id),
+        link_kind TEXT NOT NULL CHECK (link_kind IN (
+          'document_evidence', 'assertion_evidence', 'change_set_input', 'change_set_output',
+          'document_version_output', 'assertion_version_output', 'resource_revision_output',
+          'creative_document_revision_output', 'creative_relation_revision_output',
+          'constraint_profile_version_output', 'project_file_version_output',
+          'causal_relation_version_output', 'gm_resolution', 'style_profile'
+        )),
+        target_id TEXT NOT NULL,
+        target_sha256 TEXT,
+        ordinal INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO agent_audit_links (
+        id, run_id, invocation_id, tool_invocation_id, link_kind,
+        target_id, target_sha256, ordinal, created_at
+      ) SELECT
+        id, run_id, invocation_id, tool_invocation_id, link_kind,
+        target_id, target_sha256, ordinal, created_at
+      FROM agent_audit_links_v29;
+      DROP TABLE agent_audit_links_v29;
+      CREATE UNIQUE INDEX agent_audit_links_identity_idx
+        ON agent_audit_links(
+          run_id, COALESCE(invocation_id, ''), COALESCE(tool_invocation_id, ''), link_kind, target_id
+        );
+
+      UPDATE schema_meta SET version = 30 WHERE singleton = 1;
+    `);
+    const violations = db.prepare("PRAGMA foreign_key_check").all();
+    if (violations.length > 0) throw new Error("Causal Change Set output v30 migration produced foreign key violations.");
+    const integrity = db.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
+    if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok") {
+      throw new Error("Causal Change Set output v30 migration failed integrity check.");
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
   }
 }
 

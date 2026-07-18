@@ -48,7 +48,8 @@ export class CausalRelationRepository {
       status: value.status,
       relation,
     });
-    this.workspace.db.exec("BEGIN IMMEDIATE");
+    const ownsTransaction = !this.workspace.db.isTransaction;
+    if (ownsTransaction) this.workspace.db.exec("BEGIN IMMEDIATE");
     try {
       const replay = this.workspace.db.prepare(`
         SELECT id, payload_hash FROM causal_relation_versions WHERE idempotency_key = ?
@@ -57,7 +58,7 @@ export class CausalRelationRepository {
         if (readString(replay, "payload_hash") !== payloadHash) fail("DOMAIN_CAUSAL_IDEMPOTENCY_KEY_REUSED");
         const result = this.getVersion(readString(replay, "id"));
         if (!result) fail("DOMAIN_CAUSAL_DATA_INVALID");
-        this.workspace.db.exec("COMMIT");
+        if (ownsTransaction) this.workspace.db.exec("COMMIT");
         return result;
       }
       if (this.workspace.db.prepare("SELECT 1 FROM causal_relation_versions WHERE id = ?").get(value.versionId)) {
@@ -104,10 +105,10 @@ export class CausalRelationRepository {
       });
       const result = this.getVersion(value.versionId);
       if (!result) fail("DOMAIN_CAUSAL_DATA_INVALID");
-      this.workspace.db.exec("COMMIT");
+      if (ownsTransaction) this.workspace.db.exec("COMMIT");
       return result;
     } catch (error) {
-      this.workspace.db.exec("ROLLBACK");
+      if (ownsTransaction) this.workspace.db.exec("ROLLBACK");
       throw normalizeSqliteError(error);
     }
   }
@@ -218,14 +219,14 @@ export class CausalRelationRepository {
         FROM checkpoints JOIN ancestry ON checkpoints.id = ancestry.checkpoint_id
         WHERE checkpoints.parent_checkpoint_id IS NOT NULL
       )
-      SELECT source_records.kind, source_records.ref
-      FROM source_records
-      WHERE source_records.id = ? AND EXISTS (
-        SELECT 1 FROM assertion_sources
-        JOIN assertion_versions ON assertion_versions.id = assertion_sources.assertion_version_id
-        JOIN ancestry ON ancestry.checkpoint_id = assertion_versions.created_checkpoint_id
-        WHERE assertion_sources.source_id = source_records.id
-      )
+      SELECT source_records.kind, source_records.ref,
+        EXISTS (
+          SELECT 1 FROM assertion_sources
+          JOIN assertion_versions ON assertion_versions.id = assertion_sources.assertion_version_id
+          JOIN ancestry ON ancestry.checkpoint_id = assertion_versions.created_checkpoint_id
+          WHERE assertion_sources.source_id = source_records.id
+        ) AS assertion_source_visible
+      FROM source_records WHERE source_records.id = ?
     `).get(checkpointId, source.sourceId) as Row | undefined;
     if (!row) fail("DOMAIN_CAUSAL_SOURCE_NOT_VISIBLE");
     const expectedKind = source.sourceKind === "document"
@@ -252,6 +253,8 @@ export class CausalRelationRepository {
       if (readString(document, "content_hash") !== source.sourceSha256) {
         fail("DOMAIN_CAUSAL_SOURCE_HASH_MISMATCH");
       }
+    } else if (readNumber(row, "assertion_source_visible") !== 1) {
+      fail("DOMAIN_CAUSAL_SOURCE_NOT_VISIBLE");
     }
   }
 }
@@ -272,6 +275,11 @@ function normalizeSqliteError(error: unknown): unknown {
 function readString(row: Row, key: string): string {
   const value = row[key];
   return typeof value === "string" ? value : fail("DOMAIN_CAUSAL_DATA_INVALID");
+}
+
+function readNumber(row: Row, key: string): number {
+  const value = row[key];
+  return typeof value === "number" ? value : fail("DOMAIN_CAUSAL_DATA_INVALID");
 }
 
 function causalError(code: string): Error & { code: string } {

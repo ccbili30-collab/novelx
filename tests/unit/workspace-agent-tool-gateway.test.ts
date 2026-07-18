@@ -11,6 +11,7 @@ import {
 import { WorkspaceChangeSetPolicy } from "../../src/domain/changeSet/workspaceChangeSetPolicy";
 import { ChangeSetRepository } from "../../src/domain/changeSet/changeSetRepository";
 import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
+import { CausalRelationRepository } from "../../src/domain/graph/causalRelationRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { CreativeDocumentRepository } from "../../src/domain/workspace/creativeDocumentRepository";
@@ -24,6 +25,7 @@ import { ResponsesImageProviderError } from "../../src/domain/asset/responsesIma
 import { compileGrowthWorldFragment } from "../../src/agent-worker/growth/growthWorldFragment";
 import { compileGrowthStoryFragment } from "../../src/agent-worker/growth/growthStoryFragment";
 import { compileGrowthOcFragment } from "../../src/agent-worker/growth/growthOcFragment";
+import type { ProposeChangeSetArgs } from "../../src/shared/agentWorkerProtocol";
 
 const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
@@ -116,6 +118,70 @@ describe("Workspace Agent tool gateway", () => {
     const assertion = new AssertionRepository(workspace).listCurrentInScopes(["world.greenfield"])[0]!;
     expect(assertion.sources).toContainEqual({ kind: "evidence_version", ref: documentOutput.outputId });
     expect(assertion.sources.some((source) => source.ref === greenfieldDocumentOutputEvidence("world-document"))).toBe(false);
+  });
+
+  it("commits and audits a source-bound causal relation through the real Free Greenfield gateway", async () => {
+    const { workspace } = createWorkspace();
+    const worldRoot = new ResourceRepository(workspace).listCurrent().find((resource) => resource.type === "world")!;
+    seedProposeTool(workspace);
+    const gateway = createWorkspaceAgentToolGateway(workspace, new WorkspaceChangeSetPolicy(workspace), () => true);
+    const items = greenfieldWorldItems(worldRoot.id);
+    items.push({
+      id: "route-assertion",
+      dependsOn: ["world-resource", "world-document"],
+      kind: "assertion.put",
+      payload: {
+        assertionId: "assertion.greenfield.route-shift",
+        scopeType: "world",
+        scopeId: "world.greenfield",
+        subject: "商路",
+        predicate: "迁移",
+        object: { direction: "north" },
+        evidenceIds: [greenfieldDocumentOutputEvidence("world-document")],
+      },
+    }, {
+      id: "causal-relation",
+      dependsOn: ["world-document", "world-assertion", "route-assertion"],
+      kind: "causal_relation.put",
+      payload: {
+        relationId: "relation.greenfield.moon-route",
+        relationKind: "causes",
+        causeAssertionId: "assertion.greenfield.moon-tide",
+        causeAssertionItemId: "world-assertion",
+        effectAssertionId: "assertion.greenfield.route-shift",
+        effectAssertionItemId: "route-assertion",
+        mechanism: "月潮改变浅滩可航窗口。",
+        conditions: ["强月潮"],
+        temporalScope: "涨潮后三小时",
+        polarityStrengthSummary: "强正向",
+        epistemicStatus: "confirmed",
+        sourceBindings: [{
+          evidenceId: greenfieldDocumentOutputEvidence("world-document"),
+          stableLocator: "paragraph:1",
+        }],
+      },
+    });
+
+    const result = await gateway.proposeChangeSet({ summary: "创建带因果链的雾港世界", items }, invocationContext("free", true));
+    expect(result).toMatchObject({ status: "committed", itemCount: 5 });
+    expect(result.committedOutputs?.map((output) => output.kind)).toContain("causal_relation_version");
+    const causalOutput = result.committedOutputs?.find((output) => output.kind === "causal_relation_version")!;
+    const branchId = new CheckpointRepository(workspace).getActiveBranch().id;
+    expect(new CausalRelationRepository(workspace).listCurrent(branchId)).toEqual([
+      expect.objectContaining({ id: "relation.greenfield.moon-route", kind: "causes" }),
+    ]);
+    expect(new AgentAuditRepository(workspace).listLinks("run-test-only")).toContainEqual(expect.objectContaining({
+      link_kind: "causal_relation_version_output",
+      target_id: causalOutput.outputId,
+    }));
+    expect(new AgentAuditRepository(workspace).getArtifactProvenance(
+      "causal_relation_version", causalOutput.outputId,
+    )).toMatchObject({
+      artifactKind: "causal_relation_version",
+      artifactId: causalOutput.outputId,
+      changeSetId: result.changeSetId,
+      toolInvocationId: "11111111-1111-4111-8111-111111111111",
+    });
   });
 
   it("commits an ordering-independent compiled world Fragment through the real Free Greenfield gateway", async () => {
@@ -647,7 +713,7 @@ function invocationContext(mode: "free" | "assist", greenfieldCreateRequested = 
   };
 }
 
-function greenfieldWorldItems(worldRootId: string) {
+function greenfieldWorldItems(worldRootId: string): ProposeChangeSetArgs["items"] {
   return [{
     id: "world-resource",
     dependsOn: [],

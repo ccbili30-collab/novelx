@@ -55,7 +55,8 @@ export interface ChangeSetOutputRecord {
     | "creative_document_revision"
     | "creative_relation_revision"
     | "constraint_profile_version"
-    | "project_file_version";
+    | "project_file_version"
+    | "causal_relation_version";
   outputId: string;
   outputSha256: string;
 }
@@ -293,7 +294,7 @@ export class ChangeSetRepository {
       kind: readEnum(row, "output_kind", [
         "resource_revision", "document_version", "assertion_version",
         "creative_document_revision", "creative_relation_revision", "constraint_profile_version",
-        "project_file_version",
+        "project_file_version", "causal_relation_version",
       ] as const),
       outputId: readString(row, "output_id"),
       outputSha256: readString(row, "output_sha256"),

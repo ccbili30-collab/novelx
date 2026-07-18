@@ -557,7 +557,7 @@ unknown side effect -> reconciliation_required
 
 **Invariants:** checkpoint ancestry, immutable identity, current/conflict/deleted projection, source visibility, endpoint assertion visibility, branch isolation and exact replay.
 
-**Task 8 evidence (2026-07-18):** additive SQLite v29 stores immutable causal identities, checkpointed versions and exact source links. `CausalRelationRepository` validates both assertion endpoints and every source against the target checkpoint ancestry, preserves branch isolation, projects the nearest `current|conflict` version, applies `deleted` tombstones without rewriting history and rejects identity/idempotency conflicts. The v28→v29 migration is transactional, additive, byte-preserves stable v28 rows, reopens idempotently and rolls back fully on collision. Repository + persistence suites passed 21/21 with zero skips; `npm run typecheck` passed. No Provider was run. Task 9 Change Set integration and product graph projection remain unimplemented.
+**Task 8 evidence (2026-07-18):** additive SQLite v29 stores immutable causal identities, checkpointed versions and exact source links. `CausalRelationRepository` validates both assertion endpoints and every source against the target checkpoint ancestry, preserves branch isolation, projects the nearest `current|conflict` version, applies `deleted` tombstones without rewriting history and rejects identity/idempotency conflicts. The v28→v29 migration is transactional, additive, byte-preserves stable v28 rows, reopens idempotently and rolls back fully on collision. Repository + persistence suites passed 21/21 with zero skips; `npm run typecheck` passed. No Provider was run. Change Set integration was deferred to Task 9; product graph projection remains Task 10 work.
 
 ### Task 9: Extend atomic Change Set support
 
@@ -566,15 +566,21 @@ unknown side effect -> reconciliation_required
 - Modify: `src/domain/changeSet/changeSetService.ts`
 - Modify: `src/domain/changeSet/workspaceChangeSetPolicy.ts`
 - Modify: `src/main/workspaceAgentToolGateway.ts`
+- Modify: `src/domain/changeSet/changeSetRepository.ts`
+- Modify: `src/domain/audit/agentAuditRepository.ts`
+- Modify: `src/domain/graph/causalRelationRepository.ts`
+- Modify: `src/domain/workspace/workspaceRepository.ts`
 - Modify: corresponding contract, Change Set, policy and Gateway tests
 
 **Steps:**
 
-- [ ] Add one versioned `causal_relation.put` item.
-- [ ] Make its assertion endpoints depend on assertion output items in the same Change Set or visible pinned assertions.
-- [ ] Require evidence/source binding for the causal edge itself.
-- [ ] Roll back text, assertions and causal relations together on failure.
-- [ ] Emit a distinct `DOMAIN_CAUSAL_*` diagnostic family without raw content.
+- [x] Add one versioned `causal_relation.put` item.
+- [x] Make its assertion endpoints depend on assertion output items in the same Change Set or visible pinned assertions.
+- [x] Require evidence/source binding for the causal edge itself.
+- [x] Roll back text, assertions and causal relations together on failure.
+- [x] Emit a distinct `DOMAIN_CAUSAL_*` diagnostic family without raw content.
+
+**Task 9 evidence (2026-07-18):** `causal_relation.put` is a strict Agent proposal and internal Change Set item. Policy accepts only matching same-Change-Set assertion outputs or visible pinned assertions, and only active document versions or explicitly authorized same-Change-Set document outputs as edge sources. The workspace applier commits document text, assertions, causal relation versions, source records, output provenance and audit links under the existing outer Change Set transaction; injected post-edge failure rolls every formal mutation and the checkpoint back. SQLite v30 was explicitly authorized because the existing `change_set_outputs.output_kind` and `agent_audit_links.link_kind` CHECK constraints could not be extended additively; the copy-and-swap migration byte-preserves existing rows, reopens idempotently and fully rolls back when the second table collides. Safe review/error projections expose relation kind and `DOMAIN_CAUSAL_*` codes without mechanism text, source locators or raw payloads. Fourteen targeted protocol, policy, Change Set, Gateway, causal repository/policy, provenance, persistence, audit and affected legacy-migration files passed 115/115 tests with zero skips; `npm run typecheck` and `git diff --check` passed. No Provider was run and no full suite/build was run at this non-freeze batch. Task 10 graph projection/retrieval and Player Lens exposure remain unimplemented.
 
 **Stop:** A compatibility shim is required to accept invalid old causal payloads.
 

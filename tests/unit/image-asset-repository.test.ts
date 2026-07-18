@@ -81,7 +81,7 @@ describe("ImageAssetRepository", () => {
     removePostV22GrowthSchema(workspace!.db);
     workspace!.db.exec("DROP TABLE safe_diagnostic_events; DROP TABLE image_assets; DROP TABLE image_generation_jobs; UPDATE schema_meta SET version = 20 WHERE singleton = 1;");
     workspace!.close(); workspace = null; workspace = openWorkspace(root);
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 30 });
     expect(new ImageAssetRepository(workspace).createOrGetJob(jobInput("after-upgrade")).status).toBe("queued");
   });
 
@@ -98,7 +98,7 @@ describe("ImageAssetRepository", () => {
     workspace!.close(); workspace = null; workspace = openWorkspace(root);
     const migrated = new ImageAssetRepository(workspace);
 
-    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 27 });
+    expect(workspace.db.prepare("SELECT version FROM schema_meta WHERE singleton = 1").get()).toEqual({ version: 30 });
     expect(migrated.getRequiredJob(portrait.id)).toMatchObject({
       idempotencyKey: portrait.idempotencyKey,
       purpose: "character_portrait",

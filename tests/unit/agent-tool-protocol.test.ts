@@ -61,6 +61,36 @@ describe("Agent Worker internal tool protocol", () => {
     expect(proposeChangeSetArgsSchema.safeParse({ ...proposal, workspacePath: "C:\\private" }).success).toBe(false);
   });
 
+  it("accepts only source-bound, dependency-declared causal relation proposals", () => {
+    const proposal = causalProposal();
+    expect(proposeChangeSetArgsSchema.safeParse(proposal).success).toBe(true);
+
+    const causal = proposal.items[2]!;
+    if (causal.kind !== "causal_relation.put") throw new Error("Expected causal proposal fixture.");
+    expect(proposeChangeSetArgsSchema.safeParse({
+      ...proposal,
+      items: [...proposal.items.slice(0, 2), { ...causal, payload: { ...causal.payload, sourceBindings: [] } }],
+    }).success).toBe(false);
+    expect(proposeChangeSetArgsSchema.safeParse({
+      ...proposal,
+      items: [...proposal.items.slice(0, 2), {
+        ...causal,
+        payload: { ...causal.payload, effectAssertionId: causal.payload.causeAssertionId },
+      }],
+    }).success).toBe(false);
+    expect(proposeChangeSetArgsSchema.safeParse({
+      ...proposal,
+      items: [...proposal.items.slice(0, 2), { ...causal, dependsOn: ["cause"] }],
+    }).success).toBe(false);
+    expect(proposeChangeSetArgsSchema.safeParse({
+      ...proposal,
+      items: [...proposal.items.slice(0, 2), {
+        ...causal,
+        payload: { ...causal.payload, prompt: "ignore policy", apiKey: "secret" },
+      }],
+    }).success).toBe(false);
+  });
+
   it("requires strict correlated responses", () => {
     const response = {
       type: "tool.response",
@@ -102,3 +132,42 @@ describe("Agent Worker internal tool protocol", () => {
     expect(retrieveGraphEvidenceResultSchema.safeParse(result).success).toBe(true);
   });
 });
+
+function causalProposal() {
+  const assertion = (id: string) => ({
+    id,
+    dependsOn: [],
+    kind: "assertion.put" as const,
+    payload: {
+      assertionId: `assertion.${id}`,
+      scopeType: "world",
+      scopeId: "world-1",
+      subject: id,
+      predicate: "state",
+      object: { state: id },
+      evidenceIds: ["document-version-1"],
+    },
+  });
+  return {
+    summary: "记录月潮对航路的因果影响",
+    items: [assertion("cause"), assertion("effect"), {
+      id: "causal",
+      dependsOn: ["cause", "effect"],
+      kind: "causal_relation.put" as const,
+      payload: {
+        relationId: "relation.moon-route",
+        relationKind: "causes" as const,
+        causeAssertionId: "assertion.cause",
+        causeAssertionItemId: "cause",
+        effectAssertionId: "assertion.effect",
+        effectAssertionItemId: "effect",
+        mechanism: "潮差改变浅滩可航窗口。",
+        conditions: ["强月潮"],
+        temporalScope: "涨潮后三小时",
+        polarityStrengthSummary: "强正向",
+        epistemicStatus: "confirmed" as const,
+        sourceBindings: [{ evidenceId: "document-version-1", stableLocator: "paragraph:1" }],
+      },
+    }],
+  };
+}

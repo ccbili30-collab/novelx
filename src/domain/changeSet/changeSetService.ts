@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
 import { AssertionRepository } from "../graph/assertionRepository";
+import { CausalRelationRepository } from "../graph/causalRelationRepository";
 import { CheckpointRepository } from "../version/checkpointRepository";
 import { DocumentRepository } from "../workspace/documentRepository";
 import { ResourceRepository } from "../workspace/resourceRepository";
@@ -45,6 +46,9 @@ export const greenfieldCreateOnlyStructuralCodes = [
   "GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED",
   "GREENFIELD_ASSERTION_SCOPE_REQUIRED",
   "GREENFIELD_ASSERTION_EVIDENCE_REQUIRED",
+  "GREENFIELD_CAUSAL_ENDPOINT_REQUIRED",
+  "GREENFIELD_CAUSAL_DEPENDENCY_REQUIRED",
+  "GREENFIELD_CAUSAL_SOURCE_REQUIRED",
   "GREENFIELD_CREATIVE_DOCUMENT_OWNER_REQUIRED",
   "GREENFIELD_CREATIVE_DOCUMENT_DEPENDENCY_REQUIRED",
   "GREENFIELD_RELATION_ENDPOINT_REQUIRED",
@@ -76,6 +80,7 @@ export function classifyGreenfieldCreateOnlyCandidate(
         break;
       case "document.put":
       case "assertion.put":
+      case "causal_relation.put":
         break;
       case "project_file.put":
       case "project_file.delete":
@@ -100,6 +105,22 @@ export function classifyGreenfieldCreateOnlyCandidate(
           return !documentItemId || !item.dependsOn.includes(documentItemId)
             || !items.some((candidate) => candidate.id === documentItemId && candidate.kind === "document.put");
         })) return "GREENFIELD_ASSERTION_EVIDENCE_REQUIRED";
+        break;
+      }
+      case "causal_relation.put": {
+        const endpoints = [
+          [item.payload.causeAssertionItemId, item.payload.causeAssertionId],
+          [item.payload.effectAssertionItemId, item.payload.effectAssertionId],
+        ] as const;
+        if (endpoints.some(([itemId]) => itemId === null)) return "GREENFIELD_CAUSAL_ENDPOINT_REQUIRED";
+        if (endpoints.some(([itemId, assertionId]) => !itemId || !item.dependsOn.includes(itemId)
+          || !items.some((candidate) => candidate.id === itemId && candidate.kind === "assertion.put"
+            && candidate.payload.assertionId === assertionId))) return "GREENFIELD_CAUSAL_DEPENDENCY_REQUIRED";
+        if (item.payload.sourceBindings.some((source) => {
+          const documentItemId = parseGreenfieldDocumentOutputEvidence(source.evidenceId);
+          return !documentItemId || !item.dependsOn.includes(documentItemId)
+            || !items.some((candidate) => candidate.id === documentItemId && candidate.kind === "document.put");
+        })) return "GREENFIELD_CAUSAL_SOURCE_REQUIRED";
         break;
       }
       case "creative_document.put": {
@@ -169,6 +190,29 @@ const assertionItemSchema = z.object({
       kind: z.string().trim().min(1).max(120),
       ref: z.string().trim().min(1).max(1000),
     }).optional(),
+  }).strict(),
+}).strict();
+
+const causalRelationItemSchema = z.object({
+  ...commonItemShape,
+  kind: z.literal("causal_relation.put"),
+  payload: z.object({
+    relationId: z.string().trim().min(1).max(240),
+    relationKind: z.enum(["causes", "enables", "constrains", "prevents", "amplifies", "mitigates", "depends_on"]),
+    causeAssertionId: z.string().trim().min(1).max(240),
+    causeAssertionItemId: z.string().trim().min(1).max(160).nullable(),
+    effectAssertionId: z.string().trim().min(1).max(240),
+    effectAssertionItemId: z.string().trim().min(1).max(160).nullable(),
+    mechanism: z.string().trim().min(1).max(2_000),
+    conditions: z.array(z.string().trim().min(1).max(1_000)).min(1).max(20),
+    temporalScope: z.string().trim().min(1).max(1_000),
+    polarityStrengthSummary: z.string().trim().min(1).max(1_000),
+    epistemicStatus: z.enum(["confirmed", "inferred", "disputed"]),
+    sourceBindings: z.array(z.object({
+      evidenceId: z.string().trim().min(1).max(240),
+      stableLocator: z.string().trim().min(1).max(2_000),
+    }).strict()).min(1).max(50),
+    status: z.enum(["current", "conflict", "deleted"]),
   }).strict(),
 }).strict();
 
@@ -277,6 +321,7 @@ const projectFileDeleteItemSchema = z.object({
 
 const changeSetItemSchema = z.discriminatedUnion("kind", [
   assertionItemSchema,
+  causalRelationItemSchema,
   resourceItemSchema,
   documentItemSchema,
   creativeDocumentItemSchema,
@@ -359,6 +404,7 @@ export interface ChangeSetApplyReceipt {
     | "resource_revision"
     | "document_version"
     | "assertion_version"
+    | "causal_relation_version"
     | "creative_document_revision"
     | "creative_relation_revision"
     | "constraint_profile_version"
@@ -369,6 +415,7 @@ export interface ChangeSetApplyReceipt {
 
 export class WorkspaceChangeSetApplier implements ChangeSetApplier {
   readonly #assertions: AssertionRepository;
+  readonly #causalRelations: CausalRelationRepository;
   readonly #resources: ResourceRepository;
   readonly #documents: DocumentRepository;
   readonly #creativeDocuments: CreativeDocumentRepository;
@@ -379,6 +426,7 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
 
   constructor(readonly workspace: WorkspaceDatabase) {
     this.#assertions = new AssertionRepository(workspace);
+    this.#causalRelations = new CausalRelationRepository(workspace);
     this.#resources = new ResourceRepository(workspace);
     this.#documents = new DocumentRepository(workspace);
     this.#creativeDocuments = new CreativeDocumentRepository(workspace);
@@ -405,6 +453,52 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
           kind: "assertion_version",
           outputId,
           outputSha256: canonicalAuditHash({ ...assertion, checkpointId: context.checkpointId, sources }),
+        };
+      }
+      case "causal_relation.put": {
+        this.#assertSameChangeSetAssertionEndpoint(
+          item.payload.causeAssertionItemId, item.payload.causeAssertionId, item, context,
+        );
+        this.#assertSameChangeSetAssertionEndpoint(
+          item.payload.effectAssertionItemId, item.payload.effectAssertionId, item, context,
+        );
+        const now = new Date().toISOString();
+        const sourceReferences = item.payload.sourceBindings.map((binding, ordinal) => {
+          const source = this.#resolveCausalDocumentSource(binding.evidenceId, item, context);
+          const sourceId = `causal-source:${context.changeSetId}:${item.id}:${ordinal}`;
+          this.workspace.db.prepare(`
+            INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, 'document_version', ?, ?)
+          `).run(sourceId, source.id, now);
+          return {
+            sourceId,
+            sourceKind: "document" as const,
+            sourceVersionId: source.id,
+            stableLocator: binding.stableLocator,
+            sourceSha256: source.contentHash,
+          };
+        });
+        const record = this.#causalRelations.putVersion({
+          versionId: `causal-version:${context.checkpointId}:${item.id}`,
+          checkpointId: context.checkpointId,
+          status: item.payload.status,
+          idempotencyKey: `${context.changeSetId}:${item.id}`,
+          relation: {
+            id: item.payload.relationId,
+            kind: item.payload.relationKind,
+            causeAssertionId: item.payload.causeAssertionId,
+            effectAssertionId: item.payload.effectAssertionId,
+            mechanism: item.payload.mechanism,
+            conditions: item.payload.conditions,
+            temporalScope: item.payload.temporalScope,
+            polarityStrengthSummary: item.payload.polarityStrengthSummary,
+            epistemicStatus: item.payload.epistemicStatus,
+            sourceReferences,
+          },
+        });
+        return {
+          kind: "causal_relation_version",
+          outputId: record.versionId,
+          outputSha256: canonicalAuditHash(record),
         };
       }
       case "resource.put": {
@@ -519,6 +613,54 @@ export class WorkspaceChangeSetApplier implements ChangeSetApplier {
     if (!output) {
       throw serviceError("GREENFIELD_OUTPUT_EVIDENCE_NOT_COMMITTED", "Greenfield Assertion evidence document output is unavailable.");
     }
+    return output.outputId;
+  }
+
+  #assertSameChangeSetAssertionEndpoint(
+    assertionItemId: string | null,
+    assertionId: string,
+    item: Extract<ChangeSetItem, { kind: "causal_relation.put" }>,
+    context: { changeSetId: string; checkpointId: string },
+  ): void {
+    if (assertionItemId === null) return;
+    if (!item.dependsOn.includes(assertionItemId)) {
+      throw serviceError("DOMAIN_CAUSAL_ENDPOINT_DEPENDENCY_REQUIRED", "Causal endpoint dependency is required.");
+    }
+    const output = new ChangeSetRepository(this.workspace).listOutputs(context.changeSetId)
+      .find((candidate) => candidate.itemId === assertionItemId && candidate.kind === "assertion_version");
+    if (!output) throw serviceError("DOMAIN_CAUSAL_ENDPOINT_OUTPUT_NOT_COMMITTED", "Causal endpoint output is unavailable.");
+    const persisted = this.workspace.db.prepare("SELECT assertion_id FROM assertion_versions WHERE id = ?")
+      .get(output.outputId) as { assertion_id: string } | undefined;
+    if (persisted?.assertion_id !== assertionId) {
+      throw serviceError("DOMAIN_CAUSAL_ENDPOINT_OUTPUT_MISMATCH", "Causal endpoint output does not match the relation endpoint.");
+    }
+  }
+
+  #resolveCausalDocumentSource(
+    evidenceId: string,
+    item: Extract<ChangeSetItem, { kind: "causal_relation.put" }>,
+    context: { changeSetId: string; checkpointId: string },
+  ) {
+    const documentItemId = parseGreenfieldDocumentOutputEvidence(evidenceId);
+    const versionId = documentItemId
+      ? this.#requiredCausalDocumentOutput(documentItemId, item, context)
+      : evidenceId;
+    const source = this.#documents.getVersion(versionId);
+    if (!source) throw serviceError("DOMAIN_CAUSAL_SOURCE_NOT_VISIBLE", "Causal source is unavailable.");
+    return source;
+  }
+
+  #requiredCausalDocumentOutput(
+    documentItemId: string,
+    item: Extract<ChangeSetItem, { kind: "causal_relation.put" }>,
+    context: { changeSetId: string; checkpointId: string },
+  ): string {
+    if (!item.dependsOn.includes(documentItemId)) {
+      throw serviceError("DOMAIN_CAUSAL_SOURCE_DEPENDENCY_REQUIRED", "Causal source dependency is required.");
+    }
+    const output = new ChangeSetRepository(this.workspace).listOutputs(context.changeSetId)
+      .find((candidate) => candidate.itemId === documentItemId && candidate.kind === "document_version");
+    if (!output) throw serviceError("DOMAIN_CAUSAL_SOURCE_OUTPUT_NOT_COMMITTED", "Causal source output is unavailable.");
     return output.outputId;
   }
 }
@@ -993,6 +1135,14 @@ function projectReviewItem(
         semanticSummary: `${item.payload.subject} · ${item.payload.predicate}`,
         contentPreview: previewText(typeof item.payload.object.text === "string" ? item.payload.object.text : null),
       };
+    case "causal_relation.put":
+      return {
+        ...common,
+        kind: "relation",
+        kindLabel: "因果关系",
+        semanticSummary: `因果关系 · ${item.payload.relationKind}`,
+        contentPreview: null,
+      };
     case "resource.put": {
       const label = RESOURCE_KIND_LABELS[item.payload.type];
       return {
@@ -1124,5 +1274,6 @@ function safeChangeSetError(error: unknown, fallback: string): Error & { code: s
   const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
     ? error.code
     : null;
-  return serviceError(safeChangeSetErrorCodes.has(code ?? "") ? code! : fallback, "Change Set operation failed safely.");
+  const safeCode = safeChangeSetErrorCodes.has(code ?? "") || code?.startsWith("DOMAIN_CAUSAL_") ? code! : fallback;
+  return serviceError(safeCode, "Change Set operation failed safely.");
 }

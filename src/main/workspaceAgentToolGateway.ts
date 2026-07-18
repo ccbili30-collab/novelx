@@ -201,7 +201,9 @@ export function createWorkspaceAgentToolGateway(
       const head = new CheckpointRepository(workspace).getActiveBranch().headCheckpointId;
       const items = mapProposedItems(args);
       const referencesGreenfieldOutput = items.some((item) => item.kind === "assertion.put"
-        && item.payload.evidenceIds.some((evidenceId) => parseGreenfieldDocumentOutputEvidence(evidenceId) !== null));
+        && item.payload.evidenceIds.some((evidenceId) => parseGreenfieldDocumentOutputEvidence(evidenceId) !== null))
+        || items.some((item) => item.kind === "causal_relation.put"
+          && item.payload.sourceBindings.some((source) => parseGreenfieldDocumentOutputEvidence(source.evidenceId) !== null));
       if (context.greenfieldCreateRequested || (referencesGreenfieldOutput
         && !context.sameChangeSetDocumentEvidenceAuthorized)) {
         assertGreenfieldCreateOnly(workspace, items, context);
@@ -351,6 +353,11 @@ function mapProposedItems(
             ...item.payload,
             status: "current",
           },
+        };
+      case "causal_relation.put":
+        return {
+          ...item,
+          payload: { ...item.payload, status: "current" },
         };
       case "resource.put":
       case "creative_document.put":
