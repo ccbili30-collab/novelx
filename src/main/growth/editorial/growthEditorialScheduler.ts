@@ -8,6 +8,7 @@ import {
   GrowthWorkOrderRunner,
   type GrowthWorkOrderRunnerDependencies,
 } from "./growthWorkOrderRunner";
+import { ensureGrowthEditorialDiagnostic } from "../../diagnostics/growthEditorialDiagnostics";
 
 export interface GrowthEditorialSchedulerOptions {
   creativeConcurrency?: number;
@@ -207,6 +208,7 @@ export class GrowthEditorialScheduler {
           status: "failed",
           failureCode: "GROWTH_EDITORIAL_DEPENDENCY_FAILED",
         });
+        this.#recordDiagnostic(order.id, "GROWTH_EDITORIAL_DEPENDENCY_FAILED");
         failed.add(order.id);
         changed = true;
       }
@@ -227,6 +229,18 @@ export class GrowthEditorialScheduler {
     const snapshot = this.repository.getRoundSnapshot(roundId);
     if (!snapshot) throw schedulerError("GROWTH_EDITORIAL_ROUND_NOT_FOUND");
     return snapshot;
+  }
+
+  #recordDiagnostic(workOrderId: string, sourceCode: unknown): void {
+    try {
+      ensureGrowthEditorialDiagnostic({
+        workspace: this.repository.workspace,
+        workOrderId,
+        sourceCode,
+      });
+    } catch {
+      // Durable Work Order truth must not be replaced by diagnostic persistence failure.
+    }
   }
 }
 

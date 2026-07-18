@@ -7,6 +7,7 @@ import type {
   GrowthWorkOrderAttempt,
   WorkOrderAttemptStart,
 } from "../../../domain/growth/editorial/growthEditorialTypes";
+import { ensureGrowthEditorialDiagnostic } from "../../diagnostics/growthEditorialDiagnostics";
 
 export interface GrowthWorkOrderRunnerDependencies {
   prepareAttempt(input: {
@@ -118,6 +119,7 @@ export class GrowthWorkOrderRunner {
         attemptId: attempt.id,
         failureCode: "GROWTH_EDITORIAL_COMMIT_OUTCOME_UNKNOWN",
       });
+      this.#recordDiagnostic(workOrderId, "GROWTH_EDITORIAL_COMMIT_OUTCOME_UNKNOWN");
       return;
     }
     if (attempt.sideEffectState !== "none") return;
@@ -133,6 +135,7 @@ export class GrowthWorkOrderRunner {
         attemptId: attempt.id,
         failureCode: "GROWTH_EDITORIAL_COMMIT_OUTCOME_UNKNOWN",
       });
+      this.#recordDiagnostic(workOrderId, "GROWTH_EDITORIAL_COMMIT_OUTCOME_UNKNOWN");
     }
   }
 
@@ -149,11 +152,27 @@ export class GrowthWorkOrderRunner {
   #failPreCommit(workOrderId: string, failureCode: string): void {
     const order = this.repository.getWorkOrder(workOrderId);
     if (!order || ["commit_queued", "committed", "cancelled", "failed", "reconciliation_required"].includes(order.status)) return;
+    const safeFailureCode = normalizeFailureCode(failureCode, "GROWTH_EDITORIAL_CANDIDATE_FAILED");
     this.repository.terminalizeWorkOrder({
       workOrderId,
       status: "failed",
-      failureCode: normalizeFailureCode(failureCode, "GROWTH_EDITORIAL_CANDIDATE_FAILED"),
+      failureCode: safeFailureCode,
     });
+    this.#recordDiagnostic(workOrderId, safeFailureCode);
+  }
+
+  #recordDiagnostic(workOrderId: string, sourceCode: unknown): void {
+    const order = this.repository.getWorkOrder(workOrderId);
+    if (!order) return;
+    try {
+      ensureGrowthEditorialDiagnostic({
+        workspace: this.repository.workspace,
+        workOrderId,
+        sourceCode,
+      });
+    } catch {
+      // Durable Work Order truth must not be replaced by diagnostic persistence failure.
+    }
   }
 
   #requiredSnapshotForOrder(workOrderId: string): GrowthEditorialRoundSnapshot {

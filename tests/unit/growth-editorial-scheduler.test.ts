@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { GrowthEditorialRepository } from "../../src/domain/growth/editorial/growthEditorialRepository";
+import { SafeDiagnosticRepository } from "../../src/domain/audit/safeDiagnosticRepository";
 import type {
   EditorialReviewRecord,
   EditorialRoundCreate,
@@ -162,6 +163,32 @@ describe("Growth editorial scheduler", () => {
     expect(result.workOrders[0]).toMatchObject({ status: "failed", failureCode: "GROWTH_EDITORIAL_CHECKPOINT_STALE" });
     expect(result.attempts[0].sideEffectState).toBe("none");
     expect(commits).toBe(0);
+    expect(new SafeDiagnosticRepository(setup.workspace).listOperation("tool_call", "order-a"))
+      .toEqual([expect.objectContaining({
+        code: "WORK_ORDER_STATE_CHECKPOINT_STALE",
+        owner: "growth_phase",
+        boundary: "phase_compile",
+      })]);
+  });
+
+  it("classifies a dependency-blocked Work Order at the scheduler boundary", async () => {
+    const setup = createSetup();
+    const dependencies = acceptedDependencies(setup.repository, {
+      generate: (candidateOrder) => {
+        if (candidateOrder.id === "order-a") throw Object.assign(new Error("secret provider body"), { code: "PROVIDER_PROTOCOL_FAILED" });
+      },
+    });
+    const scheduler = createScheduler(setup.repository, dependencies, { creativeConcurrency: 1 });
+    const result = await scheduler.startRound(round(setup, [order("order-a"), order("order-b", ["order-a"])]));
+
+    expect(result.workOrders.map((item) => item.status)).toEqual(["failed", "failed"]);
+    const diagnostics = new SafeDiagnosticRepository(setup.workspace);
+    expect(diagnostics.listOperation("tool_call", "order-a"))
+      .toEqual([expect.objectContaining({ code: "PROVIDER_PROTOCOL_FAILED", owner: "provider" })]);
+    expect(diagnostics.listOperation("tool_call", "order-b"))
+      .toEqual([expect.objectContaining({ code: "WORK_ORDER_STATE_DEPENDENCY_FAILED", owner: "growth_phase" })]);
+    expect(JSON.stringify([...diagnostics.listOperation("tool_call", "order-a"), ...diagnostics.listOperation("tool_call", "order-b")]))
+      .not.toContain("secret provider body");
   });
 
   it("restarts accepted work without duplicating the candidate or committed Change Set", async () => {
@@ -201,6 +228,12 @@ describe("Growth editorial scheduler", () => {
     expect(result.workOrders[0].status).toBe("reconciliation_required");
     expect(result.attempts[0].sideEffectState).toBe("outcome_unknown");
     expect(commits).toBe(0);
+    expect(new SafeDiagnosticRepository(setup.workspace).listOperation("tool_call", "order-a"))
+      .toEqual([expect.objectContaining({
+        code: "RECONCILIATION_REQUIRED",
+        owner: "reconciliation",
+        boundary: "recovery",
+      })]);
   });
 
   it("keeps one scheduler and one commit lane per active workspace", () => {
