@@ -92,6 +92,14 @@ export const reconciliationRequiredSchema = z.object({
 
 export type ReconciliationRequired = z.infer<typeof reconciliationRequiredSchema>;
 
+export const editorialRoundTerminalSchema = z.object({
+  roundId: idSchema,
+  status: z.enum(["cancelled", "failed"]),
+  failureCode: failureCodeSchema,
+}).strict();
+
+export type EditorialRoundTerminal = z.infer<typeof editorialRoundTerminalSchema>;
+
 export type EditorialRoundStatus = "planned" | "active" | "completed" | "blocked" | "cancelled" | "failed" | "reconciliation_required";
 export type WorkOrderStatus = "planned" | "ready" | "running" | "candidate_ready" | "reviewing" | "revision_requested" | "accepted" | "commit_queued" | "committed" | "cancelled" | "failed" | "reconciliation_required";
 export type WorkOrderAttemptStatus = "running" | "candidate_ready" | "reviewing" | "revision_requested" | "accepted" | "cancelled" | "failed" | "reconciliation_required";

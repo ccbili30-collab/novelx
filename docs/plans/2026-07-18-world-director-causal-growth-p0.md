@@ -687,14 +687,16 @@ unknown side effect -> reconciliation_required
 
 **Scheduling:**
 
-- [ ] Persist Director plan before spawning any specialist.
-- [ ] Default creative concurrency 3; configurable and provider backpressure-aware.
-- [ ] Only dependency-ready Work Orders run.
-- [ ] Candidate generation is side-effect free.
-- [ ] Commit queue concurrency is exactly 1.
-- [ ] Later candidate rebases/rechecks against latest checkpoint before commit.
-- [ ] Cancellation stops undispatched candidates and preserves completed evidence.
-- [ ] Restart never duplicates an accepted candidate or committed Change Set.
+- [x] Persist Director plan before spawning any specialist.
+- [x] Default creative concurrency 3; configurable and provider backpressure-aware.
+- [x] Only dependency-ready Work Orders run.
+- [x] Candidate generation is side-effect free.
+- [x] Commit queue concurrency is exactly 1.
+- [x] Later candidate rebases/rechecks against latest checkpoint before commit.
+- [x] Cancellation stops undispatched candidates and preserves completed evidence.
+- [x] Restart never duplicates an accepted candidate or committed Change Set.
+
+**Task 16 evidence (2026-07-18):** Main now has one workspace-scoped editorial scheduler application, a dependency-aware scheduler and a Work Order runner layered over the Task 6 SQLite state machine. `startRound` synchronously persists the Director plan before any attempt preparation; only repository-ready dependencies dispatch. Creative concurrency defaults to three, is bounded by a live Provider-slot callback and returns without dispatch at zero capacity. Candidate/review calls receive data plus cancellation only and persist content-addressed evidence before cancellation; all accepted work enters one scheduler-wide commit promise lane. Every commit invokes a mandatory latest-state rebase/recheck seam before `commit_requested`; rejection fails with zero side effects, while any exception after `commit_requested` becomes `reconciliation_required` and is never automatically reissued. Restart skips persisted candidates and committed work, resumes accepted work once, and blocks persisted unknown commit outcomes. Cancellation aborts active work, terminalizes undispatched dependency work and preserves completed candidate Artifacts; failure propagates to blocked dependents and a truthful Round terminal state. The existing Growth Coordinator exposes one authenticated workspace seam and refuses a second dependency configuration, without adding editorial branches to its legacy Cycle state machine. Four targeted scheduler/repository/Coordinator/Director suites passed 56/56 tests with zero skips; `npm run typecheck`, `npm run build` and `git diff --check` passed. Tests used real local SQLite workspaces but injected candidate/review/rebase/commit functions; no real Provider ran, no real Change Set was submitted, and Tasks 17/19 still own production review and candidate compilation. A crash while candidate generation is merely `running` may repeat a side-effect-free Provider inference; Task 29 still owns durable Provider-boundary recovery and the final crash matrix.
 
 ### Task 17: Implement same-owner review and revision
 
@@ -914,8 +916,8 @@ This matrix is the execution index. The detailed phase sections define files and
 | [x] | 12 | Specialists should spend tokens on creation, not tool orchestration. | A generic runtime invokes one profile with one evidence packet and receives one strict candidate. | Provider fail-closed, schema correction bound, cancellation and redaction tests. |
 | [x] | 13 | Role quality and responsibility need explicit, versioned instructions without encoding Domain truth in Prompt text. | Each employee has a narrow Prompt asset, acceptance facets and prohibited authority. | Prompt registry/hash/publication tests; active identities remain unchanged until accepted. |
 | [x] | 14 | Director cannot safely plan from raw database rows or entire documents. | A compact packet provides rules, causal frontier, closure gaps, recent diffs and available capabilities. | Budget, provenance, checkpoint, hidden-data and deterministic ordering tests. |
-| [ ] | 15 | The user needs one editorial intelligence that chooses what grows next and evaluates the whole. | Director emits a bounded dependency DAG and structured editorial decisions, not prose or tools. | Strict plan/review schemas, no raw tool authority and unsupported capability rejection. |
-| [ ] | 16 | Concurrent candidates and serialized Canon commits require durable scheduling, not a Prompt convention. | Ready independent orders run concurrently; dependent orders wait; accepted commits use one lane and rebase. | Concurrency, dependency, lease, stale checkpoint, cancellation and idempotency tests. |
+| [x] | 15 | The user needs one editorial intelligence that chooses what grows next and evaluates the whole. | Director emits a bounded dependency DAG and structured editorial decisions, not prose or tools. | Strict plan/review schemas, no raw tool authority and unsupported capability rejection. |
+| [x] | 16 | Concurrent candidates and serialized Canon commits require durable scheduling, not a Prompt convention. | Ready independent orders run concurrently; dependent orders wait; accepted commits use one lane and rebase. | Concurrency, dependency, lease, stale checkpoint, cancellation and idempotency tests. |
 | [ ] | 17 | Creating a fresh task on rejection loses accountability and feedback lineage. | A rejected result returns to the same capability/Work Order as a new attempt with bounded feedback. | Same-owner identity, attempt lineage, retry cap and no-progress termination tests. |
 | [ ] | 18 | Specialist prose does not automatically become trustworthy graph structure. | Graph Curator returns sourced assertions and causal candidates with no Domain side effect. | Source-span, mechanism, condition, uncertainty and unsupported-inference tests. |
 | [ ] | 19 | Curator output, Checker findings and specialist content must converge before writing. | A deterministic compiler produces one authorized Change Set or one precise blocker. | Atomic compiled-output integration tests and zero-write rejection tests. |

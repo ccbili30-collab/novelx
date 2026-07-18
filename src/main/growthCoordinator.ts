@@ -46,6 +46,12 @@ import { GrowthPresentationProjector } from "./growth/growthPresentationProjecto
 import { GrowthIllustrationApplicationService } from "./growth/illustration/growthIllustrationApplicationService";
 import { SafeDiagnosticRepository } from "../domain/audit/safeDiagnosticRepository";
 import { ensureGrowthCycleDiagnostic } from "./diagnostics/growthCycleDiagnostics";
+import {
+  GrowthEditorialSchedulerApplication,
+  type GrowthEditorialScheduler,
+  type GrowthEditorialSchedulerOptions,
+} from "./growth/editorial/growthEditorialScheduler";
+import type { GrowthWorkOrderRunnerDependencies } from "./growth/editorial/growthWorkOrderRunner";
 
 interface GrowthWorkspaceContext {
   workspace: import("../domain/workspace/workspaceRepository").WorkspaceDatabase;
@@ -75,6 +81,7 @@ export class GrowthCoordinator {
   readonly #listeners = new Map<string, Map<string, DeliveryRoute>>();
   readonly #activeCycleRuns = new Map<string, string>();
   #illustrationApplication: { workspace: GrowthWorkspaceContext["workspace"]; service: GrowthIllustrationApplicationService } | null = null;
+  readonly #editorialApplication = new GrowthEditorialSchedulerApplication();
 
   constructor(
     readonly workspaceSession: WorkspaceSession,
@@ -195,7 +202,19 @@ export class GrowthCoordinator {
     return new GrowthPresentationProjector(context.workspace).project({ goalId: input.goalId, checkpointId: context.checkpointId });
   }
 
+  createEditorialScheduler(input: {
+    projectId: string;
+    sessionId: string;
+    dependencies: GrowthWorkOrderRunnerDependencies;
+    options?: GrowthEditorialSchedulerOptions;
+  }): GrowthEditorialScheduler {
+    this.#assertProjectSession(input.projectId, input.sessionId);
+    const context = this.#requiredContext(input.projectId);
+    return this.#editorialApplication.get(context.workspace, input.dependencies, input.options);
+  }
+
   dispose(): void {
+    this.#editorialApplication.dispose();
     this.#illustrationApplication?.service.dispose();
     this.#illustrationApplication = null;
     this.#listeners.clear();

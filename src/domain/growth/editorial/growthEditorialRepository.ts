@@ -9,12 +9,14 @@ import {
 import { z } from "zod";
 import {
   candidateRecordSchema,
+  editorialRoundTerminalSchema,
   editorialReviewRecordSchema,
   editorialRoundCreateSchema,
   reconciliationRequiredSchema,
   workOrderAttemptStartSchema,
   workOrderTerminalSchema,
   type CandidateRecord,
+  type EditorialRoundTerminal,
   type EditorialReviewRecord,
   type EditorialRoundCreate,
   type GrowthEditorialReview,
@@ -364,6 +366,28 @@ export class GrowthEditorialRepository {
         WHERE id = ? AND status = 'active'
       `).run(value.failureCode, now, now, order.roundId);
       return this.#requiredWorkOrder(order.id);
+    });
+  }
+
+  terminalizeRound(input: EditorialRoundTerminal): GrowthEditorialRound {
+    const value = editorialRoundTerminalSchema.parse(input);
+    return this.#transaction(() => {
+      const round = this.#requiredRound(value.roundId);
+      if (round.status === value.status && round.failureCode === value.failureCode) return round;
+      if (round.status !== "active") fail("GROWTH_EDITORIAL_ROUND_TERMINAL_STATE_INVALID");
+      const unfinished = this.workspace.db.prepare(`
+        SELECT 1 FROM growth_work_orders
+        WHERE round_id = ? AND status NOT IN ('committed', 'cancelled', 'failed') LIMIT 1
+      `).get(round.id);
+      if (unfinished) fail("GROWTH_EDITORIAL_ROUND_HAS_ACTIVE_WORK");
+      const now = new Date().toISOString();
+      const updated = this.workspace.db.prepare(`
+        UPDATE growth_editorial_rounds
+        SET status = ?, failure_code = ?, updated_at = ?, terminal_at = ?
+        WHERE id = ? AND status = 'active'
+      `).run(value.status, value.failureCode, now, now, round.id);
+      if (Number(updated.changes) !== 1) fail("GROWTH_EDITORIAL_STATE_CONFLICT");
+      return this.#requiredRound(round.id);
     });
   }
 
