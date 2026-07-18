@@ -8,7 +8,6 @@ import {
   directorReviewSchema,
   editorialRoundPlanParameters,
   editorialRoundPlanSchema,
-  graphCuratorCandidateSchema,
   growthEditorialContractVersion,
   specialistCandidateParameters,
   specialistCandidateSchema,
@@ -17,6 +16,7 @@ import {
 import { gmTurnOutputSchema } from "../../shared/playerWorkerProtocol";
 import { specialistArtifactSchema } from "../../shared/growthEditorialWorkerProtocol";
 import { checkerOutputSchema, writerOutputSchema } from "../contracts/roleOutputs";
+import { graphCuratorSubmissionSchema } from "./graphCuratorContracts";
 
 const identifierSchema = z.string().trim().min(1).max(240);
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -88,7 +88,7 @@ export const worldDirectorOutputParameters = Type.Union([editorialRoundPlanParam
 const contractOutputSchemas: Record<CapabilityContractId, ZodType> = {
   world_director_v1: worldDirectorOutputSchema,
   specialist_candidate_v1: specialistSubmissionSchema,
-  graph_curator_candidate_v1: graphCuratorCandidateSchema,
+  graph_curator_candidate_v1: graphCuratorSubmissionSchema,
   writer_output_v1: writerOutputSchema,
   checker_output_v1: checkerOutputSchema,
   gm_turn_v1: gmTurnOutputSchema,

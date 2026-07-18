@@ -201,7 +201,7 @@ export const growthEditorialSpecialistStartSchema = z.object({
   providerProfile: providerRuntimeProfileSchema.nullable(),
 }).strict();
 
-const receiptSchema = z.object({
+export const growthEditorialReceiptSchema = z.object({
   actualProviderId: z.string().trim().min(1).max(240).nullable(),
   actualModelId: z.string().trim().min(1).max(240).nullable(),
   responseIdSha256: sha256Schema.nullable(),
@@ -233,13 +233,13 @@ export const worldDirectorEventSchema = z.discriminatedUnion("type", [
     type: z.literal("growth.editorial.director.planned"),
     runId: identifierSchema,
     plan: editorialRoundPlanSchema,
-    receipt: receiptSchema,
+    receipt: growthEditorialReceiptSchema,
   }).strict(),
   z.object({
     type: z.literal("growth.editorial.director.reviewed"),
     runId: identifierSchema,
     review: directorReviewSchema,
-    receipt: receiptSchema,
+    receipt: growthEditorialReceiptSchema,
   }).strict(),
   z.object({
     type: z.literal("growth.editorial.director.failed"),
@@ -264,14 +264,14 @@ export const growthEditorialSpecialistEventSchema = z.discriminatedUnion("type",
     attemptId: identifierSchema,
     candidate: specialistCandidateSchema.refine((value) => value.status === "ready"),
     artifacts: z.array(specialistArtifactSchema).min(1).max(20),
-    receipt: receiptSchema,
+    receipt: growthEditorialReceiptSchema,
   }).strict(),
   z.object({
     type: z.literal("growth.editorial.specialist.evidence_requested"),
     runId: identifierSchema,
     attemptId: identifierSchema,
     request: specialistCandidateSchema.refine((value) => value.status === "needs_more_evidence"),
-    receipt: receiptSchema,
+    receipt: growthEditorialReceiptSchema,
   }).strict(),
   z.object({
     type: z.literal("growth.editorial.specialist.failed"),

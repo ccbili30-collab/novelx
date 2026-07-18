@@ -23,6 +23,8 @@ import {
 } from "../shared/growthEditorialWorkerProtocol";
 import { handleGrowthEditorialSpecialistCommand } from "./editorial/specialistWorkerController";
 import { handleWorldDirectorCommand } from "./editorial/worldDirectorWorkerController";
+import { graphCuratorStartSchema } from "./editorial/graphCuratorContracts";
+import { handleGraphCuratorCommand } from "./editorial/graphCuratorRuntime";
 
 verifyPromptRegistry();
 loadGmPrompt();
@@ -49,6 +51,20 @@ process.on("message", (payload: unknown) => {
 
   const start = agentWorkerRunStartCommandSchema.safeParse(payload);
   if (!start.success) {
+    const graphCuratorStart = graphCuratorStartSchema.safeParse(payload);
+    if (graphCuratorStart.success) {
+      const command = graphCuratorStart.data;
+      if (activeRuns.has(command.runId)) return;
+      const controller = new AbortController(); activeRuns.set(command.runId, controller);
+      void handleGraphCuratorCommand({
+        command,
+        signal: controller.signal,
+        emit: (event) => process.send?.(event),
+      }).finally(() => {
+        activeRuns.delete(command.runId); clearProviderProfile(command.providerProfile);
+      });
+      return;
+    }
     const directorStart = worldDirectorStartSchema.safeParse(payload);
     if (directorStart.success) {
       const command = directorStart.data;
