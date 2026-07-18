@@ -58,19 +58,30 @@ describe("Growth Illustration Plan compiler", () => {
           targetEvidenceRef: "setting", evidenceRefs: ["setting"], purpose: "scene" as const,
           title: "Harbor scene", compositionDescription: "Frame the documented harbor from water level.", variantKey: "harbor_scene",
         },
+        {
+          targetEvidenceRef: "setting", evidenceRefs: ["setting"], purpose: "character_portrait" as const,
+          title: "Harbor keeper", compositionDescription: "Frame only the documented identity cues.", variantKey: "harbor_keeper",
+        },
       ],
     };
     const compiled = compileGrowthIllustrationPlan(input, trusted());
 
-    expect(compiled.items).toHaveLength(2);
+    expect(compiled.items).toHaveLength(3);
     for (const item of compiled.items) {
       for (const constraint of defaultGrowthVisualStyle.positive) expect(item.promptText).toContain(constraint);
       for (const constraint of defaultGrowthVisualStyle.negative) expect(item.promptText).toContain(constraint);
       expect(item.promptText).toContain("Only depict facts stated in AUTHORIZED EVIDENCE");
+      expect(item.promptText).toContain("resolved visual policy is authoritative over conflicting aesthetic wording");
       expect(item.resolvedStyle).toMatchObject({ styleMode: "system_default", provenance: "system_default" });
       expect(item.promptSha256).toMatch(/^[a-f0-9]{64}$/);
       expect(item.promptHashInput.currentRuleRevision).toBe(7);
     }
+    expect(compiled.items.find((item) => item.purpose === "world_map")?.promptText)
+      .toContain("world-scale hierarchy emphasizes continents or macro regions");
+    expect(compiled.items.find((item) => item.purpose === "character_portrait")?.promptText)
+      .toContain("identity-first character portrait with a readable silhouette");
+    expect(compiled.items.find((item) => item.purpose === "scene")?.promptText)
+      .toContain("important-detail targets use the same scene language");
   });
 
   it("maps high-level refs to normalized authorized versions and a stable target anchor", () => {
@@ -89,6 +100,23 @@ describe("Growth Illustration Plan compiler", () => {
     expect(item.targetAnchorInput).toEqual({ kind: "resource", resourceId: "world-1", resourceVersionId: "world-v2" });
     expect(item.promptText).toContain("The world is governed by documented tidal cycles.");
     expect(item.promptText).toContain("The western coast contains a tidal harbor documented in the current setting.");
+  });
+
+  it("uses only trusted target metadata to select world, region, nation, and city cartography", () => {
+    const markers = {
+      world: "macro regions",
+      region: "hydrology",
+      nation: "provinces",
+      city: "districts",
+    } as const;
+    for (const [mapScale, marker] of Object.entries(markers) as Array<[keyof typeof markers, string]>) {
+      const context = trusted();
+      context.evidenceBindings[1] = { ...context.evidenceBindings[1]!, mapScale };
+      const compiled = compileGrowthIllustrationPlan(plan, context).items[0]!;
+      expect(compiled.promptHashInput.purposePolicy).toMatchObject({ purpose: "world_map", mapScale });
+      expect(compiled.promptText).toContain(marker);
+    }
+    expect(JSON.stringify(growthIllustrationPlanParameters)).not.toContain("mapScale");
   });
 
   it("allows immutable working and conversation text snapshots while retaining formal context sources", () => {
@@ -126,6 +154,8 @@ describe("Growth Illustration Plan compiler", () => {
     expect(item.resolvedStyle).toMatchObject({ styleMode: "user_override", provenance: "rule_revision_override" });
     expect(item.promptText).toContain("photorealistic photography");
     expect(item.promptText).not.toContain("Avoid:\n- photorealistic photography");
+    expect(item.promptText).toContain("authoritative Renderer labels");
+    expect(item.promptText).toContain("embedded place names");
     expectCode(() => compileGrowthIllustrationPlan(plan, context), "GROWTH_ILLUSTRATION_STYLE_OVERRIDE_MISMATCH");
     expectCode(() => compileGrowthIllustrationPlan(overridden, trusted()), "GROWTH_ILLUSTRATION_STYLE_OVERRIDE_UNAUTHORIZED");
   });

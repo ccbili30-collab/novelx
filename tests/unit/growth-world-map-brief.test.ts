@@ -27,6 +27,14 @@ describe("Growth World Map Brief compiler", () => {
     const compiled = compileGrowthWorldMapBrief({ title: "Tidal World Map", prompt: "A source-bound nautical world map." }, { cycleId: "cycle-world", sources });
     expect(compiled).toEqual(compileGrowthWorldMapBrief({ title: "Tidal World Map", prompt: "A source-bound nautical world map." }, { cycleId: "cycle-world", sources }));
     expect(compiled).toMatchObject({ purpose: "world_map", sourceResourceIds: [(resource.payload as { resourceId: string }).resourceId], sourceVersionIds: ["world-revision", "setting-version"] });
+    expect(compiled.prompt).toContain("A source-bound nautical world map.");
+    expect(compiled.prompt).toContain("colored expressive steel-pen and ink linework");
+    expect(compiled.prompt).toContain("code-owned visual policy below overrides conflicting aesthetic wording");
+    expect(compiled.prompt).toContain("world-scale hierarchy emphasizes continents or macro regions");
+    expect(compiled.prompt).toContain("authoritative Renderer labels");
+    for (const prohibited of ["photorealism", "Unreal Engine", "monochrome-only", "chibi", "generic moe", "fake map labels"]) {
+      expect(compiled.prompt).toContain(prohibited);
+    }
     const visible = JSON.stringify(growthWorldMapBriefParameters);
     for (const forbidden of ["purpose", "idempotencyKey", "resourceId", "versionId", "provider", "path", "sha256"]) expect(visible).not.toContain(forbidden);
   });

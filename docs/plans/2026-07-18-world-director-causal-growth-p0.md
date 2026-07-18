@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task.
 
-> **当前状态（2026-07-18）：** 已验证 Task 1–23；当前执行入口为 Phase I / Task 24：统一全部图片用途的视觉风格政策。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
+> **当前状态（2026-07-18）：** 已验证 Task 1–24；当前执行入口为 Phase I / Task 25：Visual Director（视觉总监）从已提交文本与图谱生成来源绑定 Brief。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
 
 这份计划回答三个问题：为什么 NovelX 不能继续依赖一个模型包办所有工作；为什么“因果关系”必须成为图谱和调度的核心；最终用户、评委和后续编码 Agent 分别会得到什么。代码优化的首要目标不是方便人类阅读，而是降低 AI 修改所需上下文、缩小变更影响半径并让每个失败直接定位到唯一责任模块。
 
@@ -807,6 +807,8 @@ unknown side effect -> reconciliation_required
 
 **Map adaptation:** world/region/nation/city scale-specific cartography using the same line language; authoritative labels are Renderer overlays from graph data.
 
+**Task 24 evidence (2026-07-18):** one Domain policy now owns the versioned default aesthetic: colored expressive steel-pen/ink linework, broken angular contours, cross-hatching, visible paper/pigment texture, restrained watercolor/gouache color and mature fantasy concept-illustration composition. Its default negatives cover photoreal/cinematic photography, 3D/Unreal/CGI, glossy game posters, monochrome-only output, chibi/kawaii, generic moe, embedded paragraphs, fake labels, watermarks and logos. A separate code-owned purpose adapter preserves that line language while enforcing identity-first portrait composition, source-legible scene/spatial-causality composition (including close-scale important details), and world/region/nation/city cartographic hierarchy. Map prompts reserve empty overlay space for authoritative Renderer labels and prohibit generated labels/prose. The legacy world-map Brief and the persisted Illustration Plan both compile through the same policy; trusted target metadata, never model plan fields, selects non-world map scale. Existing explicitly authorized user style overrides remain valid as approved in Section 7, while purpose/factual constraints cannot be overridden. No new `detail` image purpose or public protocol was invented: current important-detail targets remain source-bound `scene` items. Eight related style, map, illustration, state-machine, supervisor and bridge suites passed 112/112 with zero skips; `npm run typecheck`, the production build with all three active Prompt publication gates, and `git diff --check` passed. No real image Provider, Electron E2E, full suite or package run occurred. Non-world trusted scale metadata is implemented but its Visual Director producer remains Task 25.
+
 ### Task 25: Visual Director text-to-brief handoff
 
 **Files:**
@@ -939,7 +941,7 @@ This matrix is the execution index. The detailed phase sections define files and
 | [x] | 21 | Short cards look complete to a model unless depth is executable. | Importance-aware maturity profiles expose missing OC/nation/organization/geography/species/story dimensions. | Boundary tests for core/major/supporting/background nodes and promotion. |
 | [x] | 22 | Self-inquiry is useful only when it selects causal gaps from evidence and stops looping. | Each round proposes 3–7 deduplicated questions, chooses one valuable gap and records affected nodes. | Evidence, ranking, dedupe, no-progress and genuine-user-choice tests. |
 | [x] | 23 | Waiting until all text ends serializes image time and hides incremental growth. | Every eligible committed version creates an idempotent image queue item while text work continues. | Post-commit enqueue, revision-stale replacement, nonblocking failure and concurrency tests. |
-| [ ] | 24 | Separate image paths currently drift in style and maps can become photorealistic. | One default colored hand-drawn ink policy applies to maps, characters, scenes and details. | Purpose-specific prompt compilation and prohibited-style regression tests. |
+| [x] | 24 | Separate image paths currently drift in style and maps can become photorealistic. | One default colored hand-drawn ink policy applies to maps, characters, scenes and details. | Purpose-specific prompt compilation and prohibited-style regression tests. |
 | [ ] | 25 | Image models need concise visual briefs derived from stable text, not raw drafts or invented facts. | Visual Director converts committed text/graph evidence into a source-bound brief; deterministic code adds style. | Provenance, no-invention, source-version and strict-output tests. |
 | [ ] | 26 | Growth currently appears as Steward operation rather than editorial collaboration. | User talks to World Director in Growth; Steward activity remains expandable operational detail. | IPC contract, route restoration, fail-closed and non-Growth regression tests. |
 | [ ] | 27 | Judges and users must see real nodes and edits growing, not only terminal files. | Timeline, right editor, graph and image queue project authoritative safe events and committed objects. | Reducer/component/Electron tests for ordering, failure, scope switch and no premature completion. |

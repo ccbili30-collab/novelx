@@ -2,23 +2,36 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const defaultGrowthVisualStyle = {
-  id: "illustrated_manga_handdrawn_v1",
+  id: "colored_steel_pen_fantasy_v2",
   positive: [
-    "mature graphic-novel composition",
-    "expressive hand-drawn linework",
-    "painterly paper and brush texture",
-    "restrained cinematic color design",
-    "fantasy concept-art clarity",
+    "colored expressive steel-pen and ink linework",
+    "broken angular contours with deliberate line-weight variation",
+    "disciplined cross-hatching and etched shadow construction",
+    "visible hand-drawn paper and pigment texture",
+    "restrained watercolor and gouache color washes",
+    "mature fantasy concept-illustration composition",
   ],
   negative: [
-    "photorealistic photography",
-    "3D realism",
-    "chibi",
-    "kawaii mascot style",
-    "generic moe doll-like character design",
-    "watermark or embedded text",
+    "photorealism or cinematic photography",
+    "3D, Unreal Engine, or CGI rendering",
+    "glossy game-poster finish",
+    "monochrome-only output",
+    "chibi or kawaii proportions",
+    "generic moe character design",
+    "embedded paragraphs, fake map labels, watermarks, or logos",
   ],
 } as const;
+
+export type GrowthVisualPurpose = "world_map" | "character_portrait" | "scene";
+export type GrowthMapScale = "world" | "region" | "nation" | "city";
+
+export interface GrowthVisualPurposePolicy {
+  id: "growth-visual-purpose-v1";
+  purpose: GrowthVisualPurpose;
+  mapScale: GrowthMapScale | null;
+  positive: string[];
+  negative: string[];
+}
 
 export const growthVisualStyleOverrideSchema = z.object({
   summary: z.string().trim().min(1).max(2_000),
@@ -83,6 +96,51 @@ export function resolveGrowthVisualStyle(input: GrowthVisualStyleResolutionInput
   };
 }
 
+/** Purpose composition stays code-owned even when a user overrides aesthetic style. */
+export function resolveGrowthVisualPurposePolicy(
+  purpose: GrowthVisualPurpose,
+  mapScale: GrowthMapScale = "world",
+): GrowthVisualPurposePolicy {
+  if (purpose === "character_portrait") {
+    return {
+      id: "growth-visual-purpose-v1",
+      purpose,
+      mapScale: null,
+      positive: [
+        "identity-first character portrait with a readable silhouette, face, posture, clothing, and material cues",
+        "environmental accents may support the documented identity but must not replace the character as the focal subject",
+      ],
+      negative: ["generic poster pose, unsupported costume ornament, or invented equipment"],
+    };
+  }
+  if (purpose === "scene") {
+    return {
+      id: "growth-visual-purpose-v1",
+      purpose,
+      mapScale: null,
+      positive: [
+        "scene composition must make documented environment, action, and spatial causality legible",
+        "important-detail targets use the same scene language at a closer scale without inventing surrounding facts",
+      ],
+      negative: ["generic cinematic establishing shot that obscures source-bound relationships"],
+    };
+  }
+  return {
+    id: "growth-visual-purpose-v1",
+    purpose,
+    mapScale,
+    positive: [
+      "hand-drawn fantasy cartography using the same steel-pen, cross-hatched, restrained-color language",
+      mapScaleDirective(mapScale),
+      "reserve clear overlay space for authoritative Renderer labels; the generated image itself contains no labels or prose",
+    ],
+    negative: [
+      "embedded place names, paragraphs, legends, compass text, or invented political labels",
+      "decorative terrain that contradicts the source-bound topology",
+    ],
+  };
+}
+
 function resolveExplicitOverride(
   provenance: Exclude<GrowthVisualStyleProvenance, "system_default">,
   input: GrowthVisualStyleOverride,
@@ -114,6 +172,19 @@ function resolveExplicitOverride(
 
 function normalizeConstraint(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+}
+
+function mapScaleDirective(scale: GrowthMapScale): string {
+  if (scale === "world") {
+    return "world-scale hierarchy emphasizes continents or macro regions, oceans, climate systems, and interregional routes without street-level detail";
+  }
+  if (scale === "region") {
+    return "region-scale hierarchy emphasizes terrain, hydrology, subregions, settlement networks, and cross-border routes without flattening them into a globe overview";
+  }
+  if (scale === "nation") {
+    return "nation-scale hierarchy emphasizes sourced borders, provinces, capitals, resources, and transport corridors without inventing political labels";
+  }
+  return "city-scale hierarchy emphasizes sourced districts, streets, waterways, walls, and landmarks without nation-scale abstraction";
 }
 
 function sha256(value: string): string {

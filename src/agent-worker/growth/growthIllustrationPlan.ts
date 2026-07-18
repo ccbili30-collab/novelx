@@ -8,7 +8,9 @@ import {
 import { growthIllustrationAnchorSchema } from "../../shared/growthContract";
 import {
   growthVisualStyleOverrideSchema,
+  resolveGrowthVisualPurposePolicy,
   resolveGrowthVisualStyle,
+  type GrowthVisualPurposePolicy,
   type ResolvedGrowthVisualStyle,
 } from "../../domain/growth/growthVisualStylePolicy";
 
@@ -54,6 +56,7 @@ const trustedEvidenceBindingSchema = z.object({
   defaultCoverageRole: z.enum([
     "world", "place_or_faction", "story", "major_oc", "important_detail", "supporting",
   ]),
+  mapScale: z.enum(["world", "region", "nation", "city"]).optional(),
   source: trustedSourceSchema,
   authorizedFacts: z.string().trim().min(1).max(8_000),
   targetAnchorInput: growthIllustrationAnchorSchema,
@@ -111,6 +114,7 @@ export interface GrowthIllustrationPromptHashInput {
     variantKey: string;
   };
   resolvedStyle: ResolvedGrowthVisualStyle;
+  purposePolicy: GrowthVisualPurposePolicy;
   authorizedEvidence: Array<{ evidenceRef: string; authorizedFacts: string }>;
   normalizedSources: NormalizedGrowthIllustrationSource[];
   targetAnchorInput: TargetAnchorInput;
@@ -219,6 +223,7 @@ function compileItem(
     ruleRevisionOverride: trusted.currentRuleRevision.visualOverride,
     goalDefault: trusted.goalVisualDefault,
   });
+  const purposePolicy = resolveGrowthVisualPurposePolicy(item.purpose, targetBinding.mapScale ?? "world");
   validateModelStyleDeclaration(item, resolvedStyle);
 
   const normalizedSources = citedBindings.map(normalizeSource);
@@ -235,6 +240,7 @@ function compileItem(
       variantKey: item.variantKey,
     },
     resolvedStyle,
+    purposePolicy,
     authorizedEvidence: citedBindings.map((binding) => ({
       evidenceRef: binding.evidenceRef,
       authorizedFacts: binding.authorizedFacts,
@@ -308,7 +314,7 @@ function normalizeSource(binding: TrustedEvidenceBinding): NormalizedGrowthIllus
 
 function compilePromptText(input: GrowthIllustrationPromptHashInput): string {
   const styleSummary = input.resolvedStyle.userVisualSummary === null
-    ? "System mature hand-drawn manga default."
+    ? "System colored steel-pen fantasy illustration default."
     : `Explicit user visual direction: ${input.resolvedStyle.userVisualSummary}`;
   return [
     "GROWTH ILLUSTRATION BRIEF",
@@ -325,10 +331,16 @@ function compilePromptText(input: GrowthIllustrationPromptHashInput): string {
     "",
     "VISUAL STYLE POLICY",
     styleSummary,
+    "The resolved visual policy is authoritative over conflicting aesthetic wording in title or composition metadata.",
     "Required:",
     ...(input.resolvedStyle.positive.length > 0 ? input.resolvedStyle.positive.map((value) => `- ${value}`) : ["- none specified"]),
     "Avoid:",
     ...(input.resolvedStyle.negative.length > 0 ? input.resolvedStyle.negative.map((value) => `- ${value}`) : ["- none specified"]),
+    "",
+    "PURPOSE COMPOSITION POLICY",
+    ...input.purposePolicy.positive.map((value) => `- ${value}`),
+    "Avoid:",
+    ...input.purposePolicy.negative.map((value) => `- ${value}`),
     "Do not add creative facts that are absent from authorized evidence.",
   ].join("\n");
 }

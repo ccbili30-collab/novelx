@@ -8,6 +8,10 @@ import {
   type GenerateImageArgs,
   type ProposeChangeSetArgs,
 } from "../../shared/agentWorkerProtocol";
+import {
+  resolveGrowthVisualPurposePolicy,
+  resolveGrowthVisualStyle,
+} from "../../domain/growth/growthVisualStylePolicy";
 
 const identifier = z.string().trim().min(1).max(240);
 
@@ -77,10 +81,26 @@ export function compileGrowthWorldMapBrief(
     || trusted.sources.sourceVersionIds.some((versionId) => !identifier.safeParse(versionId).success)) {
     throw worldMapError("GROWTH_WORLD_MAP_SOURCE_INVALID");
   }
+  const style = resolveGrowthVisualStyle({});
+  const purposePolicy = resolveGrowthVisualPurposePolicy("world_map", "world");
   return generateImageArgsSchema.parse({
     title: brief.data.title,
     purpose: "world_map",
-    prompt: brief.data.prompt,
+    prompt: [
+      "SOURCE-BOUND WORLD MAP BRIEF",
+      brief.data.prompt,
+      "",
+      "DEFAULT VISUAL STYLE",
+      "The code-owned visual policy below overrides conflicting aesthetic wording in the creative brief.",
+      ...style.positive.map((constraint) => `- ${constraint}`),
+      "Avoid:",
+      ...style.negative.map((constraint) => `- ${constraint}`),
+      "",
+      "WORLD-SCALE CARTOGRAPHY",
+      ...purposePolicy.positive.map((constraint) => `- ${constraint}`),
+      "Avoid:",
+      ...purposePolicy.negative.map((constraint) => `- ${constraint}`),
+    ].join("\n"),
     sourceResourceIds: [trusted.sources.worldResourceId],
     sourceVersionIds: [...trusted.sources.sourceVersionIds],
     idempotencyKey: `growth-world-map-${createHash("sha256").update(trusted.cycleId, "utf8").digest("hex").slice(0, 32)}`,

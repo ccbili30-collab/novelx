@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   defaultGrowthVisualStyle,
+  resolveGrowthVisualPurposePolicy,
   resolveGrowthVisualStyle,
   type GrowthVisualStyleOverride,
 } from "../../src/domain/growth/growthVisualStylePolicy";
@@ -14,11 +15,11 @@ function visualOverride(name: string): GrowthVisualStyleOverride {
 }
 
 describe("Growth visual style policy", () => {
-  it("uses the complete mature hand-drawn manga policy when no explicit override exists", () => {
+  it("uses the complete colored steel-pen fantasy policy when no explicit override exists", () => {
     const resolved = resolveGrowthVisualStyle({});
 
     expect(resolved).toMatchObject({
-      systemPolicyId: "illustrated_manga_handdrawn_v1",
+      systemPolicyId: "colored_steel_pen_fantasy_v2",
       styleMode: "system_default",
       provenance: "system_default",
       userVisualSummary: null,
@@ -26,21 +27,42 @@ describe("Growth visual style policy", () => {
       negative: [...defaultGrowthVisualStyle.negative],
     });
     expect(resolved.positive).toEqual([
-      "mature graphic-novel composition",
-      "expressive hand-drawn linework",
-      "painterly paper and brush texture",
-      "restrained cinematic color design",
-      "fantasy concept-art clarity",
+      "colored expressive steel-pen and ink linework",
+      "broken angular contours with deliberate line-weight variation",
+      "disciplined cross-hatching and etched shadow construction",
+      "visible hand-drawn paper and pigment texture",
+      "restrained watercolor and gouache color washes",
+      "mature fantasy concept-illustration composition",
     ]);
     expect(resolved.negative).toEqual([
-      "photorealistic photography",
-      "3D realism",
-      "chibi",
-      "kawaii mascot style",
-      "generic moe doll-like character design",
-      "watermark or embedded text",
+      "photorealism or cinematic photography",
+      "3D, Unreal Engine, or CGI rendering",
+      "glossy game-poster finish",
+      "monochrome-only output",
+      "chibi or kawaii proportions",
+      "generic moe character design",
+      "embedded paragraphs, fake map labels, watermarks, or logos",
     ]);
     expect(resolved.policySha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("adapts one line language to map scales, portraits, scenes, and important-detail scenes", () => {
+    const scaleMarkers = {
+      world: "macro regions",
+      region: "hydrology",
+      nation: "provinces",
+      city: "districts",
+    } as const;
+    for (const [scale, marker] of Object.entries(scaleMarkers) as Array<[keyof typeof scaleMarkers, string]>) {
+      const policy = resolveGrowthVisualPurposePolicy("world_map", scale);
+      expect(policy).toMatchObject({ id: "growth-visual-purpose-v1", purpose: "world_map", mapScale: scale });
+      expect(policy.positive.join(" ")).toContain(marker);
+      expect(policy.positive.join(" ")).toContain("Renderer labels");
+      expect(policy.negative.join(" ")).toContain("embedded place names");
+    }
+    expect(resolveGrowthVisualPurposePolicy("character_portrait").positive.join(" ")).toContain("readable silhouette");
+    expect(resolveGrowthVisualPurposePolicy("scene").positive.join(" ")).toContain("spatial causality");
+    expect(resolveGrowthVisualPurposePolicy("scene").positive.join(" ")).toContain("important-detail targets");
   });
 
   it("resolves exact per-image, target, Rule Revision, Goal, then system precedence", () => {
