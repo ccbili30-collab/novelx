@@ -10,7 +10,9 @@ import type { GrowthIllustrationCreateRequest } from "../../../shared/growthPres
 import type { AgentToolGateway } from "../../agentProcessSupervisor";
 import { resolveAuthorizedGrowthResources } from "../growthCreatorScope";
 import { compileDefaultGrowthIllustrationPlan } from "./growthDefaultIllustrationPlan";
+import { compileGrowthIncrementalIllustrations } from "./growthIncrementalIllustrationPlanner";
 import { GrowthIllustrationCoordinator, type GrowthIllustrationSnapshotInput } from "./growthIllustrationCoordinator";
+import { GrowthIllustrationRecovery } from "./growthIllustrationRecovery";
 import {
   currentResourceRevisionId,
   illustrationCoverageRole,
@@ -28,6 +30,7 @@ export class GrowthIllustrationApplicationService {
   readonly #growth: GrowthRepository;
   readonly #coordinator: GrowthIllustrationCoordinator;
   readonly #controllers = new Map<string, AbortController>();
+  #executionTail: Promise<void> = Promise.resolve();
 
   constructor(readonly workspace: WorkspaceDatabase, gateway: Pick<AgentToolGateway, "generateImage">) {
     this.#growth = new GrowthRepository(workspace);
@@ -129,6 +132,56 @@ export class GrowthIllustrationApplicationService {
     this.#execute(requestId, plan);
   }
 
+  ensureIncrementalForCommittedCycle(
+    input: { goalId: string; cycleId: string },
+    context: IllustrationApplicationContext,
+  ): string[] {
+    const candidates = compileGrowthIncrementalIllustrations(this.workspace, {
+      goalId: input.goalId,
+      cycleId: input.cycleId,
+      branchId: context.branchId,
+      authorizedScopeResourceIds: context.authorizedScopeResourceIds,
+    });
+    if (candidates.length === 0) return [];
+
+    const recovery = new GrowthIllustrationRecovery(this.workspace);
+    for (const request of this.#growth.listIllustrationRequests(input.goalId)) {
+      recovery.recover(request.id, { recoverInterruptedJobs: false });
+    }
+    const cycle = this.#growth.getCycle(input.cycleId);
+    if (!cycle || cycle.status !== "committed") {
+      throw applicationError("GROWTH_ILLUSTRATION_COMMITTED_CHANGE_SET_REQUIRED");
+    }
+    for (const candidate of candidates) {
+      const existing = this.#growth.getIllustrationRequest(candidate.requestId);
+      if (existing && (existing.goalId !== input.goalId || existing.ruleRevision !== cycle.ruleRevision)) {
+        throw applicationError("GROWTH_ILLUSTRATION_REQUEST_AUTHORITY_MISMATCH");
+      }
+      this.#coordinator.persist({
+        request: existing ? {
+          id: existing.id,
+          goalId: existing.goalId,
+          cycleId: existing.cycleId,
+          ruleRevision: existing.ruleRevision,
+          closureProfileId: existing.closureProfileId,
+          closureRevision: existing.closureRevision,
+          idempotencyKey: candidate.idempotencyKey,
+        } : {
+          id: candidate.requestId,
+          goalId: input.goalId,
+          cycleId: cycle.id,
+          ruleRevision: cycle.ruleRevision,
+          closureProfileId: null,
+          closureRevision: null,
+          idempotencyKey: candidate.idempotencyKey,
+        },
+        plan: candidate.plan,
+      });
+      this.#execute(candidate.requestId, candidate.plan);
+    }
+    return candidates.map((candidate) => candidate.requestId);
+  }
+
   cancel(input: { goalId: string; requestId: string }): void {
     const request = this.#growth.getIllustrationRequest(input.requestId);
     if (!request || request.goalId !== input.goalId) {
@@ -149,9 +202,12 @@ export class GrowthIllustrationApplicationService {
     if (this.#controllers.has(requestId)) return;
     const controller = new AbortController();
     this.#controllers.set(requestId, controller);
-    void this.#coordinator.execute({ requestId, plan, signal: controller.signal })
-      .catch(() => undefined)
-      .finally(() => this.#controllers.delete(requestId));
+    const queued = this.#executionTail
+      .then(() => this.#coordinator.execute({ requestId, plan, signal: controller.signal }))
+      .then(() => undefined)
+      .catch(() => undefined);
+    this.#executionTail = queued;
+    void queued.finally(() => this.#controllers.delete(requestId));
   }
 
   #compile(input: GrowthIllustrationCreateRequest, context: IllustrationApplicationContext, ruleRevision: number) {

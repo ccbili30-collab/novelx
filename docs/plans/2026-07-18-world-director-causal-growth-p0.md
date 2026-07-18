@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task.
 
-> **当前状态（2026-07-18）：** 计划已展开，产品决策已确认，实施任务 `4 / 32`。Phase A–B 已冻结；Task 4 的严格内部编辑合同通过定向测试和类型检查，但尚未接入运行链。当前执行入口为 Phase C / Task 5：添加纯加法 SQLite v28。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
+> **当前状态（2026-07-18）：** 已验证 Task 1–23；当前执行入口为 Phase I / Task 24：统一全部图片用途的视觉风格政策。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
 
 这份计划回答三个问题：为什么 NovelX 不能继续依赖一个模型包办所有工作；为什么“因果关系”必须成为图谱和调度的核心；最终用户、评委和后续编码 Agent 分别会得到什么。代码优化的首要目标不是方便人类阅读，而是降低 AI 修改所需上下文、缩小变更影响半径并让每个失败直接定位到唯一责任模块。
 
@@ -791,6 +791,8 @@ unknown side effect -> reconciliation_required
 
 **Rules:** enqueue after stable Change Set output; never wait for final Closure; idempotent per source version/variant; revised source marks old item stale and creates replacement; text scheduler never awaits image completion.
 
+**Task 23 evidence (2026-07-18):** Main now validates the Growth Cycle, committed Change Set and exact output checkpoint before compiling any incremental image work. Every current visual `resource_revision` output for world, OC, story, volume, chapter, location, faction or OC variant becomes one immutable custom Illustration Request keyed by Goal/resource/version/primary variant; non-resource outputs, deleted revisions and non-visual container kinds do not create queue work. Each plan binds the exact resource revision plus current stable document versions and is persisted before execution. Re-entry replays the same request without a duplicate Provider call. Before replacement persistence, existing requests run source recovery without recovering interrupted jobs, so a revised source marks the old item and any bound asset `stale`; the new version receives a distinct replacement request. One application-level background tail keeps Provider dispatch serial across requests while `GrowthCoordinator` calls only a synchronous post-commit seam and never awaits image completion; planning or Provider failure cannot roll back or stop committed text advancement. The new focused suite proves pre-commit failure closure, same-version replay, revision-stale replacement, queue serialization and nonblocking Provider failure. The final six-suite illustration/coordinator run passed 57/57 with zero skips; `npm run typecheck`, the production build (including all three active Prompt publication gates) and `git diff --check` passed. Tests use real SQLite and persisted Change Set/Growth/Illustration records with a fake failing or pending image Gateway; no real Provider, Electron E2E, full suite or package run occurred.
+
 ### Task 24: Apply one visual style policy to every image purpose
 
 **Files:**
@@ -936,7 +938,7 @@ This matrix is the execution index. The detailed phase sections define files and
 | [x] | 20 | Previous output was too small because “world” had no enforced scale. | Default Growth creates world/cosmos, multiple macro regions/polities, physical systems, eras and interacting rules. | World-scale closure tests and a package skeleton fixture satisfying only real Domain rules. |
 | [x] | 21 | Short cards look complete to a model unless depth is executable. | Importance-aware maturity profiles expose missing OC/nation/organization/geography/species/story dimensions. | Boundary tests for core/major/supporting/background nodes and promotion. |
 | [x] | 22 | Self-inquiry is useful only when it selects causal gaps from evidence and stops looping. | Each round proposes 3–7 deduplicated questions, chooses one valuable gap and records affected nodes. | Evidence, ranking, dedupe, no-progress and genuine-user-choice tests. |
-| [ ] | 23 | Waiting until all text ends serializes image time and hides incremental growth. | Every eligible committed version creates an idempotent image queue item while text work continues. | Post-commit enqueue, revision-stale replacement, nonblocking failure and concurrency tests. |
+| [x] | 23 | Waiting until all text ends serializes image time and hides incremental growth. | Every eligible committed version creates an idempotent image queue item while text work continues. | Post-commit enqueue, revision-stale replacement, nonblocking failure and concurrency tests. |
 | [ ] | 24 | Separate image paths currently drift in style and maps can become photorealistic. | One default colored hand-drawn ink policy applies to maps, characters, scenes and details. | Purpose-specific prompt compilation and prohibited-style regression tests. |
 | [ ] | 25 | Image models need concise visual briefs derived from stable text, not raw drafts or invented facts. | Visual Director converts committed text/graph evidence into a source-bound brief; deterministic code adds style. | Provenance, no-invention, source-version and strict-output tests. |
 | [ ] | 26 | Growth currently appears as Steward operation rather than editorial collaboration. | User talks to World Director in Growth; Steward activity remains expandable operational detail. | IPC contract, route restoration, fail-closed and non-Growth regression tests. |

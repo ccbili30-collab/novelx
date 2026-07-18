@@ -238,6 +238,7 @@ export class GrowthCoordinator {
       return;
     }
     if (current?.status === "committed" && this.#activeCycleRuns.has(current.id)) return;
+    if (current?.status === "committed") this.#afterCommittedCycle(input, current);
     if (current?.status === "evaluated") {
       const outcome = input.repository.getClosureEvaluationOutcomeForCycle(current.id);
       if (!outcome) throw coordinatorError("GROWTH_CLOSURE_OUTCOME_MISSING");
@@ -389,6 +390,20 @@ export class GrowthCoordinator {
       throw coordinatorError("GROWTH_PLAN_EVENT_PERSISTENCE_FAILED");
     }
     return cycle;
+  }
+
+  #afterCommittedCycle(
+    input: { goal: GrowthGoal; context: GrowthWorkspaceContext },
+    cycle: GrowthCycle,
+  ): void {
+    try {
+      this.#illustrationService(input.context).ensureIncrementalForCommittedCycle({
+        goalId: input.goal.id,
+        cycleId: cycle.id,
+      }, input.context);
+    } catch {
+      // Illustration planning and Provider availability must never block committed text advancement.
+    }
   }
 
   #advanceCommittedRepair(

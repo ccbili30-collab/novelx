@@ -728,8 +728,12 @@ describe("GrowthCoordinator", () => {
       projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id,
     }).coordinatorStatus).toBe("completed"));
     expect(workers).toHaveLength(10);
-    const defaultIllustrations = repository.listIllustrationRequests(started.goal.id);
+    const allIllustrations = repository.listIllustrationRequests(started.goal.id);
+    const defaultIllustrations = allIllustrations.filter((request) => request.coverageMode === "default");
+    const incrementalIllustrations = allIllustrations.filter((request) => request.coverageMode === "custom");
     expect(defaultIllustrations).toHaveLength(1);
+    expect(incrementalIllustrations).toHaveLength(18);
+    expect(incrementalIllustrations.every((request) => request.itemCount === 1)).toBe(true);
     expect(defaultIllustrations[0]).toMatchObject({ coverageMode: "default", closureProfileId: expect.any(String) });
     const illustrationPurposes = repository.listIllustrationItems(defaultIllustrations[0]!.id).map((item) => item.purpose);
     expect(illustrationPurposes.filter((purpose) => purpose === "character_portrait")).toHaveLength(2);
@@ -740,11 +744,11 @@ describe("GrowthCoordinator", () => {
     expect(new GrowthPresentationProjector(setup.workspace).project({
       goalId: started.goal.id,
       checkpointId: cycles[9]!.inputCheckpointId,
-    }).illustrationRequests).toEqual([
+    }).illustrationRequests).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: defaultIllustrations[0]!.id, coverageMode: "default", itemCount: 15, readyCount: 0 }),
-    ]);
+    ]));
     coordinator.get({ projectId: setup.projectId, sessionId: setup.sessionId, goalId: started.goal.id });
-    expect(repository.listIllustrationRequests(started.goal.id)).toHaveLength(1);
+    expect(repository.listIllustrationRequests(started.goal.id)).toHaveLength(19);
     expect(repository.listIllustrationItems(defaultIllustrations[0]!.id)).toHaveLength(15);
     expect(setup.workspace.db.prepare("SELECT COUNT(*) AS count FROM image_generation_jobs").get()).toEqual({ count: 0 });
   });
