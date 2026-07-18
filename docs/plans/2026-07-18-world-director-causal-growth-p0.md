@@ -899,10 +899,12 @@ npm run package
 ### Task 31: Verify Provider profiles
 
 - [ ] Public text profile is `openai-compatible / 5.6luna` exactly.
-- [ ] Public image profile is the configured image-capable model.
-- [ ] Local State and encrypted profile copies match before isolated E2E.
-- [ ] No credential is decrypted, printed or copied into evidence.
-- [ ] If identity mismatches, fail before any Provider call.
+- [x] Public image profile is the configured image-capable model.
+- [x] Local State and encrypted profile copies match before isolated E2E.
+- [x] No credential is decrypted, printed or copied into evidence.
+- [x] If identity mismatches, fail before any Provider call.
+
+**Task 31 blocked evidence (2026-07-18):** the real interactive E2E now runs a pure-file preflight before creating its temporary project, copying stores or Local State, launching Electron, decrypting credentials or invoking either Provider. It strictly parses both encrypted envelopes, requires ciphertext presence, requires text identity `openai-compatible / 5.6luna`, requires an `openai-compatible-image` Responses image profile, and byte-compares the two source `Local State` files. The E2E then rechecks the public identities returned by the launched app against the preflight result. Three focused preflight/secure-store suites passed 13/13; `npm run typecheck` and `git diff --check` passed. The machine's active `novelx-desktop` stores are paired to the same present Local State and contain credentials, but their public identities are text `openai-compatible / gpt-5.4` and image `openai-compatible-image / gpt-image-2`; the only other known legacy text store is `deepseek-v4-flash`. Running the real E2E with the active stores failed in three seconds at `REAL_PROVIDER_MODEL_ID_MISMATCH`, before Electron launch and with worktree Electron residue zero. No credential, ciphertext, base URL or raw Local State content was printed or written to evidence. Task 31 and Task 32 remain incomplete until the user saves or supplies a machine-local encrypted `5.6luna` text profile paired with the image store's Local State; changing the user's Provider configuration is outside this verification task.
 
 ### Task 32: One real interactive dual-Provider Live
 

@@ -36,6 +36,7 @@ import {
   projectGrowthClosureSafeEvaluation,
   type GrowthClosureSafeEvaluation,
 } from "./support/growthClosureSafeEvidence";
+import { verifyRealProviderProfilePreflight } from "./support/realProviderProfilePreflight";
 
 const require = createRequire(import.meta.url);
 const electronPath = require("electron") as string;
@@ -48,10 +49,16 @@ const configuredProviderStorePath = process.env.NOVAX_REAL_E2E_PROVIDER_STORE?.t
 const configuredImageProviderStorePath = process.env.NOVAX_REAL_E2E_IMAGE_PROVIDER_STORE?.trim()
   || (process.env.APPDATA ? path.join(process.env.APPDATA, "novelx-desktop", IMAGE_PROVIDER_STORE_FILE_NAME) : "");
 
-test.skip(!configuredProviderStorePath || !configuredImageProviderStorePath || !fs.existsSync(configuredProviderStorePath) || !fs.existsSync(configuredImageProviderStorePath), "Machine-local encrypted gpt-5.4 and gpt-image-2 Provider stores are required.");
+test.skip(!configuredProviderStorePath || !configuredImageProviderStorePath || !fs.existsSync(configuredProviderStorePath) || !fs.existsSync(configuredImageProviderStorePath), "Machine-local encrypted 5.6luna and image Provider stores are required.");
 
-test("runs real gpt-5.4 interactive Growth through Closure, Longform, illustrations, reopen and later retrieval", async () => {
+test("runs real 5.6luna interactive Growth through Closure, Longform, illustrations, reopen and later retrieval", async () => {
   test.setTimeout(4_800_000);
+  const providerPreflight = verifyRealProviderProfilePreflight({
+    textStorePath: configuredProviderStorePath,
+    imageStorePath: configuredImageProviderStorePath,
+    expectedText: { providerId: "openai-compatible", modelId: "5.6luna" },
+    expectedImageProviderId: "openai-compatible-image",
+  });
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-real-interactive-growth-"));
   const userDataPath = path.join(root, "user-data");
   const workspacePath = path.join(root, "workspace");
@@ -76,10 +83,6 @@ test("runs real gpt-5.4 interactive Growth through Closure, Longform, illustrati
   fs.copyFileSync(configuredProviderStorePath, path.join(userDataPath, PROVIDER_STORE_FILE_NAME));
   fs.copyFileSync(configuredImageProviderStorePath, path.join(userDataPath, IMAGE_PROVIDER_STORE_FILE_NAME));
   const textLocalState = path.join(path.dirname(configuredProviderStorePath), "Local State");
-  const imageLocalState = path.join(path.dirname(configuredImageProviderStorePath), "Local State");
-  if (!fs.existsSync(textLocalState) || !fs.existsSync(imageLocalState)) throw new Error("REAL_PROVIDER_LOCAL_STATE_MISSING");
-  if (path.resolve(textLocalState) !== path.resolve(imageLocalState)
-    && !fs.readFileSync(textLocalState).equals(fs.readFileSync(imageLocalState))) throw new Error("REAL_PROVIDER_LOCAL_STATE_MISMATCH");
   fs.copyFileSync(textLocalState, path.join(userDataPath, "Local State"));
   initializeProject(userDataPath, workspacePath);
   evidence.initialGreenfield = captureInitialGreenfieldEligibility(workspacePath);
@@ -96,10 +99,13 @@ test("runs real gpt-5.4 interactive Growth through Closure, Longform, illustrati
     const page = await app.firstWindow();
     const provider = await providerStatus(page);
     evidence.provider = provider;
-    if (provider.modelId !== "gpt-5.4") throw new Error("REAL_PROVIDER_MODEL_ID_MISMATCH");
+    if (provider.providerId !== providerPreflight.text.providerId || provider.modelId !== providerPreflight.text.modelId) {
+      throw new Error("REAL_PROVIDER_MODEL_ID_MISMATCH");
+    }
     const imageProvider = await imageProviderStatus(page);
     evidence.imageProvider = imageProvider;
-    if (imageProvider.modelId !== "gpt-image-2") throw new Error("REAL_IMAGE_PROVIDER_MODEL_ID_MISMATCH");
+    if (imageProvider.providerId !== providerPreflight.image.providerId
+      || imageProvider.modelId !== providerPreflight.image.modelId) throw new Error("REAL_IMAGE_PROVIDER_MODEL_ID_MISMATCH");
 
     providerStarted = true;
     evidence.providerStarted = true;
