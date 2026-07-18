@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { agentCapabilityIdSchema } from "./agentCapabilityContract";
 
-export const growthPresentationCapabilityVersion = "growth-presentation-v1" as const;
+export const growthPresentationCapabilityVersion = "growth-presentation-v2" as const;
 
 const idSchema = z.string().trim().min(1).max(240);
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -141,6 +142,27 @@ const growthIllustrationRequestPresentationSchema = z.object({
   items: z.array(growthIllustrationItemPresentationSchema).max(10_000),
 }).strict();
 
+export const growthEditorialActivityKindSchema = z.enum([
+  "director_planning",
+  "employee_assigned",
+  "candidate_ready",
+  "checking",
+  "revision_requested",
+  "committed",
+  "image_queued",
+  "image_ready",
+  "image_failed",
+]);
+
+export const growthEditorialActivityEventSchema = z.object({
+  id: idSchema,
+  kind: growthEditorialActivityKindSchema,
+  actor: agentCapabilityIdSchema,
+  workOrderId: idSchema.nullable(),
+  safeSummary: z.string().trim().min(1).max(2_000).nullable(),
+  occurredAt: timestampSchema,
+}).strict();
+
 export const growthPresentationSnapshotSchema = z.object({
   capabilityVersion: z.literal(growthPresentationCapabilityVersion),
   goalId: idSchema,
@@ -152,6 +174,7 @@ export const growthPresentationSnapshotSchema = z.object({
   closures: z.array(growthClosurePresentationSchema).max(100),
   longform: growthLongformPresentationSchema,
   illustrationRequests: z.array(growthIllustrationRequestPresentationSchema).max(1_000),
+  activityEvents: z.array(growthEditorialActivityEventSchema).max(5_000),
 }).strict();
 
 export type GrowthPresentationInspectRequest = z.infer<typeof growthPresentationInspectRequestSchema>;

@@ -39,7 +39,7 @@ git diff --check
 
 ## 冻结边界
 
-- Renderer 只能经版本化 `growth-presentation-v1` 合同创建、取消和读取安全状态；不能看到 compiled Prompt、路径、hash、locator 或隐藏事实。
+- Renderer 只能经版本化 `growth-presentation-v2` 合同创建、取消和读取安全状态；不能看到 compiled Prompt、路径、hash、locator 或隐藏事实。
 - 单个 UI 请求最多 100 个变体是 IPC 消息边界，不是产品总预算；用户可以继续创建新 Request，队列仍按 20 项一批、并发 1 执行。
 - Provider 未配置或 Gateway 在 Job 前拒绝时，Item/Request 必须持久化为 failed，不能无限停留 planned，也不能生成本地替代图。
 - 不增加公开 IPC、数据库迁移、Provider 协议或产品数量上限。

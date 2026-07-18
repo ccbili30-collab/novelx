@@ -1,28 +1,14 @@
 import { Type } from "typebox";
 import { z } from "zod";
+import {
+  agentCapabilityIds,
+  agentCapabilityIdSchema,
+  type AgentCapabilityId,
+} from "./agentCapabilityContract";
+
+export { agentCapabilityIds, agentCapabilityIdSchema, type AgentCapabilityId } from "./agentCapabilityContract";
 
 export const growthEditorialContractVersion = "1.0.0" as const;
-
-export const agentCapabilityIds = [
-  "world_director",
-  "world_system_author",
-  "geography_ecology_author",
-  "civilization_author",
-  "organization_author",
-  "species_culture_author",
-  "character_author",
-  "story_architect",
-  "writer",
-  "general_setting_author",
-  "graph_curator",
-  "visual_director",
-  "checker",
-  "gm",
-  "decomposer",
-] as const;
-
-export const agentCapabilityIdSchema = z.enum(agentCapabilityIds);
-export type AgentCapabilityId = z.infer<typeof agentCapabilityIdSchema>;
 
 const boundedIdSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/);
 const persistedIdSchema = z.string().trim().min(1).max(240);

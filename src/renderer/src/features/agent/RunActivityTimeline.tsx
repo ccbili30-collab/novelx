@@ -1,6 +1,29 @@
 import type { AgentArtifact } from "../../../../shared/ipcContract";
 import { AgentArtifactList } from "./AgentArtifactList";
 import { growthDiagnosticSummary, growthEventSummary, type GrowthPresentation } from "./growthPresentation";
+import {
+  growthActivityActorLabel,
+  growthActivityKindLabel,
+  type EditorialActivityEvent,
+} from "../growth/growthEditorialPresentation";
+
+export function EditorialActivityTimeline({ events }: { events: EditorialActivityEvent[] }) {
+  if (events.length === 0) return null;
+  return (
+    <section className="growth-editorial-activity" aria-label="世界总编编辑进度">
+      <header><strong>世界总编编辑进度</strong><small>{events.length} 条记录</small></header>
+      <ol>
+        {events.slice(-20).map((event) => (
+          <li key={event.id} data-kind={event.kind}>
+            <span>{growthActivityActorLabel(event.actor)}</span>
+            <strong>{growthActivityKindLabel(event.kind)}</strong>
+            {event.safeSummary ? <small>{event.safeSummary}</small> : null}
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
 
 export function RunActivityTimeline(props: {
   presentation: GrowthPresentation;

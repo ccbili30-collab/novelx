@@ -116,6 +116,13 @@ export class GrowthEditorialRepository {
     return this.getRound(roundId) ? this.#requiredSnapshot(roundId) : null;
   }
 
+  listRoundSnapshotsForGoal(goalId: string): GrowthEditorialRoundSnapshot[] {
+    const rows = this.workspace.db.prepare(`
+      SELECT id FROM growth_editorial_rounds WHERE goal_id = ? ORDER BY created_at, id
+    `).all(goalId) as Row[];
+    return rows.map((row) => this.#requiredSnapshot(readString(row, "id")));
+  }
+
   unlockReadyWorkOrders(roundId: string): GrowthWorkOrder[] {
     return this.#transaction(() => {
       this.#requiredRound(roundId);

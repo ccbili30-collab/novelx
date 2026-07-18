@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { ChangeSetRepository } from "../../domain/changeSet/changeSetRepository";
+import { GrowthEditorialRepository } from "../../domain/growth/editorial/growthEditorialRepository";
 import { GrowthLongformProgressResolver } from "../../domain/growth/growthLongformProgress";
 import { GrowthRepository } from "../../domain/growth/growthRepository";
 import { ImageAssetRepository } from "../../domain/asset/imageAssetRepository";
@@ -35,6 +37,7 @@ export class GrowthPresentationProjector {
     const cycles = this.#growth.listCycles(goal.id);
     const current = cycles.at(-1) ?? null;
     const currentRuleRevision = this.#growth.getRuleRevision(goal.id, goal.currentRuleRevision);
+    const illustrationRequests = this.#illustrations(goal.id, visible, input.checkpointId);
 
     return growthPresentationSnapshotSchema.parse({
       capabilityVersion: growthPresentationCapabilityVersion,
@@ -51,8 +54,117 @@ export class GrowthPresentationProjector {
         .map((event) => event.safeSummary),
       closures: this.#closures(goal.id, visible),
       longform: this.#longform(goal.id, input.checkpointId, visible),
-      illustrationRequests: this.#illustrations(goal.id, visible, input.checkpointId),
+      illustrationRequests,
+      activityEvents: this.#activityEvents(goal.id, illustrationRequests),
     });
+  }
+
+  #activityEvents(
+    goalId: string,
+    illustrationRequests: GrowthPresentationSnapshot["illustrationRequests"],
+  ): GrowthPresentationSnapshot["activityEvents"] {
+    const events: GrowthPresentationSnapshot["activityEvents"] = [];
+    const editorial = new GrowthEditorialRepository(this.workspace);
+    for (const snapshot of editorial.listRoundSnapshotsForGoal(goalId)) {
+      events.push(activityEvent({
+        identity: [snapshot.round.id, "planning"],
+        kind: "director_planning",
+        actor: "world_director",
+        workOrderId: null,
+        safeSummary: `世界总编已安排 ${snapshot.workOrders.length} 项工作。`,
+        occurredAt: snapshot.round.createdAt,
+      }));
+      for (const order of snapshot.workOrders) {
+        const attempts = snapshot.attempts.filter((attempt) => attempt.workOrderId === order.id);
+        events.push(activityEvent({
+          identity: [snapshot.round.id, order.id, "assigned", "initial"],
+          kind: "employee_assigned",
+          actor: order.capability,
+          workOrderId: order.id,
+          safeSummary: null,
+          occurredAt: order.createdAt,
+        }));
+        for (const attempt of attempts.filter((candidate) => candidate.attemptNumber > 1)) {
+          events.push(activityEvent({
+            identity: [snapshot.round.id, order.id, "assigned", String(attempt.attemptNumber)],
+            kind: "employee_assigned",
+            actor: attempt.capability,
+            workOrderId: order.id,
+            safeSummary: null,
+            occurredAt: attempt.createdAt,
+          }));
+        }
+        for (const attempt of attempts) {
+          const candidateAt = snapshot.artifacts
+            .filter((artifact) => artifact.attemptId === attempt.id
+              && artifact.kind !== "checker_review" && artifact.kind !== "director_review")
+            .map((artifact) => artifact.createdAt)
+            .sort()[0];
+          if (attempt.outputSha256 && candidateAt) {
+            events.push(activityEvent({
+              identity: [snapshot.round.id, order.id, attempt.id, "candidate"],
+              kind: "candidate_ready",
+              actor: attempt.capability,
+              workOrderId: order.id,
+              safeSummary: null,
+              occurredAt: candidateAt,
+            }));
+          }
+        }
+        for (const review of snapshot.reviews.filter((candidate) => candidate.workOrderId === order.id)) {
+          events.push(activityEvent({
+            identity: [snapshot.round.id, order.id, review.id, "checking"],
+            kind: "checking",
+            actor: review.reviewerKind === "checker" ? "checker" : "world_director",
+            workOrderId: order.id,
+            safeSummary: review.safeSummary,
+            occurredAt: review.createdAt,
+          }));
+          if (review.reviewerKind === "director" && review.decision === "revise") {
+            events.push(activityEvent({
+              identity: [snapshot.round.id, order.id, review.id, "revision"],
+              kind: "revision_requested",
+              actor: order.capability,
+              workOrderId: order.id,
+              safeSummary: review.safeSummary,
+              occurredAt: review.createdAt,
+            }));
+          }
+        }
+        if (order.status === "committed") {
+          events.push(activityEvent({
+            identity: [snapshot.round.id, order.id, "committed"],
+            kind: "committed",
+            actor: "world_director",
+            workOrderId: order.id,
+            safeSummary: null,
+            occurredAt: order.updatedAt,
+          }));
+        }
+      }
+    }
+    for (const request of illustrationRequests) {
+      for (const item of request.items) {
+        const kind = item.status === "ready" ? "image_ready"
+          : item.status === "failed" ? "image_failed"
+            : item.status === "queued" || item.status === "running" ? "image_queued"
+              : null;
+        if (!kind) continue;
+        events.push(activityEvent({
+          identity: [request.id, item.id, kind],
+          kind,
+          actor: "visual_director",
+          workOrderId: null,
+          safeSummary: item.title,
+          occurredAt: item.updatedAt,
+        }));
+      }
+    }
+    return events
+      .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt)
+        || activityKindOrder(left.kind) - activityKindOrder(right.kind)
+        || left.id.localeCompare(right.id))
+      .slice(-5_000);
   }
 
   #impacts(cycles: ReturnType<GrowthRepository["listCycles"]>) {
@@ -127,7 +239,11 @@ export class GrowthPresentationProjector {
     };
   }
 
-  #illustrations(goalId: string, visible: Map<string, ResourceRecord>, checkpointId: string) {
+  #illustrations(
+    goalId: string,
+    visible: Map<string, ResourceRecord>,
+    checkpointId: string,
+  ): GrowthPresentationSnapshot["illustrationRequests"] {
     return this.#growth.listIllustrationRequests(goalId).slice(-1_000).map((request) => ({
       id: request.id,
       status: request.status,
@@ -149,7 +265,7 @@ export class GrowthPresentationProjector {
         return {
           id: item.id,
           requestId: item.requestId,
-          purpose: item.purpose,
+          purpose: presentationImagePurpose(item.purpose),
           title: item.title,
           variantKey: item.variantKey,
           status,
@@ -202,12 +318,49 @@ function boundedExcerpt(value: string): string {
   return Array.from(value).slice(0, 1_000).join("");
 }
 
+function activityEvent(input: {
+  identity: string[];
+  kind: GrowthPresentationSnapshot["activityEvents"][number]["kind"];
+  actor: GrowthPresentationSnapshot["activityEvents"][number]["actor"];
+  workOrderId: string | null;
+  safeSummary: string | null;
+  occurredAt: string;
+}): GrowthPresentationSnapshot["activityEvents"][number] {
+  return {
+    id: `growth-activity-${createHash("sha256").update(JSON.stringify(input.identity)).digest("hex").slice(0, 32)}`,
+    kind: input.kind,
+    actor: input.actor,
+    workOrderId: input.workOrderId,
+    safeSummary: input.safeSummary,
+    occurredAt: input.occurredAt,
+  };
+}
+
+function activityKindOrder(kind: GrowthPresentationSnapshot["activityEvents"][number]["kind"]): number {
+  return ({
+    director_planning: 0,
+    employee_assigned: 1,
+    candidate_ready: 2,
+    checking: 3,
+    revision_requested: 4,
+    committed: 5,
+    image_queued: 6,
+    image_ready: 7,
+    image_failed: 8,
+  })[kind];
+}
+
 function presentationClosureKind(kind: string): "world" | "story" | "oc" | "mixed" {
   if (kind === "world_birth") return "world";
   if (kind === "story_universe") return "story";
   if (kind === "oc_saga") return "oc";
   if (kind === "mixed_birth") return "mixed";
   throw presentationError("GROWTH_PRESENTATION_CLOSURE_KIND_INVALID");
+}
+
+function presentationImagePurpose(value: string): "character_portrait" | "scene" | "world_map" {
+  if (value === "character_portrait" || value === "scene" || value === "world_map") return value;
+  throw presentationError("GROWTH_PRESENTATION_IMAGE_PURPOSE_INVALID");
 }
 
 function presentationError(code: string): Error & { code: string } {

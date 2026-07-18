@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
+import { GrowthEditorialRepository } from "../../src/domain/growth/editorial/growthEditorialRepository";
 import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
 import { SemanticGraphService } from "../../src/domain/graph/semanticGraphService";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
@@ -30,6 +31,7 @@ describe("Growth presentation and manual Illustration application", () => {
       checkpointId: setup.checkpointId, ruleRevision: 1,
       facets: [{ id: "history", kind: "content", required: true }],
     });
+    createCommittedEditorialHistory(setup.workspace, setup.goalId, setup.checkpointId);
     service.create({
       projectId: "project-1", sessionId: "session-1", goalId: setup.goalId, requestId: "manual-request-1",
       target: { kind: "resource", resourceId: setup.worldId }, purpose: "scene", title: "潮汐港风貌",
@@ -40,7 +42,7 @@ describe("Growth presentation and manual Illustration application", () => {
     expect(gateway.generateImage).toHaveBeenCalledTimes(2);
     const snapshot = new GrowthPresentationProjector(setup.workspace).project({ goalId: setup.goalId, checkpointId: setup.checkpointId });
     expect(snapshot).toMatchObject({
-      capabilityVersion: "growth-presentation-v1",
+      capabilityVersion: "growth-presentation-v2",
       goalId: setup.goalId,
       longform: { status: "unavailable" },
       closures: [{ profileId: "closure-world", profileKind: "world", contentState: "growing", missingCount: 1 }],
@@ -53,6 +55,14 @@ describe("Growth presentation and manual Illustration application", () => {
       }],
     });
     expect(JSON.stringify(snapshot)).not.toMatch(/secret|prompt|locator|relativePath|apiKey/i);
+    expect(snapshot.activityEvents.map((event) => event.kind)).toEqual([
+      "director_planning", "employee_assigned", "candidate_ready", "checking", "checking",
+      "revision_requested", "employee_assigned", "candidate_ready", "checking", "checking", "committed",
+      "image_failed", "image_failed",
+    ]);
+    expect(snapshot.activityEvents.find((event) => event.kind === "revision_requested")?.safeSummary)
+      .toBe("补足潮汐制度与港口冲突的因果桥梁。");
+    expect(JSON.stringify(snapshot.activityEvents)).not.toMatch(/secret-store|@evidence|provider-config|prompt-profile|outputSha256/i);
 
     service.create({
       projectId: "project-1", sessionId: "session-1", goalId: setup.goalId, requestId: "manual-request-1",
@@ -168,4 +178,61 @@ function createSetup() {
     workspace, checkpointId, goalId: goal.id, worldId: world.resourceId,
     context: { checkpointId, branchId: branch.id, authorizedScopeResourceIds: [worldRoot.id] },
   };
+}
+
+function createCommittedEditorialHistory(workspace: WorkspaceDatabase, goalId: string, checkpointId: string) {
+  const repository = new GrowthEditorialRepository(workspace);
+  repository.createRound({
+    id: "round-presentation", goalId, sourceCheckpointId: checkpointId, ruleRevision: 1,
+    idempotencyKey: "round-presentation-key",
+    workOrders: [{
+      id: "tidal-system", objective: "构建潮汐制度。", sourceCheckpointId: checkpointId,
+      scopeRefs: ["@resource1"], capability: "world_system_author",
+      acceptanceFacets: [{ id: "causal-bridge", description: "制度必须产生可追踪后果。", required: true }],
+      dependencies: [],
+    }],
+  });
+  const sha = (character: string) => character.repeat(64);
+  const start = (id: string, key: string) => repository.startAttempt({
+    id, workOrderId: "tidal-system", idempotencyKey: key, sourceCheckpointId: checkpointId, ruleRevision: 1,
+    capability: "world_system_author",
+    capabilityProfile: { id: "world-system", version: "1", sha256: sha("a") },
+    prompt: { id: "secret-prompt-profile", version: "1", sha256: sha("b") },
+    model: { providerId: "secret-provider", modelId: "secret-model", providerConfigSha256: sha("c") },
+  });
+  const first = start("attempt-presentation-1", "attempt-presentation-key-1");
+  repository.recordCandidate({
+    attemptId: first.id, outputSha256: sha("d"),
+    artifacts: [{ kind: "content_artifact", ordinal: 0, storeRef: "secret-store/candidate-one.json", contentSha256: sha("e") }],
+  });
+  repository.beginReview(first.id);
+  repository.recordReview({
+    id: "review-checker-1", attemptId: first.id, reviewerKind: "checker", decision: "passed",
+    safeSummary: "来源绑定完整。", evidenceRefs: ["@evidence1"], artifactRef: "secret-store/checker-one.json",
+    artifactSha256: sha("f"), idempotencyKey: "review-checker-key-1",
+  });
+  repository.recordReview({
+    id: "review-director-1", attemptId: first.id, reviewerKind: "director", decision: "revise",
+    safeSummary: "补足潮汐制度与港口冲突的因果桥梁。", evidenceRefs: ["@evidence2"], artifactRef: "secret-store/director-one.json",
+    artifactSha256: sha("1"), idempotencyKey: "review-director-key-1",
+  });
+  const second = start("attempt-presentation-2", "attempt-presentation-key-2");
+  repository.recordCandidate({
+    attemptId: second.id, outputSha256: sha("2"),
+    artifacts: [{ kind: "content_artifact", ordinal: 0, storeRef: "secret-store/candidate-two.json", contentSha256: sha("3") }],
+  });
+  repository.beginReview(second.id);
+  repository.recordReview({
+    id: "review-checker-2", attemptId: second.id, reviewerKind: "checker", decision: "passed",
+    safeSummary: "因果桥梁已闭合。", evidenceRefs: ["@evidence3"], artifactRef: "secret-store/checker-two.json",
+    artifactSha256: sha("4"), idempotencyKey: "review-checker-key-2",
+  });
+  repository.recordReview({
+    id: "review-director-2", attemptId: second.id, reviewerKind: "director", decision: "accept",
+    safeSummary: "总编接受候选。", evidenceRefs: ["@evidence4"], artifactRef: "secret-store/director-two.json",
+    artifactSha256: sha("5"), idempotencyKey: "review-director-key-2",
+  });
+  repository.queueCommit("tidal-system");
+  repository.markCommitRequested("tidal-system");
+  repository.markCommitted("tidal-system");
 }

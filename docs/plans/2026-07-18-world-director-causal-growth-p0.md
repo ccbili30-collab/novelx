@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task.
 
-> **当前状态（2026-07-18）：** 已验证 Task 1–26；当前执行入口为 Phase J / Task 27：安全投影编辑工作与因果生长。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
+> **当前状态（2026-07-18）：** 已验证 Task 1–27；当前执行入口为 Phase K / Task 28：分类编辑故障并接入既有安全诊断边界。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
 
 这份计划回答三个问题：为什么 NovelX 不能继续依赖一个模型包办所有工作；为什么“因果关系”必须成为图谱和调度的核心；最终用户、评委和后续编码 Agent 分别会得到什么。代码优化的首要目标不是方便人类阅读，而是降低 AI 修改所需上下文、缩小变更影响半径并让每个失败直接定位到唯一责任模块。
 
@@ -843,6 +843,8 @@ unknown side effect -> reconciliation_required
 - Create/modify: projection, component and Electron E2E tests
 
 **Safe events:** Director planning, employee assigned, candidate ready, checking, revision requested, committed, image queued/ready/failed. No raw thoughts, Prompt, candidate JSON, credentials or hidden evidence.
+
+**Task 27 evidence (2026-07-18):** `growth-presentation-v2` now adds one strict, bounded activity stream reconstructed in Main from persisted Editorial Round, Work Order, attempt, candidate Artifact metadata, explicitly safe review summaries, committed order state and current illustration queue/item state. The public event union is closed to Director planning, employee assignment, candidate ready, checking, revision requested, committed and image queued/ready/failed; each event contains only a stable public identity, fixed capability actor, optional Work Order identity, nullable `safeSummary` and timestamp. It never projects objectives, scope refs, checkpoints, model/provider identity, Prompt identity or text, output hashes, candidate/review store refs, raw JSON or evidence refs. The single capability roster was split into a minimal Zod-only authority module and re-exported by the TypeBox editorial contract after Electron validation caught that importing the full contract would leave an unavailable `typebox` dependency in sandboxed Preload; no duplicate roster or compatibility shim remains. Renderer shows editorial activity as a compact World Director layer outside the collapsed Steward operations, the current-work pane shows the latest editorial step plus committed assertion/relation counts, and the graph toolbar shows causal-growth count and the latest Graph Curator/Checker/commit activity. Nine targeted unit files passed 89/89 with zero skips; three Electron E2E scenarios passed 3/3 and cover the visible Director activity, latest repair in current work, graph causal status, fail-closed Provider absence and absence of hidden evidence text. `npm run typecheck`, the production build with all three active Prompt publication gates, a final `electron-vite` build, `git diff --check` and 1440×900 visual inspection passed. The projector test uses real SQLite editorial/image repositories, while the UI activity E2E uses a strict projection Fixture; no real Provider, full suite, package or world-package export ran. Image activity represents the current persisted item state rather than an append-only image event history; crash/restart truthfulness remains Task 29.
 
 ## 15. Phase K — Failure, Recovery and Diagnostics
 

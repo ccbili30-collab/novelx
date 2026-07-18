@@ -5,9 +5,9 @@ const viewsModulePath = "../../src/renderer/src/features/growth/growthPresentati
 
 function snapshot(overrides: Partial<GrowthPresentationSnapshot> = {}): GrowthPresentationSnapshot {
   return {
-    capabilityVersion: "growth-presentation-v1", goalId: "goal-1", currentRuleRevision: 1,
+    capabilityVersion: "growth-presentation-v2", goalId: "goal-1", currentRuleRevision: 1,
     activeCycleRuleRevision: 1, guidanceStatus: "none", impacts: [], inquirySummaries: [], closures: [],
-    longform: { status: "unavailable" }, illustrationRequests: [], ...overrides,
+    longform: { status: "unavailable" }, illustrationRequests: [], activityEvents: [], ...overrides,
   };
 }
 

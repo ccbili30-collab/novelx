@@ -6,13 +6,14 @@ const viewsModulePath = "../../src/renderer/src/features/growth/growthPresentati
 function snapshot(): GrowthPresentationSnapshot {
   const now = "2026-07-16T00:00:00.000Z";
   return {
-    capabilityVersion: "growth-presentation-v1", goalId: "goal-1", currentRuleRevision: 2,
+    capabilityVersion: "growth-presentation-v2", goalId: "goal-1", currentRuleRevision: 2,
     activeCycleRuleRevision: 2, guidanceStatus: "applied",
     impacts: [
       { cycleId: "cycle-1", sequence: 1, durableState: "committed", resourceCount: 2, documentCount: 1, assertionCount: 3, relationCount: 4 },
       { cycleId: "cycle-2", sequence: 2, durableState: "running", resourceCount: 99, documentCount: 99, assertionCount: 99, relationCount: 99 },
     ],
     inquirySummaries: ["正在推演潮汐魔法对港口贸易的影响。"], closures: [], longform: { status: "unavailable" },
+    activityEvents: [],
     illustrationRequests: [{ id: "request-1", status: "running", coverageMode: "custom", itemCount: 2, readyCount: 1, createdAt: now, updatedAt: now, items: [
       { id: "failed", requestId: "request-1", purpose: "scene", title: "失败图", variantKey: "v1", status: "failed", source: { kind: "resource", sourceResourceId: "world-1", label: "潮汐世界", excerpt: null }, imageJobId: "job-1", assetId: null, thumbnailUrl: null, mimeType: null, width: null, height: null, createdAt: now, updatedAt: now },
       { id: "ready", requestId: "request-1", purpose: "scene", title: "港口", variantKey: "v2", status: "ready", source: { kind: "resource", sourceResourceId: "world-1", label: "潮汐世界", excerpt: null }, imageJobId: "job-2", assetId: "asset-2", thumbnailUrl: "novax-asset://image/asset-2", mimeType: "image/png", width: 1024, height: 1024, createdAt: now, updatedAt: "2026-07-16T00:00:01.000Z" },

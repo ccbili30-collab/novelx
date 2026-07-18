@@ -126,7 +126,7 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
         state.__growthInspectFirstCompleted = true;
       }
       return {
-        capabilityVersion: "growth-presentation-v1",
+        capabilityVersion: "growth-presentation-v2",
         goalId: request.goalId,
         currentRuleRevision: 1,
         activeCycleRuleRevision: 1,
@@ -136,6 +136,12 @@ async function installGrowthGuidanceMock(app: ElectronApplication) {
         closures: [],
         longform: { status: "unavailable" },
         illustrationRequests: [],
+        activityEvents: [
+          { id: "activity-plan", kind: "director_planning", actor: "world_director", workOrderId: null, safeSummary: "世界总编已安排 2 项工作。", occurredAt: "2026-07-18T08:00:00.000Z" },
+          { id: "activity-assigned", kind: "employee_assigned", actor: "graph_curator", workOrderId: "order-graph", safeSummary: null, occurredAt: "2026-07-18T08:00:01.000Z" },
+          { id: "activity-check", kind: "checking", actor: "checker", workOrderId: "order-graph", safeSummary: "因果桥梁需要补足。", occurredAt: "2026-07-18T08:00:02.000Z" },
+          { id: "activity-revision", kind: "revision_requested", actor: "graph_curator", workOrderId: "order-graph", safeSummary: "补足制度影响港口冲突的中间机制。", occurredAt: "2026-07-18T08:00:03.000Z" },
+        ],
       };
     });
   });
@@ -333,6 +339,11 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
     const guidance = page.getByRole("textbox", { name: "追加世界规则或指导" });
     const save = page.getByRole("button", { name: "保存规则修订" });
     await expect(guidance).toBeEnabled({ timeout: 8_000 });
+    await expect(page.getByLabel("世界总编编辑进度")).toContainText("图谱策展人");
+    await expect(page.getByLabel("世界总编编辑进度")).toContainText("要求返修");
+    await expect(page.getByLabel("当前编辑工作")).toContainText("补足制度影响港口冲突的中间机制。");
+    await expect(page.locator("body")).not.toContainText("@evidence");
+    await page.screenshot({ path: "test-results/novax-growth-editorial-activity-1440x900.png", fullPage: true });
     await expect(composer).toBeDisabled();
     await guidance.fill("港口钟声必须服从双月潮汐");
     await save.click();
@@ -407,6 +418,10 @@ test("persists cycle-boundary guidance without Provider calls or renderer rule s
     await expect(page.getByRole("textbox", { name: "追加世界规则或指导" })).toHaveCount(0, { timeout: 8_000 });
     await expect(page.getByText("规则修订状态不可用，无法安全保存指导。", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Growth 规则修订")).toHaveCount(0);
+    await page.getByRole("radio", { name: "IDE 模式", exact: true }).click();
+    await page.getByRole("treeitem", { name: /^图谱 0$/ }).click();
+    await expect(page.getByLabel("因果生长状态")).toContainText("图谱策展人 · 要求返修", { timeout: 8_000 });
+    await expect(page.getByLabel("因果生长状态")).toContainText("0 条因果关系");
   } finally {
     if (app) await app.close();
     fs.rmSync(root, { recursive: true, force: true });

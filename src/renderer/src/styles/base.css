@@ -624,6 +624,11 @@ button { letter-spacing: 0; }
 .run-work-target-pane > header strong { color: var(--novax-color-text-strong); font-size: 12px; }
 .run-work-target-pane > header small, .run-work-target-pane__target small { color: var(--novax-color-text-faint); font-size: 10px; }
 .run-work-target-pane__summary { color: var(--novax-color-text) !important; }
+.run-work-target-pane__editorial { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 6px; padding: 7px 8px; border-left: 2px solid var(--novax-color-accent); background: var(--novax-color-surface-control); font-size: 10px; }
+.run-work-target-pane__editorial > span { color: var(--novax-color-accent); }
+.run-work-target-pane__editorial > strong { color: var(--novax-color-text); }
+.run-work-target-pane__editorial > small { grid-column: 1 / -1; color: var(--novax-color-text-subtle); line-height: 1.45; }
+.run-work-target-pane__causal { color: var(--novax-color-text-subtle); font-size: 9px; }
 .run-work-target-pane__revisions { display: grid; gap: 3px; padding: 7px 8px; border: 1px solid var(--novax-color-border-control); border-radius: 5px; background: var(--novax-color-surface-control); color: var(--novax-color-text-subtle); font-size: 9px; }
 .run-work-target-pane__revisions span:last-child { color: var(--novax-color-accent); }
 .run-work-target-pane__target { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 6px; min-width: 0; padding: 7px 8px; border: 1px solid var(--novax-color-border-control); border-radius: 5px; background: var(--novax-color-surface-control); }
@@ -643,6 +648,14 @@ button { letter-spacing: 0; }
 .run-work-target-pane footer { color: var(--novax-color-danger-strong); font-size: 10px; }
 
 .growth-timeline { display: grid; gap: 6px; margin: 8px 10px 12px; padding: 9px; border: 1px solid var(--novax-color-border-control); border-radius: 6px; background: color-mix(in srgb, var(--novax-color-conversation) 70%, var(--paper)); animation: growth-reveal 220ms ease-out; }
+.growth-editorial-activity { display: grid; gap: 7px; padding: 8px 10px; border-left: 2px solid var(--novax-color-accent); background: color-mix(in srgb, var(--novax-color-conversation) 82%, var(--paper)); }
+.growth-editorial-activity > header { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; }
+.growth-editorial-activity > header small { color: var(--novax-color-text-subtle); }
+.growth-editorial-activity ol { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.growth-editorial-activity li { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: baseline; gap: 6px; font-size: 10px; }
+.growth-editorial-activity li > span { color: var(--novax-color-accent); }
+.growth-editorial-activity li > strong { color: var(--novax-color-text); font-weight: 620; }
+.growth-editorial-activity li > small { overflow: hidden; color: var(--novax-color-text-subtle); text-overflow: ellipsis; white-space: nowrap; }
 .growth-timeline > header { display: flex; justify-content: space-between; gap: 8px; color: var(--novax-color-text-subtle); font-size: 10px; }
 .growth-timeline > header span { color: var(--novax-color-text-strong); font-weight: 650; }
 .growth-timeline__rows { display: grid; gap: 3px; }
@@ -999,6 +1012,8 @@ button { letter-spacing: 0; }
 .graph-kind-filter button { height: 24px; padding: 0 8px; border: 0; border-radius: 3px; background: transparent; color: var(--novax-color-text-subtle); font-size: 10px; cursor: pointer; }
 .graph-kind-filter button[data-selected="true"] { background: var(--novax-color-surface-control); color: var(--novax-color-text-strong); box-shadow: 0 1px 2px var(--novax-color-shadow); }
 .graph-toolbar select { flex: none; height: 28px; max-width: 140px; border: 1px solid var(--novax-color-border-control); border-radius: 5px; outline: 0; background: var(--novax-color-surface-control); color: var(--novax-color-text-subtle); font-size: 10px; }
+.graph-growth-status { display: flex; flex: none; align-items: baseline; gap: 5px; margin-left: auto; color: var(--novax-color-accent); font-size: 9px; }
+.graph-growth-status small { color: var(--novax-color-text-subtle); }
 .graph-toggle { display: flex; align-items: center; gap: 4px; flex: none; color: var(--novax-color-text-subtle); font-size: 10px; white-space: nowrap; }
 .graph-toggle input { accent-color: var(--accent); }
 .graph-lens { flex: none; margin-left: auto; color: var(--accent); font-size: 10px; font-weight: 650; white-space: nowrap; }

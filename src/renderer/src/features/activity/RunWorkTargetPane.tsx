@@ -1,9 +1,12 @@
 import type { AgentArtifact, WorkspaceSnapshot } from "../../../../shared/ipcContract";
+import type { GrowthPresentationSnapshot } from "../../../../shared/growthPresentationContract";
 import { getGrowthWorldMapDisplay, type GrowthPresentation } from "../agent/growthPresentation";
+import { growthActivityActorLabel, growthActivityKindLabel } from "../growth/growthEditorialPresentation";
 import { FailedImagePlaceholder } from "../assets/FailedImagePlaceholder";
 
 export function RunWorkTargetPane(props: {
   presentation: GrowthPresentation | null;
+  details: GrowthPresentationSnapshot | null;
   artifacts: AgentArtifact[];
   workspace: WorkspaceSnapshot | null;
   onOpenResource(resourceId: string): Promise<void>;
@@ -24,6 +27,11 @@ export function RunWorkTargetPane(props: {
   const uniqueDomains = [...new Set(domains)];
   const worldMap = getGrowthWorldMapDisplay(props.artifacts);
   const worldMapArtifact = worldMap.artifact;
+  const latestEditorialActivity = props.details?.activityEvents.at(-1) ?? null;
+  const causalImpact = (props.details?.impacts ?? []).reduce((total, impact) => ({
+    assertions: total.assertions + impact.assertionCount,
+    relations: total.relations + impact.relationCount,
+  }), { assertions: 0, relations: 0 });
 
   return (
     <section className="run-work-target-pane" aria-label="当前创作">
@@ -34,6 +42,18 @@ export function RunWorkTargetPane(props: {
             <small>{phaseLabel(event?.phase, current?.durableState)}</small>
           </header>
           <p className="run-work-target-pane__summary">{current?.summary ?? props.presentation.terminalLabel ?? "等待 Main 安排"}</p>
+          {latestEditorialActivity ? (
+            <div className="run-work-target-pane__editorial" aria-label="当前编辑工作">
+              <span>{growthActivityActorLabel(latestEditorialActivity.actor)}</span>
+              <strong>{growthActivityKindLabel(latestEditorialActivity.kind)}</strong>
+              {latestEditorialActivity.safeSummary ? <small>{latestEditorialActivity.safeSummary}</small> : null}
+            </div>
+          ) : null}
+          {causalImpact.assertions > 0 || causalImpact.relations > 0 ? (
+            <div className="run-work-target-pane__causal" aria-label="因果生长进度">
+              已提交 {causalImpact.relations} 条因果关系 · {causalImpact.assertions} 条断言
+            </div>
+          ) : null}
           {props.presentation.guidance ? (
             <div className="run-work-target-pane__revisions" aria-label="Growth 规则修订">
               <span>当前轮使用 #{props.presentation.guidance.activeRevision}</span>

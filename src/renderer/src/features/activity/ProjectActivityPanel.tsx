@@ -75,6 +75,7 @@ export function ProjectActivityPanel(props: ProjectActivityPanelProps) {
         <summary><ChevronRight size={14} /><span>当前创作</span></summary>
         <RunWorkTargetPane
           presentation={props.growthPresentation}
+          details={props.growthDetails}
           artifacts={props.growthArtifacts}
           workspace={props.workspace}
           onOpenResource={props.onOpenResource}

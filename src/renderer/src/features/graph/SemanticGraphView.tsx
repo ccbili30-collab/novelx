@@ -18,6 +18,8 @@ import {
 import "@xyflow/react/dist/style.css";
 import { AlertTriangle, Focus, LoaderCircle, Search, Share2 } from "lucide-react";
 import type { SemanticGraphInspector, SemanticGraphSnapshot } from "../../../../shared/ipcContract";
+import type { GrowthPresentationSnapshot } from "../../../../shared/growthPresentationContract";
+import { growthActivityActorLabel, growthActivityKindLabel } from "../growth/growthEditorialPresentation";
 import { semanticGraphEdgeStyle } from "../../../../shared/semanticGraphEdgeStyle";
 
 type GraphNodeRecord = SemanticGraphSnapshot["nodes"][number];
@@ -34,11 +36,13 @@ export function SemanticGraphView({
   snapshot: suppliedSnapshot,
   scopeResourceIds,
   embedded = false,
+  growthDetails,
 }: {
   refreshKey: number;
   snapshot?: SemanticGraphSnapshot;
   scopeResourceIds?: string[];
   embedded?: boolean;
+  growthDetails?: GrowthPresentationSnapshot | null;
 }) {
   const [snapshot, setSnapshot] = useState<SemanticGraphSnapshot | null>(null);
   const [inspector, setInspector] = useState<SemanticGraphInspector | null>(null);
@@ -50,6 +54,7 @@ export function SemanticGraphView({
   const [focusNeighborhood, setFocusNeighborhood] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inspectorLoading, setInspectorLoading] = useState(false);
+  const causalGrowth = summarizeCausalGrowth(growthDetails);
 
   useEffect(() => {
     let active = true;
@@ -140,6 +145,12 @@ export function SemanticGraphView({
         <label className="graph-toggle"><input type="checkbox" checked={conflictsOnly} onChange={(event) => setConflictsOnly(event.target.checked)} />仅冲突</label>
         <label className="graph-toggle"><input type="checkbox" checked={focusNeighborhood} onChange={(event) => setFocusNeighborhood(event.target.checked)} /><Focus size={13} aria-hidden="true" />邻域</label>
         <span className="graph-lens">{snapshot.lens.label}</span>
+        {causalGrowth ? (
+          <span className="graph-growth-status" aria-label="因果生长状态">
+            <strong>{causalGrowth.relationCount} 条因果关系</strong>
+            <small>{causalGrowth.latestLabel}</small>
+          </span>
+        ) : null}
       </header>
 
       <div className="semantic-graph-layout">
@@ -166,6 +177,21 @@ export function SemanticGraphView({
       </div>
     </article>
   );
+}
+
+export function summarizeCausalGrowth(snapshot: GrowthPresentationSnapshot | null | undefined) {
+  if (!snapshot) return null;
+  const relationCount = snapshot.impacts.reduce((total, impact) => total + impact.relationCount, 0);
+  const relevant = [...snapshot.activityEvents].reverse().find((event) => (
+    event.actor === "graph_curator" || event.actor === "checker" || event.kind === "committed"
+  ));
+  if (relationCount === 0 && !relevant) return null;
+  return {
+    relationCount,
+    latestLabel: relevant
+      ? `${growthActivityActorLabel(relevant.actor)} · ${growthActivityKindLabel(relevant.kind)}`
+      : "等待图谱策展",
+  };
 }
 
 function FlowCanvas(props: {

@@ -866,7 +866,7 @@ export function App() {
             {selectedChangeSetId ? (
               <ChangeSetWorkbench changeSetId={selectedChangeSetId} onChanged={() => setChangeSetRefreshKey((value) => value + 1)} onCommitted={handleCommittedChangeSet} />
             ) : selectedDomain === "graph" || selectedResource?.type === "graph" ? (
-              <Suspense fallback={<div className="graph-loading"><LoaderCircle size={18} aria-hidden="true" />正在载入图谱</div>}><SemanticGraphView refreshKey={committedWorkspaceRefreshKey} /></Suspense>
+              <Suspense fallback={<div className="graph-loading"><LoaderCircle size={18} aria-hidden="true" />正在载入图谱</div>}><SemanticGraphView refreshKey={committedWorkspaceRefreshKey} growthDetails={growthDetails} /></Suspense>
             ) : selectedDomain === "asset" || selectedResource?.type === "asset" ? (
               <div className="empty-state"><Image size={28} strokeWidth={1.4} aria-hidden="true" /><h1>视觉资产</h1><button type="button" onClick={() => setMode("showcase")}>打开作品预览</button></div>
             ) : selectedResource ? (

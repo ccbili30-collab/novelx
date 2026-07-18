@@ -15,7 +15,7 @@ import { GrowthImpactSummary } from "../growth/GrowthImpactSummary";
 import { PendingChangeSets } from "../change-set/PendingChangeSets";
 import { AgentArtifactList } from "./AgentArtifactList";
 import { AgentMessageContent } from "./AgentMessageContent";
-import { RunActivityTimeline } from "./RunActivityTimeline";
+import { EditorialActivityTimeline, RunActivityTimeline } from "./RunActivityTimeline";
 import {
   appendGrowthAgentEvent,
   advanceGrowthVisualClimax,
@@ -573,6 +573,7 @@ export function StewardRuntimePanel({
               {entry.outcome === "awaiting_confirmation" ? <small>等待审查</small> : null}
             </article>
           ))}
+          <EditorialActivityTimeline events={growthDetails?.activityEvents ?? []} />
           {growthPresentation ? (
             <GrowthOperationalActivity>
               <RunActivityTimeline
