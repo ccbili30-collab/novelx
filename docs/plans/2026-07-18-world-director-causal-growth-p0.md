@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task.
 
-> **当前状态（2026-07-18）：** 已验证 Task 1–24；当前执行入口为 Phase I / Task 25：Visual Director（视觉总监）从已提交文本与图谱生成来源绑定 Brief。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
+> **当前状态（2026-07-18）：** 已验证 Task 1–25；当前执行入口为 Phase J / Task 26：将 Growth 用户对话路由为 World Director（世界总编），Steward（大管家）仅保留可展开的运行活动。任何任务只有在代码、测试和规定证据均满足后才可由 `[ ]` 改为 `[x]`。
 
 这份计划回答三个问题：为什么 NovelX 不能继续依赖一个模型包办所有工作；为什么“因果关系”必须成为图谱和调度的核心；最终用户、评委和后续编码 Agent 分别会得到什么。代码优化的首要目标不是方便人类阅读，而是降低 AI 修改所需上下文、缩小变更影响半径并让每个失败直接定位到唯一责任模块。
 
@@ -817,6 +817,8 @@ unknown side effect -> reconciliation_required
 
 **Flow:** committed text + graph evidence -> Visual Director brief -> deterministic style compiler -> persisted queue. Visual Director cannot invent facts or call image Provider.
 
+**Task 25 evidence (2026-07-18):** a Main-only handoff compiler now accepts one checkpoint-consistent trusted projection containing at least one committed-text binding and one graph-evidence binding. Committed text must bind a document version and immutable anchor; every binding carries an authorized scope, exact source version, target anchor and safe facts. The packet shown to Visual Director replaces all resource/document/version/hash authority with stable `@evidenceN` references, publishes only safe facts and enumerated purpose-compatible framing/viewpoint/layout choices, and explicitly withholds style, Prompt, model/tool settings, generation claims and queue authority. Both the public packet and the private source-authority projection have independent canonical hashes checked at final compilation. Visual Director output has no free-text factual field: it can only select known evidence refs and enum composition values; unknown/duplicate refs, purpose-incompatible composition, extra Prompt/provider/style/source/fact fields, checkpoint drift, duplicate source identity, missing text/graph evidence and post-compile mutation fail closed. Deterministic code then restores exact source versions, adds Task 24 style/purpose policy and produces the existing compiled Illustration Plan. A real SQLite queue test persists that plan and proves zero image Job/Provider call. Seven related packet, illustration, capability, Prompt-registry and specialist-runtime suites passed 41/41 with zero skips; `npm run typecheck`, the production build with all three active Prompt publication gates, and `git diff --check` passed. The SQLite test uses direct repository Fixture setup rather than a real Provider or Live Change Set run; no Electron E2E, full suite or package ran. This batch establishes the strict handoff and queue compatibility only; production World Director scheduling must call it during the Task 26–29 integration path before final Live.
+
 ## 14. Phase J — User Experience and Safe Projection
 
 ### Task 26: Route Growth conversation to World Director
@@ -942,7 +944,7 @@ This matrix is the execution index. The detailed phase sections define files and
 | [x] | 22 | Self-inquiry is useful only when it selects causal gaps from evidence and stops looping. | Each round proposes 3–7 deduplicated questions, chooses one valuable gap and records affected nodes. | Evidence, ranking, dedupe, no-progress and genuine-user-choice tests. |
 | [x] | 23 | Waiting until all text ends serializes image time and hides incremental growth. | Every eligible committed version creates an idempotent image queue item while text work continues. | Post-commit enqueue, revision-stale replacement, nonblocking failure and concurrency tests. |
 | [x] | 24 | Separate image paths currently drift in style and maps can become photorealistic. | One default colored hand-drawn ink policy applies to maps, characters, scenes and details. | Purpose-specific prompt compilation and prohibited-style regression tests. |
-| [ ] | 25 | Image models need concise visual briefs derived from stable text, not raw drafts or invented facts. | Visual Director converts committed text/graph evidence into a source-bound brief; deterministic code adds style. | Provenance, no-invention, source-version and strict-output tests. |
+| [x] | 25 | Image models need concise visual briefs derived from stable text, not raw drafts or invented facts. | Visual Director converts committed text/graph evidence into a source-bound brief; deterministic code adds style. | Provenance, no-invention, source-version and strict-output tests. |
 | [ ] | 26 | Growth currently appears as Steward operation rather than editorial collaboration. | User talks to World Director in Growth; Steward activity remains expandable operational detail. | IPC contract, route restoration, fail-closed and non-Growth regression tests. |
 | [ ] | 27 | Judges and users must see real nodes and edits growing, not only terminal files. | Timeline, right editor, graph and image queue project authoritative safe events and committed objects. | Reducer/component/Electron tests for ordering, failure, scope switch and no premature completion. |
 | [ ] | 28 | Generic failures force whole-repository searches and make AI repair unsafe. | Error families identify Provider, specialist protocol, Work Order state, causal Domain, review, persistence or reconciliation ownership. | Allowlisted diagnostic mapping, redaction and unknown-error containment tests. |
