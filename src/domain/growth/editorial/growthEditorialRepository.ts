@@ -376,6 +376,68 @@ export class GrowthEditorialRepository {
     });
   }
 
+  /**
+   * Quarantines Provider or Canon effects whose persisted attempt crossed a
+   * request boundary without a durable receipt. Recovery never guesses that
+   * an interrupted request was unsent.
+   */
+  reconcileInterruptedRound(roundId: string): Array<{ workOrderId: string; failureCode: string }> {
+    return this.#transaction(() => {
+      const round = this.#requiredRound(roundId);
+      if (round.status === "reconciliation_required") {
+        return this.workspace.db.prepare(`
+          SELECT work_order_id, failure_code FROM growth_work_order_attempts
+          WHERE round_id = ? AND status = 'reconciliation_required'
+          ORDER BY attempt_number, id
+        `).all(roundId).map((row) => ({
+          workOrderId: readString(row as Row, "work_order_id"),
+          failureCode: readString(row as Row, "failure_code"),
+        }));
+      }
+      if (round.status !== "active") return [];
+      const interrupted = this.workspace.db.prepare(`
+        SELECT attempt.id, attempt.work_order_id, attempt.status, attempt.side_effect_state,
+          work_order.status AS work_order_status
+        FROM growth_work_order_attempts attempt
+        JOIN growth_work_orders work_order ON work_order.id = attempt.work_order_id
+        WHERE attempt.round_id = ? AND (
+          (attempt.status IN ('running', 'reviewing') AND attempt.side_effect_state = 'none')
+          OR (attempt.status = 'accepted' AND attempt.side_effect_state = 'commit_requested'
+            AND work_order.status = 'commit_queued')
+        )
+        ORDER BY attempt.attempt_number, attempt.id
+      `).all(roundId) as Row[];
+      if (interrupted.length === 0) return [];
+      const now = new Date().toISOString();
+      const result: Array<{ workOrderId: string; failureCode: string }> = [];
+      for (const row of interrupted) {
+        const attemptId = readString(row, "id");
+        const workOrderId = readString(row, "work_order_id");
+        const attemptStatus = readString(row, "status");
+        const workOrderStatus = readString(row, "work_order_status");
+        const failureCode = attemptStatus === "accepted"
+          ? "GROWTH_EDITORIAL_COMMIT_OUTCOME_UNKNOWN"
+          : "GROWTH_EDITORIAL_PROVIDER_OUTCOME_UNKNOWN";
+        const attemptUpdate = this.workspace.db.prepare(`
+          UPDATE growth_work_order_attempts
+          SET status = 'reconciliation_required', failure_code = ?, side_effect_state = 'outcome_unknown',
+            updated_at = ?, terminal_at = ?
+          WHERE id = ? AND status = ?
+        `).run(failureCode, now, now, attemptId, attemptStatus);
+        if (Number(attemptUpdate.changes) !== 1) fail("GROWTH_EDITORIAL_STATE_CONFLICT");
+        this.#transitionWorkOrder(workOrderId, workOrderStatus, "reconciliation_required", now, failureCode);
+        result.push({ workOrderId, failureCode });
+      }
+      const roundUpdate = this.workspace.db.prepare(`
+        UPDATE growth_editorial_rounds
+        SET status = 'reconciliation_required', failure_code = ?, updated_at = ?, terminal_at = ?
+        WHERE id = ? AND status = 'active'
+      `).run(result[0]!.failureCode, now, now, roundId);
+      if (Number(roundUpdate.changes) !== 1) fail("GROWTH_EDITORIAL_STATE_CONFLICT");
+      return result;
+    });
+  }
+
   terminalizeRound(input: EditorialRoundTerminal): GrowthEditorialRound {
     const value = editorialRoundTerminalSchema.parse(input);
     return this.#transaction(() => {

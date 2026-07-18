@@ -862,13 +862,15 @@ unknown side effect -> reconciliation_required
 
 **Tests:**
 
-- [ ] restart with allocated Work Orders;
-- [ ] restart with running candidate and no Provider receipt;
-- [ ] restart after candidate Artifact persisted but before review event;
-- [ ] restart after accepted review but before Change Set;
-- [ ] restart after committed Change Set but before image enqueue;
-- [ ] outcome-unknown commit blocks duplication;
-- [ ] image failure does not block text Director loop.
+- [x] restart with allocated Work Orders;
+- [x] restart with running candidate and no Provider receipt;
+- [x] restart after candidate Artifact persisted but before review event;
+- [x] restart after accepted review but before Change Set;
+- [x] restart after committed Change Set but before image enqueue;
+- [x] outcome-unknown commit blocks duplication;
+- [x] image failure does not block text Director loop.
+
+**Task 29 evidence (2026-07-18):** editorial restart now distinguishes safe durable boundaries from ambiguous Provider/Canon effects. Reopening an allocated Work Order creates one first attempt; a persisted candidate resumes at review without candidate regeneration; an accepted review resumes through the serialized commit lane once; and a committed Growth Change Set deterministically backfills its missing incremental illustration request after a real SQLite close/reopen using the existing resource-version identity. By contrast, attempts interrupted in `running` or `reviewing` have no editorial Provider receipt and are atomically quarantined as `reconciliation_required` with `outcome_unknown`; commit attempts interrupted after `commit_requested` receive the same barrier and Canon is never reissued. Multiple callers inside the same live process reuse the active Round promise before recovery classification, avoiding false quarantine. Image Job recovery retains its existing distinction between unsent requeue and sent outcome-unknown, while a failed image remains nonblocking for committed text. Six focused repository/scheduler/review/diagnostic/incremental-image/image-recovery suites passed 58/58 with zero skips after real workspace reopen tests; `npm run typecheck` and `git diff --check` passed. Editorial Provider and commit callbacks were injected fakes; the post-commit image case used a real SQLite committed Change Set fixture but no real Provider, so this is deterministic recovery evidence, not integrated Live. No Electron E2E, full suite, build, package or world-package export ran. The conservative `running/reviewing` barrier is necessary because the current editorial attempt table has no Provider receipt identity; resolving rather than blocking it would require a separately approved durable receipt contract.
 
 ## 16. Phase L — Central Freeze and Real Acceptance
 
@@ -954,7 +956,7 @@ This matrix is the execution index. The detailed phase sections define files and
 | [x] | 26 | Growth currently appears as Steward operation rather than editorial collaboration. | User talks to World Director in Growth; Steward activity remains expandable operational detail. | IPC contract, route restoration, fail-closed and non-Growth regression tests. |
 | [x] | 27 | Judges and users must see real nodes and edits growing, not only terminal files. | Timeline, right editor, graph and image queue project authoritative safe events and committed objects. | Reducer/component/Electron tests for ordering, failure, scope switch and no premature completion. |
 | [x] | 28 | Generic failures force whole-repository searches and make AI repair unsafe. | Error families identify Provider, specialist protocol, Work Order state, causal Domain, review, persistence or reconciliation ownership. | Allowlisted diagnostic mapping, redaction and unknown-error containment tests. |
-| [ ] | 29 | Long runs will be interrupted; replay bugs can duplicate Provider calls or Canon writes. | Restart reconciles every editorial boundary and resumes or blocks truthfully. | Crash matrix covering allocated/running/candidate/review/commit/image boundaries. |
+| [x] | 29 | Long runs will be interrupted; replay bugs can duplicate Provider calls or Canon writes. | Restart reconciles every editorial boundary and resumes or blocks truthfully. | Crash matrix covering allocated/running/candidate/review/commit/image boundaries. |
 | [ ] | 30 | Focused tests cannot prove the integrated frozen candidate or release artifacts. | One frozen code state passes all deterministic, build and package gates with updated evidence index. | `git diff --check`, typecheck, Prompt gate, full tests, build and package. |
 | [ ] | 31 | The requested literary quality test is invalid if the saved model is not exactly `5.6luna`. | Live fails before side effects unless both public Provider identities match approved profiles. | Public identity evidence and encrypted-profile/Local-State consistency checks. |
 | [ ] | 32 | Mock and historical evidence do not prove the final Director/causal/image/user-guidance loop. | One real seed produces and revises a persistent causal large-world package, survives reopen and supports research retrieval. | One sanitized dual-Provider Live report, exported package and no-mutation research audit. |

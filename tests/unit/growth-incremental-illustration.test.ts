@@ -86,6 +86,37 @@ describe("incremental Growth illustration planning", () => {
     service.dispose();
   });
 
+  it("reopens after the committed Change Set and backfills the missing image queue exactly once", async () => {
+    const setup = createSetup("post-commit-reopen");
+    const committed = commitVisualCycle(setup, { suffix: "post-commit", title: "重开潮岸", create: true });
+    const originalIndex = workspaces.indexOf(setup.workspace);
+    if (originalIndex >= 0) workspaces.splice(originalIndex, 1);
+    setup.workspace.close();
+    const reopened = openWorkspace(setup.root);
+    workspaces.push(reopened);
+    const generateImage = vi.fn().mockRejectedValue(Object.assign(
+      new Error("provider unavailable after durable queue"),
+      { code: "IMAGE_PROVIDER_RUNTIME_FAILED" },
+    ));
+    const service = new GrowthIllustrationApplicationService(reopened, { generateImage });
+
+    const first = service.ensureIncrementalForCommittedCycle(
+      { goalId: setup.goalId, cycleId: committed.cycleId }, setup.context,
+    );
+    await vi.waitFor(() => expect(generateImage).toHaveBeenCalledTimes(1));
+    const replay = service.ensureIncrementalForCommittedCycle(
+      { goalId: setup.goalId, cycleId: committed.cycleId }, setup.context,
+    );
+    await vi.waitFor(() => expect(new GrowthRepository(reopened)
+      .listIllustrationItems(first[0]!).map((item) => item.status)).toEqual(["failed"]));
+
+    expect(replay).toEqual(first);
+    expect(new GrowthRepository(reopened).listIllustrationRequests(setup.goalId)).toHaveLength(1);
+    expect(generateImage).toHaveBeenCalledTimes(1);
+    expect(new GrowthRepository(reopened).getCycle(committed.cycleId)?.status).toBe("committed");
+    service.dispose();
+  });
+
   it("fails closed before persistence when the cycle has no stable committed Change Set", () => {
     const setup = createSetup("uncommitted");
     const growth = new GrowthRepository(setup.workspace);
@@ -124,6 +155,7 @@ function createSetup(suffix: string) {
     sourceMessageId: null,
   });
   return {
+    root,
     workspace,
     goalId: goal.id,
     worldRootId: worldRoot.id,

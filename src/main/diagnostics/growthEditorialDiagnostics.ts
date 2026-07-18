@@ -265,6 +265,7 @@ export function classifyGrowthEditorialFailure(sourceCode: unknown): GrowthEdito
   if (reviewBindingCodes.has(sourceCode)) return "EDITORIAL_REVIEW_BINDING_INVALID";
   if (reviewCodes.has(sourceCode)) return "EDITORIAL_REVIEW_INVALID";
   if (sourceCode === "GROWTH_EDITORIAL_COMMIT_OUTCOME_UNKNOWN"
+    || sourceCode === "GROWTH_EDITORIAL_PROVIDER_OUTCOME_UNKNOWN"
     || sourceCode === "GROWTH_EDITORIAL_RECONCILIATION_STATE_INVALID") return "RECONCILIATION_REQUIRED";
   return "WORK_ORDER_STATE_UNCLASSIFIED_FAILURE";
 }

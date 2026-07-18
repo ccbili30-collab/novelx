@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { GrowthEditorialRepository } from "../../src/domain/growth/editorial/growthEditorialRepository";
 import { SafeDiagnosticRepository } from "../../src/domain/audit/safeDiagnosticRepository";
 import type {
@@ -129,6 +129,99 @@ describe("Growth editorial scheduler", () => {
     expect(generated).toBe(1);
   });
 
+  it("reopens an allocated Work Order and dispatches its first Provider attempt once", async () => {
+    const setup = createSetup();
+    setup.repository.createRound(round(setup, [order("order-a")]));
+    const reopened = reopenSetup(setup);
+    let generated = 0;
+    const scheduler = createScheduler(reopened.repository, acceptedDependencies(reopened.repository, {
+      generate: () => { generated += 1; },
+    }));
+
+    const result = await scheduler.resumeRound("round-1");
+
+    expect(result.round.status).toBe("completed");
+    expect(generated).toBe(1);
+    expect(result.attempts).toHaveLength(1);
+  });
+
+  it("returns the active in-process Round instead of misclassifying it as an interrupted restart", async () => {
+    const setup = createSetup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const generate = vi.fn(async () => gate);
+    const scheduler = createScheduler(setup.repository, acceptedDependencies(setup.repository, { generate }));
+    const started = scheduler.startRound(round(setup, [order("order-a")]));
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+
+    const duplicateResume = scheduler.resumeRound("round-1");
+    release();
+    const [first, duplicate] = await Promise.all([started, duplicateResume]);
+
+    expect(first.round.status).toBe("completed");
+    expect(duplicate).toEqual(first);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(new SafeDiagnosticRepository(setup.workspace).listOperation("tool_call", "order-a")).toEqual([]);
+  });
+
+  it.each(["running", "reviewing"] as const)(
+    "quarantines an interrupted %s Provider boundary without another model call",
+    async (interruptedStatus) => {
+      const setup = createSetup();
+      const created = setup.repository.createRound(round(setup, [order("order-a")]));
+      const prepared = acceptedDependencies(setup.repository).prepareAttempt({
+        order: created.workOrders[0], snapshot: created,
+      });
+      if (prepared instanceof Promise) throw new Error("Unexpected async fixture preparation.");
+      const attempt = setup.repository.startAttempt(prepared);
+      if (interruptedStatus === "reviewing") {
+        setup.repository.recordCandidate(candidate(attempt));
+        setup.repository.beginReview(attempt.id);
+      }
+      const reopened = reopenSetup(setup);
+      const generate = vi.fn();
+      const review = vi.fn();
+      const dependencies = acceptedDependencies(reopened.repository, { generate });
+      dependencies.reviewCandidate = review;
+      const result = await createScheduler(reopened.repository, dependencies).resumeRound("round-1");
+
+      expect(result.round.status).toBe("reconciliation_required");
+      expect(result.workOrders[0]).toMatchObject({
+        status: "reconciliation_required",
+        failureCode: "GROWTH_EDITORIAL_PROVIDER_OUTCOME_UNKNOWN",
+      });
+      expect(result.attempts[0]).toMatchObject({
+        status: "reconciliation_required",
+        sideEffectState: "outcome_unknown",
+      });
+      expect(generate).not.toHaveBeenCalled();
+      expect(review).not.toHaveBeenCalled();
+      expect(new SafeDiagnosticRepository(reopened.workspace).listOperation("tool_call", "order-a"))
+        .toEqual([expect.objectContaining({ code: "RECONCILIATION_REQUIRED", boundary: "recovery" })]);
+    },
+  );
+
+  it("reopens a persisted candidate before review and resumes without regenerating it", async () => {
+    const setup = createSetup();
+    const created = setup.repository.createRound(round(setup, [order("order-a")]));
+    const fixtureDependencies = acceptedDependencies(setup.repository);
+    const prepared = fixtureDependencies.prepareAttempt({ order: created.workOrders[0], snapshot: created });
+    if (prepared instanceof Promise) throw new Error("Unexpected async fixture preparation.");
+    const attempt = setup.repository.startAttempt(prepared);
+    setup.repository.recordCandidate(candidate(attempt));
+    const reopened = reopenSetup(setup);
+    const generate = vi.fn();
+    const result = await createScheduler(
+      reopened.repository,
+      acceptedDependencies(reopened.repository, { generate }),
+    ).resumeRound("round-1");
+
+    expect(result.round.status).toBe("completed");
+    expect(generate).not.toHaveBeenCalled();
+    expect(result.attempts).toHaveLength(1);
+    expect(result.artifacts.filter((artifact) => artifact.kind === "specialist_candidate")).toHaveLength(1);
+  });
+
   it("persists a completed candidate before cancellation and never dispatches remaining work", async () => {
     const setup = createSetup();
     const controller = new AbortController();
@@ -194,19 +287,23 @@ describe("Growth editorial scheduler", () => {
   it("restarts accepted work without duplicating the candidate or committed Change Set", async () => {
     const setup = createSetup();
     seedAccepted(setup.repository, setup, "order-a");
+    const reopened = reopenSetup(setup);
     let generated = 0;
     let commits = 0;
-    const dependencies = acceptedDependencies(setup.repository, {
+    const dependencies = acceptedDependencies(reopened.repository, {
       generate: () => { generated += 1; },
       commit: () => { commits += 1; },
     });
-    const firstScheduler = createScheduler(setup.repository, dependencies);
+    const firstScheduler = createScheduler(reopened.repository, dependencies);
     const first = await firstScheduler.resumeRound("round-1");
     expect(first.round.status).toBe("completed");
     expect(commits).toBe(1);
     expect(generated).toBe(0);
 
-    const reopenedScheduler = createScheduler(setup.repository, dependencies);
+    const replayed = reopenSetup(reopened);
+    const reopenedScheduler = createScheduler(replayed.repository, acceptedDependencies(replayed.repository, {
+      generate: () => { generated += 1; }, commit: () => { commits += 1; },
+    }));
     const replay = await reopenedScheduler.resumeRound("round-1");
     expect(replay.round.status).toBe("completed");
     expect(commits).toBe(1);
@@ -218,8 +315,9 @@ describe("Growth editorial scheduler", () => {
     seedAccepted(setup.repository, setup, "order-a");
     setup.repository.queueCommit("order-a");
     setup.repository.markCommitRequested("order-a");
+    const reopened = reopenSetup(setup);
     let commits = 0;
-    const scheduler = createScheduler(setup.repository, acceptedDependencies(setup.repository, {
+    const scheduler = createScheduler(reopened.repository, acceptedDependencies(reopened.repository, {
       commit: () => { commits += 1; },
     }));
     const result = await scheduler.resumeRound("round-1");
@@ -228,7 +326,7 @@ describe("Growth editorial scheduler", () => {
     expect(result.workOrders[0].status).toBe("reconciliation_required");
     expect(result.attempts[0].sideEffectState).toBe("outcome_unknown");
     expect(commits).toBe(0);
-    expect(new SafeDiagnosticRepository(setup.workspace).listOperation("tool_call", "order-a"))
+    expect(new SafeDiagnosticRepository(reopened.workspace).listOperation("tool_call", "order-a"))
       .toEqual([expect.objectContaining({
         code: "RECONCILIATION_REQUIRED",
         owner: "reconciliation",
@@ -264,6 +362,14 @@ function createSetup(): { workspace: WorkspaceDatabase; repository: GrowthEditor
   });
   const repository = new GrowthEditorialRepository(workspace);
   return { workspace, repository, checkpointId: branch.headCheckpointId, goalId: goal.id };
+}
+
+function reopenSetup(
+  setup: { workspace: WorkspaceDatabase; checkpointId: string; goalId: string },
+): { workspace: WorkspaceDatabase; repository: GrowthEditorialRepository; checkpointId: string; goalId: string } {
+  setup.workspace.close();
+  workspace = openWorkspace(root!);
+  return { ...setup, workspace, repository: new GrowthEditorialRepository(workspace) };
 }
 
 function round(

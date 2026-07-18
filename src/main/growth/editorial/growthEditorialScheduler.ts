@@ -71,6 +71,11 @@ export class GrowthEditorialScheduler {
 
   resumeRound(roundId: string, signal?: AbortSignal): Promise<GrowthEditorialRoundSnapshot> {
     if (!this.repository.getRound(roundId)) throw schedulerError("GROWTH_EDITORIAL_ROUND_NOT_FOUND");
+    const active = this.#roundRuns.get(roundId);
+    if (active) return active;
+    for (const interrupted of this.repository.reconcileInterruptedRound(roundId)) {
+      this.#recordDiagnostic(interrupted.workOrderId, interrupted.failureCode);
+    }
     return this.#runPersistedRound(roundId, signal);
   }
 
