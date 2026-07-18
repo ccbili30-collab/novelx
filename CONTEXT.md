@@ -66,6 +66,7 @@ SQLite + Artifact Store
 | 理解完整产品 | `docs/product/novelx-desktop-product-requirements.md` |
 | 做架构或拆任务 | 上述 PRD + `docs/architecture/novelx-desktop-long-term-architecture.md` |
 | 判断当前完成度 | `docs/project/current-state-and-routes.md` + 对应 `notes/status/` |
+| 实现或验收 World Director、因果 Growth、图片与世界包链路 | `docs/architecture/world-director-growth-runtime-chain-contract.md` + `docs/project/current-state-and-routes.md` + 对应 `notes/status/` |
 | 接手长远 Runtime | `docs/runtime-v2/product-baseline.md` + `notes/status/2026-07-13-runtime-v2-a2-2-freeze.md` |
 | 接手黑客松 | `docs/plans/2026-07-13-hackathon-visual-creation-loop.md` + `notes/status/2026-07-14-hackathon-creative-showcase.md` |
 | 修改 Growth 阶段、Longform 或 Closure | `src/agent-worker/growth/README.md` + `src/main/growth/README.md` + 对应阶段文件与定向测试 |
