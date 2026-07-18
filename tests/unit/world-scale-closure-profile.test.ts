@@ -4,6 +4,7 @@ import {
   WORLD_SCALE_DEFAULT_REQUIREMENTS,
   type WorldScaleClosureProjection,
 } from "../../src/domain/growth/closure/worldScaleClosureProfile";
+import { selectCausalInquiry } from "../../src/domain/growth/editorial/causalInquirySelector";
 
 describe("world scale Closure profile", () => {
   it("accepts exactly the default large-world skeleton with source-bound evidence", () => {
@@ -57,6 +58,23 @@ describe("world scale Closure profile", () => {
     causal.causalMechanisms[0].systemRefs = ["economy", "economy"];
     expectCode(() => evaluateWorldScaleClosure(causal), "WORLD_SCALE_CAUSAL_MECHANISM_NOT_CROSS_SYSTEM");
   });
+
+  it("routes a missing world causal facet into one evidence-bound Inquiry frontier", () => {
+    const projection = completeProjection();
+    projection.causalMechanisms.pop();
+    expect(evaluateWorldScaleClosure(projection).facets.find((facet) => facet.facetId === "cross_system_causal_mechanisms"))
+      .toMatchObject({ state: "missing", actual: 3, required: 4 });
+    const selected = selectCausalInquiry({
+      authority: "harness_projection",
+      candidates: [
+        causalGap("cross_system", "cross_system_causal_mechanisms", "world_1", "evidence_systems", "core"),
+        causalGap("river_trade", "transport", "river", "evidence_river", "major"),
+        causalGap("minor_custom", "culture", "group_1", "evidence_group_1", "supporting"),
+      ],
+      priorAttempts: [],
+    });
+    expect(selected).toMatchObject({ status: "selected", action: "autonomous", candidate: { gapId: "cross_system" } });
+  });
 });
 
 function completeProjection(): WorldScaleClosureProjection {
@@ -84,4 +102,12 @@ function completeProjection(): WorldScaleClosureProjection {
 function expectCode(action: () => unknown, code: string): void {
   try { action(); } catch (error) { expect(error).toMatchObject({ code }); return; }
   throw new Error(`Expected ${code}.`);
+}
+
+function causalGap(gapId: string, facetId: string, nodeRef: string, evidenceRef: string, importanceTier: "core" | "major" | "supporting") {
+  return {
+    gapId, gapKind: "cross_system_dependency" as const, facetId, question: `What causal mechanism closes ${facetId}?`,
+    affectedNodeRefs: [nodeRef], evidenceRefs: [evidenceRef], missingCausalLinkCount: 1, downstreamBlockedCount: 1,
+    importanceTier, decision: { kind: "autonomous" as const },
+  };
 }

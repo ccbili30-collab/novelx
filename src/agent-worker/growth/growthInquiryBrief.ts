@@ -5,6 +5,10 @@ import {
   isGrowthInquiryDiagnosticCode,
   type GrowthInquiryDiagnosticCode,
 } from "../../shared/diagnostics/growthInquiryDiagnostics";
+import {
+  selectCausalInquiry,
+  type CausalInquirySelection,
+} from "../../domain/growth/editorial/causalInquirySelector";
 
 const localId = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
 const evidenceId = z.string().trim().min(1).max(240);
@@ -120,6 +124,34 @@ export const growthInquiryBriefParameters = Type.Object({
 
 export type GrowthInquiryBrief = z.infer<typeof growthInquiryBriefSchema>;
 
+export type CompiledCausalGrowthInquiry =
+  | { status: "ready"; brief: GrowthInquiryBrief; selection: Extract<CausalInquirySelection, { status: "selected" }> }
+  | { status: "no_progress"; selection: Extract<CausalInquirySelection, { status: "no_progress" }> };
+
+/** Binds a model-authored Brief to the Harness-owned causal selection without changing Worker IPC. */
+export function compileCausalGrowthInquiryBrief(rawBrief: unknown, rawSelectionInput: unknown): CompiledCausalGrowthInquiry {
+  const selection = selectCausalInquiry(rawSelectionInput);
+  if (selection.status === "no_progress") return { status: "no_progress", selection };
+  const parsed = growthInquiryBriefSchema.safeParse(rawBrief);
+  if (!parsed.success) throw causalBriefError("CAUSAL_INQUIRY_BRIEF_INVALID");
+  const brief = parsed.data;
+  const candidateIds = selection.consideredGapIds;
+  const inquiryIds = brief.inquiries.map((item) => item.localId).sort();
+  if (candidateIds.length !== inquiryIds.length || candidateIds.some((id, index) => id !== inquiryIds[index])) {
+    throw causalBriefError("CAUSAL_INQUIRY_BRIEF_SET_MISMATCH");
+  }
+  const selected = brief.inquiries.find((item) => item.localId === selection.candidate.gapId);
+  if (!selected || selected.question !== selection.candidate.question
+    || !sameStringSet(selected.evidenceIds, selection.candidate.evidenceRefs)) {
+    throw causalBriefError("CAUSAL_INQUIRY_BRIEF_BINDING_MISMATCH");
+  }
+  const decisionMatches = selection.action === "autonomous"
+    ? brief.selectedLocalId === selected.localId && !selected.requiresCreatorChoice
+    : brief.selectedLocalId === null && selected.requiresCreatorChoice;
+  if (!decisionMatches) throw causalBriefError("CAUSAL_INQUIRY_BRIEF_DECISION_MISMATCH");
+  return { status: "ready", brief, selection };
+}
+
 export const growthInquiryBriefDiagnosticCodes = growthInquiryDiagnosticCodes;
 
 export type GrowthInquiryBriefDiagnosticCode = GrowthInquiryDiagnosticCode;
@@ -167,4 +199,12 @@ export function classifyGrowthInquiryBriefFailure(value: unknown): GrowthInquiry
 
 export function isGrowthInquiryBriefDiagnosticCode(value: unknown): value is GrowthInquiryBriefDiagnosticCode {
   return isGrowthInquiryDiagnosticCode(value);
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value) => right.includes(value));
+}
+
+function causalBriefError(code: string): Error & { code: string } {
+  return Object.assign(new Error(code), { code });
 }

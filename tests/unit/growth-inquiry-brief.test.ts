@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyGrowthInquiryBriefFailure,
+  compileCausalGrowthInquiryBrief,
   growthInquiryBriefParameters,
   growthInquiryBriefSchema,
 } from "../../src/agent-worker/growth/growthInquiryBrief";
+import { causalInquiryFingerprint } from "../../src/domain/growth/editorial/causalInquirySelector";
 
 const inquiry = (localId: string, priority: number, overrides: Record<string, unknown> = {}) => ({
   localId,
@@ -117,4 +119,48 @@ describe("Growth Inquiry Brief", () => {
     })).toBe("STEWARD_GROWTH_INQUIRY_TRANSITION_INVALID");
     expect(classifyGrowthInquiryBriefFailure({ inquiries: base, selectedLocalId: "one", priorTransitions: [] })).toBeNull();
   });
+
+  it("binds the model Brief to one Harness-selected causal frontier and preserves no-progress", () => {
+    const brief = {
+      inquiries: [inquiry("one", 3), inquiry("two", 2), inquiry("three", 1)],
+      selectedLocalId: "one", priorTransitions: [],
+    };
+    const selectionInput = causalSelectionInput(brief.inquiries);
+    expect(compileCausalGrowthInquiryBrief(brief, selectionInput)).toMatchObject({
+      status: "ready", brief: { selectedLocalId: "one" },
+      selection: { status: "selected", action: "autonomous", candidate: { gapId: "one", affectedNodeRefs: ["node-one"] } },
+    });
+    expectCode(() => compileCausalGrowthInquiryBrief({ ...brief, inquiries: [
+      { ...brief.inquiries[0], question: "Unbound replacement?" }, ...brief.inquiries.slice(1),
+    ] }, selectionInput), "CAUSAL_INQUIRY_BRIEF_BINDING_MISMATCH");
+
+    const first = compileCausalGrowthInquiryBrief(brief, selectionInput);
+    if (first.status !== "ready") throw new Error("Fixture mismatch.");
+    expect(compileCausalGrowthInquiryBrief(brief, {
+      ...selectionInput,
+      priorAttempts: selectionInput.candidates.map((candidate) => ({
+        fingerprint: causalInquiryFingerprint(candidate),
+        outcome: "no_progress" as const,
+      })),
+    })).toMatchObject({ status: "no_progress", selection: { status: "no_progress" } });
+  });
 });
+
+function causalSelectionInput(inquiries: ReturnType<typeof inquiry>[]) {
+  return {
+    authority: "harness_projection" as const,
+    candidates: inquiries.map((item, index) => ({
+      gapId: item.localId, gapKind: "missing_mechanism" as const, facetId: `causal.${item.localId}`,
+      question: item.question, affectedNodeRefs: [`node-${item.localId}`], evidenceRefs: item.evidenceIds,
+      missingCausalLinkCount: 1, downstreamBlockedCount: 3 - index,
+      importanceTier: index === 0 ? "core" as const : "major" as const,
+      decision: { kind: "autonomous" as const },
+    })),
+    priorAttempts: [],
+  };
+}
+
+function expectCode(action: () => unknown, code: string): void {
+  try { action(); } catch (error) { expect(error).toMatchObject({ code }); return; }
+  throw new Error(`Expected ${code}.`);
+}
