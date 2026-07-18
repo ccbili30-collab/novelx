@@ -18,6 +18,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { AlertTriangle, Focus, LoaderCircle, Search, Share2 } from "lucide-react";
 import type { SemanticGraphInspector, SemanticGraphSnapshot } from "../../../../shared/ipcContract";
+import { semanticGraphEdgeStyle } from "../../../../shared/semanticGraphEdgeStyle";
 
 type GraphNodeRecord = SemanticGraphSnapshot["nodes"][number];
 type GraphNodeData = { record: GraphNodeRecord };
@@ -261,8 +262,18 @@ function GraphInspector(props: {
             <strong>关系</strong>
             {props.inspector.relations.length === 0 ? <span>暂无显式关系</span> : props.inspector.relations.map((relation) => (
               <button type="button" key={relation.edgeId} onClick={() => props.onSelectNeighbor(relation.neighborId)}>
-                <small>{relation.label}</small>
+                <small>{relation.label}{relation.causal ? ` · ${epistemicLabel(relation.causal.epistemicStatus)}` : ""}</small>
                 <span>{relation.neighborLabel}</span>
+                {relation.causal ? (
+                  <>
+                    <small>{relation.causal.mechanismSummary}</small>
+                    <small>
+                      来源：{relation.causal.sourceReferences
+                        .map((source) => `${source.kind} · ${source.locator}`)
+                        .join("；")}
+                    </small>
+                  </>
+                ) : null}
               </button>
             ))}
           </div>
@@ -291,18 +302,20 @@ function layoutGraph(records: GraphNodeRecord[], sourceEdges: SemanticGraphSnaps
         data: { record },
       };
     }),
-    edges: sourceEdges.map((edge) => ({
-      id: edge.id,
-      source: edge.sourceNodeId,
-      target: edge.targetNodeId,
-      label: edge.label,
-      type: "smoothstep",
-      animated: false,
-      markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
-      style: { stroke: edge.status === "conflict" ? "var(--novax-color-danger)" : "var(--novax-color-graph-edge)", strokeWidth: 1.3 },
-      labelStyle: { fill: "var(--novax-color-text-subtle)", fontSize: 10 },
-      labelBgStyle: { fill: "var(--novax-color-surface-control)", fillOpacity: 0.88 },
-    })).filter((edge) => byId.has(edge.source) && byId.has(edge.target)),
+    edges: sourceEdges.map((edge) => {
+      return {
+        id: edge.id,
+        source: edge.sourceNodeId,
+        target: edge.targetNodeId,
+        label: edge.label,
+        type: "smoothstep",
+        animated: false,
+        markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+        style: semanticGraphEdgeStyle(edge),
+        labelStyle: { fill: "var(--novax-color-text-subtle)", fontSize: 10 },
+        labelBgStyle: { fill: "var(--novax-color-surface-control)", fillOpacity: 0.88 },
+      };
+    }).filter((edge) => byId.has(edge.source) && byId.has(edge.target)),
   };
 }
 
@@ -317,6 +330,12 @@ function nodeColor(kind: GraphNodeRecord["kind"]): string {
   if (kind === "fact") return "var(--novax-color-accent)";
   if (kind === "entity") return "var(--novax-color-entity)";
   return "var(--novax-color-text-faint)";
+}
+
+function epistemicLabel(status: "confirmed" | "inferred" | "disputed"): string {
+  if (status === "confirmed") return "已确认";
+  if (status === "inferred") return "推断";
+  return "有争议";
 }
 
 function readErrorMessage(error: unknown): string {

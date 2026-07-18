@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
+import { CausalRelationRepository } from "../../src/domain/graph/causalRelationRepository";
+import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace } from "../../src/domain/workspace/workspaceRepository";
 import { commitFixtureCheckpoint } from "../helpers/workspaceFixtures";
@@ -17,12 +19,20 @@ test("explores the real current-branch semantic graph and safe source inspector"
   const workspace = openWorkspace(workspaceRoot);
   const resources = new ResourceRepository(workspace);
   const assertions = new AssertionRepository(workspace);
+  const causal = new CausalRelationRepository(workspace);
+  const documents = new DocumentRepository(workspace);
   const worldRootId = resources.listCurrent().find((resource) => resource.type === "world")!.id;
   commitFixtureCheckpoint(workspace, {
     idempotencyKey: "graph-ui-fixture",
     summary: "确认银湾海岸图谱事实",
     label: "建立图谱实机证据",
   }, (checkpointId, changeSetId) => {
+    const documentVersionId = documents.putVersion({
+      resourceId: worldRootId,
+      checkpointId,
+      content: "沉降与海水倒灌塑造海岸，并改变后续航路。",
+      authorKind: "user",
+    });
     const coastResourceId = resources.putRevision({
       checkpointId,
       type: "world",
@@ -55,6 +65,32 @@ test("explores the real current-branch semantic graph and safe source inspector"
       status: "conflict",
       source: { kind: "confirmed_change_set", ref: changeSetId },
     });
+    workspace.db.prepare("INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, 'document_version', ?, ?)")
+      .run("source.graph-ui-causal", documentVersionId, "2026-07-18T00:00:00.000Z");
+    causal.putVersion({
+      versionId: "causal-version.graph-ui",
+      checkpointId,
+      status: "current",
+      idempotencyKey: "graph-ui-causal",
+      relation: {
+        id: "relation.graph-ui-causal",
+        kind: "causes",
+        causeAssertionId: "assertion.graph-ui-cause",
+        effectAssertionId: "assertion.graph-ui-conflict",
+        mechanism: "地貌变化改变了航路可用性。",
+        conditions: ["海水倒灌持续"],
+        temporalScope: "沉降纪元后",
+        polarityStrengthSummary: "中等正向",
+        epistemicStatus: "inferred",
+        sourceReferences: [{
+          sourceId: "source.graph-ui-causal",
+          sourceKind: "document",
+          sourceVersionId: documentVersionId,
+          stableLocator: "paragraph:1",
+          sourceSha256: documents.getVersion(documentVersionId)!.contentHash,
+        }],
+      },
+    });
   });
   workspace.close();
 
@@ -76,6 +112,9 @@ test("explores the real current-branch semantic graph and safe source inspector"
     await expect(inspector.getByRole("heading", { name: "沉降纪元 · 塑造" })).toBeVisible();
     await expect(inspector.getByText("已确认变更：确认银湾海岸图谱事实")).toBeVisible();
     await expect(inspector.getByRole("button", { name: /影响地点.*银湾海岸/ })).toBeVisible();
+    await expect(inspector.getByRole("button", { name: /导致 · 推断.*银湾海岸 · 古代成因.*地貌变化改变了航路可用性.*document · paragraph:1/ })).toBeVisible();
+    await expect(page.getByText("导致", { exact: true })).toBeVisible();
+    await expect(page.locator(".react-flow__edge-path[style*='stroke-dasharray']")).toHaveCount(1);
 
     await page.getByRole("textbox", { name: "搜索图谱" }).fill("古代成因");
     await expect(page.locator(".react-flow__node")).toHaveCount(1);

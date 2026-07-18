@@ -277,8 +277,22 @@ describe("agent worker fail-closed contract", () => {
       evidenceId: "relation-1", kind: "relation" as const, label: "related_to",
       relation: { kind: "related_to", sourceResourceId: "world-1", targetResourceId: "story-1" },
     };
+    const causal = {
+      evidenceId: "causal-version-1",
+      kind: "causal_relation" as const,
+      label: "causes · tide narrows the route window",
+      relation: {
+        kind: "causes" as const,
+        causeAssertionId: "assertion.tide",
+        effectAssertionId: "assertion.route",
+        mechanismSummary: "Tide narrows the navigable route window.",
+        status: "current" as const,
+        epistemicStatus: "inferred" as const,
+        sourceReferences: [{ kind: "document" as const, versionId: "document-version-1", locator: "paragraph:1" }],
+      },
+    };
 
-    expect(growthRetrieveGraphEvidenceResultSchema.safeParse({ ...base, evidence: [resource, relation] }).success).toBe(true);
+    expect(growthRetrieveGraphEvidenceResultSchema.safeParse({ ...base, evidence: [resource, relation, causal] }).success).toBe(true);
     expect(growthRetrieveGraphEvidenceResultSchema.safeParse({
       ...base, evidence: [{ ...resource, resource: { ...resource.resource, type: "unknown_resource_type" } }],
     }).success).toBe(false);
@@ -287,6 +301,16 @@ describe("agent worker fail-closed contract", () => {
     }).success).toBe(false);
     expect(growthRetrieveGraphEvidenceResultSchema.safeParse({
       ...base, evidence: [{ ...relation, relation: { ...relation.relation, kind: "unknown_relation_kind" } }],
+    }).success).toBe(false);
+    expect(growthRetrieveGraphEvidenceResultSchema.safeParse({
+      ...base,
+      evidence: [{
+        ...causal,
+        relation: {
+          ...causal.relation,
+          sourceReferences: [{ ...causal.relation.sourceReferences[0], sourceId: "internal-source" }],
+        },
+      }],
     }).success).toBe(false);
   });
 

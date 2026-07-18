@@ -7,6 +7,8 @@ import {
   type SourcedAssertionRecord,
   type StoredAssertionSource,
 } from "./assertionRepository";
+import { CausalRelationRepository } from "./causalRelationRepository";
+import type { CausalEpistemicStatus, CausalRelationKind } from "./causalRelationTypes";
 
 export type SemanticGraphNodeKind = "subject" | "fact" | "entity";
 export type SemanticGraphStatus = "current" | "conflict";
@@ -30,13 +32,29 @@ export interface SemanticGraphNode {
   relationCount: number;
 }
 
-export interface SemanticGraphEdge {
+interface SemanticGraphEdgeBase {
   id: string;
-  kind: "predicate" | "entity_reference";
   sourceNodeId: string;
   targetNodeId: string;
   label: string;
   status: SemanticGraphStatus;
+}
+
+export type SemanticGraphEdge = SemanticGraphEdgeBase & (
+  | { kind: "predicate" | "entity_reference" }
+  | {
+      kind: "causal";
+      relationKind: CausalRelationKind;
+      mechanismSummary: string;
+      epistemicStatus: CausalEpistemicStatus;
+      sourceReferences: SemanticGraphCausalSourceReference[];
+    }
+);
+
+export interface SemanticGraphCausalSourceReference {
+  kind: "document" | "evidence" | "assertion";
+  versionId: string;
+  locator: string;
 }
 
 export interface SemanticGraphSnapshot {
@@ -91,6 +109,12 @@ export interface SemanticGraphInspector {
     neighborId: string;
     neighborLabel: string;
     neighborKind: SemanticGraphNodeKind;
+    causal?: {
+      relationKind: CausalRelationKind;
+      mechanismSummary: string;
+      epistemicStatus: CausalEpistemicStatus;
+      sourceReferences: SemanticGraphCausalSourceReference[];
+    };
   }>;
 }
 
@@ -102,11 +126,13 @@ interface BuiltGraph {
 
 export class SemanticGraphService {
   readonly #assertions: AssertionRepository;
+  readonly #causalRelations: CausalRelationRepository;
   readonly #checkpoints: CheckpointRepository;
   readonly #resources: ResourceRepository;
 
   constructor(readonly workspace: WorkspaceDatabase) {
     this.#assertions = new AssertionRepository(workspace);
+    this.#causalRelations = new CausalRelationRepository(workspace);
     this.#checkpoints = new CheckpointRepository(workspace);
     this.#resources = new ResourceRepository(workspace);
   }
@@ -146,6 +172,14 @@ export class SemanticGraphService {
         neighborId,
         neighborLabel: neighbor.label,
         neighborKind: neighbor.kind,
+        ...(edge.kind === "causal" ? {
+          causal: {
+            relationKind: edge.relationKind,
+            mechanismSummary: edge.mechanismSummary,
+            epistemicStatus: edge.epistemicStatus,
+            sourceReferences: edge.sourceReferences,
+          },
+        } : {}),
       }];
     });
     return { node, detail, relations };
@@ -167,6 +201,7 @@ export class SemanticGraphService {
     const edges: SemanticGraphEdge[] = [];
     const details = new Map<string, SemanticGraphNodeDetail>();
     const authorityResourceIds = new Map<string, string>();
+    const assertionFactNodeIds = new Map<string, string>();
 
     for (const assertion of assertions) {
       const status = assertion.status as SemanticGraphStatus;
@@ -174,6 +209,7 @@ export class SemanticGraphService {
       const sources = assertion.sources.map((source) => this.#projectSource(source, branch.id));
       const subjectId = safeId("subject", assertion.scopeId, assertion.subject);
       const factId = safeId("fact", assertion.versionId);
+      assertionFactNodeIds.set(assertion.assertionId, factId);
       const subjectNode = upsertSemanticNode(nodes, {
         id: subjectId,
         kind: "subject",
@@ -263,6 +299,28 @@ export class SemanticGraphService {
           status,
         });
       }
+    }
+
+    for (const relation of this.#causalRelations.listCurrent(branch.id)) {
+      const causeNodeId = assertionFactNodeIds.get(relation.causeAssertionId);
+      const effectNodeId = assertionFactNodeIds.get(relation.effectAssertionId);
+      if (!causeNodeId || !effectNodeId) continue;
+      edges.push({
+        id: safeId("edge", "causal", relation.versionId),
+        kind: "causal",
+        sourceNodeId: causeNodeId,
+        targetNodeId: effectNodeId,
+        label: causalKindLabel(relation.kind),
+        status: relation.status as SemanticGraphStatus,
+        relationKind: relation.kind,
+        mechanismSummary: boundedText(relation.mechanism, 1_000),
+        epistemicStatus: relation.epistemicStatus,
+        sourceReferences: relation.sourceReferences.map((source) => ({
+          kind: source.sourceKind,
+          versionId: boundedText(source.sourceVersionId, 240),
+          locator: boundedText(source.stableLocator, 1_000),
+        })),
+      });
     }
 
     const relationCounts = new Map<string, number>();
@@ -463,6 +521,18 @@ function resourceTypeLabel(type: ResourceType): string {
 function scopeTypeLabel(type: string): string {
   return ({ world: "世界范围", oc: "OC 范围", story: "故事范围", graph: "图谱范围", timeline: "时间线范围", asset: "资产范围" } as Record<string, string>)[type]
     || "自定义范围";
+}
+
+function causalKindLabel(kind: CausalRelationKind): string {
+  return ({
+    causes: "导致",
+    enables: "使能",
+    constrains: "约束",
+    prevents: "阻止",
+    amplifies: "放大",
+    mitigates: "缓解",
+    depends_on: "依赖",
+  })[kind];
 }
 
 function graphError(code: string, message: string): Error & { code: string } {

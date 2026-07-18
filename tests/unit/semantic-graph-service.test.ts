@@ -4,8 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
 import { SemanticGraphService } from "../../src/domain/graph/semanticGraphService";
+import { CausalRelationRepository } from "../../src/domain/graph/causalRelationRepository";
 import { CheckpointRepository } from "../../src/domain/version/checkpointRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
+import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
 import { commitFixtureCheckpoint } from "../helpers/workspaceFixtures";
 
@@ -165,5 +167,93 @@ describe("SemanticGraphService", () => {
     expect(snapshot.nodes.find((node) => node.kind === "fact")?.description).toBe("古冰川切割");
     expect(JSON.stringify(snapshot)).not.toContain("沉降纪元与海水倒灌");
     expect(JSON.stringify(snapshot)).not.toContain("未来海岸修订");
+  });
+
+  it("projects source-bound causal edges with safe mechanism and epistemic metadata", () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "novax-semantic-causal-"));
+    workspace = openWorkspace(root);
+    const assertions = new AssertionRepository(workspace);
+    const documents = new DocumentRepository(workspace);
+    const causal = new CausalRelationRepository(workspace);
+    const worldRootId = new ResourceRepository(workspace).listCurrent()
+      .find((resource) => resource.type === "world")!.id;
+    commitFixtureCheckpoint(workspace, {
+      idempotencyKey: "semantic-causal-projection",
+      summary: "确认月潮因果边",
+      label: "建立因果图谱",
+    }, (checkpointId) => {
+      const documentVersionId = documents.putVersion({
+        resourceId: worldRootId,
+        checkpointId,
+        content: "月潮增强会改变浅滩可航窗口，迫使商路北移。",
+        authorKind: "user",
+      });
+      for (const [assertionId, subject, predicate] of [
+        ["assertion.semantic.tide", "月潮", "增强"],
+        ["assertion.semantic.route", "商路", "北移"],
+      ] as const) {
+        assertions.putVersion({
+          assertionId,
+          checkpointId,
+          scopeType: "world",
+          scopeId: worldRootId,
+          subject,
+          predicate,
+          object: { text: `${subject}${predicate}` },
+          status: "current",
+          source: { kind: "document_version", ref: documentVersionId },
+        });
+      }
+      workspace!.db.prepare("INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, 'document_version', ?, ?)")
+        .run("source.semantic.causal", documentVersionId, "2026-07-18T00:00:00.000Z");
+      causal.putVersion({
+        versionId: "causal-version.semantic.route",
+        checkpointId,
+        status: "current",
+        idempotencyKey: "semantic-causal-projection",
+        relation: {
+          id: "relation.semantic.tide-route",
+          kind: "causes",
+          causeAssertionId: "assertion.semantic.tide",
+          effectAssertionId: "assertion.semantic.route",
+          mechanism: "潮差改变浅滩可航窗口。",
+          conditions: ["强月潮"],
+          temporalScope: "涨潮后三小时",
+          polarityStrengthSummary: "强正向",
+          epistemicStatus: "inferred",
+          sourceReferences: [{
+            sourceId: "source.semantic.causal",
+            sourceKind: "document",
+            sourceVersionId: documentVersionId,
+            stableLocator: "paragraph:1",
+            sourceSha256: documents.getVersion(documentVersionId)!.contentHash,
+          }],
+        },
+      });
+    });
+
+    const service = new SemanticGraphService(workspace);
+    const edge = service.getSnapshot().edges.find((candidate) => candidate.kind === "causal");
+    expect(edge).toMatchObject({
+      kind: "causal",
+      relationKind: "causes",
+      label: "导致",
+      mechanismSummary: "潮差改变浅滩可航窗口。",
+      epistemicStatus: "inferred",
+      status: "current",
+      sourceReferences: [{ kind: "document", locator: "paragraph:1" }],
+    });
+    if (!edge) throw new Error("Expected causal edge.");
+    const inspector = service.inspectNode(edge.sourceNodeId);
+    expect(inspector.relations).toContainEqual(expect.objectContaining({
+      edgeId: edge.id,
+      direction: "outgoing",
+      causal: expect.objectContaining({
+        mechanismSummary: "潮差改变浅滩可航窗口。",
+        epistemicStatus: "inferred",
+        sourceReferences: [expect.objectContaining({ locator: "paragraph:1" })],
+      }),
+    }));
+    expect(JSON.stringify({ edge, inspector })).not.toMatch(/source\.semantic\.causal|sourceSha256|workspace\.db/);
   });
 });

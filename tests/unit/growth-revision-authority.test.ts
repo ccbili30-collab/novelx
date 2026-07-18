@@ -63,6 +63,27 @@ describe("Growth revision authority resolver", () => {
       expect.objectContaining({ kind: "document", evidenceId: setup.outlineDocumentVersionId }),
       expect.objectContaining({ kind: "document", evidenceId: setup.sectionDocumentVersionId }),
     ]));
+    expect(resolver.resolve(setup.checkpointId, [...result.hits, {
+      rank: result.hits.length + 1,
+      targetKind: "relation",
+      targetId: "causal-read-only",
+      targetVersionId: "causal-version-read-only",
+      score: 0.1,
+      reasonCodes: ["scope_match"],
+      pathTargetIds: [],
+      relation: {
+        relationType: "causal",
+        id: "causal-read-only",
+        versionId: "causal-version-read-only",
+        kind: "causes",
+        causeAssertionId: "cause",
+        effectAssertionId: "effect",
+        mechanismSummary: "Read-only causal evidence.",
+        status: "current",
+        epistemicStatus: "inferred",
+        sourceReferences: [{ kind: "document", versionId: setup.worldDocumentVersionId, locator: "paragraph:1" }],
+      },
+    }]).targets).toEqual(authority.targets);
 
     const forged = result.hits.map((hit) => hit.targetVersionId === setup.storyDocumentVersionId
       ? { ...hit, targetId: "forged-document" }

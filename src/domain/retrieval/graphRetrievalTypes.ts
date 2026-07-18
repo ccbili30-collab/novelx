@@ -14,6 +14,8 @@ export const graphRetrievalRequestSchema = z.object({
   lens: z.literal("creator"),
   authorizedScopeResourceIds: z.array(idSchema).min(1).max(100),
   seedResourceIds: z.array(idSchema).max(100).default([]),
+  seedAssertionIds: z.array(idSchema).max(100).default([]),
+  causalDirection: z.enum(["upstream", "downstream", "both"]).default("both"),
   /** Main-authoritative resources that must be retained as evidence hits. */
   requiredResourceIds: z.array(idSchema).max(100).default([]),
   /** Main-authoritative pinned versions that must be retained as evidence hits. */
@@ -36,6 +38,9 @@ export const graphRetrievalRequestSchema = z.object({
   if (new Set(value.seedResourceIds).size !== value.seedResourceIds.length) {
     context.addIssue({ code: "custom", path: ["seedResourceIds"], message: "Seed IDs must be unique." });
   }
+  if (new Set(value.seedAssertionIds).size !== value.seedAssertionIds.length) {
+    context.addIssue({ code: "custom", path: ["seedAssertionIds"], message: "Assertion seed IDs must be unique." });
+  }
   if (new Set(value.requiredResourceIds).size !== value.requiredResourceIds.length) {
     context.addIssue({ code: "custom", path: ["requiredResourceIds"], message: "Required resource IDs must be unique." });
   }
@@ -57,7 +62,34 @@ export type GraphRetrievalEvidenceHit = {
   | { targetKind: "resource"; resource: { id: string; versionId: string; title: string; type: string; objectKind: string }; stableDocument: { excerpt: string; locator: string; versionId: string; contentHash: string } | null }
   | { targetKind: "document"; document: { id: string; versionId: string; title: string; excerpt: string; locator: string; contentHash: string } }
   | { targetKind: "assertion"; assertion: { id: string; versionId: string; scopeResourceId: string; subject: string; predicate: string; object: Record<string, unknown>; status: "current" | "conflict"; sources: GraphRetrievalAssertionSource[] } }
-  | { targetKind: "relation"; relation: { id: string; versionId: string; kind: string; sourceResourceId: string; targetResourceId: string } }
+  | {
+      targetKind: "relation";
+      relation:
+        | {
+            relationType: "structural";
+            id: string;
+            versionId: string;
+            kind: string;
+            sourceResourceId: string;
+            targetResourceId: string;
+          }
+        | {
+            relationType: "causal";
+            id: string;
+            versionId: string;
+            kind: "causes" | "enables" | "constrains" | "prevents" | "amplifies" | "mitigates" | "depends_on";
+            causeAssertionId: string;
+            effectAssertionId: string;
+            mechanismSummary: string;
+            status: "current" | "conflict";
+            epistemicStatus: "confirmed" | "inferred" | "disputed";
+            sourceReferences: Array<{
+              kind: "document" | "evidence" | "assertion";
+              versionId: string;
+              locator: string;
+            }>;
+          };
+    }
 );
 
 export interface GraphRetrievalResult {
@@ -70,5 +102,6 @@ export interface GraphRetrievalResult {
     consumedContentChars: number;
     coverage: "complete" | "partial" | "unknown";
     truncated: boolean;
+    cache: "hit" | "miss";
   };
 }

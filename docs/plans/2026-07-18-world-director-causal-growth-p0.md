@@ -595,11 +595,13 @@ unknown side effect -> reconciliation_required
 
 **Acceptance:**
 
-- [ ] Creator Lens can query bounded upstream/downstream causal paths.
-- [ ] Every edge exposes safe mechanism summary, status and source reference.
-- [ ] Inferred/disputed edges are visually distinct.
-- [ ] Player Lens remains fail-closed until separately authorized.
-- [ ] Query caching keys include checkpoint, scope, Lens, query and budgets.
+- [x] Creator Lens can query bounded upstream/downstream causal paths.
+- [x] Every edge exposes safe mechanism summary, status and source reference.
+- [x] Inferred/disputed edges are visually distinct.
+- [x] Player Lens remains fail-closed until separately authorized.
+- [x] Query caching keys include checkpoint, scope, Lens, query and budgets.
+
+**Task 10 evidence (2026-07-18):** the Creator Lens semantic graph now projects current checkpointed causal relations onto assertion fact nodes and exposes bounded upstream/downstream retrieval from assertion seeds. Safe edge evidence contains relation kind, bounded mechanism summary, epistemic status and source kind/version/locator only; internal source identity and hashes do not cross the IPC or Worker contract. Confirmed, inferred and disputed edges have distinct stable visual styles, with conflict taking the strongest warning style. Retrieval fails closed for Player Lens, out-of-scope endpoints and future checkpoint versions, and uses an identity-free bounded in-memory cache keyed by checkpoint, authorized scope, Lens, query, resource/assertion seeds, direction and all budgets; truncated results are not cached. Ten targeted graph, retrieval, IPC, Worker/Growth and workspace files passed 166/166 tests with zero skips; `npm run typecheck`, `npm run build`, `git diff --check` and the real Electron semantic-graph E2E passed 1/1 after building current production output. The E2E used a local SQLite Fixture and is UI/runtime wiring evidence, not Provider Live. No Provider or full test suite was run. Player Lens causal disclosure remains separately frozen, and Task 11 fixed capability registry remains unimplemented.
 
 ## 9. Phase E — Fixed Agent Registry and Tool-Light Runtimes
 

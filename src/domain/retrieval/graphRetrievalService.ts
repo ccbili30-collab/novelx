@@ -3,7 +3,7 @@ import { CreativeDocumentRepository } from "../workspace/creativeDocumentReposit
 import { DocumentRepository } from "../workspace/documentRepository";
 import { ResourceRepository } from "../workspace/resourceRepository";
 import type { WorkspaceDatabase } from "../workspace/workspaceRepository";
-import { graphRetrievalRequestSchema, type GraphRetrievalAssertionSource, type GraphRetrievalEvidenceHit, type GraphRetrievalReasonCode, type GraphRetrievalResult } from "./graphRetrievalTypes";
+import { graphRetrievalRequestSchema, type GraphRetrievalAssertionSource, type GraphRetrievalEvidenceHit, type GraphRetrievalReasonCode, type GraphRetrievalRequest, type GraphRetrievalResult } from "./graphRetrievalTypes";
 
 type TargetKind = "resource" | "document" | "assertion" | "relation";
 type Row = Record<string, SQLOutputValue>;
@@ -15,6 +15,7 @@ interface Candidate {
   targetId: string;
   targetVersionId: string;
   resourceIds: string[];
+  graphNodeIds?: string[];
   text: string;
   subject?: string;
   predicate?: string;
@@ -24,6 +25,9 @@ interface Candidate {
 }
 
 interface Edge { from: string; to: string; }
+
+const retrievalCaches = new WeakMap<WorkspaceDatabase, Map<string, GraphRetrievalResult>>();
+const MAX_CACHE_ENTRIES = 64;
 
 export class GraphRetrievalService {
   readonly #resources: ResourceRepository;
@@ -63,6 +67,22 @@ export class GraphRetrievalService {
       || value.requiredResourceIds.some((resourceId) => !value.seedResourceIds.includes(resourceId))
       || value.requiredResourceIds.some((resourceId) => !effectiveIds.has(resourceId))) {
       throw retrievalError("GRAPH_RETRIEVAL_REQUIRED_RESOURCE_INVALID");
+    }
+    this.#assertAssertionSeeds(value.checkpointId, effectiveIds, value.seedAssertionIds);
+    const cacheKey = createGraphRetrievalCacheKey(value);
+    const cache = retrievalCaches.get(this.workspace) ?? new Map<string, GraphRetrievalResult>();
+    retrievalCaches.set(this.workspace, cache);
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      cache.delete(cacheKey);
+      cache.set(cacheKey, cached);
+      const result = structuredClone(cached);
+      result.receipt.id = value.id;
+      result.receipt.cycleId = value.cycleId;
+      result.receipt.runId = value.runId;
+      result.receipt.toolInvocationId = value.toolInvocationId;
+      result.diagnostics.cache = "hit";
+      return result;
     }
 
     const startedAt = this.#now();
@@ -147,6 +167,7 @@ export class GraphRetrievalService {
       if (!appendCandidate({
         key: `assertion:${assertion.id}`, targetKind: "assertion", targetId: assertion.assertionId, targetVersionId: assertion.id,
         resourceIds: unique([assertion.scopeId, ...readEntityReferences(assertion.object)]),
+        graphNodeIds: [assertion.assertionId],
         text: `${assertion.subject}\n${assertion.predicate}\n${assertion.objectJson}`,
         subject: assertion.subject, predicate: assertion.predicate, conflict: assertion.status === "conflict", locator: null,
         evidence: { id: assertion.assertionId, versionId: assertion.id, scopeResourceId: assertion.scopeId, subject: assertion.subject, predicate: assertion.predicate, object: assertion.object, status: assertion.status, sources },
@@ -159,7 +180,42 @@ export class GraphRetrievalService {
       if (!appendCandidate({
         key: `relation:${relation.relationId}:${relation.id}`, targetKind: "relation", targetId: relation.relationId, targetVersionId: relation.id,
         resourceIds: [relation.sourceResourceId, relation.targetResourceId], text: `${relation.kind} ${relation.sourceResourceId} ${relation.targetResourceId}`,
-        conflict: false, locator: null, evidence: { id: relation.relationId, versionId: relation.id, kind: relation.kind, sourceResourceId: relation.sourceResourceId, targetResourceId: relation.targetResourceId },
+        conflict: false, locator: null, evidence: {
+          relationType: "structural", id: relation.relationId, versionId: relation.id,
+          kind: relation.kind, sourceResourceId: relation.sourceResourceId, targetResourceId: relation.targetResourceId,
+        },
+      })) break;
+    }
+    const causalRelations = this.#causalRelationsAtCheckpoint(value.checkpointId, effectiveIds);
+    if (markTimeLimit()) { enumerationStopped = true; omittedCount += causalRelations.length; }
+    for (const relation of causalRelations) {
+      if (enumerationStopped) break;
+      if (!appendCandidate({
+        key: `causal:${relation.relationId}:${relation.id}`,
+        targetKind: "relation",
+        targetId: relation.relationId,
+        targetVersionId: relation.id,
+        resourceIds: [relation.causeScopeId, relation.effectScopeId],
+        graphNodeIds: value.causalDirection === "downstream"
+          ? [relation.effectAssertionId]
+          : value.causalDirection === "upstream"
+            ? [relation.causeAssertionId]
+            : [relation.causeAssertionId, relation.effectAssertionId],
+        text: `${relation.kind} ${relation.mechanism} ${relation.causeSubject} ${relation.causePredicate} ${relation.effectSubject} ${relation.effectPredicate}`,
+        conflict: relation.status === "conflict",
+        locator: null,
+        evidence: {
+          relationType: "causal",
+          id: relation.relationId,
+          versionId: relation.id,
+          kind: relation.kind,
+          causeAssertionId: relation.causeAssertionId,
+          effectAssertionId: relation.effectAssertionId,
+          mechanismSummary: boundedText(relation.mechanism, 1_000),
+          status: relation.status,
+          epistemicStatus: relation.epistemicStatus,
+          sourceReferences: this.#causalSourceReferences(relation.id),
+        },
       })) break;
     }
 
@@ -170,13 +226,25 @@ export class GraphRetrievalService {
     }
     for (const assertion of assertions) {
       if (markTimeLimit()) { omittedCount += 1; break; }
+      edges.push({ from: assertion.scopeId, to: assertion.assertionId });
+      edges.push({ from: assertion.assertionId, to: assertion.scopeId });
       for (const targetId of readEntityReferences(assertion.object)) {
         if (effectiveIds.has(targetId)) edges.push({ from: assertion.scopeId, to: targetId });
+      }
+    }
+    for (const relation of causalRelations) {
+      if (markTimeLimit()) { omittedCount += 1; break; }
+      if (value.causalDirection === "downstream" || value.causalDirection === "both") {
+        edges.push({ from: relation.causeAssertionId, to: relation.effectAssertionId });
+      }
+      if (value.causalDirection === "upstream" || value.causalDirection === "both") {
+        edges.push({ from: relation.effectAssertionId, to: relation.causeAssertionId });
       }
     }
     edges.sort((left, right) => left.from.localeCompare(right.from) || left.to.localeCompare(right.to));
     const paths = new Map<string, string[]>();
     for (const seedId of [...value.seedResourceIds].sort()) paths.set(seedId, [seedId]);
+    for (const seedId of [...value.seedAssertionIds].sort()) paths.set(seedId, [seedId]);
     let frontier = [...paths.keys()].sort();
     for (let hop = 0; hop < value.maxHops && frontier.length > 0 && !truncated; hop += 1) {
       const next: string[] = [];
@@ -208,8 +276,10 @@ export class GraphRetrievalService {
       else if (candidate.targetKind === "resource" && contains(text, query)) { reasons.push("exact_subject"); score += 0.65; matched = true; }
       if (candidate.predicate && contains(normalize(candidate.predicate), query)) { reasons.push("exact_predicate"); score += 0.55; matched = true; }
       if (candidate.locator && contains(text, query)) { reasons.push("source_match"); score += 0.45; matched = true; }
+      else if (candidate.targetKind === "relation" && contains(text, query)) { reasons.push("source_match"); score += 0.45; matched = true; }
       if (aliases.some((alias) => contains(text, alias))) { reasons.push("alias"); score += 0.35; matched = true; }
-      const path = candidate.resourceIds.map((id) => paths.get(id)).find((value): value is string[] => Boolean(value && value.length > 1));
+      const path = (candidate.graphNodeIds ?? candidate.resourceIds)
+        .map((id) => paths.get(id)).find((value): value is string[] => Boolean(value && value.length > 1));
       if (path) { reasons.push("graph_hop"); score += 0.2 / path.length; matched = true; }
       if (!matched) continue;
       if (candidate.conflict) { reasons.push("conflict"); score += 0.1; }
@@ -262,7 +332,24 @@ export class GraphRetrievalService {
         stableLocator: item.candidate.locator?.locator ?? null, stableVersionId: item.candidate.locator?.versionId ?? null, stableHash: item.candidate.locator?.hash ?? null,
       })),
     };
-    return { receipt, hits, effectiveScopeResourceIds: [...value.authorizedScopeResourceIds], diagnostics: { candidateCount: candidates.length, expandedEdges, consumedContentChars, coverage, truncated } };
+    const result: GraphRetrievalResult = {
+      receipt,
+      hits,
+      effectiveScopeResourceIds: [...value.authorizedScopeResourceIds],
+      diagnostics: {
+        candidateCount: candidates.length,
+        expandedEdges,
+        consumedContentChars,
+        coverage,
+        truncated,
+        cache: "miss",
+      },
+    };
+    if (!result.diagnostics.truncated) {
+      cache.set(cacheKey, structuredClone(result));
+      while (cache.size > MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value!);
+    }
+    return result;
   }
 
   #assertCheckpointBranch(checkpointId: string, branchId: string): void {
@@ -314,6 +401,107 @@ export class GraphRetrievalService {
         FROM creative_relation_versions crv JOIN ancestry ON ancestry.checkpoint_id = crv.created_checkpoint_id
       ) SELECT * FROM ranked WHERE version_rank = 1 AND state = 'active' AND source_resource_id IN (${placeholders}) AND target_resource_id IN (${placeholders}) ORDER BY kind, source_resource_id, target_resource_id, relation_id
     `).all(checkpointId, ...ids, ...ids).map((row) => ({ id: readString(row, "id"), relationId: readString(row, "relation_id"), kind: readString(row, "kind"), sourceResourceId: readString(row, "source_resource_id"), targetResourceId: readString(row, "target_resource_id") }));
+  }
+
+  #causalRelationsAtCheckpoint(checkpointId: string, ids: ReadonlySet<string>): Array<{
+    id: string;
+    relationId: string;
+    kind: "causes" | "enables" | "constrains" | "prevents" | "amplifies" | "mitigates" | "depends_on";
+    causeAssertionId: string;
+    effectAssertionId: string;
+    causeScopeId: string;
+    effectScopeId: string;
+    causeSubject: string;
+    causePredicate: string;
+    effectSubject: string;
+    effectPredicate: string;
+    mechanism: string;
+    status: "current" | "conflict";
+    epistemicStatus: "confirmed" | "inferred" | "disputed";
+  }> {
+    if (ids.size === 0) return [];
+    const placeholders = [...ids].map(() => "?").join(", ");
+    return this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+        SELECT ?, 0 UNION ALL SELECT c.parent_checkpoint_id, ancestry.depth + 1 FROM checkpoints c
+        JOIN ancestry ON c.id = ancestry.checkpoint_id WHERE c.parent_checkpoint_id IS NOT NULL
+      ), causal_ranked AS (
+        SELECT versions.*, ancestry.depth,
+          ROW_NUMBER() OVER (PARTITION BY versions.relation_id ORDER BY ancestry.depth ASC) AS version_rank
+        FROM causal_relation_versions versions
+        JOIN ancestry ON ancestry.checkpoint_id = versions.created_checkpoint_id
+      ), assertion_ranked AS (
+        SELECT versions.*, ancestry.depth,
+          ROW_NUMBER() OVER (PARTITION BY versions.assertion_id ORDER BY ancestry.depth ASC) AS version_rank
+        FROM assertion_versions versions
+        JOIN ancestry ON ancestry.checkpoint_id = versions.created_checkpoint_id
+      )
+      SELECT causal_ranked.id, causal_ranked.relation_id, causal_ranked.mechanism,
+        causal_ranked.status, causal_ranked.epistemic_status,
+        identities.kind, identities.cause_assertion_id, identities.effect_assertion_id,
+        cause.scope_id AS cause_scope_id, cause.subject AS cause_subject, cause.predicate AS cause_predicate,
+        effect.scope_id AS effect_scope_id, effect.subject AS effect_subject, effect.predicate AS effect_predicate
+      FROM causal_ranked
+      JOIN causal_relations identities ON identities.id = causal_ranked.relation_id
+      JOIN assertion_ranked cause ON cause.assertion_id = identities.cause_assertion_id
+        AND cause.version_rank = 1 AND cause.status IN ('current', 'conflict')
+      JOIN assertion_ranked effect ON effect.assertion_id = identities.effect_assertion_id
+        AND effect.version_rank = 1 AND effect.status IN ('current', 'conflict')
+      WHERE causal_ranked.version_rank = 1 AND causal_ranked.status IN ('current', 'conflict')
+        AND cause.scope_id IN (${placeholders}) AND effect.scope_id IN (${placeholders})
+      ORDER BY identities.kind, identities.cause_assertion_id, identities.effect_assertion_id, identities.id
+    `).all(checkpointId, ...ids, ...ids).map((row) => ({
+      id: readString(row, "id"),
+      relationId: readString(row, "relation_id"),
+      kind: readOneOf(row, "kind", ["causes", "enables", "constrains", "prevents", "amplifies", "mitigates", "depends_on"] as const),
+      causeAssertionId: readString(row, "cause_assertion_id"),
+      effectAssertionId: readString(row, "effect_assertion_id"),
+      causeScopeId: readString(row, "cause_scope_id"),
+      effectScopeId: readString(row, "effect_scope_id"),
+      causeSubject: readString(row, "cause_subject"),
+      causePredicate: readString(row, "cause_predicate"),
+      effectSubject: readString(row, "effect_subject"),
+      effectPredicate: readString(row, "effect_predicate"),
+      mechanism: readString(row, "mechanism"),
+      status: readOneOf(row, "status", ["current", "conflict"] as const),
+      epistemicStatus: readOneOf(row, "epistemic_status", ["confirmed", "inferred", "disputed"] as const),
+    }));
+  }
+
+  #causalSourceReferences(versionId: string): Array<{
+    kind: "document" | "evidence" | "assertion";
+    versionId: string;
+    locator: string;
+  }> {
+    return (this.workspace.db.prepare(`
+      SELECT source_kind, source_version_id, stable_locator
+      FROM causal_relation_sources WHERE relation_version_id = ? ORDER BY ordinal
+    `).all(versionId) as Row[]).map((row) => ({
+      kind: readOneOf(row, "source_kind", ["document", "evidence", "assertion"] as const),
+      versionId: readString(row, "source_version_id"),
+      locator: boundedText(readString(row, "stable_locator"), 1_000),
+    }));
+  }
+
+  #assertAssertionSeeds(checkpointId: string, ids: ReadonlySet<string>, seedAssertionIds: readonly string[]): void {
+    if (seedAssertionIds.length === 0) return;
+    if (ids.size === 0) throw retrievalError("GRAPH_RETRIEVAL_SEED_NOT_VISIBLE");
+    const scopePlaceholders = [...ids].map(() => "?").join(", ");
+    const seedPlaceholders = seedAssertionIds.map(() => "?").join(", ");
+    const row = this.workspace.db.prepare(`
+      WITH RECURSIVE ancestry(checkpoint_id, depth) AS (
+        SELECT ?, 0 UNION ALL SELECT c.parent_checkpoint_id, ancestry.depth + 1 FROM checkpoints c
+        JOIN ancestry ON c.id = ancestry.checkpoint_id WHERE c.parent_checkpoint_id IS NOT NULL
+      ), ranked AS (
+        SELECT versions.*, ancestry.depth,
+          ROW_NUMBER() OVER (PARTITION BY versions.assertion_id ORDER BY ancestry.depth ASC) AS version_rank
+        FROM assertion_versions versions JOIN ancestry ON ancestry.checkpoint_id = versions.created_checkpoint_id
+      )
+      SELECT COUNT(*) AS count FROM ranked
+      WHERE version_rank = 1 AND status IN ('current', 'conflict')
+        AND scope_id IN (${scopePlaceholders}) AND assertion_id IN (${seedPlaceholders})
+    `).get(checkpointId, ...ids, ...seedAssertionIds) as { count: number };
+    if (row.count !== seedAssertionIds.length) throw retrievalError("GRAPH_RETRIEVAL_SEED_NOT_VISIBLE");
   }
 
   #assertionSources(versionId: string, checkpointId: string, effectiveIds: ReadonlySet<string>): GraphRetrievalAssertionSource[] {
@@ -396,4 +584,43 @@ function unique<T>(values: readonly T[]): T[] { return [...new Set(values)]; }
 function parseObject(value: string): Record<string, unknown> { const parsed: unknown = JSON.parse(value); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; }
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
 function readString(row: Record<string, SQLOutputValue>, key: string): string { const value = row[key]; if (typeof value !== "string") throw retrievalError("GRAPH_RETRIEVAL_DATA_INVALID"); return value; }
+function readOneOf<const T extends readonly string[]>(row: Row, key: string, values: T): T[number] {
+  const value = readString(row, key);
+  if (!values.includes(value)) throw retrievalError("GRAPH_RETRIEVAL_DATA_INVALID");
+  return value as T[number];
+}
+function boundedText(value: string, maxLength: number): string {
+  const normalized = value
+    .replace(/\b[A-Za-z]:\\[^\s，。；,;）)\]}]+/g, "[本地路径已隐藏]")
+    .replace(/\\\\[^\\\s]+\\[^\s，。；,;）)\]}]+/g, "[本地路径已隐藏]")
+    .trim()
+    .replace(/\s+/g, " ") || "未命名内容";
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 1)}…`;
+}
+export function createGraphRetrievalCacheKey(value: GraphRetrievalRequest): string {
+  return JSON.stringify({
+    branchId: value.branchId,
+    checkpointId: value.checkpointId,
+    lens: value.lens,
+    authorizedScopeResourceIds: value.authorizedScopeResourceIds,
+    seedResourceIds: value.seedResourceIds,
+    seedAssertionIds: value.seedAssertionIds,
+    requiredResourceIds: value.requiredResourceIds,
+    requiredTargetVersionIds: value.requiredTargetVersionIds,
+    query: value.query,
+    aliases: value.aliases,
+    validTime: value.validTime,
+    recordedTime: value.recordedTime,
+    maxHops: value.maxHops,
+    causalDirection: value.causalDirection,
+    budgets: {
+      cpuBudgetMs: value.cpuBudgetMs,
+      expansionBudget: value.expansionBudget,
+      resultBudget: value.resultBudget,
+      tokenBudget: value.tokenBudget,
+      contentBudgetChars: value.contentBudgetChars,
+    },
+    policyVersion: value.policyVersion,
+  });
+}
 function retrievalError(code: string): Error & { code: string } { return Object.assign(new Error(code), { code }); }

@@ -220,6 +220,8 @@ export const growthRetrieveGraphEvidenceArgsSchema = z.object({
   query: z.string().trim().min(1).max(12_000),
   aliases: z.array(z.string().trim().min(1).max(240)).max(100).default([]),
   seedResourceIds: z.array(identifierSchema).max(100).default([]),
+  seedAssertionIds: z.array(identifierSchema).max(100).default([]),
+  causalDirection: z.enum(["upstream", "downstream", "both"]).default("both"),
   maxHops: z.number().int().min(0).max(3),
   cpuBudgetMs: z.number().int().min(1).max(60_000),
   expansionBudget: z.number().int().min(1).max(100_000),
@@ -260,6 +262,22 @@ const growthEvidenceHitSchema = z.discriminatedUnion("kind", [
       kind: workspaceCreativeRelationSchema.shape.kind,
       sourceResourceId: identifierSchema,
       targetResourceId: identifierSchema,
+    }).strict(),
+  }).strict(),
+  growthEvidenceBaseSchema.extend({
+    kind: z.literal("causal_relation"),
+    relation: z.object({
+      kind: z.enum(["causes", "enables", "constrains", "prevents", "amplifies", "mitigates", "depends_on"]),
+      causeAssertionId: identifierSchema,
+      effectAssertionId: identifierSchema,
+      mechanismSummary: z.string().trim().min(1).max(1_000),
+      status: z.enum(["current", "conflict"]),
+      epistemicStatus: z.enum(["confirmed", "inferred", "disputed"]),
+      sourceReferences: z.array(z.object({
+        kind: z.enum(["document", "evidence", "assertion"]),
+        versionId: identifierSchema,
+        locator: z.string().trim().min(1).max(1_000),
+      }).strict()).min(1).max(50),
     }).strict(),
   }).strict(),
 ]);

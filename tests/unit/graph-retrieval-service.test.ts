@@ -3,9 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { GraphRetrievalService } from "../../src/domain/retrieval/graphRetrievalService";
+import { createGraphRetrievalCacheKey, GraphRetrievalService } from "../../src/domain/retrieval/graphRetrievalService";
+import { graphRetrievalRequestSchema } from "../../src/domain/retrieval/graphRetrievalTypes";
 import { GrowthRepository } from "../../src/domain/growth/growthRepository";
 import { AssertionRepository } from "../../src/domain/graph/assertionRepository";
+import { CausalRelationRepository } from "../../src/domain/graph/causalRelationRepository";
 import { ChangeSetRepository } from "../../src/domain/changeSet/changeSetRepository";
 import { CreativeDocumentRepository } from "../../src/domain/workspace/creativeDocumentRepository";
 import { CreativeRelationRepository } from "../../src/domain/workspace/creativeRelationRepository";
@@ -185,6 +187,95 @@ describe("GraphRetrievalService", () => {
     expect(result.hits[0]).toMatchObject({ targetKind: "document", targetId: setup.budgetDocumentId });
     expect(result.receipt.links).toHaveLength(1);
   });
+
+  it("retrieves bounded downstream and upstream causal paths with safe edge provenance", () => {
+    const setup = createSetup();
+    const causal = seedCausalChain(setup);
+    const service = new GraphRetrievalService(setup.workspace);
+    const downstream = service.retrieve(request(setup, {
+      query: "不存在的字面词",
+      seedAssertionIds: [causal.causeAssertionId],
+      causalDirection: "downstream",
+      maxHops: 1,
+    }));
+    const downstreamCausal = downstream.hits.filter((hit) =>
+      hit.targetKind === "relation" && hit.relation.relationType === "causal");
+    expect(downstreamCausal).toHaveLength(1);
+    expect(downstreamCausal[0]).toMatchObject({
+      targetId: causal.firstRelationId,
+      reasonCodes: expect.arrayContaining(["graph_hop"]),
+      pathTargetIds: [causal.causeAssertionId, causal.middleAssertionId],
+      relation: {
+        relationType: "causal",
+        mechanismSummary: "月潮增强会压缩浅滩可航窗口。",
+        epistemicStatus: "inferred",
+        status: "current",
+        sourceReferences: [expect.objectContaining({ kind: "document", locator: "paragraph:1" })],
+      },
+    });
+    expect(JSON.stringify(downstreamCausal)).not.toMatch(/source\.causal\.chain|sourceSha256|sourceId/);
+    const upstream = service.retrieve(request(setup, {
+      query: "不存在的字面词",
+      seedAssertionIds: [causal.effectAssertionId],
+      causalDirection: "upstream",
+      maxHops: 1,
+    }));
+    const upstreamCausal = upstream.hits.filter((hit) =>
+      hit.targetKind === "relation" && hit.relation.relationType === "causal");
+    expect(upstreamCausal).toHaveLength(1);
+    expect(upstreamCausal[0]).toMatchObject({
+      targetId: causal.secondRelationId,
+      pathTargetIds: [causal.effectAssertionId, causal.middleAssertionId],
+      relation: expect.objectContaining({ epistemicStatus: "disputed" }),
+    });
+    expect(() => service.retrieve(request(setup, { seedAssertionIds: ["assertion.outside"] })))
+      .toThrowError(expect.objectContaining({ code: "GRAPH_RETRIEVAL_SEED_NOT_VISIBLE" }));
+
+    const repository = new CausalRelationRepository(setup.workspace);
+    const current = repository.getVersion("causal-version.chain.0")!;
+    const futureCheckpoint = new CheckpointRepository(setup.workspace).appendCheckpoint(setup.branchId, "future causal revision");
+    repository.putVersion({
+      versionId: "causal-version.chain.future",
+      checkpointId: futureCheckpoint,
+      status: "current",
+      idempotencyKey: "causal-chain-future",
+      relation: {
+        id: current.id,
+        kind: current.kind,
+        causeAssertionId: current.causeAssertionId,
+        effectAssertionId: current.effectAssertionId,
+        mechanism: "未来因果泄漏",
+        conditions: current.conditions,
+        temporalScope: current.temporalScope,
+        polarityStrengthSummary: current.polarityStrengthSummary,
+        epistemicStatus: current.epistemicStatus,
+        sourceReferences: current.sourceReferences,
+      },
+    });
+    const pinned = service.retrieve(request(setup, { query: "未来因果泄漏", seedAssertionIds: [], maxHops: 0 }));
+    expect(pinned.hits.some((hit) => hit.targetId === causal.firstRelationId)).toBe(false);
+  });
+
+  it("uses an identity-free bounded cache keyed by checkpoint, scope, Lens, query and budgets", () => {
+    const setup = createSetup();
+    const service = new GraphRetrievalService(setup.workspace);
+    const first = service.retrieve(request(setup, { id: "receipt-a", runId: "run-a", toolInvocationId: "tool-a" }));
+    const second = service.retrieve(request(setup, { id: "receipt-b", runId: "run-b", toolInvocationId: "tool-b" }));
+    expect(first.diagnostics.cache).toBe("miss");
+    expect(second.diagnostics.cache).toBe("hit");
+    expect(second.receipt).toMatchObject({ id: "receipt-b", runId: "run-b", toolInvocationId: "tool-b", lens: "creator" });
+    expect(second.receipt.links).toEqual(first.receipt.links);
+
+    const parsed = graphRetrievalRequestSchema.parse(request(setup));
+    const key = createGraphRetrievalCacheKey(parsed);
+    expect(key).toContain('"lens":"creator"');
+    expect(createGraphRetrievalCacheKey({ ...parsed, checkpointId: "checkpoint-other" })).not.toBe(key);
+    expect(createGraphRetrievalCacheKey({ ...parsed, authorizedScopeResourceIds: [setup.worldRootId] })).not.toBe(key);
+    expect(createGraphRetrievalCacheKey({ ...parsed, query: "另一查询" })).not.toBe(key);
+    for (const budget of ["cpuBudgetMs", "expansionBudget", "resultBudget", "tokenBudget", "contentBudgetChars"] as const) {
+      expect(createGraphRetrievalCacheKey({ ...parsed, [budget]: parsed[budget] + 1 })).not.toBe(key);
+    }
+  });
 });
 
 function createSetup() {
@@ -243,6 +334,84 @@ function request(setup: ReturnType<typeof createSetup>, overrides: Record<string
     validTime: null, recordedTime: null, maxHops: 1, cpuBudgetMs: 1000, expansionBudget: 100, resultBudget: 20, tokenBudget: 1000, contentBudgetChars: 1000,
     policyVersion: "graph-retrieval-v1", ...overrides,
   };
+}
+
+function seedCausalChain(setup: ReturnType<typeof createSetup>) {
+  const changes = new ChangeSetRepository(setup.workspace);
+  const causal = new CausalRelationRepository(setup.workspace);
+  const assertions = new AssertionRepository(setup.workspace);
+  const sourceHash = setup.documentHash;
+  const causeAssertionId = "assertion.causal.tide";
+  const middleAssertionId = "assertion.causal.shoal";
+  const effectAssertionId = "assertion.causal.route";
+  const firstRelationId = "relation.causal.tide-shoal";
+  const secondRelationId = "relation.causal.shoal-route";
+  const changeSet = changes.propose({ idempotencyKey: "causal-chain", mode: "free", summary: "causal chain" });
+  const checkpointId = changes.commit(changeSet.id, "causal chain", (checkpointId) => {
+    for (const [assertionId, subject, predicate] of [
+      [causeAssertionId, "月潮", "增强"],
+      [middleAssertionId, "浅滩窗口", "缩短"],
+      [effectAssertionId, "商路", "北移"],
+    ] as const) {
+      assertions.putVersion({
+        assertionId,
+        checkpointId,
+        scopeType: "world",
+        scopeId: setup.worldId,
+        subject,
+        predicate,
+        object: { text: `${subject}${predicate}` },
+        status: "current",
+        source: { kind: "document_version", ref: setup.documentVersionId },
+      });
+    }
+    for (const [index, input] of [
+      {
+        relationId: firstRelationId,
+        causeAssertionId,
+        effectAssertionId: middleAssertionId,
+        mechanism: "月潮增强会压缩浅滩可航窗口。",
+        epistemicStatus: "inferred" as const,
+      },
+      {
+        relationId: secondRelationId,
+        causeAssertionId: middleAssertionId,
+        effectAssertionId,
+        mechanism: "浅滩窗口缩短可能迫使商路北移。",
+        epistemicStatus: "disputed" as const,
+      },
+    ].entries()) {
+      const sourceId = `source.causal.chain.${index}`;
+      setup.workspace.db.prepare("INSERT INTO source_records (id, kind, ref, created_at) VALUES (?, 'document_version', ?, ?)")
+        .run(sourceId, setup.documentVersionId, "2026-07-18T00:00:00.000Z");
+      causal.putVersion({
+        versionId: `causal-version.chain.${index}`,
+        checkpointId,
+        status: "current",
+        idempotencyKey: `causal-chain-${index}`,
+        relation: {
+          id: input.relationId,
+          kind: "causes",
+          causeAssertionId: input.causeAssertionId,
+          effectAssertionId: input.effectAssertionId,
+          mechanism: input.mechanism,
+          conditions: ["强月潮"],
+          temporalScope: "涨潮后三小时",
+          polarityStrengthSummary: "强正向",
+          epistemicStatus: input.epistemicStatus,
+          sourceReferences: [{
+            sourceId,
+            sourceKind: "document",
+            sourceVersionId: setup.documentVersionId,
+            stableLocator: `paragraph:${index + 1}`,
+            sourceSha256: sourceHash,
+          }],
+        },
+      });
+    }
+  });
+  setup.checkpointId = checkpointId;
+  return { causeAssertionId, middleAssertionId, effectAssertionId, firstRelationId, secondRelationId };
 }
 
 function seedRun(workspace: WorkspaceDatabase, branchId: string, checkpointId: string) {

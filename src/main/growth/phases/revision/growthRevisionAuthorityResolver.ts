@@ -120,6 +120,7 @@ export class GrowthRevisionAuthorityResolver {
         });
         continue;
       }
+      if (hit.relation.relationType === "causal") continue;
       const relation = relations.find((candidate) => candidate.id === hit.targetId);
       const versionId = relation ? requiredCurrentRelationVersionId(this.workspace, checkpointId, relation.id) : null;
       if (!relation || versionId !== hit.targetVersionId) throw revisionAuthorityError();

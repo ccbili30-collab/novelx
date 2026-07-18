@@ -582,6 +582,46 @@ describe("desktop IPC contract", () => {
     },
   );
 
+  it("accepts safe causal edge metadata and rejects internal source identities", () => {
+    const graph = {
+      lens: {
+        type: "creator" as const,
+        label: "创作者视角" as const,
+        characterLensAvailable: false as const,
+        limitation: "角色认知视角尚未实现。" as const,
+      },
+      nodes: [],
+      edges: [{
+        id: "graph-causal-edge",
+        kind: "causal" as const,
+        sourceNodeId: "graph-cause",
+        targetNodeId: "graph-effect",
+        label: "导致",
+        status: "current" as const,
+        relationKind: "causes" as const,
+        mechanismSummary: "潮差改变浅滩可航窗口。",
+        epistemicStatus: "inferred" as const,
+        sourceReferences: [{ kind: "document" as const, versionId: "document-version-1", locator: "paragraph:1" }],
+      }],
+      filterOptions: { nodeKinds: [], semanticTypes: [], scopeTypes: [], statuses: [] },
+    };
+    expect(graphSnapshotResultSchema.safeParse({ ok: true, graph }).success).toBe(true);
+    expect(graphSnapshotResultSchema.safeParse({
+      ok: true,
+      graph: {
+        ...graph,
+        edges: [{
+          ...graph.edges[0],
+          sourceReferences: [{
+            ...graph.edges[0]!.sourceReferences[0],
+            sourceId: "internal-source-id",
+            sourceSha256: "a".repeat(64),
+          }],
+        }],
+      },
+    }).success).toBe(false);
+  });
+
   it("accepts semantic graph inspection without raw source records", () => {
     expect(graphInspectorResultSchema.parse({
       ok: true,

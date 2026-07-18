@@ -1171,6 +1171,15 @@ export const changeSetDetailResultSchema = z.discriminatedUnion("ok", [
 
 const graphNodeKindSchema = z.enum(["subject", "fact", "entity"]);
 const graphStatusSchema = z.enum(["current", "conflict"]);
+const graphCausalKindSchema = z.enum([
+  "causes", "enables", "constrains", "prevents", "amplifies", "mitigates", "depends_on",
+]);
+const graphCausalEpistemicStatusSchema = z.enum(["confirmed", "inferred", "disputed"]);
+const graphCausalSourceReferenceSchema = z.object({
+  kind: z.enum(["document", "evidence", "assertion"]),
+  versionId: z.string().min(1).max(240),
+  locator: z.string().min(1).max(1_000),
+}).strict();
 
 const graphScopeSchema = z.object({
   id: z.string().min(1).max(120),
@@ -1191,14 +1200,24 @@ export const semanticGraphNodeSchema = z.object({
   relationCount: z.number().int().min(0).max(200_000),
 }).strict();
 
-export const semanticGraphEdgeSchema = z.object({
+const semanticGraphEdgeBaseSchema = z.object({
   id: z.string().min(1).max(120),
-  kind: z.enum(["predicate", "entity_reference"]),
   sourceNodeId: z.string().min(1).max(120),
   targetNodeId: z.string().min(1).max(120),
   label: z.string().min(1).max(240),
   status: graphStatusSchema,
-}).strict();
+});
+
+export const semanticGraphEdgeSchema = z.discriminatedUnion("kind", [
+  semanticGraphEdgeBaseSchema.extend({ kind: z.enum(["predicate", "entity_reference"]) }).strict(),
+  semanticGraphEdgeBaseSchema.extend({
+    kind: z.literal("causal"),
+    relationKind: graphCausalKindSchema,
+    mechanismSummary: z.string().min(1).max(1_000),
+    epistemicStatus: graphCausalEpistemicStatusSchema,
+    sourceReferences: z.array(graphCausalSourceReferenceSchema).min(1).max(50),
+  }).strict(),
+]);
 
 export const semanticGraphSnapshotSchema = z.object({
   lens: z.object({
@@ -1252,11 +1271,17 @@ export const semanticGraphInspectorSchema = z.object({
   relations: z.array(z.object({
     edgeId: z.string().min(1).max(120),
     direction: z.enum(["incoming", "outgoing"]),
-    kind: z.enum(["predicate", "entity_reference"]),
+    kind: z.enum(["predicate", "entity_reference", "causal"]),
     label: z.string().min(1).max(240),
     neighborId: z.string().min(1).max(120),
     neighborLabel: z.string().min(1).max(500),
     neighborKind: graphNodeKindSchema,
+    causal: z.object({
+      relationKind: graphCausalKindSchema,
+      mechanismSummary: z.string().min(1).max(1_000),
+      epistemicStatus: graphCausalEpistemicStatusSchema,
+      sourceReferences: z.array(graphCausalSourceReferenceSchema).min(1).max(50),
+    }).strict().optional(),
   }).strict()).max(200_000),
 }).strict();
 

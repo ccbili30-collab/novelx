@@ -1043,6 +1043,20 @@ function projectEvidence(hit: ReturnType<GraphRetrievalService["retrieve"]>["hit
     evidenceId: hit.targetVersionId, kind: hit.targetKind, label: `${hit.assertion.subject} ${hit.assertion.predicate}`,
     subject: hit.assertion.subject, predicate: hit.assertion.predicate, object: hit.assertion.object,
   };
+  if (hit.relation.relationType === "causal") return {
+    evidenceId: hit.targetVersionId,
+    kind: "causal_relation" as const,
+    label: `${hit.relation.kind} · ${hit.relation.mechanismSummary}`,
+    relation: {
+      kind: hit.relation.kind,
+      causeAssertionId: hit.relation.causeAssertionId,
+      effectAssertionId: hit.relation.effectAssertionId,
+      mechanismSummary: hit.relation.mechanismSummary,
+      status: hit.relation.status,
+      epistemicStatus: hit.relation.epistemicStatus,
+      sourceReferences: hit.relation.sourceReferences,
+    },
+  };
   return {
     evidenceId: hit.targetVersionId, kind: hit.targetKind, label: hit.relation.kind,
     relation: {
