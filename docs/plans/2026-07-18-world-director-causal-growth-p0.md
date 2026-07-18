@@ -675,6 +675,8 @@ unknown side effect -> reconciliation_required
 
 **Output:** bounded Editorial Round plan or editorial review. No prose candidate, tool call or direct Change Set.
 
+**Task 15 evidence (2026-07-18):** the Agent Worker now accepts a strict hashed World Director start command, independently verifies the active published Prompt identity/content, fixed capability profile, Creator Lens packet hash, pinned checkpoint, user-rule hashes and full capability roster, then exposes exactly one terminal `submit_world_director_result` tool. Plan invocations accept only goal/checkpoint-bound DAG Work Orders whose scopes occur in the prepared packet; review invocations accept only closure-facet and packet-evidence references. Invocation-kind drift, schema extras (including direct Change Set payloads), unauthorized scopes, forged evidence/facets, duplicate submissions, cancellation, missing Provider and unpublished/tampered Prompt all fail closed with safe events and no project write path. Task 14's packet shape is now one shared Main/Worker Zod contract, and the Agent Worker process routes Director commands through the dedicated controller. Six targeted contract/runtime suites passed 60/60 tests with zero skips; `npm run typecheck`, `npm run build` and `git diff --check` passed. Tests used an in-memory Runtime adapter and synthetic active Prompt identity; no real Provider ran, the actual World Director Prompt remains candidate/unpublished, and this is therefore internal runtime evidence rather than Live World Director evidence. Persistence, scheduling, restart/idempotency and serialized commit behavior remain Task 16 work.
+
 ### Task 16: Implement Main editorial scheduler
 
 **Files:**

@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalAuditHash } from "../../../domain/audit/canonicalAuditHash";
 import { agentCapabilityIds } from "../../../shared/growthEditorialContract";
+import {
+  worldDirectorPacketSchema,
+  type WorldDirectorPacket,
+} from "../../../shared/growthEditorialWorkerProtocol";
+
+export type { WorldDirectorPacket } from "../../../shared/growthEditorialWorkerProtocol";
 
 const idSchema = z.string().trim().min(1).max(240);
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -134,33 +140,6 @@ const editorialCharter = Object.freeze([
   "Creator choices, unresolved evidence and truncated context must be surfaced rather than guessed.",
 ]);
 
-export interface WorldDirectorPacket {
-  version: typeof WORLD_DIRECTOR_PACKET_VERSION;
-  identity: { goalId: string; branchId: string; sourceCheckpointId: string; ruleRevision: number; lens: "creator" };
-  editorialCharter: readonly string[];
-  availableCapabilities: readonly string[];
-  userRules: z.output<typeof inputSchema>["userRules"];
-  closureMatrix: z.output<typeof inputSchema>["closureMatrix"];
-  causalFrontier: z.output<typeof inputSchema>["causalFrontier"];
-  recentChangeSets: z.output<typeof inputSchema>["recentChangeSets"];
-  unresolvedCheckerFindings: z.output<typeof inputSchema>["unresolvedCheckerFindings"];
-  nodeMaturity: z.output<typeof inputSchema>["nodeMaturity"];
-  graphSummaries: z.output<typeof inputSchema>["graphSummaries"];
-  imageQueueSummary: z.output<typeof inputSchema>["imageQueueSummary"];
-  retrieval: {
-    budget: Readonly<WorldDirectorPacketBudget>;
-    omitted: {
-      closureFacets: number;
-      causalEdges: number;
-      recentChangeSets: number;
-      checkerFindings: number;
-      nodeMaturity: number;
-      graphSummaries: number;
-    };
-    incomplete: boolean;
-  };
-}
-
 export function compileWorldDirectorPacket(rawInput: unknown): { packet: WorldDirectorPacket; packetSha256: string } {
   const parsed = inputSchema.safeParse(rawInput);
   if (!parsed.success) throw packetError("WORLD_DIRECTOR_PACKET_INPUT_INVALID");
@@ -203,8 +182,8 @@ export function compileWorldDirectorPacket(rawInput: unknown): { packet: WorldDi
       ruleRevision: input.ruleRevision,
       lens: input.lens,
     },
-    editorialCharter,
-    availableCapabilities: agentCapabilityIds,
+    editorialCharter: [...editorialCharter],
+    availableCapabilities: [...agentCapabilityIds],
     userRules: [...input.userRules].sort((left, right) => left.revision - right.revision || left.id.localeCompare(right.id)),
     closureMatrix,
     causalFrontier,
@@ -221,7 +200,9 @@ export function compileWorldDirectorPacket(rawInput: unknown): { packet: WorldDi
     },
   };
   if (JSON.stringify(packet).length > budget.maxTotalChars) throw packetError("WORLD_DIRECTOR_PACKET_BUDGET_EXCEEDED");
-  return { packet, packetSha256: canonicalAuditHash(packet) };
+  const validated = worldDirectorPacketSchema.safeParse(packet);
+  if (!validated.success) throw packetError("WORLD_DIRECTOR_PACKET_OUTPUT_INVALID");
+  return { packet: validated.data, packetSha256: canonicalAuditHash(validated.data) };
 }
 
 function assertCheckpointConsistency(input: z.output<typeof inputSchema>): void {

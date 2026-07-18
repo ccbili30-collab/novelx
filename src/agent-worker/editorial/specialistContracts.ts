@@ -4,7 +4,9 @@ import { z } from "zod";
 import { decomposerOutputSchema } from "../../shared/decomposerContracts";
 import {
   agentCapabilityIdSchema,
+  directorReviewParameters,
   directorReviewSchema,
+  editorialRoundPlanParameters,
   editorialRoundPlanSchema,
   graphCuratorCandidateSchema,
   growthEditorialContractVersion,
@@ -80,7 +82,8 @@ export interface SpecialistContractDefinition {
   outputSchema: ZodType;
 }
 
-const worldDirectorOutputSchema = z.union([editorialRoundPlanSchema, directorReviewSchema]);
+export const worldDirectorOutputSchema = z.union([editorialRoundPlanSchema, directorReviewSchema]);
+export const worldDirectorOutputParameters = Type.Union([editorialRoundPlanParameters, directorReviewParameters]);
 
 const contractOutputSchemas: Record<CapabilityContractId, ZodType> = {
   world_director_v1: worldDirectorOutputSchema,

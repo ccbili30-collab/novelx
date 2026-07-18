@@ -1,7 +1,10 @@
 import { z } from "zod";
 import {
   acceptanceFacetSchema,
+  agentCapabilityIds,
   agentCapabilityIdSchema,
+  directorReviewSchema,
+  editorialRoundPlanSchema,
   growthEditorialContractVersion,
   specialistCandidateSchema,
 } from "./growthEditorialContract";
@@ -13,6 +16,122 @@ const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const evidenceRefSchema = z.string().regex(/^@evidence[1-9][0-9]*$/);
 const artifactRefSchema = z.string().regex(/^@artifact[1-9][0-9]*$/);
 const scopeRefSchema = z.string().regex(/^@(resource|document|assertion|relation)[1-9][0-9]*$/);
+const resourceRefSchema = z.string().regex(/^@resource[1-9][0-9]*$/);
+const safeSummarySchema = z.string().trim().min(1).max(2_000);
+
+export const worldDirectorPacketSchema = z.object({
+  version: z.literal("1.0.0"),
+  identity: z.object({
+    goalId: identifierSchema,
+    branchId: identifierSchema,
+    sourceCheckpointId: identifierSchema,
+    ruleRevision: z.number().int().positive(),
+    lens: z.literal("creator"),
+  }).strict(),
+  editorialCharter: z.array(z.string().trim().min(1).max(2_000)).min(4).max(20),
+  availableCapabilities: z.array(agentCapabilityIdSchema).length(agentCapabilityIds.length),
+  userRules: z.array(z.object({
+    id: identifierSchema,
+    revision: z.number().int().positive(),
+    text: z.string().trim().min(1).max(4_000),
+    contentSha256: sha256Schema,
+  }).strict()).max(100),
+  closureMatrix: z.array(z.object({
+    sourceCheckpointId: identifierSchema,
+    profileId: identifierSchema,
+    facetId: identifierSchema,
+    state: z.enum(["satisfied", "missing", "conflicted", "blocked", "unknown"]),
+    safeSummary: safeSummarySchema,
+    evidenceRefs: z.array(evidenceRefSchema).max(100),
+  }).strict()).max(500),
+  causalFrontier: z.array(z.object({
+    sourceCheckpointId: identifierSchema,
+    relationVersionId: identifierSchema,
+    relationKind: z.enum(["causes", "enables", "constrains", "prevents", "amplifies", "mitigates", "depends_on"]),
+    causeAssertionId: identifierSchema,
+    effectAssertionId: identifierSchema,
+    mechanismSummary: safeSummarySchema,
+    epistemicStatus: z.enum(["confirmed", "inferred", "disputed"]),
+    sourceReferences: z.array(z.object({
+      kind: z.enum(["document", "evidence", "assertion"]),
+      versionId: identifierSchema,
+      locator: z.string().trim().min(1).max(1_000),
+    }).strict()).min(1).max(20),
+  }).strict()).max(500),
+  recentChangeSets: z.array(z.object({
+    sourceCheckpointId: identifierSchema,
+    changeSetId: identifierSchema,
+    committedCheckpointId: identifierSchema,
+    summary: safeSummarySchema,
+    outputKinds: z.array(z.enum([
+      "resource_revision", "document_version", "assertion_version", "creative_document_revision",
+      "creative_relation_revision", "constraint_profile_version", "project_file_version", "causal_relation_version",
+    ])).max(100),
+    committedAt: z.iso.datetime({ offset: true }),
+  }).strict()).max(100),
+  unresolvedCheckerFindings: z.array(z.object({
+    sourceCheckpointId: identifierSchema,
+    findingId: identifierSchema,
+    workOrderId: identifierSchema,
+    severity: z.enum(["minor", "major", "blocking"]),
+    category: z.enum(["fact_conflict", "causality", "source", "coverage", "continuity"]),
+    safeSummary: safeSummarySchema,
+    evidenceRefs: z.array(evidenceRefSchema).min(1).max(100),
+  }).strict()).max(500),
+  nodeMaturity: z.array(z.object({
+    sourceCheckpointId: identifierSchema,
+    scopeRef: resourceRefSchema,
+    profileId: identifierSchema,
+    state: z.enum(["unknown", "seed", "structured", "developed", "closure_ready", "blocked"]),
+    satisfiedFacetIds: z.array(identifierSchema).max(100),
+    missingFacetIds: z.array(identifierSchema).max(100),
+  }).strict()).max(500),
+  graphSummaries: z.array(z.object({
+    sourceCheckpointId: identifierSchema,
+    scopeRef: resourceRefSchema,
+    label: z.string().trim().min(1).max(500),
+    safeSummary: safeSummarySchema,
+    factCount: z.number().int().nonnegative(),
+    causalEdgeCount: z.number().int().nonnegative(),
+    conflictCount: z.number().int().nonnegative(),
+    sourceVersionIds: z.array(identifierSchema).min(1).max(100),
+    truncated: z.boolean(),
+  }).strict()).max(500),
+  imageQueueSummary: z.object({
+    sourceCheckpointId: identifierSchema,
+    requests: z.number().int().nonnegative(),
+    queued: z.number().int().nonnegative(),
+    running: z.number().int().nonnegative(),
+    ready: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    stale: z.number().int().nonnegative(),
+  }).strict(),
+  retrieval: z.object({
+    budget: z.object({
+      maxClosureFacets: z.number().int().min(1).max(500),
+      maxCausalEdges: z.number().int().min(1).max(500),
+      maxRecentChangeSets: z.number().int().min(1).max(100),
+      maxCheckerFindings: z.number().int().min(1).max(500),
+      maxNodeMaturity: z.number().int().min(1).max(500),
+      maxGraphSummaries: z.number().int().min(1).max(500),
+      maxTotalChars: z.number().int().min(10_000).max(500_000),
+    }).strict(),
+    omitted: z.object({
+      closureFacets: z.number().int().nonnegative(),
+      causalEdges: z.number().int().nonnegative(),
+      recentChangeSets: z.number().int().nonnegative(),
+      checkerFindings: z.number().int().nonnegative(),
+      nodeMaturity: z.number().int().nonnegative(),
+      graphSummaries: z.number().int().nonnegative(),
+    }).strict(),
+    incomplete: z.boolean(),
+  }).strict(),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.availableCapabilities).size !== agentCapabilityIds.length
+    || agentCapabilityIds.some((capabilityId) => !value.availableCapabilities.includes(capabilityId))) {
+    context.addIssue({ code: "custom", path: ["availableCapabilities"], message: "Director packet must bind the complete fixed capability registry." });
+  }
+});
 
 export const specialistArtifactSchema = z.object({
   ref: artifactRefSchema,
@@ -92,6 +211,46 @@ const receiptSchema = z.object({
   correctionAttempts: z.number().int().nonnegative(),
 }).strict();
 
+export const worldDirectorStartSchema = z.object({
+  type: z.literal("growth.editorial.director.start"),
+  runId: identifierSchema,
+  invocationKind: z.enum(["plan", "review"]),
+  profile: z.object({ id: identifierSchema, version: semverSchema, sha256: sha256Schema }).strict(),
+  prompt: growthEditorialPromptSchema,
+  packet: worldDirectorPacketSchema,
+  packetSha256: sha256Schema,
+  outputContractId: z.literal("world_director_v1"),
+  providerProfile: providerRuntimeProfileSchema.nullable(),
+}).strict();
+
+export const worldDirectorEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("growth.editorial.director.started"),
+    runId: identifierSchema,
+    invocationKind: z.enum(["plan", "review"]),
+  }).strict(),
+  z.object({
+    type: z.literal("growth.editorial.director.planned"),
+    runId: identifierSchema,
+    plan: editorialRoundPlanSchema,
+    receipt: receiptSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("growth.editorial.director.reviewed"),
+    runId: identifierSchema,
+    review: directorReviewSchema,
+    receipt: receiptSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("growth.editorial.director.failed"),
+    runId: identifierSchema,
+    error: z.object({
+      code: z.string().regex(/^[A-Z][A-Z0-9_]{0,119}$/),
+      message: z.string().trim().min(1).max(240),
+    }).strict(),
+  }).strict(),
+]);
+
 export const growthEditorialSpecialistEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("growth.editorial.specialist.started"),
@@ -129,3 +288,6 @@ export type GrowthEditorialSpecialistPacket = z.infer<typeof growthEditorialSpec
 export type GrowthEditorialPrompt = z.infer<typeof growthEditorialPromptSchema>;
 export type GrowthEditorialSpecialistStart = z.infer<typeof growthEditorialSpecialistStartSchema>;
 export type GrowthEditorialSpecialistEvent = z.infer<typeof growthEditorialSpecialistEventSchema>;
+export type WorldDirectorPacket = z.infer<typeof worldDirectorPacketSchema>;
+export type WorldDirectorStart = z.infer<typeof worldDirectorStartSchema>;
+export type WorldDirectorEvent = z.infer<typeof worldDirectorEventSchema>;

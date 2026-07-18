@@ -17,8 +17,12 @@ import { handlePlayerWorkerCommand } from "./play/playerWorkerController";
 import { loadGmPrompt } from "./play/playPromptRegistry";
 import { decomposerWorkerStartSchema } from "../shared/decomposerWorkerProtocol";
 import { handleDecomposerWorkerCommand } from "./import/decomposerWorkerController";
-import { growthEditorialSpecialistStartSchema } from "../shared/growthEditorialWorkerProtocol";
+import {
+  growthEditorialSpecialistStartSchema,
+  worldDirectorStartSchema,
+} from "../shared/growthEditorialWorkerProtocol";
 import { handleGrowthEditorialSpecialistCommand } from "./editorial/specialistWorkerController";
+import { handleWorldDirectorCommand } from "./editorial/worldDirectorWorkerController";
 
 verifyPromptRegistry();
 loadGmPrompt();
@@ -45,6 +49,20 @@ process.on("message", (payload: unknown) => {
 
   const start = agentWorkerRunStartCommandSchema.safeParse(payload);
   if (!start.success) {
+    const directorStart = worldDirectorStartSchema.safeParse(payload);
+    if (directorStart.success) {
+      const command = directorStart.data;
+      if (activeRuns.has(command.runId)) return;
+      const controller = new AbortController(); activeRuns.set(command.runId, controller);
+      void handleWorldDirectorCommand({
+        command,
+        signal: controller.signal,
+        emit: (event) => process.send?.(event),
+      }).finally(() => {
+        activeRuns.delete(command.runId); clearProviderProfile(command.providerProfile);
+      });
+      return;
+    }
     const editorialStart = growthEditorialSpecialistStartSchema.safeParse(payload);
     if (editorialStart.success) {
       const command = editorialStart.data;
