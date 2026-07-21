@@ -7,6 +7,7 @@ import {
   type WorldScaleClosureProjection,
   type WorldScaleEntityRole,
 } from "../../domain/growth/closure/worldScaleClosureProfile";
+import { assertCreativeDocumentOwnerAllowed } from "../../domain/workspace/creativeDocumentPolicy";
 
 const localId = z.string().trim().regex(/^[a-z][a-z0-9_-]{0,79}$/);
 const localRef = localId;
@@ -75,7 +76,18 @@ export const growthWorldFragmentSchema = z.object({
     }
     if (entity.sourceDocumentRefs.some((ref) => !documents.has(ref))) ctx.addIssue({ code: "custom", message: "GROWTH_FRAGMENT_REFERENCE_INVALID" });
   }
-  for (const document of value.documents) if (!resources.has(document.ownerRef)) ctx.addIssue({ code: "custom", message: "GROWTH_FRAGMENT_REFERENCE_INVALID" });
+  for (const document of value.documents) {
+    const ownerKind = resourceKinds.get(document.ownerRef);
+    if (!ownerKind) {
+      ctx.addIssue({ code: "custom", message: "GROWTH_FRAGMENT_REFERENCE_INVALID" });
+      continue;
+    }
+    try {
+      assertCreativeDocumentOwnerAllowed(document.kind, ownerKind);
+    } catch {
+      ctx.addIssue({ code: "custom", message: "GROWTH_FRAGMENT_DOCUMENT_OWNER_KIND_INVALID" });
+    }
+  }
   if (!value.documents.some((item) => item.ownerRef === value.world.localId && item.kind === "setting")) ctx.addIssue({ code: "custom", message: "GROWTH_FRAGMENT_WORLD_SETTING_REQUIRED" });
   for (const assertion of value.assertions) {
     if (!resources.has(assertion.scopeRef) || assertion.sourceDocumentRefs.some((ref) => !documents.has(ref))) ctx.addIssue({ code: "custom", message: "GROWTH_FRAGMENT_REFERENCE_INVALID" });
@@ -96,18 +108,31 @@ export const growthWorldFragmentSchema = z.object({
 
 export type GrowthWorldFragment = z.infer<typeof growthWorldFragmentSchema>;
 
-export type GrowthWorldFragmentErrorCode =
-  | "GROWTH_FRAGMENT_INVALID"
-  | "GROWTH_FRAGMENT_DUPLICATE_LOCAL_ID"
-  | "GROWTH_FRAGMENT_REFERENCE_INVALID"
-  | "GROWTH_FRAGMENT_REFERENCE_CYCLE"
-  | "GROWTH_FRAGMENT_PARENT_KIND_INVALID"
-  | "GROWTH_FRAGMENT_WORLD_SETTING_REQUIRED"
-  | "GROWTH_FRAGMENT_WORLD_SETTING_MIN_LENGTH"
-  | "GROWTH_FRAGMENT_SCALE_ROLE_INVALID"
-  | "GROWTH_FRAGMENT_SCALE_REGION_INVALID"
-  | "GROWTH_FRAGMENT_CAUSAL_MECHANISM_INVALID"
-  | "GROWTH_FRAGMENT_RELATION_INVALID";
+export const growthWorldFragmentErrorCodes = [
+  "GROWTH_FRAGMENT_INVALID",
+  "GROWTH_FRAGMENT_DUPLICATE_LOCAL_ID",
+  "GROWTH_FRAGMENT_REFERENCE_INVALID",
+  "GROWTH_FRAGMENT_REFERENCE_CYCLE",
+  "GROWTH_FRAGMENT_PARENT_KIND_INVALID",
+  "GROWTH_FRAGMENT_DOCUMENT_OWNER_KIND_INVALID",
+  "GROWTH_FRAGMENT_WORLD_SETTING_REQUIRED",
+  "GROWTH_FRAGMENT_WORLD_SETTING_MIN_LENGTH",
+  "GROWTH_FRAGMENT_SCALE_ROLE_INVALID",
+  "GROWTH_FRAGMENT_SCALE_REGION_INVALID",
+  "GROWTH_FRAGMENT_CAUSAL_MECHANISM_INVALID",
+  "GROWTH_FRAGMENT_RELATION_INVALID",
+] as const;
+
+export type GrowthWorldFragmentErrorCode = (typeof growthWorldFragmentErrorCodes)[number];
+
+export const growthWorldFragmentToolDescription = [
+  "Submit one high-level world Fragment with at least 12 entities, one world-owned setting document of at least 200 characters, 3 Assertions, 4 eras, 3 historical turning points, and 4 causal mechanisms.",
+  "Use kind=location only for macro_region, mountain_system, sea, river, transport_network, and resource_distribution; use kind=faction only for polity and civilization_group.",
+  "Every polity and civilization_group requires macroRegionRef naming a submitted macro_region; every other scale role must omit macroRegionRef.",
+  "Bind every sourceDocumentRefs entry to a submitted document localId. Each causal mechanism must connect two distinct submitted Assertions, cite submitted documents, and use at least two distinct allowed systemRefs.",
+  "Use setting only with the world owner, location_profile only with a location owner, faction_profile only with a faction owner, and knowledge_note with any submitted owner.",
+  "Do not supply low-level IDs, dependencies, create/state fields, authority fields, or project-file operations.",
+].join(" ");
 
 const localIdParameter = Type.String({ pattern: "^[a-z][a-z0-9_-]{0,79}$" });
 const sourceDocumentRefsParameter = Type.Array(localIdParameter, { minItems: 1, maxItems: 20, uniqueItems: true });
@@ -141,6 +166,7 @@ export function compileGrowthWorldFragment(input: unknown, trusted: { cycleId: s
       "GROWTH_FRAGMENT_DUPLICATE_LOCAL_ID",
       "GROWTH_FRAGMENT_REFERENCE_INVALID",
       "GROWTH_FRAGMENT_PARENT_KIND_INVALID",
+      "GROWTH_FRAGMENT_DOCUMENT_OWNER_KIND_INVALID",
       "GROWTH_FRAGMENT_WORLD_SETTING_REQUIRED",
       "GROWTH_FRAGMENT_WORLD_SETTING_MIN_LENGTH",
       "GROWTH_FRAGMENT_SCALE_ROLE_INVALID",
@@ -277,5 +303,23 @@ export function projectGrowthWorldFragmentScale(fragment: GrowthWorldFragment): 
 
 function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function fragmentError(code: GrowthWorldFragmentErrorCode): Error & { code: GrowthWorldFragmentErrorCode } {
-  return Object.assign(new Error("Growth world Fragment is invalid."), { code });
+  return Object.assign(new Error(growthWorldFragmentCorrectionMessage(code)), { code });
+}
+
+export function growthWorldFragmentCorrectionMessage(code: GrowthWorldFragmentErrorCode): string {
+  const messages: Record<GrowthWorldFragmentErrorCode, string> = {
+    GROWTH_FRAGMENT_INVALID: "Submit exactly the Growth world Fragment schema with all required arrays, no extra fields, at least 12 entities, 3 assertions, 4 eras, 3 turning points, and 4 causal mechanisms.",
+    GROWTH_FRAGMENT_DUPLICATE_LOCAL_ID: "Every world Fragment localId must be unique across the world, entities, documents, assertions, eras, turning points, causal mechanisms, and relations.",
+    GROWTH_FRAGMENT_REFERENCE_INVALID: "Use only localIds declared in this Fragment and bind every sourceDocumentRefs entry to a declared document localId.",
+    GROWTH_FRAGMENT_REFERENCE_CYCLE: "Entity parentRef links must form an acyclic hierarchy rooted at the submitted world localId.",
+    GROWTH_FRAGMENT_PARENT_KIND_INVALID: "Location entities may have only world or location parents; faction entities may have only world or faction parents.",
+    GROWTH_FRAGMENT_DOCUMENT_OWNER_KIND_INVALID: "Use setting only with the world owner, location_profile only with a location owner, faction_profile only with a faction owner, and knowledge_note with any submitted owner.",
+    GROWTH_FRAGMENT_WORLD_SETTING_REQUIRED: "Include one setting document whose ownerRef is the submitted world localId.",
+    GROWTH_FRAGMENT_WORLD_SETTING_MIN_LENGTH: "The world-owned setting document content must contain at least 200 non-padding characters.",
+    GROWTH_FRAGMENT_SCALE_ROLE_INVALID: "Use location kind for macro_region, mountain_system, sea, river, transport_network, and resource_distribution; use faction kind for polity and civilization_group.",
+    GROWTH_FRAGMENT_SCALE_REGION_INVALID: "Every polity and civilization_group requires macroRegionRef naming a declared macro_region; all other scale roles must omit macroRegionRef.",
+    GROWTH_FRAGMENT_CAUSAL_MECHANISM_INVALID: "Each causal mechanism must connect two distinct declared assertions, cite declared documents, and contain at least two distinct allowed systemRefs.",
+    GROWTH_FRAGMENT_RELATION_INVALID: "Each relation must connect two distinct declared resource localIds.",
+  };
+  return messages[code];
 }

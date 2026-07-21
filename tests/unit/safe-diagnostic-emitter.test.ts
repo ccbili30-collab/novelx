@@ -110,7 +110,7 @@ describe("Growth Revision safe diagnostic emitter", () => {
     })).rejects.toMatchObject({ code: "SAFE_DIAGNOSTIC_CODE_UNREGISTERED" });
   });
 
-  it("emits a registered Worker schema failure and ignores non-owned phase codes", async () => {
+  it("emits registered Worker and Growth Fragment failures while ignoring unknown codes", async () => {
     const record = vi.fn(async () => undefined);
     const sink = createStewardToolDiagnosticSink({
       runId: "run-1", cycleId: "cycle-1", record,
@@ -128,8 +128,18 @@ describe("Growth Revision safe diagnostic emitter", () => {
     }));
     expect(await sink.recordFailure({
       toolCallId: "tool-2", toolName: "propose_change_set",
-      code: "GROWTH_FRAGMENT_INVALID", sideEffectState: "none",
+      code: "GROWTH_FRAGMENT_INVALID", sideEffectState: "none", attempt: 1, maxAttempts: 3,
+    })).toBe("diagnostic-worker");
+    expect(record).toHaveBeenLastCalledWith(expect.objectContaining({
+      diagnostic: expect.objectContaining({
+        owner: "growth_phase", boundary: "phase_compile", code: "GROWTH_FRAGMENT_INVALID",
+        sideEffectState: "none", disposition: "correctable", retryability: "model_correction",
+      }),
+    }));
+    expect(await sink.recordFailure({
+      toolCallId: "tool-3", toolName: "propose_change_set",
+      code: "UNREGISTERED_WORKER_ERROR", sideEffectState: "none",
     })).toBeNull();
-    expect(record).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledTimes(2);
   });
 });

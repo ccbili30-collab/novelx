@@ -80,6 +80,12 @@ import type { AgentAuditStore } from "../domain/audit/agentAuditRepository";
 import { canonicalAuditHash } from "../domain/audit/canonicalAuditHash";
 import type { ImageGenerationProgress } from "../domain/asset/imageGenerationService";
 import { promptManifest } from "../agent-worker/prompts/manifest";
+import {
+  growthEditorialSpecialistEventSchema,
+  growthEditorialSpecialistStartSchema,
+  type GrowthEditorialSpecialistEvent,
+  type GrowthEditorialSpecialistStart,
+} from "../shared/growthEditorialWorkerProtocol";
 
 export interface AgentToolInvocationContext {
   runId: string;
@@ -93,11 +99,20 @@ export interface AgentToolInvocationContext {
   assertionIdentityUpdateAuthorized?: boolean;
   /** Main-only authority for one persisted Illustration Queue item; never model- or Renderer-controlled. */
   illustrationQueueItemId?: string;
+  /** Main-only lifecycle callback fired when a serialized write reaches the queue head. */
+  onExecutionStarted?: () => void;
+  /** Main-only re-entrancy token for one admitted project write. */
+  serializedWriteLease?: symbol;
   onImageProgress?: (progress: ImageGenerationProgress) => void;
   signal: AbortSignal;
 }
 
 export interface AgentToolGateway {
+  /** Main-only write-serialization boundary used by bound runtimes that persist around a base tool call. */
+  runSerializedWrite?<T>(
+    context: AgentToolInvocationContext,
+    operation: (admittedContext: AgentToolInvocationContext) => Promise<T>,
+  ): Promise<T>;
   retrieveGraphEvidence(
     args: RetrieveGraphEvidenceArgs,
     context: AgentToolInvocationContext,
@@ -167,6 +182,7 @@ export interface AgentWorkerProcess {
 interface PendingToolRequest {
   controller: AbortController;
   timer: ReturnType<typeof setTimeout>;
+  phase: "queued" | "executing";
 }
 
 interface ActiveRun {
@@ -183,12 +199,31 @@ interface ActiveRun {
   releaseLease(): void;
 }
 
+type GrowthEditorialSpecialistTerminalEvent = Extract<
+  GrowthEditorialSpecialistEvent,
+  { type: "growth.editorial.specialist.completed" | "growth.editorial.specialist.evidence_requested" }
+>;
+
+interface ActiveEditorialRun {
+  child: AgentWorkerProcess;
+  command: GrowthEditorialSpecialistStart;
+  audit: AgentAuditStore;
+  releaseLease(): void;
+  timer: ReturnType<typeof setTimeout>;
+  signal: AbortSignal | null;
+  abortListener: (() => void) | null;
+  resolve(event: GrowthEditorialSpecialistTerminalEvent): void;
+  reject(error: Error & { code: string }): void;
+}
+
 interface AgentProcessSupervisorOptions {
   acquireRuntimeLease?(): AgentRuntimeLease | null;
   getProviderProfile?(): ProviderRuntimeProfile | null;
   toolTimeoutMs?: number;
   imageToolTimeoutMs?: number;
+  queueTimeoutMs?: number;
   cancelGraceMs?: number;
+  editorialTimeoutMs?: number;
   spawnWorker?(workerPath: string): AgentWorkerProcess;
   reportWorkerDiagnostic?(diagnostic: AgentWorkerDiagnostic): void;
 }
@@ -214,11 +249,14 @@ export interface AgentRuntimeLease {
 export class AgentProcessSupervisor {
   readonly #workerPath: string;
   readonly #runs = new Map<string, ActiveRun>();
+  readonly #editorialRuns = new Map<string, ActiveEditorialRun>();
   readonly #acquireRuntimeLease: () => AgentRuntimeLease | null;
   readonly #getProviderProfile: () => ProviderRuntimeProfile | null;
   readonly #toolTimeoutMs: number;
   readonly #imageToolTimeoutMs: number;
+  readonly #queueTimeoutMs: number;
   readonly #cancelGraceMs: number;
+  readonly #editorialTimeoutMs: number;
   readonly #spawnWorker: (workerPath: string) => AgentWorkerProcess;
   readonly #reportWorkerDiagnostic: (diagnostic: AgentWorkerDiagnostic) => void;
 
@@ -228,7 +266,9 @@ export class AgentProcessSupervisor {
     this.#getProviderProfile = options.getProviderProfile ?? (() => null);
     this.#toolTimeoutMs = options.toolTimeoutMs ?? 15_000;
     this.#imageToolTimeoutMs = options.imageToolTimeoutMs ?? 300_000;
+    this.#queueTimeoutMs = options.queueTimeoutMs ?? 330_000;
     this.#cancelGraceMs = options.cancelGraceMs ?? 1_000;
+    this.#editorialTimeoutMs = options.editorialTimeoutMs ?? 1_200_000;
     this.#spawnWorker = options.spawnWorker ?? spawnWorkerProcess;
     this.#reportWorkerDiagnostic = options.reportWorkerDiagnostic ?? (() => undefined);
   }
@@ -341,6 +381,288 @@ export class AgentProcessSupervisor {
     } catch {
       return null;
     }
+  }
+
+  getEditorialProviderIdentity(): {
+    providerId: string;
+    modelId: string;
+    providerConfigSha256: string;
+  } | null {
+    const profile = this.#readProviderProfile();
+    return profile
+      ? {
+          providerId: profile.providerId,
+          modelId: profile.modelId,
+          providerConfigSha256: hashProviderConfig(profile),
+        }
+      : null;
+  }
+
+  runGrowthEditorialSpecialist(
+    input: Omit<GrowthEditorialSpecialistStart, "providerProfile">,
+    signal?: AbortSignal,
+  ): Promise<GrowthEditorialSpecialistTerminalEvent> {
+    const providerProfile = this.#readProviderProfile();
+    if (!providerProfile) return Promise.reject(supervisorError("GROWTH_SPECIALIST_PROVIDER_REQUIRED"));
+    const command = growthEditorialSpecialistStartSchema.parse({ ...input, providerProfile });
+    if (this.#runs.has(command.runId) || this.#editorialRuns.has(command.runId)) {
+      return Promise.reject(supervisorError("AGENT_RUN_ID_CONFLICT"));
+    }
+    const lease = this.#acquireRuntimeLease();
+    if (!lease) return Promise.reject(supervisorError("AGENT_TOOLS_REQUIRED"));
+    const providerConfigSha256 = hashProviderConfig(providerProfile);
+    const invocationId = editorialInvocationId(command.runId);
+    try {
+      lease.audit.beginRun({
+        runId: command.runId,
+        mode: "free",
+        userInputSha256: canonicalAuditHash({
+          attemptId: command.attemptId,
+          binding: command.binding,
+          packet: command.packet,
+        }),
+        providerId: providerProfile.providerId,
+        requestedModelId: providerProfile.modelId,
+        providerConfigSha256,
+      });
+      const stewardProfile = getAgentRuntimeProfile("steward");
+      const stewardPrompt = promptManifest.find((candidate) => candidate.role === "steward" && candidate.status === "active");
+      if (!stewardPrompt) throw new Error("Active Steward prompt is unavailable.");
+      lease.audit.beginInvocation({
+        invocationId: stewardInvocationId(command.runId),
+        runId: command.runId,
+        parentInvocationId: null,
+        role: "steward",
+        promptId: stewardPrompt.id,
+        promptVersion: stewardPrompt.version,
+        promptSha256: stewardPrompt.publishedSha256,
+        agentProfileId: stewardProfile.id,
+        agentProfileVersion: stewardProfile.version,
+        agentProfileSha256: stewardProfile.sha256,
+        providerId: providerProfile.providerId,
+        requestedModelId: providerProfile.modelId,
+        providerConfigSha256,
+        toolPolicyId: stewardProfile.toolPolicyId,
+        toolPolicyVersion: stewardProfile.toolPolicyVersion,
+        toolPolicySha256: stewardProfile.toolPolicySha256,
+        authorizedTools: stewardProfile.authorizedTools,
+        handoffContractId: null,
+        handoffVersion: null,
+        handoffPayloadSha256: null,
+        inputSha256: command.binding.packetSha256,
+      });
+      const authorizedTools = ["submit_specialist_candidate"];
+      const toolPolicy = {
+        id: "novax.growth-editorial-specialist-tools",
+        version: "1.0.0",
+        authorizedTools,
+      };
+      lease.audit.beginInvocation({
+        invocationId,
+        runId: command.runId,
+        parentInvocationId: stewardInvocationId(command.runId),
+        role: "writer",
+        promptId: command.prompt.id,
+        promptVersion: command.prompt.version,
+        promptSha256: command.prompt.sha256,
+        agentProfileId: command.profile.id,
+        agentProfileVersion: command.profile.version,
+        agentProfileSha256: command.profile.sha256,
+        providerId: providerProfile.providerId,
+        requestedModelId: providerProfile.modelId,
+        providerConfigSha256,
+        toolPolicyId: toolPolicy.id,
+        toolPolicyVersion: toolPolicy.version,
+        toolPolicySha256: canonicalAuditHash(toolPolicy),
+        authorizedTools,
+        handoffContractId: "novax.growth-editorial-specialist",
+        handoffVersion: "1.0.0",
+        handoffPayloadSha256: command.binding.packetSha256,
+        inputSha256: command.binding.packetSha256,
+      });
+    } catch {
+      try { lease.audit.terminalizeOpenRun(command.runId, "failed", "AGENT_AUDIT_REQUIRED"); } catch { /* Best-effort closure. */ }
+      lease.release();
+      return Promise.reject(supervisorError("AGENT_AUDIT_REQUIRED"));
+    }
+
+    let child: AgentWorkerProcess;
+    try {
+      child = this.#spawnWorker(this.#workerPath);
+    } catch {
+      try { lease.audit.terminalizeOpenRun(command.runId, "interrupted", "AGENT_WORKER_INTERRUPTED"); } catch { /* Preserve the worker failure. */ }
+      lease.release();
+      return Promise.reject(supervisorError("AGENT_WORKER_INTERRUPTED"));
+    }
+
+    return new Promise<GrowthEditorialSpecialistTerminalEvent>((resolve, reject) => {
+      const timer = setTimeout(() => this.#interruptEditorial(command.runId, "GROWTH_SPECIALIST_TIMEOUT"), this.#editorialTimeoutMs);
+      timer.unref?.();
+      const abortListener = signal
+        ? () => this.#cancelEditorial(command.runId)
+        : null;
+      const run: ActiveEditorialRun = {
+        child,
+        command,
+        audit: lease.audit,
+        releaseLease: lease.release,
+        timer,
+        signal: signal ?? null,
+        abortListener,
+        resolve,
+        reject,
+      };
+      this.#editorialRuns.set(command.runId, run);
+      if (signal?.aborted) {
+        this.#cancelEditorial(command.runId);
+        return;
+      }
+      signal?.addEventListener("abort", abortListener!, { once: true });
+      child.on("message", (payload: unknown) => this.#handleEditorialWorkerMessage(command.runId, payload));
+      child.once("error", () => this.#interruptEditorial(command.runId, "AGENT_WORKER_INTERRUPTED"));
+      child.once("exit", () => this.#interruptEditorial(command.runId, "AGENT_WORKER_INTERRUPTED"));
+      child.once("spawn", () => {
+        try {
+          child.send(command, (error) => {
+            if (error) this.#interruptEditorial(command.runId, "AGENT_WORKER_INTERRUPTED");
+          });
+        } catch {
+          this.#interruptEditorial(command.runId, "AGENT_WORKER_INTERRUPTED");
+        }
+      });
+    });
+  }
+
+  #handleEditorialWorkerMessage(runId: string, payload: unknown): void {
+    const run = this.#editorialRuns.get(runId);
+    if (!run) return;
+    const parsed = growthEditorialSpecialistEventSchema.safeParse(payload);
+    if (!parsed.success
+      || parsed.data.runId !== runId
+      || parsed.data.attemptId !== run.command.attemptId) {
+      this.#interruptEditorial(runId, "AGENT_WORKER_INTERRUPTED");
+      return;
+    }
+    const event = parsed.data;
+    if (event.type === "growth.editorial.specialist.started") return;
+    if (event.type === "growth.editorial.specialist.failed") {
+      try {
+        run.audit.terminalizeOpenRun(runId, "failed", event.error.code);
+      } catch {
+        this.#finishEditorial(runId, { errorCode: "AGENT_AUDIT_REQUIRED" });
+        return;
+      }
+      this.#finishEditorial(runId, { errorCode: event.error.code });
+      return;
+    }
+    try {
+      const blocked = event.type === "growth.editorial.specialist.evidence_requested";
+      run.audit.appendInvocationTerminal({
+        runId,
+        invocationId: editorialInvocationId(runId),
+        eventType: blocked ? "blocked" : "completed",
+        errorCode: blocked ? "GROWTH_SPECIALIST_EVIDENCE_REQUIRED" : null,
+        actualProviderId: event.receipt.actualProviderId,
+        actualModelId: event.receipt.actualModelId,
+        responseIdSha256: event.receipt.responseIdSha256,
+        stopReason: null,
+        inputTokens: event.receipt.inputTokens,
+        outputTokens: event.receipt.outputTokens,
+        totalTokens: event.receipt.totalTokens,
+        contextPolicyVersion: null,
+        maxChargedInputBytes: null,
+        configuredContextWindow: null,
+        safetyReserve: null,
+        outputReserve: null,
+        correctionAttempts: event.receipt.correctionAttempts,
+        structuredSubmissionCount: 1,
+        outputSha256: canonicalAuditHash(event.type === "growth.editorial.specialist.completed"
+          ? { candidate: event.candidate, artifacts: event.artifacts }
+          : event.request),
+      });
+      run.audit.appendInvocationTerminal({
+        runId,
+        invocationId: stewardInvocationId(runId),
+        eventType: blocked ? "blocked" : "completed",
+        errorCode: blocked ? "GROWTH_SPECIALIST_EVIDENCE_REQUIRED" : null,
+        actualProviderId: null,
+        actualModelId: null,
+        responseIdSha256: null,
+        stopReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        contextPolicyVersion: null,
+        maxChargedInputBytes: null,
+        configuredContextWindow: null,
+        safetyReserve: null,
+        outputReserve: null,
+        correctionAttempts: 0,
+        structuredSubmissionCount: 0,
+        outputSha256: canonicalAuditHash(event.type === "growth.editorial.specialist.completed"
+          ? { candidate: event.candidate, artifacts: event.artifacts }
+          : event.request),
+      });
+      run.audit.appendRunTerminal({
+        runId,
+        eventType: blocked ? "blocked" : "completed",
+        errorCode: blocked ? "GROWTH_SPECIALIST_EVIDENCE_REQUIRED" : null,
+      });
+    } catch {
+      this.#finishEditorial(runId, { errorCode: "AGENT_AUDIT_REQUIRED" });
+      return;
+    }
+    this.#finishEditorial(runId, { event });
+  }
+
+  #cancelEditorial(runId: string): void {
+    const run = this.#editorialRuns.get(runId);
+    if (!run) return;
+    try {
+      run.audit.appendRunCancelRequested(runId);
+      run.audit.terminalizeOpenRun(runId, "cancelled", "AGENT_RUN_CANCELLED");
+    } catch {
+      this.#finishEditorial(runId, { errorCode: "AGENT_AUDIT_REQUIRED" });
+      return;
+    }
+    try {
+      run.child.send(agentWorkerRunCancelCommandSchema.parse({ type: "run.cancel", runId }));
+    } catch { /* Cleanup below still terminates the Worker. */ }
+    this.#finishEditorial(runId, { errorCode: "AGENT_RUN_CANCELLED", delayedKill: true });
+  }
+
+  #interruptEditorial(runId: string, code: string): void {
+    const run = this.#editorialRuns.get(runId);
+    if (!run) return;
+    try {
+      run.audit.terminalizeOpenRun(runId, "interrupted", code);
+    } catch {
+      this.#finishEditorial(runId, { errorCode: "AGENT_AUDIT_REQUIRED" });
+      return;
+    }
+    this.#finishEditorial(runId, { errorCode: code });
+  }
+
+  #finishEditorial(
+    runId: string,
+    outcome: { event?: GrowthEditorialSpecialistTerminalEvent; errorCode?: string; delayedKill?: boolean },
+  ): void {
+    const run = this.#editorialRuns.get(runId);
+    if (!run) return;
+    this.#editorialRuns.delete(runId);
+    clearTimeout(run.timer);
+    if (run.signal && run.abortListener) run.signal.removeEventListener("abort", run.abortListener);
+    run.releaseLease();
+    if (outcome.delayedKill) {
+      const timer = setTimeout(() => {
+        if (!run.child.killed) run.child.kill();
+      }, this.#cancelGraceMs);
+      timer.unref?.();
+    } else if (!run.child.killed) {
+      run.child.kill();
+    }
+    if (outcome.event) run.resolve(outcome.event);
+    else run.reject(supervisorError(outcome.errorCode ?? "AGENT_WORKER_INTERRUPTED"));
   }
 
   cancel(runId: string): void {
@@ -477,34 +799,48 @@ export class AgentProcessSupervisor {
       return;
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => {
+    const serializedWrite = isSerializedWriteTool(request.tool, run.internalBinding !== null);
+    const timeout = (): void => {
       const pending = run.pendingTools.get(request.requestId);
       if (!pending) return;
       run.pendingTools.delete(request.requestId);
       pending.controller.abort();
-      if (!this.#appendToolDiagnostic(runId, run, request, "AGENT_TOOL_TIMEOUT")) return;
+      const code = pending.phase === "queued" ? "AGENT_TOOL_QUEUE_TIMEOUT" : "AGENT_TOOL_TIMEOUT";
+      if (!this.#appendToolDiagnostic(runId, run, request, code)) return;
       try {
         run.audit.appendToolTerminal({
           runId,
           invocationId: stewardInvocationId(runId),
           toolInvocationId: request.requestId,
           eventType: "timed_out",
-          errorCode: "AGENT_TOOL_TIMEOUT",
+          errorCode: code,
           resultSha256: null,
         });
       } catch {
         this.#failAudit(runId);
         return;
       }
-      this.#sendToolFailure(run, runId, request.requestId, "AGENT_TOOL_TIMEOUT");
-    }, request.tool === "generate_image" ? this.#imageToolTimeoutMs : this.#toolTimeoutMs);
-    run.pendingTools.set(request.requestId, { controller, timer });
+      this.#sendToolFailure(run, runId, request.requestId, code);
+    };
+    const phase = serializedWrite ? "queued" as const : "executing" as const;
+    const executionTimeoutMs = request.tool === "generate_image" ? this.#imageToolTimeoutMs : this.#toolTimeoutMs;
+    const timer = setTimeout(timeout, serializedWrite ? this.#queueTimeoutMs : executionTimeoutMs);
+    run.pendingTools.set(request.requestId, { controller, timer, phase });
     const context: AgentToolInvocationContext = {
       runId,
       invocationId: stewardInvocationId(runId),
       requestId: request.requestId,
       mode: run.mode,
       greenfieldCreateRequested: run.greenfieldCreateRequested,
+      onExecutionStarted: serializedWrite
+        ? () => {
+            const pending = run.pendingTools.get(request.requestId);
+            if (!pending || pending.phase === "executing") return;
+            clearTimeout(pending.timer);
+            pending.phase = "executing";
+            pending.timer = setTimeout(timeout, executionTimeoutMs);
+          }
+        : undefined,
       onImageProgress: request.tool === "generate_image"
         ? (progress) => {
             try {
@@ -1015,6 +1351,7 @@ export class AgentProcessSupervisor {
 
   dispose(): void {
     for (const runId of [...this.#runs.keys()]) this.#interrupt(runId);
+    for (const runId of [...this.#editorialRuns.keys()]) this.#interruptEditorial(runId, "AGENT_WORKER_INTERRUPTED");
   }
 
   #handleAuditRequest(
@@ -1178,6 +1515,12 @@ function toolPresentation(request: AgentWorkerToolRequest): { label: string; dom
   return { label: "生成候选变更", domains: proposalDomains(request.args as ProposeChangeSetArgs) };
 }
 
+function isSerializedWriteTool(tool: AgentToolName, growthBound: boolean): boolean {
+  return tool === "save_task_note" || tool === "generate_image" || tool === "propose_change_set"
+    || (growthBound && (tool === "retrieve_graph_evidence" || tool === "submit_growth_inquiry"
+      || tool === "submit_closure_self_assessment" || tool === "submit_closure_checker_review"));
+}
+
 function imageProgressActivity(
   args: unknown,
   progress: ImageGenerationProgress,
@@ -1288,9 +1631,17 @@ function stewardInvocationId(runId: string): string {
   return `${runId}:steward`;
 }
 
+function editorialInvocationId(runId: string): string {
+  return `${runId}:growth-editorial-specialist`;
+}
+
 function hashProviderConfig(profile: ProviderRuntimeProfile): string {
   const { apiKey: _apiKey, ...safeConfig } = profile;
   return canonicalAuditHash(safeConfig);
+}
+
+function supervisorError(code: string): Error & { code: string } {
+  return Object.assign(new Error(code), { code });
 }
 
 function validateInvocationIdentity(
@@ -1335,6 +1686,7 @@ const TOOL_ERROR_MESSAGES = {
   AGENT_TOOLS_REQUIRED: "Agent domain tools are unavailable.",
   AGENT_TOOL_UNKNOWN: "Unknown Agent tool.",
   AGENT_TOOL_PROTOCOL_FAILED: "Agent tool request or response is invalid.",
+  AGENT_TOOL_QUEUE_TIMEOUT: "Agent tool request timed out while waiting for the serialized write queue.",
   AGENT_TOOL_TIMEOUT: "Agent tool request timed out.",
   AGENT_TOOL_FAILED: "Agent tool request failed.",
   AGENT_RUN_CANCELLED: "Agent run was cancelled.",

@@ -36,18 +36,18 @@ describe("project write queue", () => {
       await new Promise<void>((resolve) => { releaseFirst = resolve; });
       order.push("first:end");
       return "first";
-    });
+    }, () => order.push("first:admitted"));
     const second = queue.run(secondController.signal, async () => {
       order.push("second:start");
       return "second";
-    });
+    }, () => order.push("second:admitted"));
     secondController.abort();
 
     await Promise.resolve();
-    expect(order).toEqual(["first:start"]);
+    expect(order).toEqual(["first:admitted", "first:start"]);
     releaseFirst();
     await expect(first).resolves.toBe("first");
     await expect(second).rejects.toMatchObject({ code: "AGENT_RUN_CANCELLED" });
-    expect(order).toEqual(["first:start", "first:end"]);
+    expect(order).toEqual(["first:admitted", "first:start", "first:end"]);
   });
 });

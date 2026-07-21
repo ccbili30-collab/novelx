@@ -28,7 +28,7 @@
 
 - World Director、Editorial contracts（编辑合同）、SQLite v28、因果关系和调度器尚未开始实现。
 - 最新双 Provider Live 仍停在 `gpt-5.4` + `gpt-image-2` 的 incomplete 世界包；本任务的确定性绿色基线不能升级这项 Live 结论。
-- 最终文本 Live 必须在任何 Provider 副作用前验证公开模型身份精确为 `openai-compatible / 5.6luna`。
+- 最终文本 Live 必须在任何 Provider 副作用前验证公开模型身份精确为 `openai-compatible / gpt-5.6-luna`；真实上游目录已证明原写法 `5.6luna` 不存在，用户已授权按实际 ID 更正。
 
 ## 风险与恢复入口
 

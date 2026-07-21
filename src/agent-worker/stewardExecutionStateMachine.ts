@@ -13,9 +13,17 @@ import {
   growthWorldMapBriefSchema,
   type TrustedGrowthWorldMapSources,
 } from "./growth/growthWorldMapBrief";
-import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "./growth/growthWorldFragment";
+import {
+  compileGrowthWorldFragment,
+  growthWorldFragmentCorrectionMessage,
+  growthWorldFragmentErrorCodes,
+  growthWorldFragmentParameters,
+  growthWorldFragmentToolDescription,
+  type GrowthWorldFragmentErrorCode,
+} from "./growth/growthWorldFragment";
 import {
   classifyGrowthInquiryBriefFailure,
+  growthInquiryBriefSchema,
   isGrowthInquiryBriefDiagnosticCode,
 } from "./growth/growthInquiryBrief";
 import { resolveGrowthPhasePlan } from "./growth/core/growthPhaseRegistry";
@@ -96,13 +104,7 @@ type OperationalToolName = (typeof operationalToolNames)[number];
 type BlockReason = "missing_source" | "major_conflict" | "tool_failed" | "user_confirmation_required";
 
 const greenfieldCorrectionCodes = new Set([
-  "GROWTH_FRAGMENT_INVALID",
-  "GROWTH_FRAGMENT_DUPLICATE_LOCAL_ID",
-  "GROWTH_FRAGMENT_REFERENCE_INVALID",
-  "GROWTH_FRAGMENT_PARENT_KIND_INVALID",
-  "GROWTH_FRAGMENT_REFERENCE_CYCLE",
-  "GROWTH_FRAGMENT_WORLD_SETTING_REQUIRED",
-  "GROWTH_FRAGMENT_RELATION_INVALID",
+  ...growthWorldFragmentErrorCodes,
   "GREENFIELD_RESOURCE_CREATE_REQUIRED",
   "GREENFIELD_DOMAIN_ROOT_FORBIDDEN",
   "GREENFIELD_CREATIVE_CREATE_REQUIRED",
@@ -402,7 +404,7 @@ export function createStewardExecutionStateMachine(input: {
       description: "Submit one high-level OC Fragment. Supply two to eight character titles and character-profile metadata/content, plus optional character-to-character relationships. The trusted story target comes from pinned retrieval. Do not supply story/resource/evidence IDs, parents, dependencies, create/state fields, relation or document kinds, or project-file operations.",
       parameters: growthOcFragmentParameters,
     } : growthFocus(input.growthBinding) === "world" && original.name === "propose_change_set" ? {
-      description: "Submit one high-level world Fragment with at least one world, one setting document, and at least three model-supplied Assertions, each bound to one or more Fragment document sources. Locations, factions, additional documents, facts, and related_to selections remain open arrays. Do not supply low-level IDs, parents, dependencies, create/state fields, or project-file operations.",
+      description: growthWorldFragmentToolDescription,
       parameters: growthWorldFragmentParameters,
     } : growthFocus(input.growthBinding) === "world" && original.name === "generate_image" ? {
       description: "Generate the required source-bound world map. Supply only a creative title and visual prompt. The committed formal world and setting-document versions, purpose, idempotency key, Provider, and all identifiers are trusted by the Harness. Do not supply resource IDs, version IDs, hashes, paths, or authority fields.",
@@ -430,6 +432,12 @@ export function createStewardExecutionStateMachine(input: {
       try {
         requireCurrentStep(name, effectiveParams);
         currentStepAccepted = true;
+        if (growthFocus(input.growthBinding) === "world" && name === "propose_change_set") {
+          compileGrowthWorldFragment(effectiveParams, {
+            cycleId: input.growthBinding!.cycleId,
+            worldRootResourceId: input.growthBinding!.domainRootResourceIds.world,
+          });
+        }
         const compiledParams = input.growthBinding?.kind === "closure_evaluation" && name === "checker"
           ? compileClosureCheckerInput({
               binding: input.growthBinding,
@@ -672,6 +680,9 @@ export function createStewardExecutionStateMachine(input: {
                 details: { status: "blocked", errorCode: inquiryCode },
               };
             }
+          }
+          if (inquiryCorrection && inquiryCode) {
+            throw stateError(inquiryCode, growthInquiryCorrectionMessage(inquiryCode));
           }
           throw error;
         }
@@ -921,8 +932,30 @@ export function createStewardExecutionStateMachine(input: {
           error,
           false,
         )) {
-          greenfieldProposalCorrectionAttempts += 1;
-          if (greenfieldProposalCorrectionAttempts <= 2) throw error;
+          const attempt = greenfieldProposalCorrectionAttempts + 1;
+          const terminal = attempt >= 3;
+          const code = readErrorCode(error)!;
+          if (input.workerDiagnostics) {
+            try {
+              await input.workerDiagnostics.recordFailure({
+                toolCallId,
+                toolName: name,
+                code,
+                sideEffectState: executorStarted ? "request_sent" : "none",
+                attempt,
+                maxAttempts: 3,
+                terminal,
+              });
+            } catch (diagnosticError) {
+              blockReason = "tool_failed";
+              throw diagnosticError;
+            }
+          }
+          greenfieldProposalCorrectionAttempts = attempt;
+          const message = greenfieldProposalCorrectionMessage(code);
+          if (!terminal) throw stateError(code, message);
+          blockReason = "tool_failed";
+          throw stateError(code, message);
         }
         const code = readErrorCode(error);
         if (code && input.workerDiagnostics) {
@@ -1173,6 +1206,10 @@ export function createStewardExecutionStateMachine(input: {
       }
       const inquiryFailure = classifyGrowthInquiryBriefFailure(params);
       if (inquiryFailure) throw stateError(inquiryFailure);
+      const inquiry = growthInquiryBriefSchema.parse(params);
+      if (inquiry.inquiries.some((item) => item.evidenceIds.some((evidenceId) => !growthEvidenceById.has(evidenceId)))) {
+        throw stateError("STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID");
+      }
     }
     if (name === "submit_closure_self_assessment") {
       const assessment = submitClosureSelfAssessmentArgsSchema.safeParse(params);
@@ -1792,8 +1829,32 @@ function containsForbiddenExternalEcho(value: unknown, tokens: string[]): boolea
   return tokens.some((token) => serialized.includes(token));
 }
 
-function stateError(code: string): Error & { code: string } {
-  return Object.assign(new Error("Steward execution state contract failed."), { code });
+function stateError(code: string, message = "Steward execution state contract failed."): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
+function growthInquiryCorrectionMessage(code: string): string {
+  const messages: Record<string, string> = {
+    STEWARD_GROWTH_INQUIRY_REQUIRED: "Call submit_growth_inquiry exactly once after the pinned retrieval.",
+    STEWARD_GROWTH_INQUIRY_INPUT_INVALID: "Submit exactly inquiries, selectedLocalId, and priorTransitions with no extra top-level fields.",
+    STEWARD_GROWTH_INQUIRY_COUNT_INVALID: "Submit between three and seven inquiry items.",
+    STEWARD_GROWTH_INQUIRY_ITEM_INVALID: "Each inquiry item must contain exactly localId, question, evidenceIds, evidenceState, safeSummary, proposedAction, provisionalAssumption, priority, and requiresCreatorChoice. Keep evidenceIds unique. A known or conflicted item requires at least one returned evidence ID. An unknown non-choice item requires a non-null provisionalAssumption.",
+    STEWARD_GROWTH_INQUIRY_TRANSITION_INVALID: "Use only trusted prior Inquiry local IDs and the allowed promoted, answered, or closed transition shapes.",
+    STEWARD_GROWTH_INQUIRY_CHOICE_CARDINALITY_INVALID: "Creator-choice mode requires selectedLocalId=null and exactly one item with requiresCreatorChoice=true.",
+    STEWARD_GROWTH_INQUIRY_SELECTION_INVALID: "Normal mode requires selectedLocalId to name one submitted item and every requiresCreatorChoice value to be false.",
+    STEWARD_GROWTH_INQUIRY_PRIORITY_TIE_INVALID: "Assign one unique highest numeric priority; ties at the highest priority are invalid.",
+    STEWARD_GROWTH_INQUIRY_FRONTIER_PRIORITY_INVALID: "The selected or creator-choice item must have the unique highest numeric priority.",
+    STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID: "Cite only exact evidence IDs returned by the current pinned retrieval; do not invent or transform IDs. If the Receipt returned no evidence IDs, use evidenceState=unknown and evidenceIds=[]; for an autonomous item also set requiresCreatorChoice=false and provide a non-null provisionalAssumption.",
+    STEWARD_GROWTH_INQUIRY_DUPLICATE_INVALID: "Submit semantically distinct questions and do not repeat an unresolved prior Inquiry.",
+  };
+  return messages[code] ?? "Correct the Growth Inquiry to the strict submit_growth_inquiry contract without adding authority fields.";
+}
+
+function greenfieldProposalCorrectionMessage(code: string): string {
+  if (growthWorldFragmentErrorCodes.includes(code as GrowthWorldFragmentErrorCode)) {
+    return growthWorldFragmentCorrectionMessage(code as GrowthWorldFragmentErrorCode);
+  }
+  return "Correct the Greenfield Change Set proposal without changing the pinned Growth scope, generated local references, or create-only policy.";
 }
 
 function isPublicStewardOutcomeTool(name: OperationalToolName): boolean {

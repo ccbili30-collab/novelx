@@ -256,6 +256,34 @@ describe("GraphRetrievalService", () => {
     expect(pinned.hits.some((hit) => hit.targetId === causal.firstRelationId)).toBe(false);
   });
 
+  it("persists a Growth Receipt whose relation link is a visible causal relation version", () => {
+    const setup = createSetup();
+    const causal = seedCausalChain(setup);
+    const growth = new GrowthRepository(setup.workspace);
+    const goal = growth.createGoal({
+      id: "causal-receipt-goal", idempotencyKey: "causal-receipt-goal", branchId: setup.branchId,
+      seed: { kind: "text", text: "grow causal world" },
+      authorizedScopeResourceIds: [setup.storyRootId, setup.worldRootId], initialRuleText: "sources", sourceMessageId: null,
+    });
+    const cycle = growth.beginCycle({
+      id: "causal-receipt-cycle", goalId: goal.id, idempotencyKey: "causal-receipt-cycle",
+      inputCheckpointId: setup.checkpointId, ruleRevision: 1,
+      intent: { kind: "expand", focusKinds: ["story"], resumeFrontier: ["oc"] },
+    });
+    const run = seedRun(setup.workspace, setup.branchId, setup.checkpointId);
+    growth.attachRun({ cycleId: cycle.id, runId: run.runId });
+    const result = new GraphRetrievalService(setup.workspace).retrieve(request(setup, {
+      id: "causal-receipt", cycleId: cycle.id, runId: run.runId, toolInvocationId: run.toolInvocationId,
+      query: "不存在的字面词", seedAssertionIds: [causal.causeAssertionId], causalDirection: "downstream", maxHops: 1,
+    }));
+    expect(result.receipt.links).toContainEqual(expect.objectContaining({
+      targetKind: "relation", targetId: causal.firstRelationId, targetVersionId: "causal-version.chain.0",
+    }));
+    expect(growth.recordReceipt(result.receipt).links).toContainEqual(expect.objectContaining({
+      targetKind: "relation", targetId: causal.firstRelationId, targetVersionId: "causal-version.chain.0",
+    }));
+  });
+
   it("uses an identity-free bounded cache keyed by checkpoint, scope, Lens, query and budgets", () => {
     const setup = createSetup();
     const service = new GraphRetrievalService(setup.workspace);

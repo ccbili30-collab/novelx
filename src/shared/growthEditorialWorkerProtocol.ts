@@ -149,7 +149,7 @@ export const growthEditorialSpecialistPacketSchema = z.object({
   acceptanceFacets: z.array(acceptanceFacetSchema).min(1).max(50),
   evidence: z.array(z.object({
     ref: evidenceRefSchema,
-    kind: z.enum(["document", "assertion", "causal_relation", "review"]),
+    kind: z.enum(["goal_seed", "user_rule", "document", "assertion", "causal_relation", "review"]),
     stableLocator: z.string().trim().min(1).max(1_000),
     content: z.string().trim().min(1).max(100_000),
     contentSha256: sha256Schema,

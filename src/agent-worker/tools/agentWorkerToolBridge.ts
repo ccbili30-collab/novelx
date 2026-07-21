@@ -58,12 +58,14 @@ export class AgentWorkerToolBridge {
   readonly #send: SendToMain;
   readonly #timeoutMs: number;
   readonly #imageTimeoutMs: number;
+  readonly #serializedWriteTimeoutMs: number;
   readonly #pending = new Map<string, PendingRequest>();
 
-  constructor(send: SendToMain, timeoutMs = 20_000, imageTimeoutMs = 310_000) {
+  constructor(send: SendToMain, timeoutMs = 20_000, imageTimeoutMs = 310_000, serializedWriteTimeoutMs = 650_000) {
     this.#send = send;
     this.#timeoutMs = timeoutMs;
     this.#imageTimeoutMs = imageTimeoutMs;
+    this.#serializedWriteTimeoutMs = serializedWriteTimeoutMs;
   }
 
   invoke(
@@ -121,9 +123,16 @@ export class AgentWorkerToolBridge {
         this.#settle(request.requestId, undefined, toolBridgeError("AGENT_RUN_CANCELLED", "Agent run was cancelled."));
       };
       signal?.addEventListener("abort", onAbort, { once: true });
+      const transportTimeoutMs = tool === "save_task_note" || tool === "propose_change_set"
+        || tool === "retrieve_graph_evidence" || tool === "submit_growth_inquiry"
+        || tool === "submit_closure_self_assessment" || tool === "submit_closure_checker_review"
+        ? this.#serializedWriteTimeoutMs
+        : tool === "generate_image"
+          ? Math.max(this.#imageTimeoutMs, this.#serializedWriteTimeoutMs)
+          : this.#timeoutMs;
       const timer = setTimeout(() => {
         this.#settle(request.requestId, undefined, toolBridgeError("AGENT_TOOL_TIMEOUT", "Agent tool request timed out."));
-      }, tool === "generate_image" ? this.#imageTimeoutMs : this.#timeoutMs);
+      }, transportTimeoutMs);
       this.#pending.set(request.requestId, {
         runId,
         tool,

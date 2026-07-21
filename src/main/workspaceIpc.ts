@@ -127,7 +127,7 @@ import { ChangeSetService, type ChangeSetPolicyEvaluator } from "../domain/chang
 import { WorkspaceChangeSetPolicy } from "../domain/changeSet/workspaceChangeSetPolicy";
 import { SemanticGraphService } from "../domain/graph/semanticGraphService";
 import { CreativeShowcaseService } from "../domain/showcase/creativeShowcaseService";
-import type { AgentToolGateway } from "./agentProcessSupervisor";
+import type { AgentToolGateway, AgentToolInvocationContext } from "./agentProcessSupervisor";
 import { createWorkspaceAgentToolGateway } from "./workspaceAgentToolGateway";
 import { AgentAuditRepository } from "../domain/audit/agentAuditRepository";
 import { ProjectDoctorService } from "../domain/doctor/projectDoctorService";
@@ -520,7 +520,20 @@ export class WorkspaceSession {
   }
 
   #serializeWrites(gateway: AgentToolGateway): AgentToolGateway {
+    const lease = Symbol("project-write-lease");
+    const runSerializedWrite = <T>(
+      context: AgentToolInvocationContext,
+      operation: (admittedContext: AgentToolInvocationContext) => Promise<T>,
+    ): Promise<T> => {
+      if (context.serializedWriteLease === lease) return operation(context);
+      return this.#writeQueue.run(
+        context.signal,
+        () => operation({ ...context, serializedWriteLease: lease }),
+        context.onExecutionStarted,
+      );
+    };
     return {
+      runSerializedWrite,
       retrieveGraphEvidence: (args, context) => gateway.retrieveGraphEvidence(args, context),
       inspectProjectFiles: (args, context) => gateway.inspectProjectFiles(args, context),
       listProjectDirectory: (args, context) => gateway.listProjectDirectory(args, context),
@@ -528,19 +541,10 @@ export class WorkspaceSession {
       globProjectFiles: (args, context) => gateway.globProjectFiles(args, context),
       searchProjectFiles: (args, context) => gateway.searchProjectFiles(args, context),
       readProjectFile: (args, context) => gateway.readProjectFile(args, context),
-      saveTaskNote: (args, context) => this.#writeQueue.run(
-        context.signal,
-        () => gateway.saveTaskNote(args, context),
-      ),
+      saveTaskNote: (args, context) => runSerializedWrite(context, (admitted) => gateway.saveTaskNote(args, admitted)),
       listTaskNotes: (args, context) => gateway.listTaskNotes(args, context),
-      generateImage: (args, context) => this.#writeQueue.run(
-        context.signal,
-        () => gateway.generateImage(args, context),
-      ),
-      proposeChangeSet: (args, context) => this.#writeQueue.run(
-        context.signal,
-        () => gateway.proposeChangeSet(args, context),
-      ),
+      generateImage: (args, context) => runSerializedWrite(context, (admitted) => gateway.generateImage(args, admitted)),
+      proposeChangeSet: (args, context) => runSerializedWrite(context, (admitted) => gateway.proposeChangeSet(args, admitted)),
     };
   }
 }
@@ -557,9 +561,10 @@ function resolveWorkspaceAgentScopes(workspace: WorkspaceDatabase): { authorized
 export class ProjectWriteQueue {
   #tail: Promise<void> = Promise.resolve();
 
-  run<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  run<T>(signal: AbortSignal, operation: () => Promise<T>, onExecutionStarted?: () => void): Promise<T> {
     const result = this.#tail.then(async () => {
       if (signal.aborted) throw Object.assign(new Error("Agent run was cancelled."), { code: "AGENT_RUN_CANCELLED" });
+      onExecutionStarted?.();
       return operation();
     });
     this.#tail = result.then(() => undefined, () => undefined);

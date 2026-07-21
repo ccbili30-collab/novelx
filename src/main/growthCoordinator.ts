@@ -53,6 +53,10 @@ import {
   type GrowthEditorialSchedulerOptions,
 } from "./growth/editorial/growthEditorialScheduler";
 import type { GrowthWorkOrderRunnerDependencies } from "./growth/editorial/growthWorkOrderRunner";
+import {
+  WorldDirectorGeographyDelegation,
+  type WorldDirectorGeographyDelegationOptions,
+} from "./growth/editorial/worldDirectorGeographyDelegation";
 
 interface GrowthWorkspaceContext {
   workspace: import("../domain/workspace/workspaceRepository").WorkspaceDatabase;
@@ -77,17 +81,27 @@ interface DeliveryRoute {
   growth?: (event: GrowthLiveEvent) => void;
   agent?: (event: AgentRunEvent) => void;
 }
+
+export type GrowthCoordinatorOptions =
+  | { route?: "legacy" }
+  | ({ route: "world_director_geography" } & WorldDirectorGeographyDelegationOptions);
+
 /** Main-authoritative, persisted-Intent Growth orchestration. */
 export class GrowthCoordinator {
   readonly #listeners = new Map<string, Map<string, DeliveryRoute>>();
   readonly #activeCycleRuns = new Map<string, string>();
   #illustrationApplication: { workspace: GrowthWorkspaceContext["workspace"]; service: GrowthIllustrationApplicationService } | null = null;
   readonly #editorialApplication = new GrowthEditorialSchedulerApplication();
+  #worldDirectorGeographyApplication: {
+    workspace: GrowthWorkspaceContext["workspace"];
+    service: WorldDirectorGeographyDelegation;
+  } | null = null;
 
   constructor(
     readonly workspaceSession: WorkspaceSession,
     readonly applicationRegistry: ApplicationRegistryRepository,
     readonly supervisor: AgentProcessSupervisor,
+    readonly options: GrowthCoordinatorOptions = { route: "legacy" },
   ) {}
 
   start(input: GrowthStartRequest, route?: DeliveryRoute): GrowthStartResponse {
@@ -109,7 +123,11 @@ export class GrowthCoordinator {
       sourceMessageId: null,
     });
     if (route) this.#addListener(goal.id, input.sessionId, route);
-    this.#advance({ request: input, goal, context, repository });
+    if (this.options.route === "world_director_geography") {
+      this.#worldDirectorGeographyService(context).start({ goal, sourceCheckpointId: context.checkpointId });
+    } else {
+      this.#advance({ request: input, goal, context, repository });
+    }
     return growthStartResponseSchema.parse(this.#snapshot(repository, goal.id, context));
   }
 
@@ -123,7 +141,11 @@ export class GrowthCoordinator {
       throw coordinatorError("GROWTH_GUIDANCE_AUTHORITY_MISMATCH");
     }
     if (route) this.#addListener(goal.id, input.sessionId, route);
-    this.#advance({ request: { ...input, seed: goal.seed }, goal, context, repository });
+    if (this.options.route === "world_director_geography") {
+      this.#worldDirectorGeographyService(context).start({ goal, sourceCheckpointId: context.checkpointId });
+    } else {
+      this.#advance({ request: { ...input, seed: goal.seed }, goal, context, repository });
+    }
     return growthGetResponseSchema.parse(this.#snapshot(repository, goal.id, context));
   }
 
@@ -215,6 +237,8 @@ export class GrowthCoordinator {
   }
 
   dispose(): void {
+    this.#worldDirectorGeographyApplication?.service.dispose();
+    this.#worldDirectorGeographyApplication = null;
     this.#editorialApplication.dispose();
     this.#illustrationApplication?.service.dispose();
     this.#illustrationApplication = null;
@@ -821,6 +845,24 @@ export class GrowthCoordinator {
     if (!gateway) throw coordinatorError("GROWTH_WORKSPACE_REQUIRED");
     const service = new GrowthIllustrationApplicationService(context.workspace, gateway);
     this.#illustrationApplication = { workspace: context.workspace, service };
+    return service;
+  }
+
+  #worldDirectorGeographyService(context: GrowthWorkspaceContext): WorldDirectorGeographyDelegation {
+    if (this.options.route !== "world_director_geography") {
+      throw coordinatorError("GROWTH_WORLD_DIRECTOR_ROUTE_REQUIRED");
+    }
+    if (this.#worldDirectorGeographyApplication?.workspace === context.workspace) {
+      return this.#worldDirectorGeographyApplication.service;
+    }
+    this.#worldDirectorGeographyApplication?.service.dispose();
+    const service = new WorldDirectorGeographyDelegation(
+      context.workspace,
+      context.rootPath,
+      this.supervisor,
+      { requireEditorialPrompt: this.options.requireEditorialPrompt },
+    );
+    this.#worldDirectorGeographyApplication = { workspace: context.workspace, service };
     return service;
   }
 }

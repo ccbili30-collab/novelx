@@ -125,7 +125,12 @@ describe("Steward tool handoff state machine", () => {
     await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
     const wrappedInquiry = tool(machine.tools, "submit_growth_inquiry");
 
-    await expect(wrappedInquiry.execute("inquiry-1", {})).rejects.toMatchObject({ code: "STEWARD_GROWTH_INQUIRY_INPUT_INVALID" });
+    const invalidItemBrief = growthInquiryBrief();
+    invalidItemBrief.inquiries[0]!.provisionalAssumption = null;
+    await expect(wrappedInquiry.execute("inquiry-1", invalidItemBrief)).rejects.toMatchObject({
+      code: "STEWARD_GROWTH_INQUIRY_ITEM_INVALID",
+      message: expect.stringContaining("provisionalAssumption"),
+    });
     await expect(wrappedInquiry.execute("inquiry-2", {})).rejects.toMatchObject({ code: "STEWARD_GROWTH_INQUIRY_INPUT_INVALID" });
     const exhausted = await wrappedInquiry.execute("inquiry-3", {});
 
@@ -144,7 +149,7 @@ describe("Steward tool handoff state machine", () => {
     });
     expect(inquiry.execute).not.toHaveBeenCalled();
     expect(workerDiagnostics.recordFailure).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      code: "STEWARD_GROWTH_INQUIRY_INPUT_INVALID", attempt: 1, maxAttempts: 3, terminal: false,
+      code: "STEWARD_GROWTH_INQUIRY_ITEM_INVALID", attempt: 1, maxAttempts: 3, terminal: false,
     }));
     expect(workerDiagnostics.recordFailure).toHaveBeenNthCalledWith(3, expect.objectContaining({
       code: "STEWARD_GROWTH_INQUIRY_INPUT_INVALID", attempt: 3, maxAttempts: 3, terminal: true,
@@ -152,20 +157,10 @@ describe("Steward tool handoff state machine", () => {
     await expect(wrappedInquiry.execute("inquiry-4", {})).rejects.toMatchObject({ code: "STEWARD_EXECUTION_BLOCKED" });
   });
 
-  it("corrects one Main-classified Inquiry evidence error without terminalizing the Cycle", async () => {
+  it("rejects out-of-receipt Inquiry evidence before Main and accepts an exact current evidence ID", async () => {
     const workerDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
     const inquiry = selectedInquiryTool();
-    let attempts = 0;
-    inquiry.execute = vi.fn(async () => {
-      attempts += 1;
-      if (attempts === 1) {
-        throw Object.assign(new Error("safe"), { code: "STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID" });
-      }
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ result: { status: "selected", safeSummary: "正在推演。" } }) }],
-        details: { status: "selected" as const, safeSummary: "正在推演。" },
-      };
-    });
+    inquiry.execute = vi.fn(inquiry.execute);
     const machine = createGrowthMachine("world", [
       successfulTool("retrieve_graph_evidence", growthRetrievalResult()),
       inquiry,
@@ -175,12 +170,17 @@ describe("Steward tool handoff state machine", () => {
     await tool(machine.tools, "retrieve_graph_evidence").execute("retrieve", growthRetrieveArgs());
     const wrappedInquiry = tool(machine.tools, "submit_growth_inquiry");
 
-    await expect(wrappedInquiry.execute("inquiry-1", growthInquiryBrief())).rejects.toMatchObject({
+    const invalid = growthInquiryBrief();
+    (invalid.inquiries[0]! as { evidenceIds: string[] }).evidenceIds = ["not-in-current-receipt"];
+    await expect(wrappedInquiry.execute("inquiry-1", invalid)).rejects.toMatchObject({
       code: "STEWARD_GROWTH_INQUIRY_EVIDENCE_INVALID",
+      message: expect.stringContaining("evidenceState=unknown"),
     });
+    expect(inquiry.execute).not.toHaveBeenCalled();
     const corrected = await wrappedInquiry.execute("inquiry-2", growthInquiryBrief());
 
     expect(corrected.details).toMatchObject({ status: "selected" });
+    expect(inquiry.execute).toHaveBeenCalledTimes(1);
     expect(machine.requiredNextTool()).toBe("propose_change_set");
     expect(machine.snapshot().blockReason).toBeNull();
     expect(workerDiagnostics.recordFailure).toHaveBeenCalledWith(expect.objectContaining({
@@ -188,6 +188,7 @@ describe("Steward tool handoff state machine", () => {
       attempt: 1,
       maxAttempts: 3,
       terminal: false,
+      sideEffectState: "none",
     }));
   });
 
@@ -379,7 +380,8 @@ describe("Steward tool handoff state machine", () => {
       objective: "change_set", scopeResourceIds: ["world-1", "oc-root", "story-root"], steps: ["retrieve_graph_evidence", "submit_growth_inquiry", "propose_change_set", "generate_image"],
     });
     const worldProposalTool = tool(machine.tools, "propose_change_set");
-    expect(worldProposalTool.description).toContain("at least three model-supplied Assertions");
+    expect(worldProposalTool.description).toContain("at least 12 entities");
+    expect(worldProposalTool.description).toContain("kind=faction only for polity and civilization_group");
     expect(JSON.stringify(worldProposalTool.parameters)).toContain('"assertions"');
     expect(JSON.stringify(worldProposalTool.parameters)).toContain('"minItems":3');
     expect(machine.requiredNextTool()).toBe("retrieve_graph_evidence");
@@ -669,10 +671,16 @@ describe("Steward tool handoff state machine", () => {
       .toEqual(["retrieve_graph_evidence:succeeded", "propose_change_set:failed", "propose_change_set:succeeded"]);
 
     const alwaysInvalid = successfulTool("propose_change_set", greenfieldCommittedProposal());
-    alwaysInvalid.execute = async () => { throw Object.assign(new Error("safe"), { code: "GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED" }); };
+    alwaysInvalid.execute = vi.fn(alwaysInvalid.execute);
+    const invalidWorldFragment = worldFragment();
+    const invalidPolity = invalidWorldFragment.entities.find((entity) => entity.scaleRole === "polity");
+    if (!invalidPolity || invalidPolity.scaleRole !== "polity") throw new Error("TEST_POLITY_FIXTURE_REQUIRED");
+    invalidPolity.macroRegionRef = "missing";
+    const blockedDiagnostics = { recordFailure: vi.fn(async () => "diagnostic") };
     const blocked = createStewardExecutionStateMachine({
       mode: "free", userInput: "Growth seed", authorizedScopeResourceIds: ["world-root"], growthBinding: binding,
       operationalTools: [successfulTool("retrieve_graph_evidence", emptyReceipt), selectedInquiryTool(), alwaysInvalid], resultCapture: createRoleOutputTool("steward"),
+      workerDiagnostics: blockedDiagnostics,
     });
     await tool(blocked.tools, "retrieve_graph_evidence").execute("retrieve", {
       variant: "growth_v1", query: "seed", aliases: [], seedResourceIds: [], maxHops: 0, cpuBudgetMs: 1000,
@@ -680,11 +688,21 @@ describe("Steward tool handoff state machine", () => {
     });
     await submitSelectedInquiry(blocked.tools);
     for (const requestId of ["one", "two", "three"]) {
-      await expect(tool(blocked.tools, "propose_change_set").execute(requestId, worldFragment()))
-        .rejects.toMatchObject({ code: "GREENFIELD_DOCUMENT_DEPENDENCY_REQUIRED" });
+      await expect(tool(blocked.tools, "propose_change_set").execute(requestId, invalidWorldFragment))
+        .rejects.toMatchObject({
+          code: "GROWTH_FRAGMENT_SCALE_REGION_INVALID",
+          message: expect.stringContaining("macroRegionRef"),
+        });
     }
+    expect(alwaysInvalid.execute).not.toHaveBeenCalled();
     expect(blocked.requiredNextTool()).toBe("submit_steward_result");
     expect(blocked.snapshot().executions.map((entry) => entry.status)).toEqual(["succeeded", "failed", "failed", "failed"]);
+    expect(blockedDiagnostics.recordFailure).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      code: "GROWTH_FRAGMENT_SCALE_REGION_INVALID", attempt: 1, maxAttempts: 3, terminal: false, sideEffectState: "none",
+    }));
+    expect(blockedDiagnostics.recordFailure).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      code: "GROWTH_FRAGMENT_SCALE_REGION_INVALID", attempt: 3, maxAttempts: 3, terminal: true, sideEffectState: "none",
+    }));
 
     const policyFailure = successfulTool("propose_change_set", greenfieldCommittedProposal());
     let policyAttempts = 0;

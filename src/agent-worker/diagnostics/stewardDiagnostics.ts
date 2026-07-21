@@ -1,5 +1,6 @@
 import { createSafeDiagnosticCatalog } from "../../shared/diagnostics/safeDiagnosticCatalog";
 import { growthInquiryDiagnosticCodes } from "../../shared/diagnostics/growthInquiryDiagnostics";
+import { growthWorldFragmentErrorCodes } from "../growth/growthWorldFragment";
 import {
   isGrowthLongformModelCorrectionCode,
   isGrowthLongformSectionWriterCorrectionCode,
@@ -13,6 +14,7 @@ export const stewardDiagnosticCatalog = createSafeDiagnosticCatalog([
   "STEWARD_CLOSURE_EVIDENCE_MISMATCH", "STEWARD_CLOSURE_NOT_READY",
   "STEWARD_EXECUTION_BLOCKED", "STEWARD_GREENFIELD_WORLD_MAP_SOURCE_MISMATCH",
   ...growthInquiryDiagnosticCodes,
+  ...growthWorldFragmentErrorCodes,
   ...growthLongformModelCorrectionCodes,
   ...growthLongformSectionDiagnosticCodes,
   ...growthLongformWriterBlockedDiagnosticCodes,
@@ -32,14 +34,15 @@ export const stewardDiagnosticCatalog = createSafeDiagnosticCatalog([
   "STEWARD_FINAL_BLOCK_REASON_MISMATCH", "STEWARD_FINAL_CHANGE_SET_MISMATCH",
 ].map((code) => ({
   code,
-  owner: code.includes("CLOSURE") || code.includes("LONGFORM") ? "growth_phase" as const : "worker_schema" as const,
-  boundary: code.startsWith("GROWTH_LONGFORM_")
+  owner: code.includes("CLOSURE") || code.includes("LONGFORM") || code.startsWith("GROWTH_FRAGMENT_") ? "growth_phase" as const : "worker_schema" as const,
+  boundary: code.startsWith("GROWTH_LONGFORM_") || code.startsWith("GROWTH_FRAGMENT_")
     ? "phase_compile" as const
     : code === "STEWARD_LONGFORM_WRITER_EVIDENCE_ECHO_INVALID" || code === "STEWARD_LONGFORM_WRITER_RESULT_INVALID"
     ? "worker_to_main" as const
     : code.startsWith("STEWARD_LONGFORM_WRITER_BLOCKED_") ? "worker_to_main" as const
     : code === "STEWARD_TOOL_RESULT_INVALID" ? "worker_to_main" as const : "tool_arguments" as const,
   defaultRetryability: code.startsWith("STEWARD_GROWTH_INQUIRY_")
+    || code.startsWith("GROWTH_FRAGMENT_")
     || code === "STEWARD_CLOSURE_HANDOFF_REQUIRED"
     || isGrowthLongformModelCorrectionCode(code)
     || isGrowthLongformSectionWriterCorrectionCode(code)

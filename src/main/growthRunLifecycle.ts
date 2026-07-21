@@ -318,14 +318,18 @@ class BoundGrowthRun implements AgentRunInternalBinding {
       this.#terminalizeKnownFailure("GROWTH_RUN_ATTACH_FAILED");
       throw growthRunError("GROWTH_PERSISTENCE_FAILED");
     }
+    const serialize = <T>(
+      context: AgentToolInvocationContext,
+      operation: (admittedContext: AgentToolInvocationContext) => Promise<T>,
+    ): Promise<T> => input.gateway.runSerializedWrite?.(context, operation) ?? operation(context);
     return {
       ...input.gateway,
-      retrieveGraphEvidence: (args, context) => this.#retrieve(args, context),
-      submitGrowthInquiry: (args, context) => this.#submitInquiry(args, context),
-      submitClosureSelfAssessment: (args, context) => this.#submitClosureSelfAssessment(args, context),
-      submitClosureCheckerReview: (args, context) => this.#submitClosureCheckerReview(args, context),
-      proposeChangeSet: (args, context) => this.#propose(input.gateway, args, context),
-      generateImage: (args, context) => this.#generate(input.gateway, args, context),
+      retrieveGraphEvidence: (args, context) => serialize(context, (admitted) => this.#retrieve(args, admitted)),
+      submitGrowthInquiry: (args, context) => serialize(context, (admitted) => this.#submitInquiry(args, admitted)),
+      submitClosureSelfAssessment: (args, context) => serialize(context, (admitted) => this.#submitClosureSelfAssessment(args, admitted)),
+      submitClosureCheckerReview: (args, context) => serialize(context, (admitted) => this.#submitClosureCheckerReview(args, admitted)),
+      proposeChangeSet: (args, context) => serialize(context, (admitted) => this.#propose(input.gateway, args, admitted)),
+      generateImage: (args, context) => serialize(context, (admitted) => this.#generate(input.gateway, args, admitted)),
     };
   }
 

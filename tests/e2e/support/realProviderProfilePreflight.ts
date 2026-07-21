@@ -27,7 +27,7 @@ export interface RealProviderProfilePreflightResult {
 export function verifyRealProviderProfilePreflight(input: {
   textStorePath: string;
   imageStorePath: string;
-  expectedText: { providerId: "openai-compatible"; modelId: "5.6luna" };
+  expectedText: { providerId: "openai-compatible"; modelId: "gpt-5.6-luna" };
   expectedImageProviderId: "openai-compatible-image";
 }): RealProviderProfilePreflightResult {
   const text = readStore(input.textStorePath, textStoreSchema, "REAL_PROVIDER_STORE_INVALID");

@@ -93,6 +93,30 @@ describe("Growth world Fragment compiler", () => {
     expect(growthWorldFragmentSchema.safeParse({ ...fragment, resourceId: "forged" }).success).toBe(false);
   });
 
+  it("rejects document kinds incompatible with their declared owner before compiling a Change Set", () => {
+    const invalidLocationProfile = {
+      ...fragment,
+      documents: [
+        ...fragment.documents,
+        { localId: "wrong_location_profile", ownerRef: "north_crown", kind: "location_profile", title: "Wrong", content: "Invalid owner." },
+      ],
+    };
+    const invalidFactionProfile = {
+      ...fragment,
+      documents: [
+        ...fragment.documents,
+        { localId: "wrong_faction_profile", ownerRef: "north", kind: "faction_profile", title: "Wrong", content: "Invalid owner." },
+      ],
+    };
+    for (const [cycleId, candidate] of [["cycle-location-owner", invalidLocationProfile], ["cycle-faction-owner", invalidFactionProfile]] as const) {
+      expect(growthWorldFragmentSchema.safeParse(candidate).success).toBe(false);
+      expectFragmentCode(
+        () => compileGrowthWorldFragment(candidate, { cycleId, worldRootResourceId: "world-root" }),
+        "GROWTH_FRAGMENT_DOCUMENT_OWNER_KIND_INVALID",
+      );
+    }
+  });
+
   it("deterministically compiles model creative fields into create-only source-bound items", () => {
     const trusted = { cycleId: "cycle-1", worldRootResourceId: "world-root" };
     const first = compileGrowthWorldFragment(fragment, trusted);
@@ -137,6 +161,13 @@ describe("Growth world Fragment compiler", () => {
     expectFragmentCode(() => compileGrowthWorldFragment({ ...fragment, documents: [{ ...fragment.documents[0], ownerRef: "missing" }] }, { cycleId: "cycle-reference", worldRootResourceId: "world-root" }), "GROWTH_FRAGMENT_REFERENCE_INVALID");
     expectFragmentCode(() => compileGrowthWorldFragment({ ...fragment, entities: scaleEntities.map((entity) => entity.localId === "mountains" ? { ...entity, parentRef: "north_crown" } : entity), relations: [] }, { cycleId: "cycle-cross-a", worldRootResourceId: "world-root" }), "GROWTH_FRAGMENT_PARENT_KIND_INVALID");
     expectFragmentCode(() => compileGrowthWorldFragment({ ...fragment, entities: scaleEntities.map((entity) => entity.localId === "north_crown" ? { ...entity, parentRef: "north" } : entity), relations: [] }, { cycleId: "cycle-cross-b", worldRootResourceId: "world-root" }), "GROWTH_FRAGMENT_PARENT_KIND_INVALID");
+    expect(() => compileGrowthWorldFragment({
+      ...fragment,
+      entities: scaleEntities.map((entity) => entity.localId === "north_crown" ? { ...entity, macroRegionRef: undefined } : entity),
+    }, { cycleId: "cycle-scale-region", worldRootResourceId: "world-root" })).toThrowError(expect.objectContaining({
+      code: "GROWTH_FRAGMENT_SCALE_REGION_INVALID",
+      message: expect.stringContaining("macroRegionRef"),
+    }));
   });
 });
 

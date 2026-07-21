@@ -30,6 +30,7 @@ import { ApplicationRegistryRepository } from "../domain/application/application
 import { createAgentWorkerDiagnosticReporter } from "./agentWorkerDiagnosticLog";
 import { GrowthCoordinator } from "./growthCoordinator";
 import type { WorkspaceSession } from "./workspaceIpc";
+import { requireActiveEditorialPrompt } from "../agent-worker/editorial/editorialPromptRegistry";
 
 export function registerDesktopIpc(
   workerPath: string,
@@ -48,7 +49,27 @@ export function registerDesktopIpc(
   });
   const playerSupervisor = new PlayerProcessSupervisor(workerPath, { acquireRuntimeLease: acquirePlayerRuntimeLease, getProviderProfile });
   const decomposerSupervisor = new DecomposerProcessSupervisor(workerPath, { acquireRuntimeLease: acquireDecomposerRuntimeLease, getProviderProfile });
-  const growthCoordinator = workspaceSession ? new GrowthCoordinator(workspaceSession, applicationRegistry, supervisor) : null;
+  const growthCoordinator = workspaceSession
+    ? new GrowthCoordinator(workspaceSession, applicationRegistry, supervisor, {
+        route: "world_director_geography",
+        requireEditorialPrompt: () => {
+          const prompt = requireActiveEditorialPrompt("geography_ecology_author");
+          return {
+            id: prompt.id,
+            version: prompt.version,
+            sha256: prompt.sha256,
+            status: prompt.status,
+            content: prompt.content,
+            publicationEvidence: prompt.publicationEvidence
+              ? {
+                  reportPath: prompt.publicationEvidence.reportPath,
+                  reportSha256: prompt.publicationEvidence.reportSha256,
+                }
+              : null,
+          };
+        },
+      })
+    : null;
 
   ipcMain.handle(desktopIpcChannels.systemStatus, () => systemStatusSchema.parse({
     platform: process.platform,

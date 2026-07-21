@@ -201,7 +201,7 @@ describe("Agent Worker tool bridge", () => {
   it("cleans up pending calls on cancellation and timeout", async () => {
     vi.useFakeTimers();
     try {
-      const bridge = new AgentWorkerToolBridge(() => true, 50);
+      const bridge = new AgentWorkerToolBridge(() => true, 50, 500, 50);
       const cancelled = bridge.invoke("run-cancel", "retrieve_graph_evidence", { scopeResourceIds: ["world-1"] });
       bridge.cancelRun("run-cancel");
       await expect(cancelled).rejects.toMatchObject({ code: "AGENT_RUN_CANCELLED" });
@@ -243,6 +243,47 @@ describe("Agent Worker tool bridge", () => {
         },
       })).toBe(true);
       await expect(pending).resolves.toMatchObject({ assetId: "asset-1" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps serialized Change Set transport pending beyond the ordinary tool timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let sent: AgentWorkerToolRequest | undefined;
+      const bridge = new AgentWorkerToolBridge((request) => { sent = request; return true; }, 50, 500, 600);
+      const pending = bridge.invoke("run-change", "propose_change_set", {
+        summary: "safe",
+        items: [{
+          id: "world-item", dependsOn: [], kind: "resource.put",
+          payload: { resourceId: "world-1", create: true, type: "world", objectKind: "world", title: "safe", parentId: "root-1", state: "active", sortOrder: 0 },
+        }],
+      });
+      await vi.advanceTimersByTimeAsync(51);
+      expect(bridge.handleResponse({
+        type: "tool.response", runId: "run-change", requestId: sent!.requestId, ok: true,
+        tool: "propose_change_set",
+        result: { changeSetId: "change-1", mode: "assist", status: "pending", gateStatus: "review_pending", blockedReason: null, itemCount: 1 },
+      })).toBe(true);
+      await expect(pending).resolves.toMatchObject({ changeSetId: "change-1" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps durable Growth retrieval transport pending beyond the ordinary tool timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let sent: AgentWorkerToolRequest | undefined;
+      const bridge = new AgentWorkerToolBridge((request) => { sent = request; return true; }, 50, 500, 600);
+      const pending = bridge.invoke("run-growth-retrieval", "retrieve_graph_evidence", { scopeResourceIds: ["world-1"] });
+      await vi.advanceTimersByTimeAsync(51);
+      expect(bridge.handleResponse({
+        type: "tool.response", runId: "run-growth-retrieval", requestId: sent!.requestId, ok: false,
+        error: { code: "AGENT_TOOL_QUEUE_TIMEOUT", message: "The queued operation expired." },
+      })).toBe(true);
+      await expect(pending).rejects.toMatchObject({ code: "AGENT_TOOL_QUEUE_TIMEOUT" });
     } finally {
       vi.useRealTimers();
     }

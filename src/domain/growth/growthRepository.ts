@@ -2625,14 +2625,14 @@ export class GrowthRepository {
   #assertReceiptLinkVisible(link: GrowthRetrievalReceiptCreate["links"][number], checkpointId: string, branchId: string): void {
     if (link.targetKind === "change_set") {
       this.#assertChangeSetVisible(link.targetId, link.targetVersionId, checkpointId, branchId, "GROWTH_RECEIPT_LINK_NOT_VISIBLE");
+    } else if (link.targetKind === "relation") {
+      this.#assertRelationVersionVisible(link.targetId, link.targetVersionId, checkpointId, "GROWTH_RECEIPT_LINK_NOT_VISIBLE");
     } else {
       const definition = link.targetKind === "resource"
         ? ["resource_revisions", "resource_id"] as const
         : link.targetKind === "document"
           ? ["document_versions", "creative_document_id"] as const
-          : link.targetKind === "assertion"
-            ? ["assertion_versions", "assertion_id"] as const
-            : ["creative_relation_versions", "relation_id"] as const;
+          : ["assertion_versions", "assertion_id"] as const;
       this.#assertVersionVisible(definition[0], definition[1], link.targetId, link.targetVersionId, checkpointId, "GROWTH_RECEIPT_LINK_NOT_VISIBLE");
     }
     if (link.stableLocator !== null) this.#assertStableLocator(link.stableVersionId!, link.stableHash!, checkpointId);
@@ -2666,13 +2666,15 @@ export class GrowthRepository {
       return;
     }
     if (targetVersionId === null) throw growthError("GROWTH_EVENT_TARGET_NOT_VISIBLE");
+    if (kind === "relation") {
+      this.#assertRelationVersionVisible(targetId, targetVersionId, checkpointId, "GROWTH_EVENT_TARGET_NOT_VISIBLE");
+      return;
+    }
     const definition = kind === "resource"
       ? ["resource_revisions", "resource_id"] as const
       : kind === "document"
         ? ["document_versions", "creative_document_id"] as const
-        : kind === "assertion"
-          ? ["assertion_versions", "assertion_id"] as const
-          : ["creative_relation_versions", "relation_id"] as const;
+        : ["assertion_versions", "assertion_id"] as const;
     this.#assertVersionVisible(definition[0], definition[1], targetId, targetVersionId, checkpointId, "GROWTH_EVENT_TARGET_NOT_VISIBLE");
   }
 
@@ -2684,13 +2686,15 @@ export class GrowthRepository {
       this.#assertChangeSetVisible(targetId, targetVersionId, checkpointId, branchId, "GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
       return;
     }
+    if (kind === "relation") {
+      this.#assertRelationVersionVisible(targetId, targetVersionId, checkpointId, "GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
+      return;
+    }
     const definition = kind === "resource"
       ? ["resource_revisions", "resource_id"] as const
       : kind === "document"
         ? ["document_versions", "creative_document_id"] as const
-        : kind === "assertion"
-          ? ["assertion_versions", "assertion_id"] as const
-          : ["creative_relation_versions", "relation_id"] as const;
+        : ["assertion_versions", "assertion_id"] as const;
     this.#assertVersionVisible(definition[0], definition[1], targetId, targetVersionId, checkpointId, "GROWTH_CONTENT_REFERENCE_NOT_VISIBLE");
   }
 
@@ -2701,8 +2705,19 @@ export class GrowthRepository {
     }
   }
 
-  #assertVersionVisible(table: "resource_revisions" | "document_versions" | "assertion_versions" | "creative_relation_versions", ownerColumn: "resource_id" | "creative_document_id" | "assertion_id" | "relation_id", targetId: string, versionId: string, checkpointId: string, code: string): void {
-    const valid = this.workspace.db.prepare(`
+  #assertRelationVersionVisible(targetId: string, versionId: string, checkpointId: string, code: string): void {
+    if (!this.#versionVisible("creative_relation_versions", "relation_id", targetId, versionId, checkpointId)
+      && !this.#versionVisible("causal_relation_versions", "relation_id", targetId, versionId, checkpointId)) {
+      throw growthError(code);
+    }
+  }
+
+  #assertVersionVisible(table: "resource_revisions" | "document_versions" | "assertion_versions" | "creative_relation_versions" | "causal_relation_versions", ownerColumn: "resource_id" | "creative_document_id" | "assertion_id" | "relation_id", targetId: string, versionId: string, checkpointId: string, code: string): void {
+    if (!this.#versionVisible(table, ownerColumn, targetId, versionId, checkpointId)) throw growthError(code);
+  }
+
+  #versionVisible(table: "resource_revisions" | "document_versions" | "assertion_versions" | "creative_relation_versions" | "causal_relation_versions", ownerColumn: "resource_id" | "creative_document_id" | "assertion_id" | "relation_id", targetId: string, versionId: string, checkpointId: string): boolean {
+    return Boolean(this.workspace.db.prepare(`
       WITH RECURSIVE ancestry(checkpoint_id) AS (
         SELECT ?
         UNION ALL
@@ -2711,8 +2726,7 @@ export class GrowthRepository {
       )
       SELECT 1 FROM ${table} versions JOIN ancestry ON ancestry.checkpoint_id = versions.created_checkpoint_id
       WHERE versions.id = ? AND versions.${ownerColumn} = ?
-    `).get(checkpointId, versionId, targetId);
-    if (!valid) throw growthError(code);
+    `).get(checkpointId, versionId, targetId));
   }
 
   #checkpointIsVisible(candidateCheckpointId: string, checkpointId: string): boolean {

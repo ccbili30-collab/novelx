@@ -18,9 +18,15 @@ import { ConstraintProfileRepository } from "../../src/domain/workspace/constrai
 import { DocumentRepository } from "../../src/domain/workspace/documentRepository";
 import { ResourceRepository } from "../../src/domain/workspace/resourceRepository";
 import { openWorkspace, type WorkspaceDatabase } from "../../src/domain/workspace/workspaceRepository";
-import { AgentProcessSupervisor, type AgentRuntimeLease, type AgentWorkerProcess } from "../../src/main/agentProcessSupervisor";
+import {
+  AgentProcessSupervisor,
+  type AgentRuntimeLease,
+  type AgentToolInvocationContext,
+  type AgentWorkerProcess,
+} from "../../src/main/agentProcessSupervisor";
 import { GrowthRunLifecycle, safeFailureCode } from "../../src/main/growthRunLifecycle";
 import { createWorkspaceAgentToolGateway } from "../../src/main/workspaceAgentToolGateway";
+import { ProjectWriteQueue } from "../../src/main/workspaceIpc";
 import { compileGrowthRevisionFragment } from "../../src/agent-worker/growth/phases/revision/growthRevisionFragment";
 import type { GrowthRevisionAuthority } from "../../src/shared/agentWorkerProtocol";
 
@@ -1382,6 +1388,45 @@ describe("Growth Run bridge", () => {
     for (const forbidden of ["stableLocator", "contentHash", "branchId", "checkpointId", setup.workspace.rootPath]) {
       expect(serialized).not.toContain(forbidden);
     }
+  });
+
+  it("serializes the complete Growth retrieval including durable Receipt persistence", async () => {
+    const setup = createSetup();
+    const worker = new FakeWorker();
+    const queue = new ProjectWriteQueue();
+    const blockerController = new AbortController();
+    let releaseBlocker!: () => void;
+    const blocker = queue.run(blockerController.signal, () => new Promise<void>((resolve) => { releaseBlocker = resolve; }));
+    const lease = Symbol("test-write-lease");
+    const supervisor = createSupervisor(setup, worker, undefined, {
+      runSerializedWrite: <T>(
+        context: AgentToolInvocationContext,
+        operation: (admittedContext: AgentToolInvocationContext) => Promise<T>,
+      ) => context.serializedWriteLease === lease
+        ? operation(context)
+        : queue.run(
+            context.signal,
+            () => operation({ ...context, serializedWriteLease: lease }),
+            context.onExecutionStarted,
+          ),
+    });
+    const runId = new GrowthRunLifecycle(setup.workspace, supervisor).start({
+      goalId: setup.goalId, cycleId: setup.cycleId,
+      request: { projectId: "project-1", sessionId: "session-1", userInput: "排队检索", mode: "free" }, emit: () => undefined,
+    });
+    worker.spawn();
+    beginStewardInvocation(setup.workspace, runId);
+    requestGrowthRetrieval(worker, runId, "77777777-7777-4777-8777-777777777777");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(worker.sent).toHaveLength(1);
+    expect(new GrowthRepository(setup.workspace).getCycle(setup.cycleId)?.receiptId).toBeNull();
+
+    releaseBlocker();
+    await blocker;
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2));
+    expect(worker.sent[1]).toMatchObject({ type: "tool.response", ok: true, tool: "retrieve_graph_evidence" });
+    expect(new GrowthRepository(setup.workspace).getCycle(setup.cycleId)?.receiptId).toEqual(expect.any(String));
   });
 
   it("binds one Run only and terminalizes cancellation without a Change Set", () => {

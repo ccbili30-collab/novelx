@@ -87,6 +87,12 @@ function classifyCode(code: MainToolDiagnosticCode): {
       disposition: "reconciliation_required", retryability: "restart_reconcile",
     };
   }
+  if (code === "AGENT_TOOL_QUEUE_TIMEOUT") {
+    return {
+      owner: "tool_bridge", boundary: "tool_execution", sideEffectState: "none",
+      disposition: "terminal", retryability: "safe_retry",
+    };
+  }
   if (code === "AGENT_TOOL_PROTOCOL_FAILED" || code === "AGENT_TOOL_UNKNOWN" || code === "AGENT_TOOLS_REQUIRED") {
     return {
       owner: "tool_bridge", boundary: "tool_arguments", sideEffectState: "none",

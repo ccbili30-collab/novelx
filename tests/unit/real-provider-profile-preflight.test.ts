@@ -12,15 +12,15 @@ afterEach(() => {
 });
 
 describe("real Provider profile preflight", () => {
-  it("accepts exact 5.6luna and image identities without decrypting ciphertext", () => {
+  it("accepts exact gpt-5.6-luna and image identities without decrypting ciphertext", () => {
     const stores = createStores();
     const result = verifyRealProviderProfilePreflight({
       ...stores,
-      expectedText: { providerId: "openai-compatible", modelId: "5.6luna" },
+      expectedText: { providerId: "openai-compatible", modelId: "gpt-5.6-luna" },
       expectedImageProviderId: "openai-compatible-image",
     });
     expect(result).toMatchObject({
-      text: { providerId: "openai-compatible", modelId: "5.6luna" },
+      text: { providerId: "openai-compatible", modelId: "gpt-5.6-luna" },
       image: { providerId: "openai-compatible-image", modelId: "gpt-image-2" },
     });
     expect(JSON.stringify(result)).not.toContain("synthetic-ciphertext");
@@ -32,7 +32,7 @@ describe("real Provider profile preflight", () => {
     expect(() => {
       verifyRealProviderProfilePreflight({
         ...stores,
-        expectedText: { providerId: "openai-compatible", modelId: "5.6luna" },
+        expectedText: { providerId: "openai-compatible", modelId: "gpt-5.6-luna" },
         expectedImageProviderId: "openai-compatible-image",
       });
       continuation();
@@ -44,14 +44,14 @@ describe("real Provider profile preflight", () => {
     const stores = createStores({ distinctImageLocalState: true });
     expect(() => verifyRealProviderProfilePreflight({
       ...stores,
-      expectedText: { providerId: "openai-compatible", modelId: "5.6luna" },
+      expectedText: { providerId: "openai-compatible", modelId: "gpt-5.6-luna" },
       expectedImageProviderId: "openai-compatible-image",
     })).toThrowError(expect.objectContaining({ code: "REAL_PROVIDER_LOCAL_STATE_MISMATCH" }));
 
     const invalid = createStores({ ciphertext: "not ciphertext!" });
     expect(() => verifyRealProviderProfilePreflight({
       ...invalid,
-      expectedText: { providerId: "openai-compatible", modelId: "5.6luna" },
+      expectedText: { providerId: "openai-compatible", modelId: "gpt-5.6-luna" },
       expectedImageProviderId: "openai-compatible-image",
     })).toThrowError(expect.objectContaining({ code: "REAL_PROVIDER_STORE_INVALID" }));
   });
@@ -74,7 +74,7 @@ function createStores(options: {
     version: 1,
     config: {
       providerId: "openai-compatible", displayName: "Text", baseUrl: "https://example.invalid/v1",
-      modelId: options.textModelId ?? "5.6luna", contextWindow: 200_000, maxTokens: null,
+      modelId: options.textModelId ?? "gpt-5.6-luna", contextWindow: 200_000, maxTokens: null,
       reasoning: true, input: ["text"],
     },
     encryptedCredential: ciphertext,

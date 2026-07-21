@@ -1,6 +1,10 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
-import { compileGrowthWorldFragment, growthWorldFragmentParameters } from "../growth/growthWorldFragment";
+import {
+  compileGrowthWorldFragment,
+  growthWorldFragmentParameters,
+  growthWorldFragmentToolDescription,
+} from "../growth/growthWorldFragment";
 import { growthInquiryBriefParameters, growthInquiryBriefSchema } from "../growth/growthInquiryBrief";
 import { createGrowthRevisionReferenceCatalog } from "../growth/phases/revision/growthRevisionReferences";
 import {
@@ -423,7 +427,7 @@ export function createAgentTools(executor: AgentToolExecutor, options: { growthB
     name: "propose_change_set",
     label: "生成候选变更",
     description: worldFragment
-      ? "Submit one high-level world Fragment: at least one world, at least two location/faction entities, one setting document, and one sourced Assertion; documents, facts, and related_to relations are open arrays. Do not supply low-level IDs, parents, dependencies, create/state fields, or project-file operations."
+      ? growthWorldFragmentToolDescription
       : "Submit a candidate Change Set for Novax policy evaluation; this tool cannot approve or commit it.",
     parameters: worldFragment ? growthWorldFragmentParameters : proposeParameters,
     execute: async (_toolCallId, params, signal) => {

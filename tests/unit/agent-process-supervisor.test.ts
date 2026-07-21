@@ -8,6 +8,7 @@ import {
   type AgentWorkerProcess,
 } from "../../src/main/agentProcessSupervisor";
 import type { AgentAuditStore } from "../../src/domain/audit/agentAuditRepository";
+import { ProjectWriteQueue } from "../../src/main/workspaceIpc";
 
 class FakeWorkerProcess extends EventEmitter implements AgentWorkerProcess {
   killed = false;
@@ -698,6 +699,7 @@ describe("Agent Process Supervisor internal tool gateway", () => {
         acquireRuntimeLease: () => createLease(createGateway({
           generateImage: (_args, context) => {
             invocationSignal = context.signal;
+            context.onExecutionStarted?.();
             return new Promise(() => undefined);
           },
         })),
@@ -734,4 +736,143 @@ describe("Agent Process Supervisor internal tool gateway", () => {
       vi.useRealTimers();
     }
   });
+
+  it("starts the Change Set execution timeout only after serialized queue admission", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakeWorkerProcess();
+      const audit = createAuditStore();
+      let invocationContext: Parameters<AgentToolGateway["proposeChangeSet"]>[1] | undefined;
+      const supervisor = new AgentProcessSupervisor("worker.js", {
+        acquireRuntimeLease: () => createLease(createGateway({
+          proposeChangeSet: (_args, context) => {
+            invocationContext = context;
+            return new Promise(() => undefined);
+          },
+        }), audit),
+        toolTimeoutMs: 5,
+        queueTimeoutMs: 50,
+        spawnWorker: () => child,
+      });
+      const runId = supervisor.start(runRequest(), () => undefined);
+      child.spawn();
+      child.receive(proposeRequest(runId, "88888888-8888-4888-8888-888888888888"));
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(6);
+      expect(invocationContext?.signal.aborted).toBe(false);
+      expect(child.sent).toHaveLength(1);
+      invocationContext?.onExecutionStarted?.();
+      await vi.advanceTimersByTimeAsync(6);
+
+      expect(invocationContext?.signal.aborted).toBe(true);
+      expect(child.sent.at(-1)).toMatchObject({
+        type: "tool.response", ok: false, error: { code: "AGENT_TOOL_TIMEOUT" },
+      });
+      expect(audit.appendSafeDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+        code: "AGENT_TOOL_TIMEOUT", sideEffectState: "outcome_unknown",
+      }));
+      supervisor.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("allows a queued Change Set to outwait its execution budget and succeed after the prior write", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakeWorkerProcess();
+      const audit = createAuditStore();
+      const queue = new ProjectWriteQueue();
+      const blockerController = new AbortController();
+      let releaseBlocker!: () => void;
+      const blocker = queue.run(blockerController.signal, () => new Promise<void>((resolve) => {
+        releaseBlocker = resolve;
+      }));
+      const supervisor = new AgentProcessSupervisor("worker.js", {
+        acquireRuntimeLease: () => createLease(createGateway({
+          proposeChangeSet: (args, context) => queue.run(
+            context.signal,
+            () => Promise.resolve({
+              changeSetId: "change-after-queue", mode: context.mode, status: "pending" as const,
+              gateStatus: "review_pending" as const, blockedReason: null, itemCount: args.items.length,
+            }),
+            context.onExecutionStarted,
+          ),
+        }), audit),
+        toolTimeoutMs: 5,
+        queueTimeoutMs: 50,
+        spawnWorker: () => child,
+      });
+      const runId = supervisor.start(runRequest(), () => undefined);
+      child.spawn();
+      child.receive(proposeRequest(runId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"));
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(20);
+      expect(child.sent).toHaveLength(1);
+      releaseBlocker();
+      await blocker;
+      await vi.waitFor(() => expect(child.sent.at(-1)).toEqual({
+        type: "tool.response", ok: true, tool: "propose_change_set",
+        runId, requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        result: {
+          changeSetId: "change-after-queue", mode: "assist", status: "pending",
+          gateStatus: "review_pending", blockedReason: null, itemCount: 1,
+        },
+      }), { interval: 1, timeout: 4 });
+      expect(audit.appendSafeDiagnostic).not.toHaveBeenCalled();
+      supervisor.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("classifies serialized queue starvation as zero-side-effect instead of outcome unknown", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new FakeWorkerProcess();
+      const audit = createAuditStore();
+      let invocationSignal: AbortSignal | undefined;
+      const supervisor = new AgentProcessSupervisor("worker.js", {
+        acquireRuntimeLease: () => createLease(createGateway({
+          proposeChangeSet: (_args, context) => {
+            invocationSignal = context.signal;
+            return new Promise(() => undefined);
+          },
+        }), audit),
+        toolTimeoutMs: 5,
+        queueTimeoutMs: 50,
+        spawnWorker: () => child,
+      });
+      const runId = supervisor.start(runRequest(), () => undefined);
+      child.spawn();
+      child.receive(proposeRequest(runId, "99999999-9999-4999-8999-999999999999"));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(51);
+
+      expect(invocationSignal?.aborted).toBe(true);
+      expect(child.sent.at(-1)).toMatchObject({
+        type: "tool.response", ok: false, error: { code: "AGENT_TOOL_QUEUE_TIMEOUT" },
+      });
+      expect(audit.appendSafeDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+        code: "AGENT_TOOL_QUEUE_TIMEOUT", sideEffectState: "none", retryability: "safe_retry",
+      }));
+      supervisor.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
+
+function proposeRequest(runId: string, requestId: string) {
+  return {
+    type: "tool.request", runId, requestId, tool: "propose_change_set",
+    args: {
+      summary: "safe", items: [{
+        id: "world-item", dependsOn: [], kind: "resource.put",
+        payload: { resourceId: "world-1", create: true, type: "world", objectKind: "world", title: "safe", parentId: "root-1", state: "active", sortOrder: 0 },
+      }],
+    },
+  };
+}

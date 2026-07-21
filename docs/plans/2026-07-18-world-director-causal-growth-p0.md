@@ -267,7 +267,7 @@ In addition to behavior tests, the frozen candidate must prove:
 - [x] Runtime V2 A2.2, Canon authority, permissions and Player Lens remain unchanged.
 - [x] Text nodes enqueue images only after a stable Change Set commit; image work never blocks text Growth.
 - [x] Default visual style is colored expressive pen-and-ink fantasy illustration, not photorealism, 3D rendering, monochrome manga or moe/chibi anime.
-- [x] The next text Live run must publicly identify model `5.6luna` before any Provider side effect.
+- [x] The next text Live run must publicly identify model `gpt-5.6-luna` before any Provider side effect.
 
 ## 1. Completion Definition
 
@@ -288,7 +288,7 @@ This plan is complete only when all of the following are proven on the same froz
 - [ ] Renderer shows safe editorial summaries, Work Order progress, graph growth and image queue state without exposing raw thought, Prompt, credentials or tool arguments.
 - [ ] Restart recovers Director rounds, Work Orders, attempts, reviews, causal graph and illustration queue without duplicate Provider calls or Change Sets.
 - [ ] Full tests, typecheck, build and packaging gates pass.
-- [ ] One real dual-Provider interactive Live uses text `5.6luna`, produces a causal large-world package, exports it to the fixed latest package folder and survives reopen/research retrieval.
+- [ ] One real dual-Provider interactive Live uses text `gpt-5.6-luna`, produces a causal large-world package, exports it to the fixed latest package folder and survives reopen/research retrieval.
 
 ## 2. Non-Goals and Stop Conditions
 
@@ -898,13 +898,13 @@ npm run package
 
 ### Task 31: Verify Provider profiles
 
-- [ ] Public text profile is `openai-compatible / 5.6luna` exactly.
+- [ ] Public text profile is `openai-compatible / gpt-5.6-luna` exactly.
 - [x] Public image profile is the configured image-capable model.
 - [x] Local State and encrypted profile copies match before isolated E2E.
 - [x] No credential is decrypted, printed or copied into evidence.
 - [x] If identity mismatches, fail before any Provider call.
 
-**Task 31 blocked evidence (2026-07-18):** the real interactive E2E now runs a pure-file preflight before creating its temporary project, copying stores or Local State, launching Electron, decrypting credentials or invoking either Provider. It strictly parses both encrypted envelopes, requires ciphertext presence, requires text identity `openai-compatible / 5.6luna`, requires an `openai-compatible-image` Responses image profile, and byte-compares the two source `Local State` files. The E2E then rechecks the public identities returned by the launched app against the preflight result. Three focused preflight/secure-store suites passed 13/13; `npm run typecheck` and `git diff --check` passed. The machine's active `novelx-desktop` stores are paired to the same present Local State and contain credentials, but their public identities are text `openai-compatible / gpt-5.4` and image `openai-compatible-image / gpt-image-2`; the only other known legacy text store is `deepseek-v4-flash`. Running the real E2E with the active stores failed in three seconds at `REAL_PROVIDER_MODEL_ID_MISMATCH`, before Electron launch and with worktree Electron residue zero. No credential, ciphertext, base URL or raw Local State content was printed or written to evidence. Task 31 and Task 32 remain incomplete until the user saves or supplies a machine-local encrypted `5.6luna` text profile paired with the image store's Local State; changing the user's Provider configuration is outside this verification task.
+**Task 31 resumed evidence (2026-07-18):** the real interactive E2E runs a pure-file preflight before creating its temporary project, copying stores or Local State, launching Electron, decrypting credentials or invoking either Provider. It strictly parses both encrypted envelopes, requires ciphertext presence, requires the approved text identity, requires an `openai-compatible-image` Responses image profile, and byte-compares the two source `Local State` files. Three focused preflight/secure-store suites previously passed 13/13; `npm run typecheck` and `git diff --check` passed. The machine's active `novelx-desktop` stores are paired to the same present Local State and contain credentials, but their public identities are text `openai-compatible / gpt-5.4` and image `openai-compatible-image / gpt-image-2`. A credential-safe read-only upstream `GET /models` returned HTTP 200 with 13 IDs, proved that the originally requested `5.6luna` does not exist, and proved that the actual upstream ID is `gpt-5.6-luna`. The user authorized correcting the acceptance identity to `openai-compatible / gpt-5.6-luna`. The Live will use an isolated copied envelope with only the public `modelId` changed; the user's saved profile remains unchanged.
 
 ### Task 32: One real interactive dual-Provider Live
 
@@ -962,7 +962,7 @@ This matrix is the execution index. The detailed phase sections define files and
 | [x] | 28 | Generic failures force whole-repository searches and make AI repair unsafe. | Error families identify Provider, specialist protocol, Work Order state, causal Domain, review, persistence or reconciliation ownership. | Allowlisted diagnostic mapping, redaction and unknown-error containment tests. |
 | [x] | 29 | Long runs will be interrupted; replay bugs can duplicate Provider calls or Canon writes. | Restart reconciles every editorial boundary and resumes or blocks truthfully. | Crash matrix covering allocated/running/candidate/review/commit/image boundaries. |
 | [x] | 30 | Focused tests cannot prove the integrated frozen candidate or release artifacts. | One frozen code state passes all deterministic, build and package gates with updated evidence index. | `git diff --check`, typecheck, Prompt gate, full tests, build and package. |
-| [ ] | 31 | The requested literary quality test is invalid if the saved model is not exactly `5.6luna`. | Live fails before side effects unless both public Provider identities match approved profiles. | Public identity evidence and encrypted-profile/Local-State consistency checks. |
+| [ ] | 31 | The requested literary quality test is invalid if the isolated profile is not exactly `gpt-5.6-luna`. | Live fails before side effects unless both public Provider identities match approved profiles. | Public identity evidence and encrypted-profile/Local-State consistency checks. |
 | [ ] | 32 | Mock and historical evidence do not prove the final Director/causal/image/user-guidance loop. | One real seed produces and revises a persistent causal large-world package, survives reopen and supports research retrieval. | One sanitized dual-Provider Live report, exported package and no-mutation research audit. |
 
 ## 18. Progress Reporting Format
